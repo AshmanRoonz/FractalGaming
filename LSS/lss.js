@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "48.30";
+const LSS_BUILD = "48.32";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -69813,7 +69813,7 @@ function _hlfIconPath(ctx, kind, s) {
   }
 }
 
-function _hlfIcon(I, kind, s, col, ready, frac) {
+function _hlfIcon(I, kind, s, col, ready, frac, flash) {
   const ctx = I.ctx, vm = I.vmin;
   const _f = (typeof frac === 'number' && isFinite(frac))
     ? Math.max(0, Math.min(1, frac)) : (ready ? 1 : 0);
@@ -69836,6 +69836,18 @@ function _hlfIcon(I, kind, s, col, ready, frac) {
   if (ready) { ctx.shadowColor = col; ctx.shadowBlur = vm * 1.5; }
   ctx.stroke();
   ctx.shadowBlur = 0;
+  if (flash > 0) {
+    _hlfIconPath(ctx, kind, s);
+    ctx.globalAlpha = I.ga * flash;
+    ctx.fillStyle = '#ffffff';
+    ctx.shadowColor = '#ffffff'; ctx.shadowBlur = vm * 2.2;
+    ctx.fill();
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = Math.max(1, vm * 0.17);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.globalAlpha = I.ga;
+  }
 }
 
 const _HLF_CORE = { pitch: 1.55, thick: 0.62, depth: 0.55 };
@@ -69892,15 +69904,39 @@ function _hlfChevronRow(I, rInV, rOutV, a0, a1, frac, col, glow) {
 
 const _HLF_ICON_ROW = (function () {
   const nrgOut = _HL.speed.r + _HL.speed.tick * 0.5;   // 13.2 - NRG's outer edge
-  const GAP = 0.20, size = 2.10;
+  const GAP = 0.20, size = 4.20, gapAlong = 1.10;
   return {
     rIn: nrgOut + GAP,                           // the edge nothing may cross
     r: nrgOut + GAP + size / 2,                  // resting centre
     mid: (_HL.speed.a0 + _HL.speed.a1) / 2 + (_HL.speed.rot || 0),
-    step: 3.3,
+    step: size + gapAlong,                       // arc length between centres, at the resting centre radius
+    gapAlong: gapAlong,                          // air between neighbouring glyphs, along the ring
     size: size,
   };
 })();
+
+const _HLF_ICON_CLEAR = 0.5;   // vm of daylight between the top glyph and the frame's end
+const _hlfIconMidMemo = { k: '', mid: 0 };
+function _hlfIconMid(szV, gapV, popK) {
+  const key = szV + '|' + gapV + '|' + popK;
+  if (_hlfIconMidMemo.k === key) return _hlfIconMidMemo.mid;
+  const IR = _HLF_ICON_ROW;
+  const sP = szV * (1 + Math.max(0, popK || 0));          // the glyph at the peak of its pop
+  const rC = IR.rIn + sP / 2;                              // ...whose centre rides out as it grows
+  const dStep = (szV + gapV) / (IR.rIn + szV / 2) * 180 / Math.PI;
+  const up = (_HL_AB.length - 1) / 2 * dStep;              // the top glyph's offset from the centre
+  const frameA = _HLF.TOP.a0 - 2;                          // the border's end, as _hlfDraw draws it
+  let mid = IR.mid;
+  for (let k = 0; k < 120; k++) {
+    const c = (mid + up) * _HL_D2R;
+    const tx = Math.cos(c) * rC + 0.38 * sP, ty = Math.sin(c) * rC - 0.5 * sP;
+    let ta = Math.atan2(ty, tx) * 180 / Math.PI; if (ta < 0) ta += 360;
+    if (ta <= frameA - (_HLF_ICON_CLEAR / Math.hypot(tx, ty)) * 180 / Math.PI) break;
+    mid -= 0.25;
+  }
+  _hlfIconMidMemo.k = key; _hlfIconMidMemo.mid = mid;
+  return mid;
+}
 
 const _HLF_DASH = (function () {
   const ang = Math.atan2(_HL.dash.y, -_HL.dash.x);
@@ -69993,10 +70029,16 @@ function _hlfDraw(ctx, W, H, v) {
   {
     const order = _HL_AB.slice().sort((a, b) => _HL[a.cd].a0 - _HL[b.cd].a0);
     const IR = _HLF_ICON_ROW;
-    let szV = IR.size;
-    try { if (window.__hudIcon && typeof window.__hudIcon.size === 'number') szV = window.__hudIcon.size; } catch (_) {}
+    let szV = IR.size, gapV = IR.gapAlong, popK = 0.16;
+    try {
+      const K = window.__hudIcon;
+      if (K && typeof K.size === 'number') szV = K.size;
+      if (K && typeof K.gap === 'number') gapV = K.gap;
+      if (K && typeof K.pop === 'number') popK = K.pop;
+    } catch (_) {}
     const size = szV * vm;
-    const dPerStep = IR.step / (IR.rIn + szV / 2) * 180 / Math.PI;
+    const midA = _hlfIconMid(szV, gapV, popK);   // (v48.32) clear of the HP/SHIELD frame
+    const dPerStep = (szV + gapV) / (IR.rIn + szV / 2) * 180 / Math.PI;
     ctx.save();
     ctx.globalAlpha = I.ga;
     for (let i = 0; i < order.length; i++) {
@@ -70011,12 +70053,22 @@ function _hlfDraw(ctx, W, H, v) {
       const col = sh[m.cd] || _HL[m.cd].col;
       let pop = 1;
       const age = (v.t != null && _hudRF && _hudRF.t0) ? v.t - _hudRF.t0[m.slot] : -1;
-      if (age >= 0 && age < 0.45) pop = 1 + 0.32 * (1 - age / 0.45);
-      const a = (IR.mid + ((order.length - 1) / 2 - i) * dPerStep) * _HL_D2R;
+      if (age >= 0 && age < 0.45) pop = 1 + popK * (1 - age / 0.45);
+      let flash = 0;
+      try {
+        const F = window.__hudFlash;
+        if (!(F && F.on === false) && age >= 0) {
+          const dur = (F && F.dur > 0) ? F.dur : 0.12, gp = (F && F.gap >= 0) ? F.gap : 0.10;
+          if (age < dur * 2 + gp && !(age >= dur && age < dur + gp)) {
+            flash = Math.max(0, Math.min(1, (F && F.gain != null) ? F.gain : 1));
+          }
+        }
+      } catch (_) {}
+      const a = (midA + ((order.length - 1) / 2 - i) * dPerStep) * _HL_D2R;
       const rDraw = IR.rIn + szV * pop / 2;
       ctx.save();
       ctx.translate(I.cx + Math.cos(a) * rDraw * vm, I.cy + Math.sin(a) * rDraw * vm);
-      _hlfIcon(I, _HLF_ICON[m.slot] || 'bolt', size * pop, col, ready, _frac);
+      _hlfIcon(I, _HLF_ICON[m.slot] || 'bolt', size * pop, col, ready, _frac, flash);
       ctx.restore();
     }
     ctx.restore();
@@ -74758,7 +74810,7 @@ function _howtoBindLabel(scheme, action) {
 }
 const _HOWTO_HUD_PTS = {
   shield: [0.3562, 0.1284], hp: [0.3272, 0.2002], core: [0.3404, 0.2556], nrg: [0.2719, 0.3552],
-  icons: [0.2269, 0.4153], reticle: [0.5683, 0.3827], ammo: [0.7795, 0.4175], dash: [0.7313, 0.5496],
+  icons: [0.2113, 0.4538], reticle: [0.5683, 0.3827], ammo: [0.7795, 0.4175], dash: [0.7313, 0.5496],
   radar: [0.4363, 0.8415], compass: [0.6642, 0.7654], aegis: [0.6206, 0.9593],
 };
 function _howtoHudSvg() {

@@ -4146,7 +4146,7 @@ body.vr-active #camp-video { display: none !important; }
           <div style="font-size:11px;color:#fff;letter-spacing:3px;font-weight:bold;font-family:'Rajdhani','Orbitron',sans-serif;">COMMUNITY</div>
           
           <div style="display:flex;flex-direction:column;gap:8px;">
-            <a href="https://discord.gg/ZnaqxU8Y9N" target="_blank" rel="noopener" style="
+            <a href="https://discord.gg/C75Anq7PJZ" target="_blank" rel="noopener" style="
               background:rgba(88,101,242,0.25);border:1px solid rgba(88,101,242,0.7);
               color:#cdd4ff;padding:9px 12px;font-family:'Rajdhani','Orbitron',sans-serif;font-size:11px;
               text-decoration:none;letter-spacing:2px;transition:all 0.2s;border-radius:6px;
@@ -6860,7 +6860,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "48.30";
+const LSS_BUILD = "48.32";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -109290,7 +109290,11 @@ function _hlfIconPath(ctx, kind, s) {
 //   spare at this size.
 // ⚠ Default `frac` is the old behaviour exactly (`ready ? 1 : 0`), so every non-charge icon in the
 //   row is byte-for-byte what it was.
-function _hlfIcon(I, kind, s, col, ready, frac) {
+// (v48.32) `flash` 0..1 lays the READY DOUBLE-FLASH over the glyph: the whole silhouette in solid
+// white with a white halo, the same "ready-flash white" CORE's pulse uses (deliberately never
+// themed - see _HLF_THEME). The caller owns the envelope (two pulses off `_hudRF.t0`); this only
+// paints one frame of it. 0 / absent draws exactly what it drew before.
+function _hlfIcon(I, kind, s, col, ready, frac, flash) {
   const ctx = I.ctx, vm = I.vmin;
   const _f = (typeof frac === 'number' && isFinite(frac))
     ? Math.max(0, Math.min(1, frac)) : (ready ? 1 : 0);
@@ -109315,6 +109319,18 @@ function _hlfIcon(I, kind, s, col, ready, frac) {
   if (ready) { ctx.shadowColor = col; ctx.shadowBlur = vm * 1.5; }
   ctx.stroke();
   ctx.shadowBlur = 0;
+  if (flash > 0) {
+    _hlfIconPath(ctx, kind, s);
+    ctx.globalAlpha = I.ga * flash;
+    ctx.fillStyle = '#ffffff';
+    ctx.shadowColor = '#ffffff'; ctx.shadowBlur = vm * 2.2;
+    ctx.fill();
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = Math.max(1, vm * 0.17);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.globalAlpha = I.ga;
+  }
 }
 
 // ── CORE: A CHEVRON RUN ── (v47.22) Owner: "i want the core bar to look unique
@@ -109411,6 +109427,28 @@ function _hlfChevronRow(I, rInV, rOutV, a0, a1, frac, col, glow) {
 // Still far larger than the ~1.3 the FULL-width band forced when they sat at
 // r 13.2 with NRG 7.8 degrees away - that measurement is what pushed them off
 // the flank in the first place, and halving the strip is what made it usable.
+//
+// ⭐⭐ (v48.32) 2.10 -> 4.20vm - TWICE THE SIZE, AND ALL OF IT OUTWARD. Owner: "on
+// the HUD, there are 3 icons, sword, shield, lightning bolt... I want them to be 2x
+// bigger, they can protrude out the circumpunct to the left rather than right into
+// the NRG bar". The v47.20 pin already does the second half: `rIn` holds, so the
+// extra 2.1vm all travels away from the ring and the row now reaches 17.6, about
+// 2.4vm past the frame's 15.25 - it sits OUTSIDE the instrument, by request.
+// ⚠ THE SPACING HAD TO CHANGE SHAPE, NOT JUST SCALE. It was a flat `step` 3.3
+// (1.2vm of air between 2.1vm glyphs), and doubling it to 6.6 would have run the
+// top glyph (the bolt) to ~206 deg - through the lower-left end of the HP/SHIELD
+// frame, whose border _hlfDraw strokes from `_HLF.TOP.a0 - 2` = 200 deg across
+// 14.2..15.25 right where the bolt's inner corner lands. So the step is now the
+// glyph's size plus `gapAlong`, measured from the size the row is actually DRAWN
+// at: `__hudIcon.size` keeps the three from colliding with each other at any
+// value, where the old fixed step let a live nudge stack them. And the row's
+// centre is no longer NRG's mid-angle by fiat - `_hlfIconMid` lowers it just far
+// enough that the top glyph clears that frame end (it has to: centred on NRG, even
+// 0.45vm of air left the bolt touching it). `gapAlong` 1.1, not 0.45: the step is
+// ARC length and the ring curves, so 4.65 along it was only ~4.37 of vertical
+// separation between upright glyphs - the sword's pommel sat on the shield's top at
+// rest and the two overlapped when both popped. 1.1 clears that at the pop's peak
+// (lab, 2560x1440). Knob: window.__hudIcon = { size, gap, pop }.
 // ⚠ Reads `_HL` at module scope - keep below the `_HL` literal (v39.02 TDZ).
 const _HLF_ICON_ROW = (function () {
   const nrgOut = _HL.speed.r + _HL.speed.tick * 0.5;   // 13.2 - NRG's outer edge
@@ -109419,15 +109457,48 @@ const _HLF_ICON_ROW = (function () {
   // 0.20 leaves ~0.115vm of real daylight against NRG's 13.2.
   // (The ready glow is a shadowBlur halo, not an edge - it washes over the bar
   // by design and did before this change too.)
-  const GAP = 0.20, size = 2.10;
+  const GAP = 0.20, size = 4.20, gapAlong = 1.10;
   return {
     rIn: nrgOut + GAP,                           // the edge nothing may cross
     r: nrgOut + GAP + size / 2,                  // resting centre
     mid: (_HL.speed.a0 + _HL.speed.a1) / 2 + (_HL.speed.rot || 0),
-    step: 3.3,
+    step: size + gapAlong,                       // arc length between centres, at the resting centre radius
+    gapAlong: gapAlong,                          // air between neighbouring glyphs, along the ring
     size: size,
   };
 })();
+
+// ⭐ (v48.32) WHERE THE ROW'S CENTRE SITS - as far up as NRG's own mid-angle, and no further than
+// keeps the TOP glyph off the HP/SHIELD frame. At 2.1vm the row fit beside NRG with room to spare;
+// at 4.2vm, centred on NRG (174), the bolt's upper tip landed at 199.57 deg / r 15.25 - exactly on
+// the frame's lower-left corner, which _hlfDraw strokes from `TOP.a0 - 2` = 200 out to rOut 15.25
+// (measured in the HUD lab at 2560x1440: the two touching). So the centre walks DOWN from NRG's mid
+// in quarter degrees until the top glyph's box corner nearest the frame (+0.38 across, 0.5 up - the
+// shield's shoulder, conservatively) clears 200 deg by `CLEAR` vm, sized at the ready-POP's peak so
+// the swell cannot bump it either. Computed per (size, gap, pop), so the live `__hudIcon` knobs can
+// never drive the row into the frame. Nothing sits below the row on this flank, so down is free.
+const _HLF_ICON_CLEAR = 0.5;   // vm of daylight between the top glyph and the frame's end
+const _hlfIconMidMemo = { k: '', mid: 0 };
+function _hlfIconMid(szV, gapV, popK) {
+  const key = szV + '|' + gapV + '|' + popK;
+  if (_hlfIconMidMemo.k === key) return _hlfIconMidMemo.mid;
+  const IR = _HLF_ICON_ROW;
+  const sP = szV * (1 + Math.max(0, popK || 0));          // the glyph at the peak of its pop
+  const rC = IR.rIn + sP / 2;                              // ...whose centre rides out as it grows
+  const dStep = (szV + gapV) / (IR.rIn + szV / 2) * 180 / Math.PI;
+  const up = (_HL_AB.length - 1) / 2 * dStep;              // the top glyph's offset from the centre
+  const frameA = _HLF.TOP.a0 - 2;                          // the border's end, as _hlfDraw draws it
+  let mid = IR.mid;
+  for (let k = 0; k < 120; k++) {
+    const c = (mid + up) * _HL_D2R;
+    const tx = Math.cos(c) * rC + 0.38 * sP, ty = Math.sin(c) * rC - 0.5 * sP;
+    let ta = Math.atan2(ty, tx) * 180 / Math.PI; if (ta < 0) ta += 360;
+    if (ta <= frameA - (_HLF_ICON_CLEAR / Math.hypot(tx, ty)) * 180 / Math.PI) break;
+    mid -= 0.25;
+  }
+  _hlfIconMidMemo.k = key; _hlfIconMidMemo.mid = mid;
+  return mid;
+}
 
 // The dash row moved out of the lower-left corner and onto the tick strips'
 // own band, so it mirrors CORE across the instrument. Derived from `_HL.dash`
@@ -109633,16 +109704,25 @@ function _hlfDraw(ctx, W, H, v) {
     const IR = _HLF_ICON_ROW;
     // Live knob, same reason as `window.__hudLbl`: this is eye-tuned against the
     // NRG bar it must not touch, and a rebuild per nudge is the slow way there.
-    let szV = IR.size;
-    try { if (window.__hudIcon && typeof window.__hudIcon.size === 'number') szV = window.__hudIcon.size; } catch (_) {}
+    // (v48.32) pop's amplitude is read here, once, because the row's centre depends on it too
+    // (_hlfIconMid sizes its clearance at the pop's peak) - see the pop note in the loop.
+    let szV = IR.size, gapV = IR.gapAlong, popK = 0.16;
+    try {
+      const K = window.__hudIcon;
+      if (K && typeof K.size === 'number') szV = K.size;
+      if (K && typeof K.gap === 'number') gapV = K.gap;
+      if (K && typeof K.pop === 'number') popK = K.pop;
+    } catch (_) {}
     const size = szV * vm;
+    const midA = _hlfIconMid(szV, gapV, popK);   // (v48.32) clear of the HP/SHIELD frame
     // Stepped in POLAR so the row follows the ring, but each glyph is drawn
     // upright (below): a tilted sword and a tilted bolt are markedly harder to
     // tell apart at a glance, and being read at a glance is the whole job.
     // The row is a vertical-ish column on the left flank now, so the old
     // left-to-right pill order becomes TOP-to-bottom. Angle grows upward
     // here, so the first of the sorted abilities takes the LARGEST offset.
-    const dPerStep = IR.step / (IR.rIn + szV / 2) * 180 / Math.PI;
+    // (v48.32) the step is the DRAWN size plus the gap - see _HLF_ICON_ROW.
+    const dPerStep = (szV + gapV) / (IR.rIn + szV / 2) * 180 / Math.PI;
     ctx.save();
     ctx.globalAlpha = I.ga;
     for (let i = 0; i < order.length; i++) {
@@ -109664,10 +109744,32 @@ function _hlfDraw(ctx, W, H, v) {
       // timestamp `_hlReadyFlash` uses. Motion in the corner of the eye is a
       // cost the owner has called out before, so it is spent only on a thing
       // the ship actually just did, and it is over in under half a second.
+      // (v48.32) 0.32 -> 0.16 WITH the 2x glyph, so the swell covers the same
+      // ~0.67vm it always did: the owner asked for bigger icons and a flash, not
+      // for twice the motion. The FLASH is the ready signal now (below).
+      // Knob: window.__hudIcon.pop (0 = no swell).
       let pop = 1;
       const age = (v.t != null && _hudRF && _hudRF.t0) ? v.t - _hudRF.t0[m.slot] : -1;
-      if (age >= 0 && age < 0.45) pop = 1 + 0.32 * (1 - age / 0.45);
-      const a = (IR.mid + ((order.length - 1) / 2 - i) * dPerStep) * _HL_D2R;
+      if (age >= 0 && age < 0.45) pop = 1 + popK * (1 - age / 0.45);
+      // ⭐⭐ (v48.32) THE READY DOUBLE-FLASH, BACK ON THE ABILITIES. Owner: "i also want them to
+      // flash 2x when they are charged/ready". They had one as ARCS (v44.39, _hlReadyFlash: "when
+      // one of the three abilities and core are ready, they should do a little double flash");
+      // v47.01's switch to glyphs traded it for the pop above, and CORE kept its double flash while
+      // the icons lost theirs. Same clock (`_hudRF.t0[slot]`: the cooldown's zero-crossing, or a
+      // charge coming back - only real waits >= 1 s, never on reseed / respawn / while dead), same
+      // two-pulse envelope and the same knob as CORE's (window.__hudFlash = { on, dur, gap, gain }),
+      // so all four readouts blink in one rhythm.
+      let flash = 0;
+      try {
+        const F = window.__hudFlash;
+        if (!(F && F.on === false) && age >= 0) {
+          const dur = (F && F.dur > 0) ? F.dur : 0.12, gp = (F && F.gap >= 0) ? F.gap : 0.10;
+          if (age < dur * 2 + gp && !(age >= dur && age < dur + gp)) {
+            flash = Math.max(0, Math.min(1, (F && F.gain != null) ? F.gain : 1));
+          }
+        }
+      } catch (_) {}
+      const a = (midA + ((order.length - 1) / 2 - i) * dPerStep) * _HL_D2R;
       // ⚠ (v47.20) THE READY-POP GROWS OUTWARD, not about the centre. Scaled in
       // place, a 1.32x pop put the inner edge 0.34vm INSIDE the NRG bar for the
       // 0.45 s it ran - an overlap that existed before this row was resized and
@@ -109676,7 +109778,7 @@ function _hlfDraw(ctx, W, H, v) {
       const rDraw = IR.rIn + szV * pop / 2;
       ctx.save();
       ctx.translate(I.cx + Math.cos(a) * rDraw * vm, I.cy + Math.sin(a) * rDraw * vm);
-      _hlfIcon(I, _HLF_ICON[m.slot] || 'bolt', size * pop, col, ready, _frac);
+      _hlfIcon(I, _HLF_ICON[m.slot] || 'bolt', size * pop, col, ready, _frac, flash);
       ctx.restore();
     }
     ctx.restore();
@@ -117230,9 +117332,11 @@ function _howtoBindLabel(scheme, action) {
 // 900x838. _HOWTO_HUD_PTS is where each part landed IN THAT PICTURE (0..1 of its width and height), measured by
 // the lab from the same layout tables (_HLF, _HLF_ICON_ROW, _HLF_DASH, _HL.minimap / .aegis) - so every leader line
 // ends on its part. ⚠ The two are a PAIR: when the HUD layout changes, recapture both (recipe: lss.map.md v48.18).
+// (v48.32) Recaptured for the 2x ability icons - the row's centre moved to 167.75 deg / r 15.5 (see _hlfIconMid).
+// Only `icons` moved; every other point was re-checked on the new picture and still lands on its part.
 const _HOWTO_HUD_PTS = {
   shield: [0.3562, 0.1284], hp: [0.3272, 0.2002], core: [0.3404, 0.2556], nrg: [0.2719, 0.3552],
-  icons: [0.2269, 0.4153], reticle: [0.5683, 0.3827], ammo: [0.7795, 0.4175], dash: [0.7313, 0.5496],
+  icons: [0.2113, 0.4538], reticle: [0.5683, 0.3827], ammo: [0.7795, 0.4175], dash: [0.7313, 0.5496],
   radar: [0.4363, 0.8415], compass: [0.6642, 0.7654], aegis: [0.6206, 0.9593],
 };
 function _howtoHudSvg() {
