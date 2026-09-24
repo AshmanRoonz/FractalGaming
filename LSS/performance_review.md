@@ -3,6 +3,10 @@
 > Companion to [`lss.map.md`](lss.map.md). Baseline build **v47.01**, reviewed **2026-09-20/21**.
 > Everything below is **measured**, not estimated, unless a line says otherwise. Where a number was
 > estimated and then re-derived, the re-derived number is the one printed.
+>
+> **Follow-up (2026-09-24, v48.32):** [`performance_review_v48.md`](performance_review_v48.md) — a static,
+> adversarially verified sweep of the whole file (86 surviving findings, ranked ORDER 1-3, with a measurement
+> plan). Nothing in it has been A/B'd in the pane yet; treat its GPU figures as estimates until measured.
 
 ## How this was measured
 

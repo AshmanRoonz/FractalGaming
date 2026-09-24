@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "48.32";
+const LSS_BUILD = "48.37";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -3640,6 +3640,19 @@ const EndlessMode = {
     try { _aegisShipUpgrades(true); } catch (_) {}
   },
   _spawnWave(run) {
+    try {
+      let swept = 0;
+      const keep = [];
+      for (const e of game.entities) {
+        if (e && e instanceof Bot && !e.alive && e._endlessWave != null) {
+          try { e.destroy(); } catch (_) {}
+          swept++;
+          continue;
+        }
+        keep.push(e);
+      }
+      if (swept) { game.entities = keep; run.swept = (run.swept || 0) + swept; }
+    } catch (_) {}
     run.waveN++;
     const n = Math.min(6, 2 + Math.floor(run.dist / 3000));
     const elite = (run.waveN % 5 === 0);
@@ -11915,7 +11928,24 @@ game.levelWorker = null;
 try {
   THREE.ShaderChunk.fog_vertex = '#ifdef USE_FOG\n\tvFogDepth = length( mvPosition.xyz );\n#endif';
 } catch (_) {}
-scene.fog = new THREE.FogExp2(0x0a0520, 0.000015); 
+try {
+  const _LFB_CALL = 'RE_Direct( directLight, geometryPosition, geometryNormal, geometryViewDir, geometryClearcoatNormal, material, reflectedLight );';
+  const _lfb = THREE.ShaderChunk.lights_fragment_begin;
+  const _off = (typeof location !== 'undefined') && /[?&]nolightskip\b/.test(location.search || '');
+  const _dirAt = (typeof _lfb === 'string') ? _lfb.indexOf('#if ( NUM_DIR_LIGHTS > 0 )') : -1;
+  const _head = (_dirAt > 0) ? _lfb.slice(0, _dirAt) : '';
+  const _nHead = _head.split(_LFB_CALL).length - 1;
+  const _nAll = (typeof _lfb === 'string') ? _lfb.split(_LFB_CALL).length - 1 : 0;
+  if (!_off && _dirAt > 0 && _nHead === 2 && _nAll === 3) {
+    THREE.ShaderChunk.lights_fragment_begin =
+      _head.split(_LFB_CALL).join('if ( directLight.visible ) { ' + _LFB_CALL + ' }') + _lfb.slice(_dirAt);
+    window.__lightSkip = true;
+  } else {
+    window.__lightSkip = false;
+    if (!_off) console.warn('[lss] light-skip: lights_fragment_begin is not the r165 text (point+spot calls ' + _nHead + ', total ' + _nAll + ') - left untouched');
+  }
+} catch (_) {}
+scene.fog = new THREE.FogExp2(0x0a0520, 0.000015);
 
 const camera = new THREE.PerspectiveCamera((input && input.fovDeg) || 90, window.innerWidth / window.innerHeight, 1, 25000);
 if (typeof navigator !== 'undefined' && navigator.gpu && navigator.gpu.requestAdapter) {
@@ -13813,6 +13843,20 @@ function _vrUpdateAllHealthBars() {
 function _vrEnsureShipNameLabel(bot) {
   if (!bot || !bot.mesh) return null;
   if (bot._vrNameSprite) return bot._vrNameSprite;
+  try {
+    const ch = bot.mesh.children;
+    for (let i = 0; i < ch.length; i++) {
+      const s = ch[i];
+      if (s && s.isSprite && s.userData && s.userData.vrNameLabel) {
+        s.userData.lastText = ''; s.userData.lastEnemy = null;
+        s.visible = false;
+        if (s.userData.line) s.userData.line.visible = false;
+        bot._vrNameSprite = s;
+        bot._vrNameLine = s.userData.line || null;
+        return s;
+      }
+    }
+  } catch (_) {}
   const canvas = document.createElement('canvas');
   canvas.width = 512; canvas.height = 128;
   const tex = new THREE.CanvasTexture(canvas);
@@ -13854,7 +13898,8 @@ function _vrEnsureShipNameLabel(bot) {
   line.visible = false;
   bot.mesh.add(line);
   bot.mesh.add(sprite);
-  sprite.userData = { canvas: canvas, tex: tex, lastText: '', lastEnemy: null, line: line, lineMat: lineMat };
+  sprite.userData = { canvas: canvas, tex: tex, lastText: '', lastEnemy: null, line: line, lineMat: lineMat,
+                      vrNameLabel: true };   // (v48.33) the adoption tag - see the top of this function
   bot._vrNameSprite = sprite;
   bot._vrNameLine = line;
   return sprite;
@@ -18646,6 +18691,8 @@ function _rplStudioLoop(timestamp) {
   const dt = game.deltaTime || 0.016, k = _rplTimeK();
   if (game.sandwichTerrain && game.sandwichTerrain.ON) {
     try { _swU.uTime.value += dt; _swU.uCam.value.set(camera.position.x, camera.position.y, camera.position.z); } catch (_) {}
+    try { _swTreeVisTick(camera.position.x, camera.position.z); } catch (_) {}
+    try { _swFolVisExtra(camera.position.x, camera.position.z); } catch (_) {}
     try { _swUpdateHubWater(); } catch (_) {}
     try { _swRippleTick(dt); } catch (_) {}
     try { _swUpdateUnderwater(); } catch (_) {}
@@ -20640,6 +20687,67 @@ function _swTreeVisTick(cx, cz) {
     }
   }
   try { window.__treeVis = { hidden: _hid, shown: _shown, fadeB: Math.round(B) }; } catch (_) {}
+}
+
+function _swFolBound(pts, stride) {
+  let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+  for (let i = 0; i + 2 < pts.length; i += stride) {
+    const x = pts[i], z = pts[i + 2];
+    if (x < x0) x0 = x; if (x > x1) x1 = x; if (z < z0) z0 = z; if (z > z1) z1 = z;
+  }
+  if (!(x1 >= x0) || !(z1 >= z0)) return null;
+  const cx = (x0 + x1) * 0.5, cz = (z0 + z1) * 0.5;
+  let r2 = 0;
+  for (let i = 0; i + 2 < pts.length; i += stride) {
+    const dx = pts[i] - cx, dz = pts[i + 2] - cz, d2 = dx * dx + dz * dz;
+    if (d2 > r2) r2 = d2;
+  }
+  return { x: cx, z: cz, r: Math.sqrt(r2) };
+}
+function _swFolVisList(arr, cx, cz, B, off) {
+  if (!arr) return;
+  const S = _swFolVisExtra;
+  for (let i = 0; i < arr.length; i++) {
+    const im = arr[i];
+    if (!im || !im.isInstancedMesh) continue;
+    const f = im.userData && im.userData._fol;
+    let vis = true;
+    if (!off && f) {
+      const dx = cx - f.x, dz = cz - f.z;
+      vis = (Math.sqrt(dx * dx + dz * dz) - f.r) < (B + 2);
+    }
+    if (im.visible !== vis) im.visible = vis;
+    if (vis) S.shown++; else S.hid++;
+  }
+}
+function _swFolVisExtra(cx, cz) {
+  const S = _swFolVisExtra;
+  const off = (typeof window !== 'undefined' && window.__treeVisCull === 0);
+  let B = 0;
+  if (!off) {
+    if (game.bendWorld) return;
+    if (game._worldPrebaking || game._swPreloading || game._swapStaging || game._rrStaging) return;
+    try { if (window.__lssWarmDraw) return; } catch (_) {}
+    if (typeof _PREBAKE !== 'undefined' && _PREBAKE && _PREBAKE.on) return;
+    if (!_swU || !_swU.uTreeFadeB) return;
+    B = _swU.uTreeFadeB.value;
+    if (!(B > 0)) return;
+  }
+  S.hid = 0; S.shown = 0;
+  try { for (const rec of _skLive.values()) if (rec && rec.grp && rec.grp.userData) _swFolVisList(rec.grp.userData._fol, cx, cz, B, off); } catch (_) {}
+  try {
+    const hc = game.hubCity;
+    if (hc && hc.group && hc.group.userData) _swFolVisList(hc.group.userData._parkIMs, cx, cz, B, off);
+  } catch (_) {}
+  try {
+    if (typeof OW !== 'undefined' && OW && OW.cities) {
+      for (let i = 0; i < OW.cities.length; i++) {
+        const b = OW.cities[i].built;
+        if (b && b.group && b.group.userData) _swFolVisList(b.group.userData._parkIMs, cx, cz, B, off);
+      }
+    }
+  } catch (_) {}
+  try { window.__folVis = { hidden: S.hid, shown: S.shown, fadeB: Math.round(B) }; } catch (_) {}
 }
 
 const _SW_DRAPE_SEG = 4;
@@ -23869,6 +23977,18 @@ function _swEntityWaterTick(dt, WL) {
   _SW_ENT.cursor = (_SW_ENT.cursor + 1) % n;
 }
 
+function _lssFastReadableCaps(rnd) {
+  const c = rnd && rnd.capabilities;
+  if (!c || c._lssFastRead || typeof c.textureTypeReadable !== 'function') return;
+  const orig = c.textureTypeReadable;
+  c.textureTypeReadable = function (t) {
+    if ((t === THREE.FloatType || t === THREE.UnsignedByteType) &&
+        !(typeof window !== 'undefined' && window.__water && window.__water.crFastCaps === 0)) return true;
+    return orig.call(c, t);
+  };
+  c._lssFastRead = true;
+}
+
 function _swRippleTick(dt) {
   const R = _swRipple; if (!R.gpu) return;
   if (game._xrBlurred) return;
@@ -24376,6 +24496,7 @@ function _swRippleTick(dt) {
             R._crPending = true;
             const _prevRT = renderer.getRenderTarget();
             let _pr = null;
+            try { _lssFastReadableCaps(renderer); } catch (_) {}   // (v48.33) no queue-draining getParameter in the prologue
             const _rt0 = performance.now();
             try { _pr = renderer.readRenderTargetPixelsAsync(R.gpu.getAlternateRenderTarget(R.heightVar), CO, CO, CRS, CRS, buf); }
             catch (e) { R._crPending = false; R._crAsyncErr = 1; try { console.warn('[crestBreak] async readback unavailable, using the synchronous path:', e && e.message); } catch (_) {} }
@@ -26296,8 +26417,11 @@ function _swBuildHubWater(T) {
       const _rxWas = this.rotation.x;
       if (_underNow) { this.rotation.x = _rxWas + Math.PI; this.updateMatrix(); this.updateMatrixWorld(true); }
       this._reflFlipped = _underNow;
+      const _mwPin = !!(scn && scn.matrixWorldAutoUpdate === true && !(window.__water && window.__water.mirrorWalk === 1));
+      if (_mwPin) scn.matrixWorldAutoUpdate = false;
       try { _reflOBR.call(this, rnd, scn, cam, geo2, mat2, grp); }
       finally {
+        if (_mwPin) scn.matrixWorldAutoUpdate = true;   // (v48.33) FIRST - see above
         if (window.__f8seg) window.__f8seg('scene');   // (v40.59) back to the pass that contains us
         if (_wDv) _wD.visible = true;
         if (_wOv) _wO.visible = true;
@@ -28332,6 +28456,10 @@ function _hcMakeMeshes(city, site) {
       im.userData.isHubCity = true;
       im.userData.hcShared = true;
       group.add(im);
+      try {
+        im.userData._fol = _swFolBound(pts, 4);
+        (group.userData._parkIMs || (group.userData._parkIMs = [])).push(im);
+      } catch (_) {}
     }
   } catch (_) {}
 
@@ -31205,12 +31333,25 @@ const SKY_I = {
 try { window.__sky = SKY_I; } catch (_) {}
 
 function _skH3(x, y, z) { const h = Math.sin(x * 127.1 + y * 311.7 + z * 74.7) * 43758.5453; return h - Math.floor(h); }
+function _skH3m(xi, yi, zi) {
+  if (!(xi > -1073741824 && xi < 1073741824 && yi > -1073741824 && yi < 1073741824 &&
+        zi > -1073741824 && zi < 1073741824)) return _skH3(xi, yi, zi);
+  const M = _skH3m;
+  let K = M.K, V = M.V;
+  if (!K) { K = M.K = new Int32Array(3 * 32768).fill(0x7fffffff); V = M.V = new Float64Array(32768); }
+  const s = (Math.imul(xi, 73856093) ^ Math.imul(yi, 19349663) ^ Math.imul(zi, 83492791)) & 32767;
+  const o = s * 3;
+  if (K[o] === xi && K[o + 1] === yi && K[o + 2] === zi) return V[s];
+  const h = _skH3(xi, yi, zi);
+  if (h === h) { K[o] = xi; K[o + 1] = yi; K[o + 2] = zi; V[s] = h; }
+  return h;
+}
 function _skN3(x, y, z) {
   const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
   const xf = x - xi, yf = y - yi, zf = z - zi;
   const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf), w = zf * zf * (3 - 2 * zf);
-  const a = _skH3(xi, yi, zi), b = _skH3(xi + 1, yi, zi), c = _skH3(xi, yi + 1, zi), d = _skH3(xi + 1, yi + 1, zi);
-  const e = _skH3(xi, yi, zi + 1), f = _skH3(xi + 1, yi, zi + 1), g = _skH3(xi, yi + 1, zi + 1), h = _skH3(xi + 1, yi + 1, zi + 1);
+  const a = _skH3m(xi, yi, zi), b = _skH3m(xi + 1, yi, zi), c = _skH3m(xi, yi + 1, zi), d = _skH3m(xi + 1, yi + 1, zi);
+  const e = _skH3m(xi, yi, zi + 1), f = _skH3m(xi + 1, yi, zi + 1), g = _skH3m(xi, yi + 1, zi + 1), h = _skH3m(xi + 1, yi + 1, zi + 1);
   const x0 = a + (b - a) * u, x1 = c + (d - c) * u, x2 = e + (f - e) * u, x3 = g + (h - g) * u;
   const y0 = x0 + (x1 - x0) * v, y1 = x2 + (x3 - x2) * v;
   return y0 + (y1 - y0) * w;
@@ -31349,15 +31490,30 @@ function _skTop(I, x, z, nb) {
 
 const _SN_E = [[0,1],[1,3],[2,3],[0,2],[4,5],[5,7],[6,7],[4,6],[0,4],[1,5],[2,6],[3,7]];
 const _SN_C = [[0,0,0],[1,0,0],[0,1,0],[1,1,0],[0,0,1],[1,0,1],[0,1,1],[1,1,1]];
+function _skDue() {
+  const D = _skDue;
+  return (typeof D.budget === 'number') && D.budget !== Infinity && (performance.now() - D.t0) >= D.budget;
+}
 function _skNet(f, ox, oy, oz, size, N) {
+  const it = _skNetG(f, ox, oy, oz, size, N);
+  let r = it.next();
+  while (!r.done) r = it.next();
+  return r.value;
+}
+function* _skNetG(f, ox, oy, oz, size, N) {
   const S = N + 1, step = size / N;
   const g = new Float32Array(S * S * S);
-  for (let k = 0; k < S; k++) for (let j = 0; j < S; j++) for (let i = 0; i < S; i++)
-    g[(k * S + j) * S + i] = f(ox + i * step, oy + j * step, oz + k * step);
+  for (let k = 0; k < S; k++) {
+    for (let j = 0; j < S; j++) for (let i = 0; i < S; i++)
+      g[(k * S + j) * S + i] = f(ox + i * step, oy + j * step, oz + k * step);
+    if (_skDue()) yield;
+  }
   const at = (i, j, k) => g[(k * S + j) * S + i];
   const idx = new Int32Array(N * N * N).fill(-1);
   const pos = [], nrm = [], col = [], tri = [], c = new Array(8);
-  for (let k = 0; k < N; k++) for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+  for (let k = 0; k < N; k++) {
+  if (k > 0 && _skDue()) yield;   // (v48.33) between slabs: the normal samples make this loop as heavy as the grid
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
     let neg = 0;
     for (let n = 0; n < 8; n++) { const o = _SN_C[n]; c[n] = at(i + o[0], j + o[1], k + o[2]); if (c[n] < 0) neg++; }
     if (neg === 0 || neg === 8) continue;
@@ -31386,6 +31542,7 @@ function _skNet(f, ox, oy, oz, size, N) {
     r += (0.20 - r) * up; gg += (0.40 - gg) * up; bb += (0.15 - bb) * up;
     col.push(r, gg, bb);
   }
+  }   // (v48.33) end of the k slab
   for (let k = 1; k < N; k++) for (let j = 1; j < N; j++) for (let i = 1; i < N; i++) {
     const v0 = at(i, j, k) < 0;
     if (v0 !== (at(i + 1, j, k) < 0)) {
@@ -31514,6 +31671,15 @@ const _SK_GLOW = new THREE.SphereGeometry(1, 6, 5);
 function _skBuild(I) {
   if (I.grp) return I.grp;
   const t0 = performance.now();
+  _skDue.budget = undefined;
+  const it = _skBuildG(I);
+  let r = it.next();
+  while (!r.done) r = it.next();
+  SKY_I._ms = SKY_I._ms * 0.8 + (performance.now() - t0) * 0.2;
+  return r.value;
+}
+function* _skBuildG(I) {
+  if (I.grp) return I.grp;
   _skMats();
   const nb = _skNb(I);
   const pad = I.R * 1.55;
@@ -31526,7 +31692,7 @@ function _skBuild(I) {
     const ex = Math.min(x - ox, ox + size - x, y - oy, oy + size - y, z - oz, oz + size - z);
     return ex >= wallW ? d : d - (1 - Math.max(ex, 0) / wallW) * 8;
   };
-  const sn = _skNet(f, ox, oy, oz, size, SKY_I.res);
+  const sn = yield* _skNetG(f, ox, oy, oz, size, SKY_I.res);
   const grp = new THREE.Group();
   grp.name = 'skyIsland:' + I.id;
   if (!sn.tri.length) { I.grp = grp; return grp; }
@@ -31581,6 +31747,7 @@ function _skBuild(I) {
     const boxes = [], glows = [];
     const nT = 2 + Math.floor(rnd() * (I.R > 800 ? 7 : 4));
     for (let k = 0; k < nT; k++) {
+      if (_skDue()) yield;   // (v48.33) each tower is up to 5 _skTop walks - a natural seam
       const a = rnd() * 6.283, rr = Math.sqrt(rnd()) * I.R * 0.52;
       const bx = I.x + Math.cos(a) * rr, bz = I.z + Math.sin(a) * rr;
       if (Math.hypot(bx - I.x, bz - I.z) < SKY_I.padR + 90) continue;
@@ -31667,6 +31834,7 @@ function _skBuild(I) {
       const want = Math.round((fungal ? 30 : 20) * (0.55 + rnd() * 0.9) * (I.R / 620));
       const e2 = 20;
       for (let k = 0, tries = 0; k < want && tries < want * 8; tries++) {
+        if ((tries & 7) === 7 && _skDue()) yield;   // (v48.33) every 8 candidates (1-5 _skTop walks each)
         const a = rnd() * 6.283, rr = Math.sqrt(rnd()) * I.R * 0.66;
         const fx = I.x + Math.cos(a) * rr, fz = I.z + Math.sin(a) * rr;
         const ty = _skTop(I, fx, fz, nb);
@@ -31713,45 +31881,123 @@ function _skBuild(I) {
         im.frustumCulled = true;
         im.castShadow = false; im.receiveShadow = false;
         grp.add(im);
+        try {
+          im.userData._fol = _swFolBound(pts, 3);
+          (grp.userData._fol || (grp.userData._fol = [])).push(im);
+        } catch (_) {}
       }
     }
   }
 
-  SKY_I._ms = SKY_I._ms * 0.8 + (performance.now() - t0) * 0.2;
   I.grp = grp;
   return grp;
 }
 
 const _skLive = new Map();
+const _skKeep = new Map();
+let _skJob = null;   // (v48.33) the one island being built in slices: { I, it, ms }
+function _skFreeRec(rec) {
+  if (!rec) return;
+  try {
+    if (rec.grp) rec.grp.traverse(o => {
+      if (o.geometry && o.userData && o.userData.skOwned) o.geometry.dispose();
+      else if (o.isInstancedMesh && typeof o.dispose === 'function') o.dispose();   // instance buffers only
+    });
+  } catch (_) {}
+  if (rec.isl && rec.isl.grp === rec.grp) { rec.isl.grp = null; rec.isl.nb = null; }
+}
+function _skKeepCap() {
+  if (SKY_I.keep != null) return Math.max(0, +SKY_I.keep || 0);
+  return (typeof _fxSmallDevice === 'function' && _fxSmallDevice()) ? 12 : 48;
+}
+function _skCurtainUp() {
+  const S = _skCurtainUp;
+  if (!S.el) { try { S.el = document.getElementById('lss-loading-overlay'); } catch (_) {} }
+  return !!(S.el && S.el.classList && S.el.classList.contains('active'));
+}
 function _skDispose() {
   for (const [k, rec] of _skLive) {
-    try { scene.remove(rec.grp); rec.grp.traverse(o => { if (o.geometry && o.userData && o.userData.skOwned) o.geometry.dispose(); }); } catch (_) {}
-    if (rec.isl) { rec.isl.grp = null; rec.isl.nb = null; }
+    try { scene.remove(rec.grp); } catch (_) {}
+    _skFreeRec(rec);
   }
   _skLive.clear();
+  for (const rec of _skKeep.values()) _skFreeRec(rec);
+  _skKeep.clear();
+  _skJob = null;
 }
 function _skFrame(px, py, pz) {
   const T = game.sandwichTerrain;
-  if (!T || !T.HUB || !SKY_I.on) { if (_skLive.size) _skDispose(); return; }
+  if (!T || !T.HUB || !SKY_I.on) { if (_skLive.size || _skKeep.size || _skJob) _skDispose(); return; }
   const near = _skNear(px, pz, SKY_I.range);
   const want = new Set();
   for (const I of near) want.add(I.id);
   for (const [k, rec] of [..._skLive]) {
     if (want.has(k)) continue;
-    scene.remove(rec.grp);
-    rec.grp.traverse(o => { if (o.geometry && o.userData && o.userData.skOwned) o.geometry.dispose(); });
-    if (rec.isl) { rec.isl.grp = null; rec.isl.nb = null; }
+    try { scene.remove(rec.grp); } catch (_) {}
     _skLive.delete(k);
+    _skKeep.delete(k); _skKeep.set(k, rec);          // newest last
   }
+  const cap = _skKeepCap();
+  while (_skKeep.size > cap) {
+    const k = _skKeep.keys().next().value, rec = _skKeep.get(k);
+    _skKeep.delete(k); _skFreeRec(rec);
+  }
+  if (_skJob && !want.has(_skJob.I.id)) _skJob = null;
   near.sort((a, b) => (Math.hypot(a.x - px, a.y - py, a.z - pz)) - (Math.hypot(b.x - px, b.y - py, b.z - pz)));
+  const syncR = (SKY_I.syncR != null) ? +SKY_I.syncR : 21000;
+  const curtain = _skCurtainUp();
+  const pend = [];
   let n = 0;
   for (const I of near) {
     if (_skLive.has(I.id)) continue;
-    if (n >= SKY_I.budget) break;
-    const grp = _skBuild(I);
-    scene.add(grp);
-    _skLive.set(I.id, { grp, isl: I });
-    n++;
+    const kept = _skKeep.get(I.id);
+    if (kept) {
+      _skKeep.delete(I.id);
+      if (kept.isl === I && kept.grp && I.grp === kept.grp) { scene.add(kept.grp); _skLive.set(I.id, kept); continue; }
+      _skFreeRec(kept);   // (cannot happen while _skCache is never cleared - but never publish a stale group)
+    }
+    const inside = (Math.hypot(I.x - px, I.y - py, I.z - pz) - I.R * 2.2) < syncR;
+    if (inside && !curtain) {
+      if (n >= SKY_I.budget) continue;
+      n++;
+      let grp = null;
+      if (_skJob && _skJob.I === I) {
+        const t0 = performance.now(), J = _skJob;
+        _skJob = null; _skDue.budget = undefined;
+        let r = J.it.next();
+        while (!r.done) r = J.it.next();
+        SKY_I._ms = SKY_I._ms * 0.8 + (J.ms + performance.now() - t0) * 0.2;
+        grp = r.value;
+      } else grp = _skBuild(I);
+      if (grp) { scene.add(grp); _skLive.set(I.id, { grp, isl: I }); }
+      continue;
+    }
+    pend.push(I);
+  }
+  const sliceMs = curtain ? ((SKY_I.curtainMs != null) ? +SKY_I.curtainMs : 24)
+                          : ((SKY_I.sliceMs != null) ? +SKY_I.sliceMs : 1.5);
+  if (!(sliceMs > 0)) return;
+  const tEnd = performance.now() + sliceMs;
+  let pi = 0, guard = 0;
+  while (performance.now() < tEnd && guard++ < 64) {
+    if (!_skJob) {
+      while (pi < pend.length && (_skLive.has(pend[pi].id) || pend[pi].grp)) pi++;
+      if (pi >= pend.length) break;
+      const I = pend[pi++];
+      _skJob = { I, it: _skBuildG(I), ms: 0 };
+    }
+    const J = _skJob;
+    _skDue.t0 = performance.now();
+    _skDue.budget = Math.max(0.25, tEnd - _skDue.t0);
+    let r = null;
+    try { r = J.it.next(); } catch (e) { r = null; }
+    J.ms += performance.now() - _skDue.t0;
+    _skDue.budget = undefined;
+    if (!r) { if (_skJob === J) _skJob = null; continue; }   // a throwing build is dropped; the sync path threw too
+    if (!r.done) break;                                        // yielded: this frame's share is spent
+    if (_skJob === J) _skJob = null;
+    SKY_I._ms = SKY_I._ms * 0.8 + J.ms * 0.2;
+    if (r.value) { scene.add(r.value); _skLive.set(J.I.id, { grp: r.value, isl: J.I }); }
   }
 }
 
@@ -31987,6 +32233,7 @@ function _skCollide(pos, velocity, radius) {
   }
 }
 try { window.__skyDbg = () => ({ live: _skLive.size, ms: +SKY_I._ms.toFixed(1),
+  keep: _skKeep.size, job: _skJob ? _skJob.I.id : null,   // (v48.33) retained-out-of-range + the island being sliced
   near: _skNear(player.position.x, player.position.z, SKY_I.range).length,
   list: [..._skLive.values()].map(r => ({ id: r.isl.id, x: Math.round(r.isl.x), y: Math.round(r.isl.y), z: Math.round(r.isl.z), R: Math.round(r.isl.R),
     d: Math.round(Math.hypot(r.isl.x - player.position.x, r.isl.y - player.position.y, r.isl.z - player.position.z)) })).sort((a,b)=>a.d-b.d) }); } catch (_) {}
@@ -42342,6 +42589,10 @@ const isChaingunBot = (weapon.fireRate <= 0.10);
 
   destroy() {
     try { if (typeof _clearOutlineOpticsOn === 'function') _clearOutlineOpticsOn(this); } catch (_) {}
+    try {
+      if (this._vrNameSprite) this._vrNameSprite.visible = false;
+      if (this._vrNameLine) this._vrNameLine.visible = false;
+    } catch (_) {}
     if (typeof _botShipPoolPut === 'function' && _botShipPoolPut(this)) return;
     if (typeof _disposeShipGroup === 'function') _disposeShipGroup(this.mesh);
     else if (this.mesh && this.mesh.parent) scene.remove(this.mesh);
@@ -69560,14 +69811,33 @@ function _hlfCellPath(ctx, cx, cy, rIn, rOut, a0, a1, bevel) {
   ctx.closePath();
 }
 
-function _hlfHatch(ctx, cx, cy, reach, col, alpha, vm) {
+function _hlfSectorBox(cx, cy, rIn, rOut, a0, a1) {
+  const D = _HL_D2R, o = _hlfSectorBox.o || (_hlfSectorBox.o = [0, 0, 0, 0]);
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  const add = (r, a) => {
+    const x = cx + Math.cos(a * D) * r, y = cy + Math.sin(a * D) * r;
+    if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+  };
+  add(rIn, a0); add(rIn, a1); add(rOut, a0); add(rOut, a1);
+  for (let q = Math.ceil(a0 / 90) * 90; q <= a1; q += 90) { add(rOut, q); add(rIn, q); }
+  o[0] = x0; o[1] = y0; o[2] = x1; o[3] = y1;
+  return o;
+}
+function _hlfHatch(ctx, cx, cy, reach, col, alpha, vm, bb) {
   ctx.save();
   ctx.clip();
   ctx.globalAlpha = alpha;
   ctx.strokeStyle = col;
   ctx.lineWidth = Math.max(1.4, vm * 0.42);
   const step = vm * 0.95;
+  let kLo = -Infinity, kHi = Infinity;
+  if (bb && !(typeof window !== 'undefined' && window.__hudHatchAll)) {
+    const m = (ctx.lineWidth / 2 + 2) * Math.SQRT2;
+    kLo = bb[0] - bb[3] - m; kHi = bb[2] - bb[1] + m;
+  }
   for (let d = -reach * 2; d <= reach * 2; d += step) {
+    const k = (cx + d) - (cy - reach);
+    if (k < kLo || k > kHi) continue;
     ctx.beginPath();
     ctx.moveTo(cx + d, cy - reach);
     ctx.lineTo(cx + d + reach * 2, cy + reach);
@@ -69696,7 +69966,7 @@ function _hlfBarRow(I, rInV, rOutV, a0, a1, segs, gapDeg, frac, col, weights, op
         ctx.restore();
       } else {
         _hlfCellPath(ctx, cx, cy, rIn, rOut, st, le, bev);
-        _hlfHatch(ctx, cx, cy, reach, col, 0.9 * I.ga, vm);
+        _hlfHatch(ctx, cx, cy, reach, col, 0.9 * I.ga, vm, _hlfSectorBox(cx, cy, rIn, rOut, st, le));   // (v48.33) cull
       }
       ctx.globalAlpha = I.ga;
       _hlfCellPath(ctx, cx, cy, rIn, rOut, st, le, bev);
@@ -69896,10 +70166,28 @@ function _hlfChevronRow(I, rInV, rOutV, a0, a1, frac, col, glow) {
     ctx.clip();
     ctx.fillStyle = col;
     if (glow) { ctx.shadowColor = col; ctx.shadowBlur = vm * glow * 1.6; }
-    for (let i = 0; i < n; i++) { _hlfChevronPath(ctx, cx, cy, rIn, rOut, start + i * pitch, w, tk); ctx.fill(); }
+    const _K = (typeof window !== 'undefined') ? window.__hudCore : null;
+    if (glow && !(_K && _K.glowUnion === 0)) {
+      ctx.beginPath();
+      for (let i = 0; i < n; i++) _hlfChevronSub(ctx, cx, cy, rIn, rOut, start + i * pitch, w, tk);
+      ctx.fill();
+    } else {
+      for (let i = 0; i < n; i++) { _hlfChevronPath(ctx, cx, cy, rIn, rOut, start + i * pitch, w, tk); ctx.fill(); }
+    }
     ctx.shadowBlur = 0;
     ctx.restore();
   }
+}
+function _hlfChevronSub(ctx, cx, cy, rIn, rOut, s, wDeg, tkDeg) {
+  const rM = (rIn + rOut) / 2, D = _HL_D2R;
+  const X = (r, a) => cx + Math.cos(a * D) * r, Y = (r, a) => cy + Math.sin(a * D) * r;
+  ctx.moveTo(X(rOut, s), Y(rOut, s));
+  ctx.lineTo(X(rM, s + wDeg), Y(rM, s + wDeg));
+  ctx.lineTo(X(rIn, s), Y(rIn, s));
+  ctx.lineTo(X(rIn, s + tkDeg), Y(rIn, s + tkDeg));
+  ctx.lineTo(X(rM, s + wDeg + tkDeg), Y(rM, s + wDeg + tkDeg));
+  ctx.lineTo(X(rOut, s + tkDeg), Y(rOut, s + tkDeg));
+  ctx.closePath();
 }
 
 const _HLF_ICON_ROW = (function () {
@@ -85055,6 +85343,8 @@ function updateEnemyHealthBars() {
   _lblFrameId++;   // (v40.55) one stamp per frame; a slot left unstamped below is unused and gets hidden
   const _processShipForLabel = (ent) => {
     if (!ent || !ent.alive || !ent.position || !ent.loadout) return;
+    if (ent._lblFrame === _lblFrameId) return;
+    ent._lblFrame = _lblFrameId;
     if (ent.mesh && (ent.mesh.visible === false || !ent.mesh.parent)) return;
     ent._lblHeld = false;   // (v40.55) set by _lblSoftGate below; the draw point only clears the hold clock when NO gate held
     ent._lblUpPrev = !!ent._lblUp;
@@ -85991,6 +86281,14 @@ function __pmark(name) {
 })();
 
 function gameLoop(timestamp) {
+  try { return _gameLoopBody(timestamp); }
+  finally {
+    if (!_lssFromWatchdog) {
+      try { _lssLastRafAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now(); } catch (_) {}
+    }
+  }
+}
+function _gameLoopBody(timestamp) {
   try {
     const _lt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     _lssLastLoopAt = _lt;
@@ -86005,8 +86303,9 @@ function gameLoop(timestamp) {
   if (_RPL.kc && game.state !== 'roundEnd' && game.state !== 'playing') { try { _rplKcEnd(); } catch (_) {} }
   if (_RPL.rec && game.state !== 'roundEnd' && game.state !== 'playing') _RPL.rec = false;
   if (!game.lastTime) game.lastTime = timestamp;
-  game.deltaTime = Math.min(0.05, (timestamp - game.lastTime) / 1000);
-  game.lastTime = timestamp;
+  const _dtRaw = (timestamp - game.lastTime) / 1000;
+  game.deltaTime = Math.max(0, Math.min(0.05, _dtRaw));
+  if (_dtRaw > 0 || _dtRaw < -1) game.lastTime = timestamp;
   game.time += game.deltaTime;
   __pmark(); 
   if (typeof _tickFlatCombatPerf === 'function') _tickFlatCombatPerf(game.deltaTime);
@@ -86054,6 +86353,8 @@ function gameLoop(timestamp) {
           const _cdt = game.deltaTime;
           _swU.uTime.value += _cdt;
           _swU.uCam.value.set(camera.position.x, camera.position.y, camera.position.z);
+          try { _swTreeVisTick(camera.position.x, camera.position.z); } catch (_) {}
+          try { _swFolVisExtra(camera.position.x, camera.position.z); } catch (_) {}
           try { _swUpdateHubWater(); } catch (_) {}
           __pmark('cine:water');
           try { _swRippleTick(_cdt); }
@@ -86234,8 +86535,10 @@ function gameLoop(timestamp) {
       let _fZ = _cineActive ? camera.position.z : player.position.z;
       _swU.uCam.value.set(_fX, _cineActive ? camera.position.y : player.position.y, _fZ);
       try { _swTreeVisTick(_fX, _fZ); } catch (_) {}   // (v47.05) must stay ABOVE the bend unmap below - _fX/_fZ are still in the space uCam just got
+      try { _swFolVisExtra(_fX, _fZ); } catch (_) {}   // (v48.33) sky-island + city-park foliage, same rule; its own try so neither can starve the other
       try { _volcSync(_fX, _fZ); } catch (_) {}
       try { _skFrame(_fX, _cineActive ? camera.position.y : player.position.y, _fZ); } catch (_) {}
+      __pmark('hub:sky');
       try { _padFrame(dt); } catch (e) { if (typeof window !== 'undefined' && !window.__padErr) window.__padErr = String((e && e.stack) || e); }
       try { _skyAudioFrame(dt); } catch (_) {}
       if (game.bendWorld && game._bendSegs && game._bendSegs.length) {
@@ -96408,7 +96711,7 @@ const _LSS_STALL_MS = 120;   // ~7 missed frames at 60 Hz: long enough never to 
       }, 350);
     } else {
       bgActive = false;
-      if (bgWorker) bgWorker.postMessage({ cmd: 'stop' });
+      try { const w = _ensureWorker(); if (w) w.postMessage({ cmd: 'start', ms: Math.round(1000 / TICK_HZ) }); } catch (_) {}
       try { renderer.setAnimationLoop(null); renderer.setAnimationLoop(gameLoop); } catch (_) {}
     }
   });
@@ -97473,6 +97776,19 @@ function _leSlicer() {
   return S;
 }
 function _leBreath() { return _leDeferPublish() ? new Promise((r) => setTimeout(r, 0)) : Promise.resolve(); }
+
+function _leFindSun(scene) {
+  const S = _leFindSun;
+  S.best = null; S.bi = -1;
+  if (scene && typeof scene.traverse === 'function') scene.traverse(_leFindSunVisit);
+  const b = S.best;
+  S.best = null;   // never pin a light object past the call
+  return b;
+}
+function _leFindSunVisit(o) {
+  const S = _leFindSun;
+  if (o.isDirectionalLight && o.intensity > S.bi) { S.bi = o.intensity; S.best = o; }
+}
 
 class LSSEarthTiles {
   constructor(opts = {}) {
@@ -98540,11 +98856,10 @@ class LSSEarthTiles {
     if (!m || !m.userData || !m.userData.uLeNight) return;
     m.userData.uLeNight.value = Math.max(0, Math.min(1, v));
   }
-  updateNight(scene) {
+  updateNight(scene, sun) {
     const m = this._wallMat;
     if (!m || !m.userData || !m.userData.uSunV) return;
-    let best = null, bi = -1;
-    scene.traverse((o) => { if (o.isDirectionalLight && o.intensity > bi) { bi = o.intensity; best = o; } });
+    const best = (sun !== undefined) ? sun : _leFindSun(scene);
     if (best) m.userData.uSunV.value.copy(best.position).normalize();
   }
 
@@ -99277,6 +99592,8 @@ class LSSEarthTiles {
 
     const geo = new THREE.PlaneGeometry(1, 1);
     const mat = _hcHoloMat();
+    mat.transparent = false;
+    mat.depthWrite = true;
     for (const k of Object.keys(mat.uniforms)) {
       if (mat.uniforms[k] === undefined || mat.uniforms[k] === null) {
         mat.uniforms[k] = { value: (k === 'uHcLodOn') ? 1 : 0 };
@@ -100081,8 +100398,17 @@ class LSSEarthWorld {
     return best;
   }
   updateNight(scene) {
-    for (const p of this._patches.values()) p.updateNight(scene);
-    if (this._far) this._far.updateNight(scene);
+    let need = !!(this._far && this._far._wallMat && this._far._wallMat.userData && this._far._wallMat.userData.uSunV);
+    if (!need) {
+      for (const p of this._patches.values()) {
+        const m = p._wallMat;
+        if (m && m.userData && m.userData.uSunV) { need = true; break; }
+      }
+    }
+    if (!need) return;
+    const sun = _leFindSun(scene);   // null when there is no directional light: patches keep their last value
+    for (const p of this._patches.values()) p.updateNight(scene, sun);
+    if (this._far) this._far.updateNight(scene, sun);
   }
   setWindowGlow(v) {
     this._glow = v;          // see _backfillBuildings
@@ -100874,7 +101200,7 @@ function _lssGmapsTick(dt) {
     try { if (typeof _wxFrame === 'function') _wxFrame(dt); } catch (_) {}
     __pmark('earth:wx');         // the sky dome + weather, which only this mode drives
   } catch (_) {  }
-  if (t.group && t.group.children && t.group.children.length > 0) {
+  if (typeof t.collide !== 'function' && t.group && t.group.children && t.group.children.length > 0) {
     t.group.traverse((c) => {
       if (!c || !c.isMesh) return;
       const mats = Array.isArray(c.material) ? c.material : [c.material];
@@ -100889,7 +101215,7 @@ function _lssGmapsTick(dt) {
       }
     });
   }
-  __pmark('earth:matfix');       // ⚠ a FULL traverse of the patch set, every frame
+  __pmark('earth:matfix');       // (v48.33) ~0 on our own tiles classes - see above
   try {
     if (typeof player !== 'undefined' && player && player.position && player.velocity) {
       _lssGmapsCollideEntity(player.position, player.velocity);

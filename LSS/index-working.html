@@ -6860,7 +6860,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "48.32";
+const LSS_BUILD = "48.37";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -12332,6 +12332,31 @@ const EndlessMode = {
     try { _aegisShipUpgrades(true); } catch (_) {}
   },
   _spawnWave(run) {
+    // ⭐⭐ (v48.33) RETIRE THE LAST WAVES' DEAD. Bot.die only takes the hull out of the scene; the Bot
+    // itself stayed in game.entities for the rest of the run. Classic retires its dead in spawnBots
+    // every round - endless never gets there - so an hour of endless carried 150-360 corpses:
+    // animateShipMesh ran on every one of them in the main loop (0.10 ms a frame at 150, linear), they
+    // rode the co-op bot_state packet, and because a corpse still HELD its hull the ship pool stayed
+    // empty and every wave built fresh hulls (and their LayeredFX + shield registrations).
+    // destroy() is the classic path: strip the Outline Optics rim, park the hull in the pool (the new
+    // wave just below takes it straight back) or dispose it. Swept HERE, at the next wave's spawn,
+    // never at wave clear: the director only starts the next travel clock once a wave is CLEARED
+    // (28-58 s) and then warns for 5 s, so every corpse is at least ~33 s dead - long past any peer
+    // having seen the death (the v47.45 lesson). Only `_endlessWave` bots, which only this function
+    // stamps, and only the dead: anything else in game.entities is never touched.
+    try {
+      let swept = 0;
+      const keep = [];
+      for (const e of game.entities) {
+        if (e && e instanceof Bot && !e.alive && e._endlessWave != null) {
+          try { e.destroy(); } catch (_) {}
+          swept++;
+          continue;
+        }
+        keep.push(e);
+      }
+      if (swept) { game.entities = keep; run.swept = (run.swept || 0) + swept; }
+    } catch (_) {}
     run.waveN++;
     const n = Math.min(6, 2 + Math.floor(run.dist / 3000));
     const elite = (run.waveN % 5 === 0);
@@ -24264,7 +24289,47 @@ game.levelWorker = null;
 try {
   THREE.ShaderChunk.fog_vertex = '#ifdef USE_FOG\n\tvFogDepth = length( mvPosition.xyz );\n#endif';
 } catch (_) {}
-scene.fog = new THREE.FogExp2(0x0a0520, 0.000015); 
+// ⭐⭐ (v48.33) A DARK LIGHT COSTS NOTHING. The pinned lights (see NUM_POINT_LIGHTS PINNING in
+// initDynamicLights: the 8-light pool, the engine light, 3 traffic lights, the cockpit key + fill, and
+// the headlight spot) sit in the scene at intensity 0 on purpose, so NUM_*_LIGHTS - a program-key term -
+// never changes and nothing relinks mid-fight. That rule STAYS. But r165's lights_fragment_begin calls
+// RE_Direct for every point and spot light unconditionally: getPointLightInfo already computes
+// `directLight.visible = (color != vec3(0.0))`, and nothing but the shadow line reads it. An
+// intensity-0 light has an exactly-zero colour; a fragment past a light's `distance` gets exactly 0
+// from the cutoff window pow2(saturate(1 - pow4(d / cutoff))); a spot outside its cone is zeroed in
+// getSpotLightInfo. Every one of those still paid RE_Direct_Physical + BRDF_GGX (~65-70 scalar ops)
+// to add +0.0. The initDynamicLights comment assumed a no-op iteration was nearly free - on r165 it
+// is not: FXC proxy 838 -> 436 DXBC for a lit Standard fragment when the guarded lights are dark.
+// So: `if ( directLight.visible ) { RE_Direct(...) }` in the POINT and SPOT loops only (directional
+// lights - the sun - are always lit). Pixel-identical by construction: skipping `x += 0.0` is exact,
+// and every lit model (Physical, Lambert, Phong, Toon) scales its whole contribution by the colour.
+// The ShaderChunk is NOT in the program cache key, so this must run before the first compile - the
+// fog_vertex line above proves this spot is early enough (the main renderer is created further down).
+// Unrolled correctly: three's unroll regex ends the body at `}\s+#pragma unroll_loop_end`, which the
+// inserted brace never matches (checked in node against r165's own unrollLoops: 14 point + 1 spot
+// calls wrapped, the 3 directional ones untouched, and stripping the wrapper gives the original text
+// byte for byte). ⚠ A three upgrade that rewords the chunk makes the counts miss: the patch then
+// leaves the chunk alone and says so, rather than half-applying. ⚠ One-time cost: every lit program's
+// source changes, so the first launch after deploy misses Chrome's GPU shader cache once (the launch
+// warmup and prebake absorb it). A/B: `?nolightskip` (a reload - programs are compiled at boot).
+try {
+  const _LFB_CALL = 'RE_Direct( directLight, geometryPosition, geometryNormal, geometryViewDir, geometryClearcoatNormal, material, reflectedLight );';
+  const _lfb = THREE.ShaderChunk.lights_fragment_begin;
+  const _off = (typeof location !== 'undefined') && /[?&]nolightskip\b/.test(location.search || '');
+  const _dirAt = (typeof _lfb === 'string') ? _lfb.indexOf('#if ( NUM_DIR_LIGHTS > 0 )') : -1;
+  const _head = (_dirAt > 0) ? _lfb.slice(0, _dirAt) : '';
+  const _nHead = _head.split(_LFB_CALL).length - 1;
+  const _nAll = (typeof _lfb === 'string') ? _lfb.split(_LFB_CALL).length - 1 : 0;
+  if (!_off && _dirAt > 0 && _nHead === 2 && _nAll === 3) {
+    THREE.ShaderChunk.lights_fragment_begin =
+      _head.split(_LFB_CALL).join('if ( directLight.visible ) { ' + _LFB_CALL + ' }') + _lfb.slice(_dirAt);
+    window.__lightSkip = true;
+  } else {
+    window.__lightSkip = false;
+    if (!_off) console.warn('[lss] light-skip: lights_fragment_begin is not the r165 text (point+spot calls ' + _nHead + ', total ' + _nAll + ') - left untouched');
+  }
+} catch (_) {}
+scene.fog = new THREE.FogExp2(0x0a0520, 0.000015);
 
 const camera = new THREE.PerspectiveCamera((input && input.fovDeg) || 90, window.innerWidth / window.innerHeight, 1, 25000);
 if (typeof navigator !== 'undefined' && navigator.gpu && navigator.gpu.requestAdapter) {
@@ -26739,6 +26804,27 @@ function _vrUpdateAllHealthBars() {
 function _vrEnsureShipNameLabel(bot) {
   if (!bot || !bot.mesh) return null;
   if (bot._vrNameSprite) return bot._vrNameSprite;
+  // ⭐ (v48.33) A RECYCLED HULL ALREADY WEARS ONE. The label is a child of bot.mesh, and the bot ship
+  // pool (v38.97) parks that group WHOLE - so the next Bot dealt the hull found no `_vrNameSprite` on
+  // ITSELF and built a second sprite + line + 512x128 CanvasTexture beside the first: one more per bot
+  // per round, ~38 MB of VRAM and ~38 MB of canvas an hour on a Quest. The old one was never updated
+  // again, so a label that was showing at round end stayed drawn - through walls (depthTest false) -
+  // over whichever ship later flew that hull. Adopt it instead: same objects, text forced to redraw
+  // (lastText cleared) for the new pilot. Bot.destroy hides it before the hull is parked.
+  try {
+    const ch = bot.mesh.children;
+    for (let i = 0; i < ch.length; i++) {
+      const s = ch[i];
+      if (s && s.isSprite && s.userData && s.userData.vrNameLabel) {
+        s.userData.lastText = ''; s.userData.lastEnemy = null;
+        s.visible = false;
+        if (s.userData.line) s.userData.line.visible = false;
+        bot._vrNameSprite = s;
+        bot._vrNameLine = s.userData.line || null;
+        return s;
+      }
+    }
+  } catch (_) {}
   const canvas = document.createElement('canvas');
   canvas.width = 512; canvas.height = 128;
   const tex = new THREE.CanvasTexture(canvas);
@@ -26784,7 +26870,8 @@ function _vrEnsureShipNameLabel(bot) {
   line.visible = false;
   bot.mesh.add(line);
   bot.mesh.add(sprite);
-  sprite.userData = { canvas: canvas, tex: tex, lastText: '', lastEnemy: null, line: line, lineMat: lineMat };
+  sprite.userData = { canvas: canvas, tex: tex, lastText: '', lastEnemy: null, line: line, lineMat: lineMat,
+                      vrNameLabel: true };   // (v48.33) the adoption tag - see the top of this function
   bot._vrNameSprite = sprite;
   bot._vrNameLine = line;
   return sprite;
@@ -33349,6 +33436,10 @@ function _rplStudioLoop(timestamp) {
   const dt = game.deltaTime || 0.016, k = _rplTimeK();
   if (game.sandwichTerrain && game.sandwichTerrain.ON) {
     try { _swU.uTime.value += dt; _swU.uCam.value.set(camera.position.x, camera.position.y, camera.position.z); } catch (_) {}
+    // (v48.33) the studio's ghost camera roams far from where the paused match last gated its
+    // foliage - gate around the camera the shader is fading against (see the cinematic fork).
+    try { _swTreeVisTick(camera.position.x, camera.position.z); } catch (_) {}
+    try { _swFolVisExtra(camera.position.x, camera.position.z); } catch (_) {}
     try { _swUpdateHubWater(); } catch (_) {}
     try { _swRippleTick(dt); } catch (_) {}
     try { _swUpdateUnderwater(); } catch (_) {}
@@ -36325,6 +36416,84 @@ function _swTreeVisTick(cx, cz) {
     }
   }
   try { window.__treeVis = { hidden: _hid, shown: _shown, fadeB: Math.round(B) }; } catch (_) {}
+}
+
+// ⭐ (v48.33) THE SAME GATE FOR THE FOLIAGE v47.05 COULD NOT SEE. `_swTreeVisTick` walks
+// `game.sandwichChunks` only, but two more owners plant instances on the SAME two foliage materials
+// (`_swTreeMatGet` / `_swShroomMatGet`, i.e. the same tfade collapse): the SKY ISLANDS (built out to
+// SKY_I.range = 30000, never hidden) and the CITY PARKS (hub + overworld cities, never hidden, and
+// they CAST - so the shadow pass, whose stock MeshDepthMaterial has no tfade, drew every far park at
+// FULL size: shadows of trees that the colour pass draws as nothing). Computed at B = 8208: sky islands
+// ~0.7-0.9 M zero-pixel tris + 17-20 draws in the main pass, hub parks ~0.6 M averaged over yaw.
+//   - EXACT, not a heuristic: each mesh carries the xz bounding circle of its OWN instance origins
+//     (`userData._fol`, from `_swFolBound` at build). The shader's test is
+//     distance(ip.xz, uCam.xz) with ip = the instance translation, and smoothstep(A, B, d) is exactly
+//     1 for d >= B, so when even the NEAREST possible origin is past B every triangle of the mesh is
+//     already degenerate. +2 u covers float32 vs double at ~8 km.
+//   - The camera is the same `_fX/_fZ` uCam was just set from (see the call site).
+//   - WALKS THE OWNERS, no registry: `_skLive` (an island that drops leaves it), `game.hubCity`, and
+//     `OW.cities[].built` - a disposed city or island simply stops being visited.
+//   - Same guards as `_swTreeVisTick` (curtain, prebake, warm draws, bend), and the SAME symmetric
+//     off-switch: window.__treeVisCull = 0 shows everything again (the v47.06 lesson).
+function _swFolBound(pts, stride) {
+  let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+  for (let i = 0; i + 2 < pts.length; i += stride) {
+    const x = pts[i], z = pts[i + 2];
+    if (x < x0) x0 = x; if (x > x1) x1 = x; if (z < z0) z0 = z; if (z > z1) z1 = z;
+  }
+  if (!(x1 >= x0) || !(z1 >= z0)) return null;
+  const cx = (x0 + x1) * 0.5, cz = (z0 + z1) * 0.5;
+  let r2 = 0;
+  for (let i = 0; i + 2 < pts.length; i += stride) {
+    const dx = pts[i] - cx, dz = pts[i + 2] - cz, d2 = dx * dx + dz * dz;
+    if (d2 > r2) r2 = d2;
+  }
+  return { x: cx, z: cz, r: Math.sqrt(r2) };
+}
+function _swFolVisList(arr, cx, cz, B, off) {
+  if (!arr) return;
+  const S = _swFolVisExtra;
+  for (let i = 0; i < arr.length; i++) {
+    const im = arr[i];
+    if (!im || !im.isInstancedMesh) continue;
+    const f = im.userData && im.userData._fol;
+    let vis = true;
+    if (!off && f) {
+      const dx = cx - f.x, dz = cz - f.z;
+      vis = (Math.sqrt(dx * dx + dz * dz) - f.r) < (B + 2);
+    }
+    if (im.visible !== vis) im.visible = vis;
+    if (vis) S.shown++; else S.hid++;
+  }
+}
+function _swFolVisExtra(cx, cz) {
+  const S = _swFolVisExtra;
+  const off = (typeof window !== 'undefined' && window.__treeVisCull === 0);
+  let B = 0;
+  if (!off) {
+    if (game.bendWorld) return;
+    if (game._worldPrebaking || game._swPreloading || game._swapStaging || game._rrStaging) return;
+    try { if (window.__lssWarmDraw) return; } catch (_) {}
+    if (typeof _PREBAKE !== 'undefined' && _PREBAKE && _PREBAKE.on) return;
+    if (!_swU || !_swU.uTreeFadeB) return;
+    B = _swU.uTreeFadeB.value;
+    if (!(B > 0)) return;
+  }
+  S.hid = 0; S.shown = 0;
+  try { for (const rec of _skLive.values()) if (rec && rec.grp && rec.grp.userData) _swFolVisList(rec.grp.userData._fol, cx, cz, B, off); } catch (_) {}
+  try {
+    const hc = game.hubCity;
+    if (hc && hc.group && hc.group.userData) _swFolVisList(hc.group.userData._parkIMs, cx, cz, B, off);
+  } catch (_) {}
+  try {
+    if (typeof OW !== 'undefined' && OW && OW.cities) {
+      for (let i = 0; i < OW.cities.length; i++) {
+        const b = OW.cities[i].built;
+        if (b && b.group && b.group.userData) _swFolVisList(b.group.userData._parkIMs, cx, cz, B, off);
+      }
+    }
+  } catch (_) {}
+  try { window.__folVis = { hidden: S.hid, shown: S.shown, fadeB: Math.round(B) }; } catch (_) {}
 }
 
 // ═══ (v46.56) RIDGE DRAPES - ICICLES AND VINES OVER A CLIFF LIP ══════════════════════════════════
@@ -41778,6 +41947,34 @@ function _swEntityWaterTick(dt, WL) {
   _SW_ENT.cursor = (_SW_ENT.cursor + 1) % n;
 }
 
+// ⭐⭐ (v48.33) THE "ASYNC" READBACK'S SYNCHRONOUS PROLOGUE. three r165's readRenderTargetPixelsAsync
+// is only async after its first `await`. Before that it runs capabilities.textureTypeReadable(type),
+// which for a FloatType target evaluates
+//     textureType !== UnsignedByteType && convert(textureType) !== gl.getParameter(IMPLEMENTATION_COLOR_READ_TYPE)
+//       && textureType !== FloatType && ...
+// left to right - so the getParameter runs BEFORE the `!== FloatType` short-circuit that makes its
+// answer irrelevant. IMPLEMENTATION_COLOR_READ_TYPE depends on the bound framebuffer, so Chrome cannot
+// answer it from its client-side cache: it is a round trip that waits for the GPU process to drain its
+// queue, on the main thread, on every crest scan. Recorded crCost 0.8-1.2 ms on a healthy queue - the
+// v39.49b cadence then backed the scan off (crSkip 4 -> up to 32, i.e. the crest spray firing up to
+// eight times less often than designed, the exact side effect v41.46 says it did not want), and on the
+// deep-queue machine (v40.19) the same wait reads 13-15 ms. For FloatType and UnsignedByteType r165
+// returns `true` whatever the query says, so answering those two directly is EXACT - same readback,
+// same pixels, no round trip. Every other type still goes through three's own test. Installed lazily
+// on the live capabilities object (a context restore rebuilds it); window.__water.crFastCaps = 0
+// routes everything back through three's test for an A/B.
+function _lssFastReadableCaps(rnd) {
+  const c = rnd && rnd.capabilities;
+  if (!c || c._lssFastRead || typeof c.textureTypeReadable !== 'function') return;
+  const orig = c.textureTypeReadable;
+  c.textureTypeReadable = function (t) {
+    if ((t === THREE.FloatType || t === THREE.UnsignedByteType) &&
+        !(typeof window !== 'undefined' && window.__water && window.__water.crFastCaps === 0)) return true;
+    return orig.call(c, t);
+  };
+  c._lssFastRead = true;
+}
+
 // Per-frame driver — runs in the master tick BEFORE renderer.render.
 function _swRippleTick(dt) {
   const R = _swRipple; if (!R.gpu) return;
@@ -42719,6 +42916,7 @@ function _swRippleTick(dt) {
             R._crPending = true;
             const _prevRT = renderer.getRenderTarget();
             let _pr = null;
+            try { _lssFastReadableCaps(renderer); } catch (_) {}   // (v48.33) no queue-draining getParameter in the prologue
             const _rt0 = performance.now();
             try { _pr = renderer.readRenderTargetPixelsAsync(R.gpu.getAlternateRenderTarget(R.heightVar), CO, CO, CRS, CRS, buf); }
             catch (e) { R._crPending = false; R._crAsyncErr = 1; try { console.warn('[crestBreak] async readback unavailable, using the synchronous path:', e && e.message); } catch (_) {} }
@@ -46030,8 +46228,27 @@ function _swBuildHubWater(T) {
       const _rxWas = this.rotation.x;
       if (_underNow) { this.rotation.x = _rxWas + Math.PI; this.updateMatrix(); this.updateMatrixWorld(true); }
       this._reflFlipped = _underNow;
+      // ⭐ (v48.33) THE MIRROR DOES NOT RE-WALK THE SCENE'S MATRICES. three r165 `render()` opens with
+      // `if (scene.matrixWorldAutoUpdate === true) scene.updateMatrixWorld()`, and the stock Reflector
+      // pins `xr.enabled` and `shadowMap.autoUpdate` for its nested render(scene, virtualCamera) but
+      // not this - so every mirror refresh recomposed and re-multiplied EVERY node in the scene a
+      // second time, from inside the main pass, which had already done exactly that this frame.
+      // Nothing moves in between: the only onBeforeRender hooks in the file are the sky dome (updates
+      // its own matrices), the displacement sheet (no transforms) and this wrapper, whose sole
+      // transform write - the underwater flip just above - calls updateMatrixWorld(true) itself;
+      // _reflFxBoost / _shipReflOverride / _reflLift touch materials and visibility only, and
+      // visibility never gated the walk anyway. Same pin the ADS overlay pass has used since v39.49.
+      // The virtual camera is unaffected: it is parentless, render() updates it on its own line, and
+      // the Reflector calls virtualCamera.updateMatrixWorld() itself. Measured by node bench of r165
+      // updateMatrixWorld at 92-160 ns a node; ~1 refresh in 2.9 frames in the hub.
+      // ⚠ The restore is the FIRST statement of the finally: a throw with the pin still set would
+      // freeze every matrix in the scene. ⚠ A future onBeforeRender that MOVES an object must update
+      // its own matrix (the _skyDome pattern). A/B: window.__water.mirrorWalk = 1 restores the walk.
+      const _mwPin = !!(scn && scn.matrixWorldAutoUpdate === true && !(window.__water && window.__water.mirrorWalk === 1));
+      if (_mwPin) scn.matrixWorldAutoUpdate = false;
       try { _reflOBR.call(this, rnd, scn, cam, geo2, mat2, grp); }
       finally {
+        if (_mwPin) scn.matrixWorldAutoUpdate = true;   // (v48.33) FIRST - see above
         if (window.__f8seg) window.__f8seg('scene');   // (v40.59) back to the pass that contains us
         if (_wDv) _wD.visible = true;
         if (_wOv) _wO.visible = true;
@@ -48721,6 +48938,13 @@ function _hcMakeMeshes(city, site) {
       im.userData.isHubCity = true;
       im.userData.hcShared = true;
       group.add(im);
+      // (v48.33) the far-foliage gate's handle - see _swFolVisExtra. pts is exactly what
+      // D.position placed (stride 4); the city group sits at the origin, so these are world xz,
+      // the same frame the foliage shader's `ip` is in.
+      try {
+        im.userData._fol = _swFolBound(pts, 4);
+        (group.userData._parkIMs || (group.userData._parkIMs = [])).push(im);
+      } catch (_) {}
     }
   } catch (_) {}
 
@@ -52969,12 +53193,34 @@ try { window.__sky = SKY_I; } catch (_) {}
 
 // ---- 3D value noise (the hub only had a 2D one) ------------------------------
 function _skH3(x, y, z) { const h = Math.sin(x * 127.1 + y * 311.7 + z * 74.7) * 43758.5453; return h - Math.floor(h); }
+// ⭐ (v48.33) _skH3 ON THE INTEGER LATTICE, MEMOISED - the _stHash2i idea (v47.02) for the islands.
+// Each field sample is 5 octaves x 8 lattice corners of this Math.sin hash, and neighbouring samples
+// share their corners, so an island build (27^3 grid + 6 samples a vertex for normals + every _skTop
+// walk) recomputes the same few thousand sines over and over. A direct-mapped cache of the INTEGER
+// corners returns the value _skH3 computed the first time - bit-exact by construction (same function,
+// same arguments; a miss computes the identical expression). Guards: only integer corners reach it
+// (it is called from _skN3 alone, on Math.floor results); anything outside +-2^30 or NaN goes straight
+// to _skH3 - an Int32Array would store NaN as 0 and poison lattice (0,0,0) for the session - and a NaN
+// VALUE is never stored. State hangs off the function object (no top-level const, no TDZ).
+function _skH3m(xi, yi, zi) {
+  if (!(xi > -1073741824 && xi < 1073741824 && yi > -1073741824 && yi < 1073741824 &&
+        zi > -1073741824 && zi < 1073741824)) return _skH3(xi, yi, zi);
+  const M = _skH3m;
+  let K = M.K, V = M.V;
+  if (!K) { K = M.K = new Int32Array(3 * 32768).fill(0x7fffffff); V = M.V = new Float64Array(32768); }
+  const s = (Math.imul(xi, 73856093) ^ Math.imul(yi, 19349663) ^ Math.imul(zi, 83492791)) & 32767;
+  const o = s * 3;
+  if (K[o] === xi && K[o + 1] === yi && K[o + 2] === zi) return V[s];
+  const h = _skH3(xi, yi, zi);
+  if (h === h) { K[o] = xi; K[o + 1] = yi; K[o + 2] = zi; V[s] = h; }
+  return h;
+}
 function _skN3(x, y, z) {
   const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
   const xf = x - xi, yf = y - yi, zf = z - zi;
   const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf), w = zf * zf * (3 - 2 * zf);
-  const a = _skH3(xi, yi, zi), b = _skH3(xi + 1, yi, zi), c = _skH3(xi, yi + 1, zi), d = _skH3(xi + 1, yi + 1, zi);
-  const e = _skH3(xi, yi, zi + 1), f = _skH3(xi + 1, yi, zi + 1), g = _skH3(xi, yi + 1, zi + 1), h = _skH3(xi + 1, yi + 1, zi + 1);
+  const a = _skH3m(xi, yi, zi), b = _skH3m(xi + 1, yi, zi), c = _skH3m(xi, yi + 1, zi), d = _skH3m(xi + 1, yi + 1, zi);
+  const e = _skH3m(xi, yi, zi + 1), f = _skH3m(xi + 1, yi, zi + 1), g = _skH3m(xi, yi + 1, zi + 1), h = _skH3m(xi + 1, yi + 1, zi + 1);
   const x0 = a + (b - a) * u, x1 = c + (d - c) * u, x2 = e + (f - e) * u, x3 = g + (h - g) * u;
   const y0 = x0 + (x1 - x0) * v, y1 = x2 + (x3 - x2) * v;
   return y0 + (y1 - y0) * w;
@@ -53137,15 +53383,35 @@ function _skTop(I, x, z, nb) {
 // ---- naive surface nets ------------------------------------------------------
 const _SN_E = [[0,1],[1,3],[2,3],[0,2],[4,5],[5,7],[6,7],[4,6],[0,4],[1,5],[2,6],[3,7]];
 const _SN_C = [[0,0,0],[1,0,0],[0,1,0],[1,1,0],[0,0,1],[1,0,1],[0,1,1],[1,1,1]];
+// (v48.33) THE ISLAND BUILDER'S SLICE CLOCK. `_skBuildG` / `_skNetG` ask this at safe points (between
+// slabs, between towers, between foliage candidates) and yield when the frame's share is spent. With
+// no budget set - the synchronous `_skBuild` - it is never due, so a synchronous build runs exactly as
+// it always did. Nothing a build computes depends on WHEN it runs: the field is pure and `rnd()` is
+// drawn in the same order whether the build takes one frame or ten.
+function _skDue() {
+  const D = _skDue;
+  return (typeof D.budget === 'number') && D.budget !== Infinity && (performance.now() - D.t0) >= D.budget;
+}
 function _skNet(f, ox, oy, oz, size, N) {
+  const it = _skNetG(f, ox, oy, oz, size, N);
+  let r = it.next();
+  while (!r.done) r = it.next();
+  return r.value;
+}
+function* _skNetG(f, ox, oy, oz, size, N) {
   const S = N + 1, step = size / N;
   const g = new Float32Array(S * S * S);
-  for (let k = 0; k < S; k++) for (let j = 0; j < S; j++) for (let i = 0; i < S; i++)
-    g[(k * S + j) * S + i] = f(ox + i * step, oy + j * step, oz + k * step);
+  for (let k = 0; k < S; k++) {
+    for (let j = 0; j < S; j++) for (let i = 0; i < S; i++)
+      g[(k * S + j) * S + i] = f(ox + i * step, oy + j * step, oz + k * step);
+    if (_skDue()) yield;
+  }
   const at = (i, j, k) => g[(k * S + j) * S + i];
   const idx = new Int32Array(N * N * N).fill(-1);
   const pos = [], nrm = [], col = [], tri = [], c = new Array(8);
-  for (let k = 0; k < N; k++) for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+  for (let k = 0; k < N; k++) {
+  if (k > 0 && _skDue()) yield;   // (v48.33) between slabs: the normal samples make this loop as heavy as the grid
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
     let neg = 0;
     for (let n = 0; n < 8; n++) { const o = _SN_C[n]; c[n] = at(i + o[0], j + o[1], k + o[2]); if (c[n] < 0) neg++; }
     if (neg === 0 || neg === 8) continue;
@@ -53176,6 +53442,7 @@ function _skNet(f, ox, oy, oz, size, N) {
     r += (0.20 - r) * up; gg += (0.40 - gg) * up; bb += (0.15 - bb) * up;
     col.push(r, gg, bb);
   }
+  }   // (v48.33) end of the k slab
   for (let k = 1; k < N; k++) for (let j = 1; j < N; j++) for (let i = 1; i < N; i++) {
     const v0 = at(i, j, k) < 0;
     if (v0 !== (at(i + 1, j, k) < 0)) {
@@ -53342,9 +53609,28 @@ const _SK_RING = new THREE.TorusGeometry(1, 0.085, 8, 26).rotateX(Math.PI / 2);
 const _SK_GLOW = new THREE.SphereGeometry(1, 6, 5);
 
 // ---- build one island --------------------------------------------------------
+// (v48.33) The synchronous build - what every island was before. Drains _skBuildG in one call (with no
+// slice budget set, _skDue is never due, so it never yields) and times it, exactly as before.
 function _skBuild(I) {
   if (I.grp) return I.grp;
   const t0 = performance.now();
+  _skDue.budget = undefined;
+  const it = _skBuildG(I);
+  let r = it.next();
+  while (!r.done) r = it.next();
+  SKY_I._ms = SKY_I._ms * 0.8 + (performance.now() - t0) * 0.2;
+  return r.value;
+}
+// ⭐⭐ (v48.33) ...AND THE SLICEABLE ONE. The same build, as a generator that yields between slabs of
+// the field grid, between surface-net slabs, between towers and between foliage candidates when the
+// frame's share (_skDue) is spent. Measured before this: 8-12 ms median, 17-18 p90, 20-24 max per
+// island, ONE per frame, ~16.5 a minute while circling at the range edge - all billed to `hub:clip`,
+// which is why v47.08's hitch hunt could not see it. `_skFrame` now runs it in slices for islands out
+// past the sky dome (where no one can see it arrive) and synchronously only for one that appears
+// INSIDE it (a teleport, a respawn). I.grp stays null until the very end, so nothing - collision,
+// pads, the foliage gate - ever sees half an island.
+function* _skBuildG(I) {
+  if (I.grp) return I.grp;
   _skMats();
   const nb = _skNb(I);
   const pad = I.R * 1.55;
@@ -53362,7 +53648,7 @@ function _skBuild(I) {
     const ex = Math.min(x - ox, ox + size - x, y - oy, oy + size - y, z - oz, oz + size - z);
     return ex >= wallW ? d : d - (1 - Math.max(ex, 0) / wallW) * 8;
   };
-  const sn = _skNet(f, ox, oy, oz, size, SKY_I.res);
+  const sn = yield* _skNetG(f, ox, oy, oz, size, SKY_I.res);
   const grp = new THREE.Group();
   grp.name = 'skyIsland:' + I.id;
   if (!sn.tri.length) { I.grp = grp; return grp; }
@@ -53426,6 +53712,7 @@ function _skBuild(I) {
     const boxes = [], glows = [];
     const nT = 2 + Math.floor(rnd() * (I.R > 800 ? 7 : 4));
     for (let k = 0; k < nT; k++) {
+      if (_skDue()) yield;   // (v48.33) each tower is up to 5 _skTop walks - a natural seam
       const a = rnd() * 6.283, rr = Math.sqrt(rnd()) * I.R * 0.52;
       const bx = I.x + Math.cos(a) * rr, bz = I.z + Math.sin(a) * rr;
       // ⚠ THE PAD IS ALWAYS AT THE ISLAND CENTRE, and the towers are placed BEFORE it
@@ -53531,6 +53818,7 @@ function _skBuild(I) {
       const want = Math.round((fungal ? 30 : 20) * (0.55 + rnd() * 0.9) * (I.R / 620));
       const e2 = 20;
       for (let k = 0, tries = 0; k < want && tries < want * 8; tries++) {
+        if ((tries & 7) === 7 && _skDue()) yield;   // (v48.33) every 8 candidates (1-5 _skTop walks each)
         const a = rnd() * 6.283, rr = Math.sqrt(rnd()) * I.R * 0.66;
         const fx = I.x + Math.cos(a) * rr, fz = I.z + Math.sin(a) * rr;
         const ty = _skTop(I, fx, fz, nb);
@@ -53585,11 +53873,18 @@ function _skBuild(I) {
         // shadow map is fitted around the player on the ground, kilometres below.
         im.castShadow = false; im.receiveShadow = false;
         grp.add(im);
+        // (v48.33) the far-foliage gate's handle: this mesh's own instance-origin circle (pts is
+        // exactly what setMatrixAt placed, stride 3), listed on the island group so the gate walks
+        // `_skLive` - a dropped island stops being visited with its group. See _swFolVisExtra.
+        try {
+          im.userData._fol = _swFolBound(pts, 3);
+          (grp.userData._fol || (grp.userData._fol = [])).push(im);
+        } catch (_) {}
       }
     }
   }
 
-  SKY_I._ms = SKY_I._ms * 0.8 + (performance.now() - t0) * 0.2;
+  // (v48.33) SKY_I._ms is now kept by the callers: a sliced build's wall time spans frames.
   I.grp = grp;
   return grp;
 }
@@ -53602,35 +53897,131 @@ const _skLive = new Map();
 // somebody else. v46.12 hangs the overworld's ez-tree geometries on these groups:
 // under the old rule, ONE island unloading would dispose the shared tree pool and
 // every tree in the world would vanish. Only `skOwned` geometry is per-island.
+// ⭐⭐ (v48.33) ISLANDS ARE KEPT, NOT REBUILT. An island that left range used to be disposed on the
+// spot, and one that came back was rebuilt from scratch - 8-24 ms, one per frame - and with no drop
+// hysteresis at the 30 km edge, circling or dogfighting there rebuilt the same islands ~16.5 times a
+// minute. Placement is a pure f(cell) (`_skCache` is never cleared), so a built island is simply
+// still valid: it now leaves the SCENE and waits in `_skKeep` (LRU, oldest first) and coming back is
+// a scene.add. Capped - ~0.3 MB of rock + instance buffers an island - at SKY_I.keep (48, 12 on a
+// small device); only an evicted island is freed. `_skFreeRec` also disposes the InstancedMeshes'
+// own instance buffers (vines, towers, beacons, foliage), which the old drop path never did - their
+// GPU buffers outlived every dropped island. Shared geometry/materials are untouched, as ever.
+const _skKeep = new Map();
+let _skJob = null;   // (v48.33) the one island being built in slices: { I, it, ms }
+function _skFreeRec(rec) {
+  if (!rec) return;
+  try {
+    if (rec.grp) rec.grp.traverse(o => {
+      if (o.geometry && o.userData && o.userData.skOwned) o.geometry.dispose();
+      else if (o.isInstancedMesh && typeof o.dispose === 'function') o.dispose();   // instance buffers only
+    });
+  } catch (_) {}
+  if (rec.isl && rec.isl.grp === rec.grp) { rec.isl.grp = null; rec.isl.nb = null; }
+}
+function _skKeepCap() {
+  if (SKY_I.keep != null) return Math.max(0, +SKY_I.keep || 0);
+  return (typeof _fxSmallDevice === 'function' && _fxSmallDevice()) ? 12 : 48;
+}
+function _skCurtainUp() {
+  const S = _skCurtainUp;
+  if (!S.el) { try { S.el = document.getElementById('lss-loading-overlay'); } catch (_) {} }
+  return !!(S.el && S.el.classList && S.el.classList.contains('active'));
+}
 function _skDispose() {
   for (const [k, rec] of _skLive) {
-    try { scene.remove(rec.grp); rec.grp.traverse(o => { if (o.geometry && o.userData && o.userData.skOwned) o.geometry.dispose(); }); } catch (_) {}
-    if (rec.isl) { rec.isl.grp = null; rec.isl.nb = null; }
+    try { scene.remove(rec.grp); } catch (_) {}
+    _skFreeRec(rec);
   }
   _skLive.clear();
+  for (const rec of _skKeep.values()) _skFreeRec(rec);
+  _skKeep.clear();
+  _skJob = null;
 }
 function _skFrame(px, py, pz) {
   const T = game.sandwichTerrain;
-  if (!T || !T.HUB || !SKY_I.on) { if (_skLive.size) _skDispose(); return; }
+  if (!T || !T.HUB || !SKY_I.on) { if (_skLive.size || _skKeep.size || _skJob) _skDispose(); return; }
   const near = _skNear(px, pz, SKY_I.range);
   const want = new Set();
   for (const I of near) want.add(I.id);
   for (const [k, rec] of [..._skLive]) {
     if (want.has(k)) continue;
-    scene.remove(rec.grp);
-    rec.grp.traverse(o => { if (o.geometry && o.userData && o.userData.skOwned) o.geometry.dispose(); });
-    if (rec.isl) { rec.isl.grp = null; rec.isl.nb = null; }
+    try { scene.remove(rec.grp); } catch (_) {}
     _skLive.delete(k);
+    _skKeep.delete(k); _skKeep.set(k, rec);          // newest last
   }
+  const cap = _skKeepCap();
+  while (_skKeep.size > cap) {
+    const k = _skKeep.keys().next().value, rec = _skKeep.get(k);
+    _skKeep.delete(k); _skFreeRec(rec);
+  }
+  // A build whose island left range mid-way just stops: nothing of it was published (I.grp is set on
+  // its last line only) and nothing was uploaded, so there is nothing to free.
+  if (_skJob && !want.has(_skJob.I.id)) _skJob = null;
   near.sort((a, b) => (Math.hypot(a.x - px, a.y - py, a.z - pz)) - (Math.hypot(b.x - px, b.y - py, b.z - pz)));
+  // ⚠ SYNCHRONOUS ONLY WHERE IT COULD BE SEEN ARRIVING. The weather dome is an opaque camera-centred
+  // shell (radius ~20,500) that paints over everything outside it (v47.07), and islands enter range at
+  // 30,000 - so in normal flight an island is built long before it can be seen, and a sliced build that
+  // takes a few frames is invisible. An island whose nearest edge is already inside the dome's reach
+  // (a teleport, a respawn, the first frames of a launch) is built at once, one a frame, exactly as
+  // before - a hitch is better than a pop-in in front of you. SKY_I.syncR moves the line.
+  const syncR = (SKY_I.syncR != null) ? +SKY_I.syncR : 21000;
+  const curtain = _skCurtainUp();
+  const pend = [];
   let n = 0;
   for (const I of near) {
     if (_skLive.has(I.id)) continue;
-    if (n >= SKY_I.budget) break;
-    const grp = _skBuild(I);
-    scene.add(grp);
-    _skLive.set(I.id, { grp, isl: I });
-    n++;
+    const kept = _skKeep.get(I.id);
+    if (kept) {
+      _skKeep.delete(I.id);
+      if (kept.isl === I && kept.grp && I.grp === kept.grp) { scene.add(kept.grp); _skLive.set(I.id, kept); continue; }
+      _skFreeRec(kept);   // (cannot happen while _skCache is never cleared - but never publish a stale group)
+    }
+    const inside = (Math.hypot(I.x - px, I.y - py, I.z - pz) - I.R * 2.2) < syncR;
+    if (inside && !curtain) {
+      if (n >= SKY_I.budget) continue;
+      n++;
+      let grp = null;
+      if (_skJob && _skJob.I === I) {
+        // it was already being sliced: finish THAT build now rather than start a second one
+        const t0 = performance.now(), J = _skJob;
+        _skJob = null; _skDue.budget = undefined;
+        let r = J.it.next();
+        while (!r.done) r = J.it.next();
+        SKY_I._ms = SKY_I._ms * 0.8 + (J.ms + performance.now() - t0) * 0.2;
+        grp = r.value;
+      } else grp = _skBuild(I);
+      if (grp) { scene.add(grp); _skLive.set(I.id, { grp, isl: I }); }
+      continue;
+    }
+    pend.push(I);
+  }
+  // THE SLICED BUILDER. 1.5 ms a frame in play (SKY_I.sliceMs); behind the loading curtain nobody is
+  // watching the frame, so it takes SKY_I.curtainMs (24) and simply bakes every island in range before
+  // the lift - "baked in with the rest" of the hub load.
+  const sliceMs = curtain ? ((SKY_I.curtainMs != null) ? +SKY_I.curtainMs : 24)
+                          : ((SKY_I.sliceMs != null) ? +SKY_I.sliceMs : 1.5);
+  if (!(sliceMs > 0)) return;
+  const tEnd = performance.now() + sliceMs;
+  let pi = 0, guard = 0;
+  while (performance.now() < tEnd && guard++ < 64) {
+    if (!_skJob) {
+      while (pi < pend.length && (_skLive.has(pend[pi].id) || pend[pi].grp)) pi++;
+      if (pi >= pend.length) break;
+      const I = pend[pi++];
+      _skJob = { I, it: _skBuildG(I), ms: 0 };
+    }
+    const J = _skJob;
+    _skDue.t0 = performance.now();
+    _skDue.budget = Math.max(0.25, tEnd - _skDue.t0);
+    let r = null;
+    try { r = J.it.next(); } catch (e) { r = null; }
+    J.ms += performance.now() - _skDue.t0;
+    _skDue.budget = undefined;
+    if (!r) { if (_skJob === J) _skJob = null; continue; }   // a throwing build is dropped; the sync path threw too
+    if (!r.done) break;                                        // yielded: this frame's share is spent
+    if (_skJob === J) _skJob = null;
+    SKY_I._ms = SKY_I._ms * 0.8 + J.ms * 0.2;
+    if (r.value) { scene.add(r.value); _skLive.set(J.I.id, { grp: r.value, isl: J.I }); }
   }
 }
 
@@ -54027,6 +54418,7 @@ function _skCollide(pos, velocity, radius) {
   }
 }
 try { window.__skyDbg = () => ({ live: _skLive.size, ms: +SKY_I._ms.toFixed(1),
+  keep: _skKeep.size, job: _skJob ? _skJob.I.id : null,   // (v48.33) retained-out-of-range + the island being sliced
   near: _skNear(player.position.x, player.position.z, SKY_I.range).length,
   list: [..._skLive.values()].map(r => ({ id: r.isl.id, x: Math.round(r.isl.x), y: Math.round(r.isl.y), z: Math.round(r.isl.z), R: Math.round(r.isl.R),
     d: Math.round(Math.hypot(r.isl.x - player.position.x, r.isl.y - player.position.y, r.isl.z - player.position.z)) })).sort((a,b)=>a.d-b.d) }); } catch (_) {}
@@ -68865,6 +69257,14 @@ const isChaingunBot = (weapon.fireRate <= 0.10);
     // rounds left the outlines burned in, and why keeping the perk equipped
     // stacked a second rim on the same hull every round.
     try { if (typeof _clearOutlineOpticsOn === 'function') _clearOutlineOpticsOn(this); } catch (_) {}
+    // (v48.33) ...and the VR name label goes DARK before the hull is parked, for the same reason: it is
+    // a child of this group, and a label left showing would ride the recycled hull into the next round,
+    // drawn over a stranger's ship through walls. The next Bot on this hull adopts it (see
+    // _vrEnsureShipNameLabel) rather than building another.
+    try {
+      if (this._vrNameSprite) this._vrNameSprite.visible = false;
+      if (this._vrNameLine) this._vrNameLine.visible = false;
+    } catch (_) {}
     // (leak fix 2026-06-12) Bots are torn down for good here (match end /
     // entity wipe); dispose the ship group's per-build resources too.
     // (v38.97) ...unless the next round can wear it: park it in the bot ship pool.
@@ -70742,6 +71142,11 @@ const dynamicLights = {
 // not in use. NUM_POINT_LIGHTS=MAX_LIGHTS always, no .visible toggling, no
 // runtime recompiles. Cost is ~8 noop light iterations per fragment (0 dot
 // products when intensity=0 gets unrolled) which is sub-millisecond.
+// ⚠ (v48.33) CORRECTION: on r165 a dark iteration was NOT a no-op - lights_fragment_begin called
+// RE_Direct (the full BRDF) for every point/spot light regardless, so 14 dark lights cost every lit
+// fragment ~14 BRDFs of +0.0. The pinning stays exactly as described; what changed is that a light
+// whose colour reaches the fragment as exactly zero now skips RE_Direct. See the v48.33 "A DARK LIGHT
+// COSTS NOTHING" patch beside the fog_vertex ShaderChunk (before the renderer is created).
 (function initDynamicLights() {
   for (let i = 0; i < dynamicLights.MAX_LIGHTS; i++) {
     const light = new THREE.PointLight(0xff8800, 0, 600);
@@ -108926,14 +109331,47 @@ function _hlfCellPath(ctx, cx, cy, rIn, rOut, a0, a1, bevel) {
 // on a dark field. They run at 45 degrees, so the gap you actually SEE is the
 // perpendicular one, `step`/sqrt2 wide: at step 0.95 that is 0.67vm, and 0.42
 // of it is stripe. Halve the width and the row reads as empty.
-function _hlfHatch(ctx, cx, cy, reach, col, alpha, vm) {
+//
+// ⭐ (v48.33) ONLY THE LINES THAT CAN REACH THE CELL ARE STROKED. The hatch is ~73 full-length
+// 45-degree lines across a 2*reach square, each its own beginPath/stroke, clipped to one plate - and a
+// plate spans 25-40 degrees of arc, so ~85% of those lines never touch it. Skia cannot quick-reject
+// them (each line's bounds are the whole square, which overlaps the clip), so every one was rasterised
+// against the clip in the GPU PROCESS - on the same thread that decodes the game's WebGL, and invisible
+// to __prof. Measured on an RTX 4070 in headless Chrome at 995x583 / 1884x975 / 2524x1335, hudScale
+// 1.75: 0.7-1.1 ms of GPU-process raster per HUD redraw at a full or changing hull. A line is
+// x - y = k with k = (cx + d) - (cy - reach); the clip lies inside `bb` (its annulus sector's box), on
+// which x - y spans [bb0 - bb3, bb2 - bb1]; the stroke reaches lineWidth/2 either side (x sqrt2 in k),
+// plus 2 px of AA/rounding slack. Outside that band the line cannot draw a pixel, so skipping it is
+// PIXEL-IDENTICAL (checked bit-exact against --disable-accelerated-2d-canvas). ⚠ The accumulating
+// `d += step` loop is kept verbatim - `-2R + i*step` would move the surviving lines' last float bits.
+// ⚠ `bb` is optional: without it every line is stroked, exactly as before (the HUD lab runs this).
+function _hlfSectorBox(cx, cy, rIn, rOut, a0, a1) {
+  const D = _HL_D2R, o = _hlfSectorBox.o || (_hlfSectorBox.o = [0, 0, 0, 0]);
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  const add = (r, a) => {
+    const x = cx + Math.cos(a * D) * r, y = cy + Math.sin(a * D) * r;
+    if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+  };
+  add(rIn, a0); add(rIn, a1); add(rOut, a0); add(rOut, a1);
+  for (let q = Math.ceil(a0 / 90) * 90; q <= a1; q += 90) { add(rOut, q); add(rIn, q); }
+  o[0] = x0; o[1] = y0; o[2] = x1; o[3] = y1;
+  return o;
+}
+function _hlfHatch(ctx, cx, cy, reach, col, alpha, vm, bb) {
   ctx.save();
   ctx.clip();
   ctx.globalAlpha = alpha;
   ctx.strokeStyle = col;
   ctx.lineWidth = Math.max(1.4, vm * 0.42);
   const step = vm * 0.95;
+  let kLo = -Infinity, kHi = Infinity;
+  if (bb && !(typeof window !== 'undefined' && window.__hudHatchAll)) {
+    const m = (ctx.lineWidth / 2 + 2) * Math.SQRT2;
+    kLo = bb[0] - bb[3] - m; kHi = bb[2] - bb[1] + m;
+  }
   for (let d = -reach * 2; d <= reach * 2; d += step) {
+    const k = (cx + d) - (cy - reach);
+    if (k < kLo || k > kHi) continue;
     ctx.beginPath();
     ctx.moveTo(cx + d, cy - reach);
     ctx.lineTo(cx + d + reach * 2, cy + reach);
@@ -109111,7 +109549,7 @@ function _hlfBarRow(I, rInV, rOutV, a0, a1, segs, gapDeg, frac, col, weights, op
         ctx.restore();
       } else {
         _hlfCellPath(ctx, cx, cy, rIn, rOut, st, le, bev);
-        _hlfHatch(ctx, cx, cy, reach, col, 0.9 * I.ga, vm);
+        _hlfHatch(ctx, cx, cy, reach, col, 0.9 * I.ga, vm, _hlfSectorBox(cx, cy, rIn, rOut, st, le));   // (v48.33) cull
       }
       ctx.globalAlpha = I.ga;
       _hlfCellPath(ctx, cx, cy, rIn, rOut, st, le, bev);
@@ -109400,10 +109838,38 @@ function _hlfChevronRow(I, rInV, rOutV, a0, a1, frac, col, glow) {
     ctx.clip();
     ctx.fillStyle = col;
     if (glow) { ctx.shadowColor = col; ctx.shadowBlur = vm * glow * 1.6; }
-    for (let i = 0; i < n; i++) { _hlfChevronPath(ctx, cx, cy, rIn, rOut, start + i * pitch, w, tk); ctx.fill(); }
+    // ⭐ (v48.33) THE GLOW IS ONE LAYER, NOT FIFTEEN. With the glow on (CORE ready / firing) every
+    // chevron was its own shadowed fill, and a canvas shadow is a blur pass per fill - measured on an
+    // RTX 4070: 2.45 ms of GPU-process work per HUD redraw while CORE is READY, 0.92 with the run
+    // filled as ONE path of subpaths (one blur of the union). ⚠ NOT pixel-identical: where two
+    // neighbours' halos overlap they used to stack (and each later halo lay over the chevron before
+    // it); one union blur counts that overlap once, so the glow between chevrons reads a touch softer.
+    // The charging state (no glow) keeps its per-chevron fills byte for byte. Owner to judge by eye:
+    // window.__hudCore = { glowUnion: 0 } puts the fifteen layers back, live.
+    const _K = (typeof window !== 'undefined') ? window.__hudCore : null;
+    if (glow && !(_K && _K.glowUnion === 0)) {
+      ctx.beginPath();
+      for (let i = 0; i < n; i++) _hlfChevronSub(ctx, cx, cy, rIn, rOut, start + i * pitch, w, tk);
+      ctx.fill();
+    } else {
+      for (let i = 0; i < n; i++) { _hlfChevronPath(ctx, cx, cy, rIn, rOut, start + i * pitch, w, tk); ctx.fill(); }
+    }
     ctx.shadowBlur = 0;
     ctx.restore();
   }
+}
+// (v48.33) _hlfChevronPath's outline WITHOUT the beginPath, so a whole run can be one path - the union
+// glow fill above. Same six points, same order, same winding.
+function _hlfChevronSub(ctx, cx, cy, rIn, rOut, s, wDeg, tkDeg) {
+  const rM = (rIn + rOut) / 2, D = _HL_D2R;
+  const X = (r, a) => cx + Math.cos(a * D) * r, Y = (r, a) => cy + Math.sin(a * D) * r;
+  ctx.moveTo(X(rOut, s), Y(rOut, s));
+  ctx.lineTo(X(rM, s + wDeg), Y(rM, s + wDeg));
+  ctx.lineTo(X(rIn, s), Y(rIn, s));
+  ctx.lineTo(X(rIn, s + tkDeg), Y(rIn, s + tkDeg));
+  ctx.lineTo(X(rM, s + wDeg + tkDeg), Y(rM, s + wDeg + tkDeg));
+  ctx.lineTo(X(rOut, s + tkDeg), Y(rOut, s + tkDeg));
+  ctx.closePath();
 }
 
 // Where the three role icons sit: the OUTER half of the NRG strip's own band,
@@ -130218,6 +130684,20 @@ function updateEnemyHealthBars() {
   // friendly/enemy branch stays in one place.
   const _processShipForLabel = (ent) => {
     if (!ent || !ent.alive || !ent.position || !ent.loadout) return;
+    // ⭐⭐ (v48.33) ONCE PER ENTITY PER FRAME. Every NetworkPlayer lives in BOTH `game.entities`
+    // (updateNetworkPlayer pushes it, and respawn re-adds it) AND `net.networkPlayers`, and the two
+    // loops at the bottom of this function walk both - so a peer was processed TWICE. On the second
+    // pass its own slot was already stamped for this frame, `_lblClaimSlot` handed it a SECOND div
+    // (stealing another ship's slot when the pool was full), and both were drawn: every human peer
+    // wore two stacked tags, and the pair traded divs every frame (constant layer churn). Measured in
+    // headless Chrome: +0.47 ms a frame with one visible peer, +0.77 with two, +1.17 with three.
+    // ⚠ Stamped here, BEFORE `_lblUpPrev` is written below: the second call must be a pure no-op,
+    // or it would overwrite the hold state the first call just set (the v40.61 hold). The
+    // networkPlayers loop stays - it still covers a peer that has dropped out of game.entities
+    // (returnToRootMenu clears only entities). ⚠ VISIBLE, and intended: a peer's tag now draws
+    // once, like a bot's, instead of as a brighter double.
+    if (ent._lblFrame === _lblFrameId) return;
+    ent._lblFrame = _lblFrameId;
     // (v43.00) ...and it must not be a hull that is not being drawn. The tracker-lock path has always
     // had this test (_lockShown: "(!o.mesh || o.mesh.visible)"); the callout never did, which is why a
     // hidden-but-alive entity kept its tag. Belt and braces with the _cloaked write above: either one
@@ -131776,7 +132256,31 @@ function __pmark(name) {
     load().length + ' saved marks. window.__f8log() / .summary() / .export() / .clear()'); } catch (_) {}
 })();
 
+// ⭐⭐ (v48.33) THE WATCHDOG'S CLOCK STOPS AT THE END OF A FRAME, NOT THE START.
+// The stall watchdog (setupBackgroundTick, v43.11-43.16) is a PRODUCTION multiplayer safeguard - a
+// window that stops being painted while still 'visible' would otherwise freeze everything its client
+// is authority for, for the whole room - so it stays exactly as designed. What was wrong was the stamp
+// it keys on: `_lssLastRafAt` was written at the START of each compositor frame. The Worker posts every
+// 33 ms and postMessage does not coalesce, so while one long-but-HEALTHY frame of D ms runs,
+// floor(D/33) messages queue; the first to run after it sees `now - _lssLastRafAt >= D > 120` and steps
+// a full extra gameLoop + renderFrame + keep-warm out of vsync, and - since a watchdog frame
+// deliberately never refreshes the stamp - so does every other queued message. Measured on a
+// headless replica: a 130 / 150 / 200 / 300 ms hitch grew by +33 / +41 / +51 / +76 ms on desktop
+// (4 / 5 / 6 / 9 extra frames), proportionally worse on a phone. So every compositor-driven frame now
+// ALSO stamps on its way out (the finally below). A real stall - rAF stopped - is still exactly
+// "no compositor frame has ENDED for 120 ms", which is what the watchdog was always meant to test;
+// the Worker's own frames still never stamp (`_lssFromWatchdog`), so it keeps driving at TICK_HZ.
+// One wrapper here covers every entry: setAnimationLoop, the three re-arm sites, XR, and the ?perf=1
+// profiler (which wraps whatever `gameLoop` is and still calls through to this).
 function gameLoop(timestamp) {
+  try { return _gameLoopBody(timestamp); }
+  finally {
+    if (!_lssFromWatchdog) {
+      try { _lssLastRafAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now(); } catch (_) {}
+    }
+  }
+}
+function _gameLoopBody(timestamp) {
   // (v43.11) THE HEARTBEAT THE WATCHDOG WATCHES. See setupBackgroundTick.
   // (v43.16) TWO stamps, and the difference is the whole mechanism. _lssLastLoopAt says the loop ran
   // at all; _lssLastRafAt says the COMPOSITOR ran it. The watchdog has to key on the second, because
@@ -131811,8 +132315,17 @@ function gameLoop(timestamp) {
   // stops the frame the round end does - not whenever _rplFrame next notices (the picker hides it)
   if (_RPL.rec && game.state !== 'roundEnd' && game.state !== 'playing') _RPL.rec = false;
   if (!game.lastTime) game.lastTime = timestamp;
-  game.deltaTime = Math.min(0.05, (timestamp - game.lastTime) / 1000);
-  game.lastTime = timestamp;
+  // (v48.33) floored at 0. A watchdog frame is stepped with performance.now(), and the rAF frame after
+  // it carries the VSYNC timestamp of its own frame start, which can be EARLIER - so dt came out
+  // negative and game.time ran backwards for a frame (particles un-aged, timers re-armed). A frame that
+  // started before the last one we simulated has simply nothing new to simulate - and the clock only
+  // moves FORWARD, or the next frame would simulate the overlap a second time.
+  // ⚠ ...unless it jumped back by more than a second: that is not an overlap, it is a DIFFERENT CLOCK
+  // (a runtime handing the loop timestamps on another timeline), and holding lastTime would freeze the
+  // game until that clock caught up. Rebase instead - one frame of dt 0, exactly what the old code did.
+  const _dtRaw = (timestamp - game.lastTime) / 1000;
+  game.deltaTime = Math.max(0, Math.min(0.05, _dtRaw));
+  if (_dtRaw > 0 || _dtRaw < -1) game.lastTime = timestamp;
   game.time += game.deltaTime;
   __pmark(); 
   if (typeof _tickFlatCombatPerf === 'function') _tickFlatCombatPerf(game.deltaTime);
@@ -131894,6 +132407,12 @@ function gameLoop(timestamp) {
           const _cdt = game.deltaTime;
           _swU.uTime.value += _cdt;
           _swU.uCam.value.set(camera.position.x, camera.position.y, camera.position.z);
+          // (v48.33) the far-foliage gates follow uCam HERE too. This fork returns before the gameplay
+          // path, so a cinematic used to inherit whatever the last gameplay frame gated around the SHIP
+          // while the shader faded around the flying CAMERA - trees inside the camera's fade band stayed
+          // hidden. Same rule, same guards, the camera's xz (exactly what uCam just got).
+          try { _swTreeVisTick(camera.position.x, camera.position.z); } catch (_) {}
+          try { _swFolVisExtra(camera.position.x, camera.position.z); } catch (_) {}
           try { _swUpdateHubWater(); } catch (_) {}
           __pmark('cine:water');
           try { _swRippleTick(_cdt); }
@@ -132183,8 +132702,12 @@ function gameLoop(timestamp) {
       let _fZ = _cineActive ? camera.position.z : player.position.z;
       _swU.uCam.value.set(_fX, _cineActive ? camera.position.y : player.position.y, _fZ);
       try { _swTreeVisTick(_fX, _fZ); } catch (_) {}   // (v47.05) must stay ABOVE the bend unmap below - _fX/_fZ are still in the space uCam just got
+      try { _swFolVisExtra(_fX, _fZ); } catch (_) {}   // (v48.33) sky-island + city-park foliage, same rule; its own try so neither can starve the other
       try { _volcSync(_fX, _fZ); } catch (_) {}
       try { _skFrame(_fX, _cineActive ? camera.position.y : player.position.y, _fZ); } catch (_) {}
+      // (v48.33) the foliage gates + volcano sync + sky islands, measured on their own: island builds
+      // used to land in `hub:clip` (the next mark), which is why v47.08's hitch hunt never saw them.
+      __pmark('hub:sky');
       try { _padFrame(dt); } catch (e) { if (typeof window !== 'undefined' && !window.__padErr) window.__padErr = String((e && e.stack) || e); }
       try { _skyAudioFrame(dt); } catch (_) {}
       // (v36.96) BENT SANDWICH: the chunk grid lives in FLAT space — center
@@ -144116,7 +144639,15 @@ const _LSS_STALL_MS = 120;   // ~7 missed frames at 60 Hz: long enough never to 
     } else {
       // Hand back to rAF ; gameLoop will run at refresh rate again.
       bgActive = false;
-      if (bgWorker) bgWorker.postMessage({ cmd: 'stop' });
+      // ⭐⭐ (v48.33) ...AND THE WATCHDOG STAYS ARMED. This line used to post { cmd: 'stop' } - left over
+      // from before v43.11, when the Worker only existed to drive a HIDDEN page. v43.11 made it a
+      // permanent stall watchdog ("arm it immediately and leave it armed"), but this branch still
+      // stopped it the first time the page came back from hidden, and nothing ever started it again.
+      // So after ONE alt-tab the room-freeze safeguard was dead for the rest of the session. Measured
+      // on v48.32: rAF stopped for 1.2 s on a fresh page -> the watchdog kept game.time moving (1.107 s);
+      // the same test after one hide/show cycle -> 0. Re-arming is free: the Worker's `start` is
+      // idempotent, and while rAF is healthy each tick is one timestamp comparison that returns.
+      try { const w = _ensureWorker(); if (w) w.postMessage({ cmd: 'start', ms: Math.round(1000 / TICK_HZ) }); } catch (_) {}
       // setAnimationLoop(gameLoop) alone can no-op here: three's internal
       // WebGLAnimation.start() bails while its isAnimating flag is stuck true
       // after a hidden phase, leaving game.time frozen even though rAF runs.
@@ -145565,6 +146096,25 @@ function _leSlicer() {
 // without one the tail of a stage and the head of the next could share a
 // task. Behind the curtain it is a resolved promise.
 function _leBreath() { return _leDeferPublish() ? new Promise((r) => setTimeout(r, 0)) : Promise.resolve(); }
+
+// (v48.33) THE SUN, FOUND ONCE A FRAME. The brightest DirectionalLight in the scene - exactly the
+// rule every patch used to apply for itself (see LSSEarthTiles.updateNight). Still a full walk, on
+// purpose: the day/night blend (_lssEarthApplyDayNight) moves intensities every step, so WHICH light
+// is brightest can change, and caching the object forever would be a guess. One walk instead of P.
+// The visitor is a hoisted declaration and its state lives on the function object, like _stHash2i's
+// cache: no per-frame closure, and no top-level `let` for a TDZ to bite (v39.02).
+function _leFindSun(scene) {
+  const S = _leFindSun;
+  S.best = null; S.bi = -1;
+  if (scene && typeof scene.traverse === 'function') scene.traverse(_leFindSunVisit);
+  const b = S.best;
+  S.best = null;   // never pin a light object past the call
+  return b;
+}
+function _leFindSunVisit(o) {
+  const S = _leFindSun;
+  if (o.isDirectionalLight && o.intensity > S.bi) { S.bi = o.intensity; S.best = o; }
+}
 
 class LSSEarthTiles {
   constructor(opts = {}) {
@@ -147110,11 +147660,17 @@ class LSSEarthTiles {
     if (!m || !m.userData || !m.userData.uLeNight) return;
     m.userData.uLeNight.value = Math.max(0, Math.min(1, v));
   }
-  updateNight(scene) {
+  // ⭐ (v48.33) `sun` is OPTIONAL. LSSEarthWorld looks the sun up ONCE per frame and hands it to
+  // every patch; before that, every patch walked the WHOLE SCENE itself (~900 pooled FX meshes, the
+  // ships, every other patch) to get the same answer, P times a frame. Measured with real r165
+  // objects at 25-29 ns a node: 0.7-1.2 ms a frame at spawn (P = 9), ~5.4 ms after wandering a big
+  // city (P = 25) - and the v47.13 self-profile had already shown `updateNight` at 1,505 ms across
+  // one round transition. `undefined` = not looked up (the one-argument form, which the single-patch
+  // class and the overlay loader still use); `null` = looked up, no directional light.
+  updateNight(scene, sun) {
     const m = this._wallMat;
     if (!m || !m.userData || !m.userData.uSunV) return;
-    let best = null, bi = -1;
-    scene.traverse((o) => { if (o.isDirectionalLight && o.intensity > bi) { bi = o.intensity; best = o; } });
+    const best = (sun !== undefined) ? sun : _leFindSun(scene);
     if (best) m.userData.uSunV.value.copy(best.position).normalize();
   }
 
@@ -148047,6 +148603,17 @@ class LSSEarthTiles {
 
     const geo = new THREE.PlaneGeometry(1, 1);
     const mat = _hcHoloMat();
+    // ⭐ (v48.33) BAKED HERE, NOT PATCHED EVERY FRAME. `_lssGmapsTick`'s "matfix" traverse (written
+    // for the long-dead Google 3d-tiles path) forced every material under the tiles group opaque on
+    // its first frame - and on our own classes the ONLY material it ever changed was this one. So an
+    // Earth ad panel has always drawn in the OPAQUE list with depth writes: its premultiplied
+    // CustomBlending survives that (r165 WebGLState only drops blending for NormalBlending +
+    // !transparent), and the program key is untouched either way (r165's `opaque` term also requires
+    // NormalBlending). Setting the same two flags at birth keeps that exact look - and program - and
+    // lets the per-frame traverse go. This material is our own fresh copy: _hcHoloMat builds a new
+    // ShaderMaterial per call, so the hub city's panels are not touched.
+    mat.transparent = false;
+    mat.depthWrite = true;
     // ⚠ BACKFILL ANY UNDEFINED UNIFORM BEFORE THE FIRST DRAW.
     // _hcHoloMat is written for the hub city and takes uHcLodOn straight from
     // HUB_CITY._uLodOn. On a gmaps level the hub city was never built, so that
@@ -149199,9 +149766,21 @@ class LSSEarthWorld {
     }
     return best;
   }
+  // (v48.33) ONE scene walk for the whole patch set, not one per patch - see LSSEarthTiles.updateNight.
+  // Only walked when some patch will actually read it (a patch without a cyberpunk wall material
+  // returns early), so the no-sun case costs exactly what it did before: nothing.
   updateNight(scene) {
-    for (const p of this._patches.values()) p.updateNight(scene);
-    if (this._far) this._far.updateNight(scene);
+    let need = !!(this._far && this._far._wallMat && this._far._wallMat.userData && this._far._wallMat.userData.uSunV);
+    if (!need) {
+      for (const p of this._patches.values()) {
+        const m = p._wallMat;
+        if (m && m.userData && m.userData.uSunV) { need = true; break; }
+      }
+    }
+    if (!need) return;
+    const sun = _leFindSun(scene);   // null when there is no directional light: patches keep their last value
+    for (const p of this._patches.values()) p.updateNight(scene, sun);
+    if (this._far) this._far.updateNight(scene, sun);
   }
   setWindowGlow(v) {
     this._glow = v;          // see _backfillBuildings
@@ -150481,7 +151060,16 @@ function _lssGmapsTick(dt) {
     try { if (typeof _wxFrame === 'function') _wxFrame(dt); } catch (_) {}
     __pmark('earth:wx');         // the sky dome + weather, which only this mode drives
   } catch (_) {  }
-  if (t.group && t.group.children && t.group.children.length > 0) {
+  // (v48.33) THE MATFIX RUNS ONLY FOR A FOREIGN TILES OBJECT. It forces every material under the
+  // group opaque, which the Google photogrammetry renderer needed; our own LSSEarthTiles /
+  // LSSEarthWorld (they answer `collide()`, the same test _lssGmapsCollideEntity uses) author their
+  // materials opaque already - the one exception, the ad panels, is now baked at birth
+  // (_buildAdPanels). It cost a full traverse of the patch set plus one throwaway array per mesh,
+  // EVERY frame, to change nothing. ⚠ The `__earthRivers` experiment's river sheet is the other
+  // transparent material under the group; the matfix used to force it opaque on its first frame,
+  // which silently defeated its v46.x fade-in ("i saw it pop in"). With the traverse gone it fades
+  // and stays translucent, as _buildLocalWater intends. Off by default, so shipped play is unchanged.
+  if (typeof t.collide !== 'function' && t.group && t.group.children && t.group.children.length > 0) {
     t.group.traverse((c) => {
       if (!c || !c.isMesh) return;
       const mats = Array.isArray(c.material) ? c.material : [c.material];
@@ -150496,7 +151084,7 @@ function _lssGmapsTick(dt) {
       }
     });
   }
-  __pmark('earth:matfix');       // ⚠ a FULL traverse of the patch set, every frame
+  __pmark('earth:matfix');       // (v48.33) ~0 on our own tiles classes - see above
   // Terrain + building collision for player and AI ships.
   try {
     if (typeof player !== 'undefined' && player && player.position && player.velocity) {
