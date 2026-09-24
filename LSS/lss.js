@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "48.38";
+const LSS_BUILD = "48.41";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -17560,7 +17560,7 @@ function _rplState(prev, st) {
       if (!_RPL.cur.endT) _RPL.cur.endT = _rplNow();
       _RPL.last = _RPL.cur;
       const done = _RPL.cur;
-      setTimeout(() => _rplAutoKeep(done), 1200);   // (v48.05) every finished round is kept
+      setTimeout(() => _rplAutoKeep(done), 1200);
     }
     _RPL.cur = null; _RPL.rec = false; _RPL.kcAt = 0;
   }
@@ -19041,6 +19041,29 @@ const _arenaGridMeshes = [];
   const s = LSS.ARENA_SIZE;
   const gridMat = new THREE.LineBasicMaterial({ color: 0x112244, transparent: true, opacity: tier > 0 ? 0.08 : 0.15 });
   const step = tier > 0 ? 2000 : 500;
+  if (tier === 0) {
+    const n = Math.floor((2 * s) / step) + 1;          // grid lines per face (the old j loop's count)
+    const lo = -s, hi = -s + (n - 1) * step + step;   // the old i loop's first point and last point
+    for (let axis = 0; axis < 3; axis++) {
+      for (let sign = -1; sign <= 1; sign += 2) {
+        const pos = new Float32Array(n * 6);
+        const f = sign * s;
+        for (let k = 0; k < n; k++) {
+          const c = -s + k * step, o = k * 6;
+          if (axis === 0)      { pos[o] = f;  pos[o + 1] = lo; pos[o + 2] = c; pos[o + 3] = f;  pos[o + 4] = hi; pos[o + 5] = c; }
+          else if (axis === 1) { pos[o] = lo; pos[o + 1] = f;  pos[o + 2] = c; pos[o + 3] = hi; pos[o + 4] = f;  pos[o + 5] = c; }
+          else                 { pos[o] = c;  pos[o + 1] = lo; pos[o + 2] = f; pos[o + 3] = c;  pos[o + 4] = hi; pos[o + 5] = f; }
+        }
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+        const seg = new THREE.LineSegments(geo, gridMat);
+        seg.userData = { isArenaGrid: true };
+        _arenaGridMeshes.push(seg);
+        scene.add(seg);
+      }
+    }
+    return;
+  }
   for (let axis = 0; axis < 3; axis++) {
     for (let sign = -1; sign <= 1; sign += 2) {
       const lines = [];
@@ -19801,6 +19824,36 @@ function _stCeilYCarved(x,z,T){
   const ov=(T.PILLARS.overlap||80);
   return c+(((g+c)*0.5-ov)-c)*pw;
 }
+const _stPairScratch = { g: 0, c: 0 };
+function _stCarvedPair(x,z,T,out){
+  const g=_stGroundY(x,z,T); const r=_stRouteAt(x,z,T);
+  const ro=Math.max(0,Math.min(1,r.o)), rty=r.ty;   // copied out: r is _stRouteAt's module scratch
+  const c=_stCeilY(x,z,T);
+  const PINCH=(T.WALL_PINCH!=null?T.WALL_PINCH:0.45);
+  const mid=(g+c)*0.5;
+  const g2=g+(mid-g)*PINCH*(1-ro);
+  let gB;
+  if(ro<=0) gB=g2;
+  else { const floor=rty-(T.ARENA_DROP||320); gB=g2+(floor-g2)*ro; }
+  let cB;
+  if(T && T._openTop) cB=1e9;
+  else {
+    const c2=c+(mid-c)*PINCH*(1-ro);
+    if(ro<=0) cB=c2;
+    else { const roof=rty+(T.ARENA_RISE||420); cB=c2+(roof-c2)*ro; }
+  }
+  let gC=gB, cC=cB;
+  if(T.PILLARS && !T._openTop){
+    const pw=_stPillarAt(x,z,T);
+    if(!(pw<=0)){
+      const ov=(T.PILLARS.overlap||80);
+      gC=gB+(((gB+cB)*0.5+ov)-gB)*pw;
+      cC=cB+(((gB+cB)*0.5-ov)-cB)*pw;
+    }
+  }
+  out.g=gC; out.c=cC;
+  return out;
+}
 function _stGapSDFCarved(px,py,pz,T){
   const g=_stGroundY(px,pz,T), c=_stCeilY(px,pz,T);
   const r=_stRouteAt(px,pz,T);
@@ -19878,6 +19931,12 @@ const _SW_BIOME_LOOK = {
 };
 const _SW_tmpC = new THREE.Color();
 const _SW_cA = new THREE.Color(), _SW_cB = new THREE.Color();
+const _swLinCache = new Map();
+function _swLin(hex) {
+  let c = _swLinCache.get(hex);
+  if (c === undefined) { c = new THREE.Color().set(hex); _swLinCache.set(hex, c); }
+  return c;
+}
 function _swPal(T){ return _SW_BIOMES[(T && T.biome) || 'grassy'] || _SW_BIOMES.grassy; }
 function _stPatch(x, z) {
   const n = _stNoise2(x*0.0016+5.1, z*0.0016-2.3)*0.62 + _stNoise2(x*0.0041+11.0, z*0.0041+7.0)*0.38;
@@ -19896,15 +19955,15 @@ function _swColGroundB(x, z, wy, T, bio, out) {
   let t = (wy - lo) / (hi - lo); t = t < 0 ? 0 : (t > 1 ? 1 : t);
   if (bio === 'grassy') {
     const pc = _stPatch(x, z);
-    if (pc < 0.40) out.copy(_SW_cA.set(P.rock)).lerp(_SW_cB.set(P.moss), pc / 0.40);
-    else if (pc < 0.68) out.copy(_SW_cA.set(P.moss)).lerp(_SW_cB.set(P.gMid), (pc - 0.40) / 0.28);
-    else out.copy(_SW_cA.set(P.gMid)).lerp(_SW_cB.set(P.gHi), (pc - 0.68) / 0.32);
-    if (t > sl) out.lerp(_SW_cB.set(P.gSnow), Math.min(1, (t - sl) / Math.max(0.01, 1 - sl)));
+    if (pc < 0.40) out.copy(_swLin(P.rock)).lerp(_swLin(P.moss), pc / 0.40);
+    else if (pc < 0.68) out.copy(_swLin(P.moss)).lerp(_swLin(P.gMid), (pc - 0.40) / 0.28);
+    else out.copy(_swLin(P.gMid)).lerp(_swLin(P.gHi), (pc - 0.68) / 0.32);
+    if (t > sl) out.lerp(_swLin(P.gSnow), Math.min(1, (t - sl) / Math.max(0.01, 1 - sl)));
     return out;
   }
-  if (t < 0.42) out.copy(_SW_cA.set(P.gLo)).lerp(_SW_cB.set(P.gMid), t / 0.42);
-  else if (t < sl) out.copy(_SW_cA.set(P.gMid)).lerp(_SW_cB.set(P.gHi), (t - 0.42) / Math.max(0.01, sl - 0.42));
-  else out.copy(_SW_cA.set(P.gHi)).lerp(_SW_cB.set(P.gSnow), (t - sl) / Math.max(0.01, 1 - sl));
+  if (t < 0.42) out.copy(_swLin(P.gLo)).lerp(_swLin(P.gMid), t / 0.42);
+  else if (t < sl) out.copy(_swLin(P.gMid)).lerp(_swLin(P.gHi), (t - 0.42) / Math.max(0.01, sl - 0.42));
+  else out.copy(_swLin(P.gHi)).lerp(_swLin(P.gSnow), (t - sl) / Math.max(0.01, 1 - sl));
   return out;
 }
 const _swXfC = new THREE.Color();
@@ -19925,7 +19984,7 @@ function _swColCeilB(wy, T, bio, out) {
   const P = _SW_BIOMES[bio] || _SW_BIOMES.grassy;
   const lo = T.YMID - T.AMP * 0.3, hi = T.YCEIL;
   let t = (wy - lo) / (hi - lo); t = t < 0 ? 0 : (t > 1 ? 1 : t);
-  return out.copy(_SW_cA.set(P.cHi)).lerp(_SW_cB.set(P.cLo), t);
+  return out.copy(_swLin(P.cHi)).lerp(_swLin(P.cLo), t);   // (v48.40) cached linear palette
 }
 function _swColCeil(x, z, wy, T, out) {
   const X = game._swPalXf;
@@ -20913,12 +20972,29 @@ function _swBuildDrapes(x0, z0, T) {
   return out.length ? out : null;
 }
 
+let _swPairLast = null;
+function _swPairOn() { return !(typeof window !== 'undefined' && window.__swPair === false); }
 function _swShellJobNew(x0, z0, isCeil, T) {
   const n = _SW_CELLS, nVert = (n + 1) * (n + 1);
-  return { x0, z0, isCeil, T, n, j: 0, p: 0, verts: new Float32Array(nVert * 3), cols: new Float32Array(nVert * 3) };
+  const J = { x0, z0, isCeil, T, n, j: 0, p: 0, verts: new Float32Array(nVert * 3), cols: new Float32Array(nVert * 3),
+              pair: _swPairOn(), gY: null, cY: null, adopt: false, seq: (game._buildSeq | 0) };
+  if (J.pair) {
+    if (isCeil) {
+      const L = _swPairLast;
+      if (L && L.x0 === x0 && L.z0 === z0 && L.T === T && L.n === n && L.seq === J.seq && L.gY) {
+        J.gY = L.gY; J.cY = L.cY; J.adopt = true;
+      }
+      _swPairLast = null;   // one hand-over per ground job, matched or not
+    } else {
+      J.gY = new Float64Array(nVert); J.cY = new Float64Array(nVert);
+    }
+  }
+  return J;
 }
 function _swShellJobRows(J, budgetMs) {
   const n = J.n, step = _SW_CHUNK / n, T = J.T, isCeil = J.isCeil, verts = J.verts, cols = J.cols, x0 = J.x0, z0 = J.z0;
+  const pair = J.pair, adopt = J.adopt, gY = J.gY, cY = J.cY, PR = _stPairScratch;
+  const wantCol = isCeil || (typeof window !== 'undefined' && window.__swGroundCol === true);
   const t0 = performance.now();
   let p = J.p;
   while (J.j <= n) {
@@ -20929,15 +21005,30 @@ function _swShellJobRows(J, budgetMs) {
       const _jit = step * 0.40;
       const x = gx0 + (_stHash2(_gi * 1.7, _gj * 2.3) - 0.5) * _jit;
       const z = gz0 + (_stHash2(_gi * 3.1 + 5.0, _gj * 1.1 + 9.0) - 0.5) * _jit;
-      let y = isCeil ? _stCeilYCarved(x, z, T) : _stGroundYCarved(x, z, T);
+      let y;
       const _pinch = _swRimPinch(x, z, T);
-      if (_pinch > 0) {
-        const _other = isCeil ? _stGroundYCarved(x, z, T) : _stCeilYCarved(x, z, T);
-        y += ((y + _other) * 0.5 - y) * _pinch;
+      if (pair) {
+        const v = p / 3;
+        let yo;
+        if (adopt) { y = cY[v]; yo = gY[v]; }
+        else {
+          _stCarvedPair(x, z, T, PR);
+          if (gY) { gY[v] = PR.g; cY[v] = PR.c; }
+          if (isCeil) { y = PR.c; yo = PR.g; } else { y = PR.g; yo = PR.c; }
+        }
+        if (_pinch > 0) y += ((y + yo) * 0.5 - y) * _pinch;
+      } else {
+        y = isCeil ? _stCeilYCarved(x, z, T) : _stGroundYCarved(x, z, T);
+        if (_pinch > 0) {
+          const _other = isCeil ? _stGroundYCarved(x, z, T) : _stCeilYCarved(x, z, T);
+          y += ((y + _other) * 0.5 - y) * _pinch;
+        }
       }
       verts[p] = x; verts[p + 1] = y; verts[p + 2] = z;
-      if (isCeil) _swColCeil(x, z, y, T, _SW_tmpC); else _swColGround(x, z, y, T, _SW_tmpC);
-      cols[p] = _SW_tmpC.r; cols[p + 1] = _SW_tmpC.g; cols[p + 2] = _SW_tmpC.b;
+      if (wantCol) {
+        if (isCeil) _swColCeil(x, z, y, T, _SW_tmpC); else _swColGround(x, z, y, T, _SW_tmpC);
+        cols[p] = _SW_tmpC.r; cols[p + 1] = _SW_tmpC.g; cols[p + 2] = _SW_tmpC.b;
+      }
       p += 3;
     }
     J.j++;
@@ -20947,6 +21038,7 @@ function _swShellJobRows(J, budgetMs) {
   return J.j > n;
 }
 function _swShellJobFinish(J) {
+  if (!J.isCeil && J.gY) _swPairLast = J;
   const n = J.n, isCeil = J.isCeil, verts = J.verts, cols = J.cols, nVert = (n + 1) * (n + 1);
   const idx = [];
   const row = n + 1;
@@ -27745,16 +27837,25 @@ function _hubCityBuild(g, site) {
     const img = a2.createImageData(CS, CS);
     const d8 = img.data;
     const hsh = (x, y) => { const h = Math.sin(x * 127.1 + y * 311.7) * 43758.5453; return h - Math.floor(h); };
-    const vn2 = (x, y) => {
+    const _vtab = (s, ox, oy) => {
+      const x0 = Math.floor(0 * s + ox), x1 = Math.floor((CS - 1) * s + ox) + 1;
+      const y0 = Math.floor(0 * s + oy), y1 = Math.floor((CS - 1) * s + oy) + 1;
+      const W = x1 - x0 + 1, T = new Float64Array(W * (y1 - y0 + 1));
+      for (let j = y0; j <= y1; j++) for (let i = x0; i <= x1; i++) T[(j - y0) * W + (i - x0)] = hsh(i, j);
+      return { T, W, x0, y0 };
+    };
+    const vt = (t, x, y) => {
       const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
       const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
-      const a = hsh(xi, yi), b = hsh(xi + 1, yi), c = hsh(xi, yi + 1), dd = hsh(xi + 1, yi + 1);
+      const T = t.T, W = t.W, k = (yi - t.y0) * W + (xi - t.x0);
+      const a = T[k], b = T[k + 1], c = T[k + W], dd = T[k + W + 1];
       return a + (b - a) * u + (c - a) * v + (a - b - c + dd) * u * v;
     };
+    const _t1 = _vtab(0.013, 0, 0), _t2 = _vtab(0.041, 7, 3), _t3 = _vtab(0.11, 13, 9), _t4 = _vtab(0.006, 31, 17);
     for (let y = 0; y < CS; y++) {
       for (let x = 0; x < CS; x++) {
-        const n = 0.55 * vn2(x * 0.013, y * 0.013) + 0.3 * vn2(x * 0.041 + 7, y * 0.041 + 3) + 0.15 * vn2(x * 0.11 + 13, y * 0.11 + 9);
-        const dry = vn2(x * 0.006 + 31, y * 0.006 + 17);
+        const n = 0.55 * vt(_t1, x * 0.013, y * 0.013) + 0.3 * vt(_t2, x * 0.041 + 7, y * 0.041 + 3) + 0.15 * vt(_t3, x * 0.11 + 13, y * 0.11 + 9);
+        const dry = vt(_t4, x * 0.006 + 31, y * 0.006 + 17);
         let r, g, b;
         if (n < 0.5) { const t2 = n * 2; r = 52 + 22 * t2; g = 56 + 24 * t2; b = 67 + 28 * t2; }
         else { const t2 = n * 2 - 1; r = 74 + 26 * t2; g = 80 + 26 * t2; b = 95 + 28 * t2; }
@@ -29806,7 +29907,7 @@ function _carrierEngineStart() {
     src.playbackRate.value = (K.pitch != null) ? K.pitch : (1 / (PHI * PHI));
     const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 1200; lp.Q.value = 0.4;
     const g = ctx.createGain(); g.gain.setValueAtTime(0.0001, now);
-    const pan = ctx.createPanner();
+    const pan = _audioKRatePanner(ctx.createPanner());   // (v48.39) k-rate - see _audioKRateSet
     pan.panningModel = 'HRTF';
     pan.distanceModel = 'inverse';
     pan.refDistance = 900;      // a capital ship carries a long way
@@ -35903,6 +36004,11 @@ function setSandwichBiome(name) {
   if (!_SW_BIOMES[name]) { console.warn('[sandwich] unknown biome', name, '— options:', Object.keys(_SW_BIOMES).join(', ')); return; }
   game.sandwichBiome = name;
   if (typeof _swapArmed === 'function' && _swapArmed()) return name;
+  try {
+    if (game.currentLevel && game.state === 'select' &&
+        typeof _lssPickerOwnsFrame === 'function' && _lssPickerOwnsFrame() &&
+        !(typeof window !== 'undefined' && window.__pickerRebuild === true)) return name;
+  } catch (_) {}
   try { if (typeof buildRoomGraphLevel === 'function' && game.currentLevel) buildRoomGraphLevel(game.currentLevel); } catch (e) { console.warn(e); }
   return name;
 }
@@ -35970,16 +36076,63 @@ const _ARENA_FIELD_SRC = `{
   },
   smax(a, b, k) { return -this.smin(-a, -b, k); },
 
+  // (v48.40) THE TRIG TABLES (review O1.12). floorHole's shaft centres depend only on (storey f,
+  // shaft h, G) and the satellites' only on (i, G) - a dozen constants per arena - yet eval() called
+  // floorHole ~40 times per sample (3 from the floor loop, the rest from the spike and pillar root
+  // tests), so every sample recomputed ~320 cos/sin of the same angles. _tab fills them ONCE per G with
+  // the IDENTICAL expressions, so every table entry is the double the inline code computed (node-checked:
+  // eval() bit-identical over the arena, both realms build from this one string). The state lives on
+  // THIS field object, never on G (G is peer data and a worker copy); _tok re-validates every value the
+  // tables read, so a G mutated in place (the __spireArena.G() console) rebuilds them instead of going
+  // stale. floorHole keeps the per-call trig as the fallback for a storey outside the table (a
+  // non-integer or out-of-range f).
+  _tg: null, _tSh: null, _tSt: null, _tNf: -1, _tNs: -1, _tNsat: -1, _tPh: 0, _tShR: 0, _tSatR: 0,
+  _tok(g) {
+    return this._tg === g && this._tNf === g.floorY.length && this._tNs === g.shafts && this._tNsat === g.sat &&
+           this._tPh === g.satPhase && this._tShR === g.shaftR && this._tSatR === g.satR;
+  },
+  _tab(g) {
+    const nf = g.floorY.length, ns = g.shafts, nsat = g.sat;
+    const sh = new Float64Array(Math.max(0, nf * ns * 2));
+    for (let f = 0; f < nf; f++) {
+      for (let h = 0; h < ns; h++) {
+        const a = (h / g.shafts) * 6.2831853 + f * 0.9 + g.satPhase;
+        sh[(f * ns + h) * 2] = Math.cos(a) * g.shaftR;
+        sh[(f * ns + h) * 2 + 1] = Math.sin(a) * g.shaftR;
+      }
+    }
+    const st = new Float64Array(Math.max(0, nsat * 2));
+    for (let i = 0; i < nsat; i++) {
+      const a = (i / g.sat) * 6.2831853 + g.satPhase;
+      st[i * 2] = Math.cos(a) * g.satR;
+      st[i * 2 + 1] = Math.sin(a) * g.satR;
+    }
+    this._tSh = sh; this._tSt = st;
+    this._tNf = nf; this._tNs = ns; this._tNsat = nsat;
+    this._tPh = g.satPhase; this._tShR = g.shaftR; this._tSatR = g.satR;
+    this._tg = g;
+  },
+
   // Where a floor slab is MISSING. Negative = hole (shaft or the annular gap
   // around the spire). Shared by the slab carve and the spike root test, so
   // the two can never disagree about where floor exists.
   floorHole(px, pz, f, g) {
+    if (!this._tok(g)) this._tab(g);
     let hole = 1e9;
-    for (let h = 0; h < g.shafts; h++) {
-      const a = (h / g.shafts) * 6.2831853 + f * 0.9 + g.satPhase;
-      const hx = Math.cos(a) * g.shaftR, hz = Math.sin(a) * g.shaftR;
-      const hd = Math.sqrt((px-hx)*(px-hx) + (pz-hz)*(pz-hz)) - g.shaftRad;
-      if (hd < hole) hole = hd;
+    if (f >= 0 && f < this._tNf && (f | 0) === f) {
+      const T = this._tSh, ns = this._tNs, o = f * ns * 2;
+      for (let h = 0; h < ns; h++) {
+        const hx = T[o + h * 2], hz = T[o + h * 2 + 1];
+        const hd = Math.sqrt((px-hx)*(px-hx) + (pz-hz)*(pz-hz)) - g.shaftRad;
+        if (hd < hole) hole = hd;
+      }
+    } else {
+      for (let h = 0; h < g.shafts; h++) {
+        const a = (h / g.shafts) * 6.2831853 + f * 0.9 + g.satPhase;
+        const hx = Math.cos(a) * g.shaftR, hz = Math.sin(a) * g.shaftR;
+        const hd = Math.sqrt((px-hx)*(px-hx) + (pz-hz)*(pz-hz)) - g.shaftRad;
+        if (hd < hole) hole = hd;
+      }
     }
     const rxz = Math.sqrt(px*px + pz*pz);
     const ring = Math.abs(rxz - g.ringR) - g.ringW;
@@ -36096,9 +36249,10 @@ const _ARENA_FIELD_SRC = `{
     // 2. CENTRAL COLUMN(S) — one ragged spire on the axis + satellites.
     let col = rxz - g.colR;
     col -= Math.abs(this.noise(px*0.010, py*0.008, pz*0.010)) * 34;
+    if (!this._tok(g)) this._tab(g);
+    const ST = this._tSt;
     for (let i = 0; i < g.sat; i++) {
-      const a = (i / g.sat) * 6.2831853 + g.satPhase;
-      const sx = Math.cos(a) * g.satR, sz = Math.sin(a) * g.satR;
+      const sx = ST[i * 2], sz = ST[i * 2 + 1];   // (v48.40) the satellite table - see _tab
       const sd = Math.sqrt((px-sx)*(px-sx) + (pz-sz)*(pz-sz)) - g.satRad
                - Math.abs(this.noise(px*0.013, py*0.010, pz*0.013)) * 22;
       col = this.smin(col, sd, 60);
@@ -42642,6 +42796,206 @@ function _pointInsideShipOBB(worldPoint, ship, margin) {
   );
 }
 
+const _HRG = { minTris: 5000, perCell: 24, maxDim: 96, builds: 0, buildMs: 0, fast: 0, fallback: 0, queued: 0, _q: [], _qBusy: false };
+const _hrgMap = new WeakMap();   // geometry -> grid
+const _hrgV = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+const _hrgPt = new THREE.Vector3(), _hrgPW = new THREE.Vector3(), _hrgEnd = new THREE.Vector3(), _hrgHitAt = new THREE.Vector3();
+const _hrgRayW = new THREE.Ray(), _hrgRayL = new THREE.Ray();
+const _hrgSph = new THREE.Sphere(), _hrgInv = new THREE.Matrix4();
+const _hrgTmp = [];
+function _hrgEligible(mesh) {
+  if (!mesh || !mesh.isMesh || mesh.isSkinnedMesh || mesh.isInstancedMesh || mesh.isBatchedMesh) return false;
+  const g = mesh.geometry, m = mesh.material;
+  if (!g || !g.attributes || !g.attributes.position || !m || Array.isArray(m)) return false;
+  if (g.morphAttributes && g.morphAttributes.position && g.morphAttributes.position.length) return false;
+  const dr = g.drawRange;
+  if (!dr || dr.start !== 0 || dr.count !== Infinity) return false;
+  const tc = g.index ? Math.floor(g.index.count / 3) : Math.floor(g.attributes.position.count / 3);
+  return tc >= _HRG.minTris;
+}
+function _hrgBuild(geo) {
+  const t0 = performance.now();
+  const pos = geo.attributes.position, index = geo.index;
+  const tc = index ? Math.floor(index.count / 3) : Math.floor(pos.count / 3);
+  if (!geo.boundingBox) geo.computeBoundingBox();
+  const bb = geo.boundingBox;
+  const ox = bb.min.x, oy = bb.min.y, oz = bb.min.z;
+  const dx = Math.max(bb.max.x - ox, 1e-6), dy = Math.max(bb.max.y - oy, 1e-6), dz = Math.max(bb.max.z - oz, 1e-6);
+  const cellsWanted = Math.max(1, tc / _HRG.perCell);
+  const s = Math.cbrt((dx * dy * dz) / cellsWanted) || Math.max(dx, dy, dz);
+  const MD = _HRG.maxDim;
+  const nx = Math.max(1, Math.min(MD, Math.ceil(dx / s))), ny = Math.max(1, Math.min(MD, Math.ceil(dy / s))), nz = Math.max(1, Math.min(MD, Math.ceil(dz / s)));
+  const ix = nx / dx, iy = ny / dy, iz = nz / dz;
+  const ex = dx * 1e-5, ey = dy * 1e-5, ez = dz * 1e-5;   // padding: a float that lands on a cell wall still counts on both sides
+  const R = new Uint16Array(tc * 6);   // per-triangle cell range, kept between the two passes
+  const cnt = new Uint32Array(nx * ny * nz + 1);
+  const cl = (v, n) => (v < 0 ? 0 : (v >= n ? n - 1 : v));
+  for (let t = 0; t < tc; t++) {
+    let mnx = Infinity, mny = Infinity, mnz = Infinity, mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
+    for (let k = 0; k < 3; k++) {
+      const vi = index ? index.getX(t * 3 + k) : t * 3 + k;
+      const x = pos.getX(vi), y = pos.getY(vi), z = pos.getZ(vi);
+      if (x < mnx) mnx = x; if (x > mxx) mxx = x; if (y < mny) mny = y; if (y > mxy) mxy = y; if (z < mnz) mnz = z; if (z > mxz) mxz = z;
+    }
+    const i0 = cl(Math.floor((mnx - ex - ox) * ix), nx), i1 = cl(Math.floor((mxx + ex - ox) * ix), nx);
+    const j0 = cl(Math.floor((mny - ey - oy) * iy), ny), j1 = cl(Math.floor((mxy + ey - oy) * iy), ny);
+    const k0 = cl(Math.floor((mnz - ez - oz) * iz), nz), k1 = cl(Math.floor((mxz + ez - oz) * iz), nz);
+    const o = t * 6; R[o] = i0; R[o + 1] = i1; R[o + 2] = j0; R[o + 3] = j1; R[o + 4] = k0; R[o + 5] = k1;
+    for (let k = k0; k <= k1; k++) for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) cnt[(k * ny + j) * nx + i + 1]++;
+  }
+  for (let c = 1; c < cnt.length; c++) cnt[c] += cnt[c - 1];
+  const start = cnt;   // start[c] .. start[c + 1]
+  const fill = start.slice(0, start.length - 1);
+  const tris = new Uint32Array(start[start.length - 1]);
+  for (let t = 0; t < tc; t++) {
+    const o = t * 6;
+    for (let k = R[o + 4]; k <= R[o + 5]; k++) for (let j = R[o + 2]; j <= R[o + 3]; j++) for (let i = R[o]; i <= R[o + 1]; i++) tris[fill[(k * ny + j) * nx + i]++] = t;
+  }
+  const G = { nx, ny, nz, ox, oy, oz, ix, iy, iz, dx, dy, dz, ex, ey, ez, start, tris, tc,
+              pv: pos.version, iv: index ? index.version : -1, pa: pos, ia: index };
+  _hrgMap.set(geo, G);
+  _HRG.builds++; _HRG.buildMs += performance.now() - t0;
+  return G;
+}
+function _hrgGet(geo) {
+  const G = _hrgMap.get(geo);
+  if (!G) return null;
+  if (G.pa !== geo.attributes.position || G.ia !== geo.index || G.pv !== G.pa.version || (G.ia && G.iv !== G.ia.version)) { _hrgMap.delete(geo); return null; }
+  return G;
+}
+function _hrgQueue(geo) {
+  if (!geo || geo._hrgQueued) return;
+  geo._hrgQueued = true; _HRG._q.push(geo); _HRG.queued++;
+  if (_HRG._qBusy) return;
+  _HRG._qBusy = true;
+  const step = () => {
+    const g = _HRG._q.shift();
+    if (g) { try { if (!_hrgMap.get(g)) _hrgBuild(g); } catch (_) {} }
+    if (_HRG._q.length) { if (typeof requestIdleCallback === 'function') requestIdleCallback(step, { timeout: 2000 }); else setTimeout(step, 250); }
+    else _HRG._qBusy = false;
+  };
+  if (typeof requestIdleCallback === 'function') requestIdleCallback(step, { timeout: 2000 }); else setTimeout(step, 250);
+}
+function _hrgHitMesh(mesh, rc) {
+  if (!_hrgEligible(mesh)) return null;
+  const geo = mesh.geometry, mat = mesh.material;
+  const G = _hrgGet(geo);
+  if (!G) { _hrgQueue(geo); return null; }
+  if (geo.boundingSphere === null) geo.computeBoundingSphere();
+  _hrgSph.copy(geo.boundingSphere).applyMatrix4(mesh.matrixWorld);
+  _hrgRayW.copy(rc.ray).recast(rc.near);
+  if (_hrgSph.containsPoint(_hrgRayW.origin) === false) {
+    if (_hrgRayW.intersectSphere(_hrgSph, _hrgHitAt) === null) return false;
+    if (_hrgRayW.origin.distanceToSquared(_hrgHitAt) > (rc.far - rc.near) ** 2) return false;
+  }
+  _hrgInv.copy(mesh.matrixWorld).invert();
+  _hrgRayL.copy(rc.ray).applyMatrix4(_hrgInv);
+  if (geo.boundingBox !== null && _hrgRayL.intersectsBox(geo.boundingBox) === false) return false;
+  const p0x = _hrgRayL.origin.x, p0y = _hrgRayL.origin.y, p0z = _hrgRayL.origin.z;
+  _hrgEnd.copy(rc.ray.direction).multiplyScalar(rc.far).add(rc.ray.origin).applyMatrix4(_hrgInv);
+  const sdx = _hrgEnd.x - p0x, sdy = _hrgEnd.y - p0y, sdz = _hrgEnd.z - p0z;
+  const { nx, ny, nz, ox, oy, oz, ix, iy, iz, ex, ey, ez, start, tris } = G;
+  const cl = (v, n) => (v < 0 ? 0 : (v >= n ? n - 1 : v));
+  const lo = (a, b) => (a < b ? a : b), hi = (a, b) => (a > b ? a : b);
+  const bx0 = lo(p0x, _hrgEnd.x) - ex, bx1 = hi(p0x, _hrgEnd.x) + ex;
+  const by0 = lo(p0y, _hrgEnd.y) - ey, by1 = hi(p0y, _hrgEnd.y) + ey;
+  const bz0 = lo(p0z, _hrgEnd.z) - ez, bz1 = hi(p0z, _hrgEnd.z) + ez;
+  if (bx1 < ox || by1 < oy || bz1 < oz || bx0 > ox + G.dx || by0 > oy + G.dy || bz0 > oz + G.dz) return false;
+  const i0 = cl(Math.floor((bx0 - ox) * ix), nx), i1 = cl(Math.floor((bx1 - ox) * ix), nx);
+  const j0 = cl(Math.floor((by0 - oy) * iy), ny), j1 = cl(Math.floor((by1 - oy) * iy), ny);
+  const k0 = cl(Math.floor((bz0 - oz) * iz), nz), k1 = cl(Math.floor((bz1 - oz) * iz), nz);
+  const pos = G.pa, index = G.ia, side = mat.side;
+  const cw = 1 / ix, ch = 1 / iy, cd = 1 / iz;
+  for (let k = k0; k <= k1; k++) {
+    for (let j = j0; j <= j1; j++) {
+      for (let i = i0; i <= i1; i++) {
+        const c = (k * ny + j) * nx + i;
+        const s0 = start[c], s1 = start[c + 1];
+        if (s0 === s1) continue;
+        let tmin = 0, tmax = 1;
+        const cx0 = ox + i * cw - ex, cx1 = cx0 + cw + 2 * ex;
+        const cy0 = oy + j * ch - ey, cy1 = cy0 + ch + 2 * ey;
+        const cz0 = oz + k * cd - ez, cz1 = cz0 + cd + 2 * ez;
+        if (Math.abs(sdx) < 1e-12) { if (p0x < cx0 || p0x > cx1) continue; }
+        else { let a = (cx0 - p0x) / sdx, b = (cx1 - p0x) / sdx; if (a > b) { const q = a; a = b; b = q; } if (a > tmin) tmin = a; if (b < tmax) tmax = b; if (tmin > tmax) continue; }
+        if (Math.abs(sdy) < 1e-12) { if (p0y < cy0 || p0y > cy1) continue; }
+        else { let a = (cy0 - p0y) / sdy, b = (cy1 - p0y) / sdy; if (a > b) { const q = a; a = b; b = q; } if (a > tmin) tmin = a; if (b < tmax) tmax = b; if (tmin > tmax) continue; }
+        if (Math.abs(sdz) < 1e-12) { if (p0z < cz0 || p0z > cz1) continue; }
+        else { let a = (cz0 - p0z) / sdz, b = (cz1 - p0z) / sdz; if (a > b) { const q = a; a = b; b = q; } if (a > tmin) tmin = a; if (b < tmax) tmax = b; if (tmin > tmax) continue; }
+        for (let q = s0; q < s1; q++) {
+          const t = tris[q];
+          const a = index ? index.getX(t * 3) : t * 3, b = index ? index.getX(t * 3 + 1) : t * 3 + 1, cc = index ? index.getX(t * 3 + 2) : t * 3 + 2;
+          _hrgV[0].fromBufferAttribute(pos, a); _hrgV[1].fromBufferAttribute(pos, b); _hrgV[2].fromBufferAttribute(pos, cc);
+          let hit;
+          if (side === THREE.BackSide) hit = _hrgRayL.intersectTriangle(_hrgV[2], _hrgV[1], _hrgV[0], true, _hrgPt);
+          else hit = _hrgRayL.intersectTriangle(_hrgV[0], _hrgV[1], _hrgV[2], (side === THREE.FrontSide), _hrgPt);
+          if (hit === null) continue;
+          _hrgPW.copy(_hrgPt).applyMatrix4(mesh.matrixWorld);
+          const dist = rc.ray.origin.distanceTo(_hrgPW);
+          if (dist < rc.near || dist > rc.far) continue;
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+function _hrgHitAny(meshes, rc) {
+  const on = !(typeof window !== 'undefined' && window.__hullGrid === false);
+  for (let n = 0; n < meshes.length; n++) {
+    const m = meshes[n];
+    if (!m.layers.test(rc.layers)) continue;   // what Raycaster.intersectObjects checks before raycast()
+    const r = on ? _hrgHitMesh(m, rc) : null;
+    if (r === true) { _HRG.fast++; return true; }
+    if (r === false) { _HRG.fast++; continue; }
+    _HRG.fallback++;
+    _hrgTmp.length = 0;
+    m.raycast(rc, _hrgTmp);
+    const any = _hrgTmp.length > 0;
+    _hrgTmp.length = 0;
+    if (any) return true;
+  }
+  return false;
+}
+function _hrgPrebuildRoot(root) {
+  let n = 0;
+  if (!root || !root.traverse) return 0;
+  root.traverse((o) => {
+    if (!o || !o.isMesh || o.name === 'shield' || (o.userData && o.userData.isPlume)) return;
+    if (!_hrgEligible(o) || _hrgGet(o.geometry)) return;
+    try { _hrgBuild(o.geometry); n++; } catch (_) {}
+  });
+  return n;
+}
+if (typeof window !== 'undefined') {
+  window.__hullGridStats = () => ({ builds: _HRG.builds, buildMs: +_HRG.buildMs.toFixed(1), fast: _HRG.fast, fallback: _HRG.fallback, queued: _HRG.queued, pending: _HRG._q.length });
+  window.__hullGridBench = (n, root) => {
+    root = root || (typeof player !== 'undefined' && player && player.mesh);
+    if (!root) return 'no hull';
+    const meshes = [];
+    root.traverse((o) => { if (o && o.isMesh && o.name !== 'shield' && !(o.userData && o.userData.isPlume)) meshes.push(o); });
+    root.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(root), size = box.getSize(new THREE.Vector3()), ctr = box.getCenter(new THREE.Vector3());
+    const rc = new THREE.Raycaster(), o = new THREE.Vector3(), d = new THREE.Vector3(), tmp = [];
+    let agree = 0, disagree = 0, hits = 0, tGrid = 0, tThree = 0;
+    n = n || 400;
+    for (let q = 0; q < n; q++) {
+      o.set(ctr.x + (Math.random() - 0.5) * size.x * 1.2, ctr.y + (Math.random() - 0.5) * size.y * 1.2, ctr.z + (Math.random() - 0.5) * size.z * 1.2);
+      d.set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize();
+      rc.set(o, d); rc.far = (q % 5 === 0) ? 1.5 : 2 + Math.random() * 40;
+      let t0 = performance.now();
+      const g = _hrgHitAny(meshes, rc);
+      tGrid += performance.now() - t0;
+      t0 = performance.now();
+      tmp.length = 0; const th = rc.intersectObjects(meshes, false, tmp).length > 0;
+      tThree += performance.now() - t0;
+      if (g === th) agree++; else disagree++;
+      if (th) hits++;
+    }
+    return { rays: n, agree, disagree, threeHits: hits, gridMsPerRay: +(tGrid / n).toFixed(3), threeMsPerRay: +(tThree / n).toFixed(3), stats: window.__hullGridStats() };
+  };
+}
+
 const _hitRayRaycaster = new THREE.Raycaster();
 const _hitRayOrigin    = new THREE.Vector3();
 const _hitRayDir       = new THREE.Vector3();
@@ -42670,15 +43024,13 @@ function _swepRayHitsShipMesh(currentPos, velocity, shipMesh) {
     _hitRayDir.set(0, 0, 1);
     _hitRayRaycaster.set(_hitRayOrigin, _hitRayDir);
     _hitRayRaycaster.far = 1.5;
-    const hits = _hitRayRaycaster.intersectObjects(hullMeshes, false);
-    return hits.length > 0;
+    return _hrgHitAny(hullMeshes, _hitRayRaycaster);   // (v48.41) the hull ray grid - see _HRG
   }
   _hitRayOrigin.set(currentPos.x - sx, currentPos.y - sy, currentPos.z - sz);
   _hitRayDir.set(sx / sweptLen, sy / sweptLen, sz / sweptLen);
   _hitRayRaycaster.set(_hitRayOrigin, _hitRayDir);
   _hitRayRaycaster.far = sweptLen + 1.0;
-  const hits = _hitRayRaycaster.intersectObjects(hullMeshes, false);
-  return hits.length > 0;
+  return _hrgHitAny(hullMeshes, _hitRayRaycaster);   // (v48.41) the hull ray grid - see _HRG
 }
 
 const _SHARED_PROJ_CORE_GEO = new THREE.SphereGeometry(2.2, 8, 6);
@@ -42719,7 +43071,7 @@ class Projectile {
     this.mesh = new THREE.Mesh(_SHARED_PROJ_CORE_GEO, mat);
     this.mesh.position.copy(origin);
     this.mesh.renderOrder = 1; 
-    this.mesh.castShadow = true;
+    this.mesh.castShadow = false;
     scene.add(this.mesh);
 
     this.trailColor = color || 0xffaa00;
@@ -42787,6 +43139,14 @@ class Projectile {
     this._baseOpacityRibbon = 0.85; 
 
     this.trailRibbonBaseWidth = 5.5;
+    this.trailRibbon = null;
+    this.trailRibbonPositions = null;
+
+    this.electricArcTimer = 0.05 + Math.random() * 0.10;
+  }
+
+  _buildTrailRibbon() {
+    const trailSegs = this.trailSegs;
     this.trailRibbonPositions = new Float32Array(trailSegs * 2 * 3);
     const ribbonColors = new Float32Array(trailSegs * 2 * 3);
     const ribbonHeadCol = new THREE.Color(this.trailColor);
@@ -42809,7 +43169,7 @@ class Projectile {
       const b = i * 2 + 1;      
       const c = (i + 1) * 2;    
       const d = (i + 1) * 2 + 1;
-      
+    
       ribbonIndices[i * 6]     = a;
       ribbonIndices[i * 6 + 1] = b;
       ribbonIndices[i * 6 + 2] = c;
@@ -42833,8 +43193,6 @@ class Projectile {
     this.trailRibbon.frustumCulled = false; 
     this.trailRibbon.renderOrder = 1;
     scene.add(this.trailRibbon);
-
-    this.electricArcTimer = 0.05 + Math.random() * 0.10;
   }
 
   update(dt) {
@@ -42855,23 +43213,12 @@ class Projectile {
       this.destroy(true); return;
     }
 
-    if (this.smokeTrail && this.trailRibbon) {
-      if (this.trailRibbon.parent) scene.remove(this.trailRibbon);
-      if (this.trailRibbon.geometry) this.trailRibbon.geometry.dispose();
-      if (this.trailRibbon.material) this.trailRibbon.material.dispose();
-      this.trailRibbon = null;
-      this.trailRibbonPositions = null;
-    }
-    if (this.smokeCone) {
-      if (this.smokeCone.parent) scene.remove(this.smokeCone);
-      _releaseSmokeConeMaterial(this.smokeCone.material);
-      this.smokeCone = null;
-    }
+    if (!this.trailRibbon && !this.smokeTrail) this._buildTrailRibbon();
 
     if (this.salvoGuided && this.mesh) {
       if (this.mesh.parent) scene.remove(this.mesh);
-      if (this.mesh.geometry) this.mesh.geometry.dispose();
-      if (this.mesh.material) this.mesh.material.dispose();
+      if (this.mesh.geometry && this.mesh.geometry !== _SHARED_PROJ_CORE_GEO) this.mesh.geometry.dispose();
+      if (this.mesh.material) _lssRetainMat(this.mesh.material);
       this.mesh = null;
     }
 
@@ -43625,7 +43972,7 @@ class Projectile {
   removeHaze() {
     if (this.hazeMesh) {
       if (this.hazeMesh.parent) scene.remove(this.hazeMesh);
-      if (this.hazeMesh.geometry) this.hazeMesh.geometry.dispose();
+      if (this.hazeMesh.geometry && this.hazeMesh.geometry !== _SHARED_PROJ_HAZE_GEO) this.hazeMesh.geometry.dispose();
       if (this.hazeMesh.material) this.hazeMesh.material.dispose();
       this.hazeMesh = null;
     }
@@ -43652,8 +43999,8 @@ class Projectile {
     }
     if (this.smokeCone && this.smokeCone.parent) {
       scene.remove(this.smokeCone);
-      if (this.smokeCone.material && this.smokeCone.material.dispose) {
-        try { _lssRetainMat(this.smokeCone.material); } catch (_) {}
+      if (this.smokeCone.material) {
+        try { _releaseSmokeConeMaterial(this.smokeCone.material); } catch (_) {}
       }
       this.smokeCone = null;
     }
@@ -43696,30 +44043,30 @@ function _despawnProjectileSilent(p) {
   try {
     if (p.mesh && p.mesh.parent) {
       scene.remove(p.mesh);
-      if (p.mesh.material && p.mesh.material.dispose) p.mesh.material.dispose();
+      if (p.mesh.material) _lssRetainMat(p.mesh.material);
     }
     if (p.trail && p.trail.parent) {
       scene.remove(p.trail);
       if (p.trail.geometry) p.trail.geometry.dispose();
-      if (p.trail.material) p.trail.material.dispose();
+      if (p.trail.material) _lssRetainMat(p.trail.material);
     }
     if (p.glowMesh && p.glowMesh.parent) {
       scene.remove(p.glowMesh);
-      if (p.glowMesh.material && p.glowMesh.material.dispose) p.glowMesh.material.dispose();
+      if (p.glowMesh.material) _lssRetainMat(p.glowMesh.material);
     }
     if (p.hazeMesh && p.hazeMesh.parent) {
       scene.remove(p.hazeMesh);
-      if (p.hazeMesh.material && p.hazeMesh.material.dispose) p.hazeMesh.material.dispose();
+      if (p.hazeMesh.material) _lssRetainMat(p.hazeMesh.material);
     }
     if (p.smokeCone && p.smokeCone.parent) {
       scene.remove(p.smokeCone);
-      if (p.smokeCone.material && p.smokeCone.material.dispose) { try { p.smokeCone.material.dispose(); } catch (_) {} }
+      if (p.smokeCone.material) { try { _releaseSmokeConeMaterial(p.smokeCone.material); } catch (_) {} }
       p.smokeCone = null;
     }
     if (p.trailRibbon && p.trailRibbon.parent) {
       scene.remove(p.trailRibbon);
       if (p.trailRibbon.geometry) p.trailRibbon.geometry.dispose();
-      if (p.trailRibbon.material) p.trailRibbon.material.dispose();
+      if (p.trailRibbon.material) _lssRetainMat(p.trailRibbon.material);
     }
   } catch (_) {}
 }
@@ -50443,7 +50790,16 @@ function _wildProto(key) {
           sy = sz.y || maxDim;
           ctr = b.getCenter(new THREE.Vector3());
         } catch (_) {}
-        resolve({ scene: gltf.scene, clips: gltf.animations || [], maxDim: maxDim, ctr: ctr, sy: sy });
+        try {
+          gltf.scene.traverse((n) => {
+            if (!n.isSkinnedMesh) return;
+            n.computeBoundingSphere();
+            if (n.boundingSphere) n.boundingSphere.radius *= 1.35;
+          });
+        } catch (_) {}
+        let clip0 = null;
+        try { if (gltf.animations && gltf.animations.length && typeof _monStripRootMotion === 'function') clip0 = _monStripRootMotion(gltf.animations[0]); } catch (_) {}
+        resolve({ scene: gltf.scene, clips: gltf.animations || [], clip0: clip0, maxDim: maxDim, ctr: ctr, sy: sy });
       },
       undefined,
       (err) => { console.warn('[wild] load failed:', key, err && err.message); resolve(null); });
@@ -50552,7 +50908,7 @@ class WildLeviathan {
       try {
         if (proto.clips && proto.clips.length && THREE.AnimationMixer) {
           this._mixer = new THREE.AnimationMixer(obj);
-          const clip = (typeof _monStripRootMotion === 'function') ? _monStripRootMotion(proto.clips[0]) : proto.clips[0];
+          const clip = proto.clip0 || ((typeof _monStripRootMotion === 'function') ? _monStripRootMotion(proto.clips[0]) : proto.clips[0]);
           const act = this._mixer.clipAction(clip);
           act.setLoop(THREE.LoopRepeat, Infinity);
           this._animJit = 0.85 + Math.random() * 0.3;
@@ -53935,6 +54291,12 @@ function _buildModelWarmGroup() {
     }
   } catch (_) {}
   try {
+    if (typeof _addBasicRim === 'function') {
+      add(mkSkinned(_addBasicRim(new THREE.MeshBasicMaterial({ map: tex, color: 0xffffff }), 0x8ad8ff, 0.35)));
+      add(mkSkinned(_addBasicRim(new THREE.MeshBasicMaterial({ color: 0x888888 }), 0x8ad8ff, 0.35)));
+    }
+  } catch (_) {}
+  try {
     if (!potato && typeof _addGutsShader === 'function') {
       const gm = _addGutsShader(new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 1.0 }), 0xb22436, 0x7a1020);
       add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), gm));
@@ -54642,6 +55004,15 @@ async function _prebakeWorldForLaunch() {
     rep.ms.fx = Math.round(_pbNow() - _tC);
     await _warmupYield();
 
+    let _wildP = null;
+    try {
+      const _wildOn = (typeof _WILD !== 'undefined' && _WILD && _WILD.on !== false) &&
+                      game.selectedMap === 'hub_overworld' && !game._cavern &&
+                      !(typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato());
+      if (_wildOn && typeof _wildProto === 'function' && typeof MONSTER_DEFS !== 'undefined') {
+        _wildP = Promise.all(MONSTER_DEFS.map((d) => _wildProto(d.key).catch(() => null)));
+      }
+    } catch (_) { _wildP = null; }
     const _tE = _pbNow();
     _pbSub('priming ships');
     try { rep.ent = await _primeEntityModels(_entPrimePlan(), _bt0, _ENT_PRIME_MAX_MS); } catch (_) {}
@@ -54673,6 +55044,23 @@ async function _prebakeWorldForLaunch() {
           _cl.traverse((o) => { if (o.isMesh) { o.frustumCulled = false; o.castShadow = true; } });
           _carWarmGroup.add(_cl);
         }
+        try {
+          if (_wildP) {
+            _pbSub('waking the wild leviathans');
+            const _protos = await Promise.race([_wildP, new Promise((r) => setTimeout(() => r(null), 6000))]);
+            let _wi = 0;
+            for (const _pr of (_protos || [])) {
+              if (!_pr || !_pr.scene) continue;
+              const _wc = _wildRigClone(_pr.scene);
+              if (!_wc) continue;
+              _wc.position.set(-400 - (_wi++) * 60, 0, 0);
+              _wc.traverse((o) => { if (o.isMesh) o.frustumCulled = false; });
+              _wc.userData._wildWarm = true;
+              _carWarmGroup.add(_wc);
+            }
+            rep.wild = _wi;
+          }
+        } catch (e) { try { console.warn('[prebake] wild prime failed:', e && e.message); } catch (_) {} }
         try {
           const _keys = (typeof shipModelCache !== 'undefined' && shipModelCache.loaded) ? Object.keys(shipModelCache.loaded) : [];
           if (typeof createShipMesh === 'function' && typeof LOADOUTS !== 'undefined' && typeof CHASSIS !== 'undefined') {
@@ -54718,13 +55106,31 @@ async function _prebakeWorldForLaunch() {
     } catch (e) { console.warn('[prebake] carrier prime failed:', e && e.message); }
     rep.ms.carrier = Math.round(_pbNow() - _tK);
 
+    try {
+      const _tG = _pbNow();
+      let _gn = 0;
+      if (typeof shipModelCache !== 'undefined' && shipModelCache && shipModelCache.loaded) {
+        for (const _k of Object.keys(shipModelCache.loaded)) { const _pr = shipModelCache.loaded[_k]; if (_pr && _pr.isObject3D) _gn += _hrgPrebuildRoot(_pr); }
+      }
+      if (typeof player !== 'undefined' && player && player.mesh) _gn += _hrgPrebuildRoot(player.mesh);
+      rep.hullGrids = _gn; rep.ms.hullGrid = Math.round(_pbNow() - _tG);
+    } catch (_) {}
+    if (_wildP && rep.wild == null) {
+      try { _pbSub('waking the wild leviathans'); await Promise.race([_wildP, new Promise((r) => setTimeout(r, 6000))]); rep.wild = 'loaded, not drawn'; } catch (_) {}
+    }
+
     const _tD = _pbNow();
     if (_pbNow() - _bt0 < _PREBAKE_MAX_MS) {
       _pbSub('priming the GPU');
       rep.gpuPasses = await _prebakeGpuPrime();
     } else if (!rep.capped) rep.capped = 'gpu-skipped';
     rep.ms.gpu = Math.round(_pbNow() - _tD);
-    try { if (_carWarmGroup) { scene.remove(_carWarmGroup); _carWarmGroup = null; } } catch (_) {}
+    try {
+      if (_carWarmGroup) {
+        _carWarmGroup.traverse((o) => { if (o.isSkinnedMesh && o.skeleton) { let w = false; for (let p = o; p; p = p.parent) if (p.userData && p.userData._wildWarm) { w = true; break; } if (w) { try { o.skeleton.dispose(); } catch (_) {} } } });
+        scene.remove(_carWarmGroup); _carWarmGroup = null;
+      }
+    } catch (_) {}
 
     let _uiRehearsalP = null;
     try {
@@ -85514,7 +85920,7 @@ function updateEnemyHealthBars() {
       const wallDist = raycastLevel(player.position, toEnt, dist + 50, true, !!ent.isCarrier);
       ent._hbLosBlocked = (wallDist < dist - 30) || _losBlockedByClusters(player.position, toEnt, dist) ||
                           _lblHullOccluded(ent);   // (v48.29) another SHIP in front of it - see _lblHullOccluded
-      ent._hbLosTime = now;
+      ent._hbLosTime = now + (Math.random() - 0.5) * 0.3 * HBAR_LOS_INTERVAL;
       _lblTagAudit(ent);   // (v48.29) at the LOS rate, not per frame: is it wearing its own hull?
     }
     if (!_lblSoftGate(ent, !ent._hbLosBlocked, now)) { return; }
@@ -86446,6 +86852,14 @@ function _gameLoopBody(timestamp) {
   _xrResetDollyAtFrameStart();
 
   if (_RPL.kc && game.state !== 'roundEnd' && game.state !== 'playing') { try { _rplKcEnd(); } catch (_) {} }
+  if (_RPL.cur && game.state !== 'roundEnd' && game.state !== 'playing') {
+    try {
+      const done = _RPL.cur;
+      if (!done.endT) done.endT = _rplNow();
+      _RPL.last = done; _RPL.cur = null; _RPL.kcAt = 0;
+      setTimeout(() => _rplAutoKeep(done), 300);
+    } catch (_) {}
+  }
   if (_RPL.rec && game.state !== 'roundEnd' && game.state !== 'playing') _RPL.rec = false;
   if (!game.lastTime) game.lastTime = timestamp;
   const _dtRaw = (timestamp - game.lastTime) / 1000;
@@ -94103,11 +94517,30 @@ function _occlusionRaycastAllowed() {
   _occlCount++;
   return true;
 }
+function _audioKRateSet(ps, rate) {
+  for (let i = 0; i < ps.length; i++) {
+    const p = ps[i];
+    try { if (p && ('automationRate' in p) && p.automationRate !== rate) p.automationRate = rate; } catch (_) {}
+  }
+}
+function _audioKRateWant() { return !(typeof window !== 'undefined' && window.__audioKRate === false); }
+function _audioKRatePanner(pan) {
+  if (pan) _audioKRateSet([pan.positionX, pan.positionY, pan.positionZ, pan.orientationX, pan.orientationY, pan.orientationZ],
+                          _audioKRateWant() ? 'k-rate' : 'a-rate');
+  return pan;
+}
+let _alKRate = null, _alKRateL = null;   // the rate last applied, and to WHICH listener (a new context brings a new one)
+function _audioKRateListener(l) {
+  const r = _audioKRateWant() ? 'k-rate' : 'a-rate';
+  if (!l || (_alKRateL === l && _alKRate === r)) return;
+  _alKRate = r; _alKRateL = l;
+  _audioKRateSet([l.positionX, l.positionY, l.positionZ, l.forwardX, l.forwardY, l.forwardZ, l.upX, l.upY, l.upZ], r);
+}
 const _spatialPool = [];
 const _SPATIAL_POOL_MAX = 32;
 function _acquireSpatialTriple(ctx) {
-  if (_spatialPool.length) return _spatialPool.pop();
-  const panner = ctx.createPanner();
+  if (_spatialPool.length) { const t = _spatialPool.pop(); _audioKRatePanner(t.panner); return t; }   // (v48.39)
+  const panner = _audioKRatePanner(ctx.createPanner());   // (v48.39) k-rate - see _audioKRateSet
   panner.channelCount = 1;
   panner.channelCountMode = 'explicit';
   return {
@@ -94146,6 +94579,7 @@ function _audioUpdateListener() {
   _alUp.set(0, 1, 0).applyQuaternion(camera.quaternion);
   const t = audio.ctx.currentTime;
   if (_alMode === 0) _alMode = (l.positionX && l.positionX.setTargetAtTime) ? 1 : 2;
+  if (_alMode === 1) _audioKRateListener(l);   // (v48.39) k-rate - see _audioKRateSet
   try {
     if (_alMode === 1) {
       const TAU = 0.02;
@@ -94192,7 +94626,7 @@ function _flybyEnsureVoice(ctx) {
   bp.Q.value = 0.9;
   const g = ctx.createGain();
   g.gain.value = 0;
-  const pan = ctx.createPanner();
+  const pan = _audioKRatePanner(ctx.createPanner());   // (v48.39) k-rate - see _audioKRateSet
   pan.panningModel = (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) ? 'equalpower' : 'HRTF';
   pan.channelCount = 1;             // point-source panning (see _acquireSpatialTriple)
   pan.channelCountMode = 'explicit';

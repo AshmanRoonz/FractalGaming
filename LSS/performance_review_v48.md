@@ -29,6 +29,19 @@ Implemented and measured in the pane against a byte-exact v48.32 served beside i
 | O2.27 endless corpse sweep | **shipped** | watched live: entities stay at one wave's 6 across waves 2-3 |
 | O2.29 VR label adoption | **shipped** | not yet exercised in XR |
 | O2.23 HUD layer cache | **shipped v48.38** | GPU-process per HUD draw at 1080p/DPR 1.25: full 3.24 -> 1.25, CORE ready 3.41 -> 1.25, combat 2.50 -> 1.46 ms (harness, real span); pixels within Skia's own variance; no in-pane fps change either way |
+| O2.10 smoke cone rebuild + lazy ribbon | **shipped v48.39** (+ 2 shared-sphere disposals found) | 180 live-cone frames -> 11 cone builds (10 s window); 0 core / 0 haze sphere disposals over the session (salvo strip and `removeHaze` freed them per shot) |
+| O2.13 projectile core shadow | **shipped v48.39** | castShadow off |
+| O2.15 callout LOS stagger | **shipped v48.39** | phase-aligned tags disperse to 0-1 tests/frame within a cycle |
+| O2.20 replay keep | **shipped v48.39** | keep now 0.34 s into the picker (its IDB put: 9.3 ms, main thread) instead of mid 3-2-1 |
+| O2.25 k-rate panners + listener | **shipped v48.39** | offline render, 16 HRTF panners: 720 -> 203 ms per 4 s (~18 % -> ~5 % of the audio thread); ILD diff median 0.37 dB |
+| O2.30 post-match picker rebuild | **shipped v48.39** | 3 map clicks: 3 rebuilds (160/111/104 ms frames) -> 0; launch still rebuilds a changed biome |
+| O2.33 arena grid | **shipped v48.39** | 61,206 segments -> 606 lines on desktop, coverage node-checked identical |
+| O1.13 paired shells | **shipped v48.40** | bit-identical (`tools/terrain_pair_check.mjs`); both shells of a chunk 5.05 -> 1.86 ms with O1.14; in-page 5x5 core 72-78 -> 44-48 ms |
+| O1.14 ground colour skip + palette cache | **shipped v48.40** | ground-only render with magenta vs original vertex colours: 0 bytes differ |
+| O1.12 Spire trig tables | **shipped v48.40** | bit-identical (`tools/spire_table_check.mjs` + `arena_port_check.cjs`); in-page Spire mesh 28.6 -> 11.0 s, nav lattice 5.5 -> 2.7 s |
+| O1.15 hub deck noise tables | **shipped v48.40** | byte-identical (`tools/hub_deck_bake_check.mjs`); `[hubcity] built` genMs 412 -> 60-65 |
+| O2.19 wild leviathan arrival | **shipped v48.41** (prebake) | 5 packs arriving: skinned sphere computes in play 11 -> 0, new programs 1 -> 0, LoAFs 100 + 74 ms -> none |
+| O2.17 hull ray grid | **shipped v48.41** | grid vs three on 9,000+ live segments: 100 % agree; 0.004-0.013 vs 0.46-1.96 ms per ray; grids prebuilt (39 in 136 ms) |
 
 ---
 
