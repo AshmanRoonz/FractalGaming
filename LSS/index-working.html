@@ -6860,7 +6860,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "48.37";
+const LSS_BUILD = "48.38";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -108058,6 +108058,13 @@ function pollGamepad() {
 
 const hudCanvas = document.getElementById('circumpunct-hud');
 const hudCtx = hudCanvas.getContext('2d');
+// (v48.38) A lost 2D context comes back BLANK, and so do the HUD layer cache's canvases - drop every cached
+// layer, or SHIELD / HP / CORE would blit empty until one of their values changed. (Outside the HUD lab's
+// extraction span on purpose: the lab has no hudCanvas.)
+try {
+  hudCanvas.addEventListener('contextlost', () => { try { _hlfLayerClear(); } catch (_) {} });
+  hudCanvas.addEventListener('contextrestored', () => { try { _hlfLayerClear(); } catch (_) {} });
+} catch (_) {}
 // Cache last-applied canvas dims so we don't reset (and reallocate the
 // internal bitmap) every frame. Also cache the current font string so
 // repeated `ctx.font = '10px Courier New'` writes skip the parse.
@@ -109983,6 +109990,151 @@ const _HLF_DASH = (function () {
   });
 })();
 
+// ⭐⭐⭐ (v48.38) THE HUD LAYER CACHE. `_hlfDraw` re-rasterised the whole instrument on every HUD draw
+// (30 Hz flat, and mirrored into XR), although most of it is a pure function of values that change only
+// on events. Three runs carried nearly all of the canvas-2D raster cost: SHIELD's glow (three shadowed
+// fills of a 136-degree band, shadowBlur 5.4 / 2.3 / 0.7 vm - ~92 / 39 / 12 px at 1080p and hudScale
+// 1.75), the HP plates (hatch under a clip - cheaper since v48.33's cull, still clipped work) and CORE
+// (a blurred chevron run at READY). Chrome rasterises a 2D canvas in the GPU PROCESS, on the thread that
+// also decodes the game's WebGL - which is why none of it shows in __prof or ?pbseg, and why the review
+// (performance_review_v48.md O2.23) could only measure it in a harness: 3.40 -> 0.99 ms/draw full,
+// 4.41 -> 1.39 at CORE READY (RTX 4070, before the v48.33 hatch cull and glow union took their share).
+//
+// HOW: each run is baked ONCE onto its own transparent canvas at the IDENTICAL device transform (the
+// translate shifted by an integer, so the sub-pixel phase is exact) and composited with one
+// drawImage(cv, X0, Y0) under an identity transform. Everything in the HUD is source-over, which is
+// associative, so that reproduces the pixels up to 8-bit premultiplied rounding: the verifiers measured
+// ~4.5k pixels off by 1/255 and a few antialiased tips by up to 33/255 - the SAME class a no-op flush of
+// the unchanged code flips (10-20/255 on 1-2 pixels, Skia batching variance). Invisible.
+//
+// THE RULES THAT MAKE IT SAFE (each one was found by the review's harness or its verifiers):
+//   - THE KEY IS EVERY INPUT. Values, colours, the ship theme, I.ga, the geometry constants, the live
+//     knobs a run reads (__hudCore, __hudHatchAll), the FULL device transform (so the HUD shake's
+//     fractional counter-shift simply draws live) and the entry canvas state the run READS before it
+//     sets anything (alpha, composite, joins/caps/miter, dash, shadow). NOT the entry stroke/fill style
+//     or line width: every run sets those before use, and _hudSharedTail leaves them varying per frame
+//     (the doomed edge's pulse, the tracker lock rings) - keying on them would miss every draw.
+//   - BAKE ONLY A KEY THAT REPEATS. A key must also have been this run's key on the previous draw,
+//     otherwise the run draws live - a value that changes every draw costs exactly what it costs today.
+//     The review measured always-bake 0.1-0.5 ms/draw WORSE than shipped.
+//   - THE EXIT STATE IS REPLAYED. After a blit the context is left in the state the live draw would
+//     have left (snapshot at the end of the bake) - e.g. _hlfChevronRow's lineJoin 'round', which the
+//     CORE label plate strokes with. Never font / textAlign / textBaseline: hudFont's cache owns those.
+//   - A RUN THAT ANIMATES ON ITS OWN CLOCK DRAWS LIVE (key null): CORE while its ready double-flash
+//     window is open. Everything else animated reaches these runs through a colour that is in the key
+//     (the READY pulse, quantised to 11 values, and the doomed hull flash).
+//   - GLOW MARGINS: >= 1.5 x shadowBlur. 9vm + 4 for SHIELD (4vm clipped its faint tail into a ~3/255
+//     seam in the harness), 2vm + 4 for HP (whose box must also reach the SHIELD row: the overshield
+//     overlay is in the HP run but draws at the SHIELD radius), 4vm + 4 for CORE.
+//   - CONTEXT LOSS clears everything (the layer canvases' own contextlost/contextrestored, the HUD
+//     canvas's, see beside `const hudCanvas`), or a lost layer would blit blank until a value changed.
+//   - It lives inside the `const _HL`..`_hlDrawHUD` span, with its state on the function object, so the
+//     HUD lab (which evaluates that span verbatim) runs it too, and no top-level const can be read early.
+//   - It is NOT extended to the plates, NRG/AMMO, icons or pips: measured <= 0.36 ms together, and the
+//     plates would drag in the Orbitron font-load and text-alpha traps and the CORE pulse.
+// Knob: window.__hudLayerCache = false draws everything live again (A/B). window.__hudLayerStats() reads
+// hits / bakes / live draws and the layers held.
+function _hlfLayerOn() {
+  return !(typeof window !== 'undefined' && window.__hudLayerCache === false);
+}
+function _hlfLayerState() {
+  const S = _hlfLayer.S || (_hlfLayer.S = {
+    gen: 0, groups: new Map(), last: new Map(), hit: 0, bake: 0, live: 0, px: 0,
+    // read-before-set entry state (keyed) ...
+    IN: ['globalAlpha', 'globalCompositeOperation', 'lineJoin', 'lineCap', 'miterLimit', 'lineDashOffset',
+         'shadowBlur', 'shadowColor', 'shadowOffsetX', 'shadowOffsetY', 'imageSmoothingEnabled'],
+    // ... and everything a run can leave behind (replayed after a blit)
+    OUT: ['globalAlpha', 'globalCompositeOperation', 'strokeStyle', 'fillStyle', 'lineWidth', 'lineJoin',
+          'lineCap', 'miterLimit', 'lineDashOffset', 'shadowBlur', 'shadowColor', 'shadowOffsetX',
+          'shadowOffsetY', 'imageSmoothingEnabled'],
+  });
+  return S;
+}
+function _hlfLayerClear() {
+  const S = _hlfLayerState();
+  S.gen++; S.groups.clear(); S.last.clear();
+}
+function _hlfLayerCanvas() {
+  const cv = document.createElement('canvas');
+  // A layer canvas can lose its context too (it is GPU-backed); a lost one would blit blank.
+  try {
+    cv.addEventListener('contextlost', _hlfLayerClear);
+    cv.addEventListener('contextrestored', _hlfLayerClear);
+  } catch (_) {}
+  return cv;
+}
+function _hlfLayer(ctx, name, key, bb, maxEnt, draw) {
+  const S = _hlfLayerState();
+  if (key == null || !bb || !_hlfLayerOn()) { S.live++; draw(ctx, false); return; }
+  let T = null;
+  try { T = ctx.getTransform(); } catch (_) {}
+  if (!T || T.b !== 0 || T.c !== 0 || !(T.a > 0) || !(T.d > 0)) { S.live++; draw(ctx, false); return; }
+  const cw = ctx.canvas.width, chh = ctx.canvas.height;
+  const X0 = Math.max(0, Math.floor(T.a * bb[0] + T.e)), Y0 = Math.max(0, Math.floor(T.d * bb[1] + T.f));
+  const X1 = Math.min(cw, Math.ceil(T.a * bb[2] + T.e)), Y1 = Math.min(chh, Math.ceil(T.d * bb[3] + T.f));
+  if (X1 <= X0 || Y1 <= Y0) { S.live++; draw(ctx, false); return; }
+  let sig = '';
+  for (let i = 0; i < S.IN.length; i++) sig += ctx[S.IN[i]] + ';';
+  const dash = (typeof ctx.getLineDash === 'function') ? ctx.getLineDash().join(',') : '';
+  const full = S.gen + '#' + key + '|' + T.a + ',' + T.d + ',' + T.e + ',' + T.f + '|' +
+               X0 + ',' + Y0 + ',' + X1 + ',' + Y1 + '|' + sig + dash;
+  let G = S.groups.get(name);
+  if (!G) { G = new Map(); S.groups.set(name, G); }
+  let e = G.get(full);
+  if (e) {
+    G.delete(full); G.set(full, e);   // LRU touch
+    S.hit++;
+  } else {
+    if (S.last.get(name) !== full) { S.last.set(name, full); S.live++; draw(ctx, false); return; }
+    const w = X1 - X0, h = Y1 - Y0;
+    let lc = null;
+    if (G.size >= Math.max(1, maxEnt | 0)) { const k0 = G.keys().next().value; lc = G.get(k0).cv; G.delete(k0); }
+    if (!lc) lc = _hlfLayerCanvas();
+    if (lc.width !== w || lc.height !== h) { lc.width = w; lc.height = h; }
+    const g = lc.getContext('2d');
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.clearRect(0, 0, w, h);
+    g.save();
+    for (let i = 0; i < S.IN.length; i++) g[S.IN[i]] = ctx[S.IN[i]];
+    if (typeof g.setLineDash === 'function') g.setLineDash(dash ? dash.split(',').map(Number) : []);
+    g.setTransform(T.a, 0, 0, T.d, T.e - X0, T.f - Y0);
+    draw(g, true);
+    const end = {};
+    for (let i = 0; i < S.OUT.length; i++) end[S.OUT[i]] = g[S.OUT[i]];
+    end.dash = (typeof g.getLineDash === 'function') ? g.getLineDash().slice() : [];
+    g.restore();
+    e = { cv: lc, x: X0, y: Y0, end: end };
+    G.set(full, e);
+    S.bake++;
+  }
+  S.last.set(name, full);
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+  ctx.shadowBlur = 0; ctx.shadowColor = 'rgba(0,0,0,0)'; ctx.shadowOffsetX = 0; ctx.shadowOffsetY = 0;
+  ctx.drawImage(e.cv, e.x, e.y);
+  ctx.restore();
+  // leave the context exactly as the live draws would have
+  const end = e.end;
+  for (let i = 0; i < S.OUT.length; i++) ctx[S.OUT[i]] = end[S.OUT[i]];
+  if (typeof ctx.setLineDash === 'function') ctx.setLineDash(end.dash);
+  S.px += e.cv.width * e.cv.height;
+}
+// (annulus-sector bounding box + margin, CSS px, degrees in canvas convention - _hlfSectorBox's maths,
+// but returning a fresh array: the layer keeps no reference to it, and three are built per draw.)
+function _hlfLayerBox(cx, cy, rIn, rOut, a0, a1, m) {
+  const o = _hlfSectorBox(cx, cy, rIn, rOut, a0, a1);
+  return [o[0] - m, o[1] - m, o[2] + m, o[3] + m];
+}
+if (typeof window !== 'undefined') {
+  window.__hudLayerStats = () => {
+    const S = _hlfLayerState();
+    const held = {}; let mb = 0;
+    for (const [k, G] of S.groups) { held[k] = G.size; for (const e of G.values()) mb += e.cv.width * e.cv.height * 4 / 1048576; }
+    return { on: _hlfLayerOn(), hit: S.hit, bake: S.bake, live: S.live, held, MB: +mb.toFixed(2), gen: S.gen };
+  };
+}
+
 // ── THE ASSEMBLY ────────────────────────────────────────────────────────────
 function _hlfDraw(ctx, W, H, v) {
   const TOP = _HLF.TOP, SH = _HLF.SH, HP = _HLF.HP, AB = _HLF.AB, FR = _HLF.FR;
@@ -109999,27 +110151,41 @@ function _hlfDraw(ctx, W, H, v) {
   ctx.save();
   ctx.globalAlpha = I.ga;
 
+  // (v48.38) THE LAYER CACHE'S SHARED KEY - everything all three cached runs depend on besides their own
+  // values: viewport, vmin (hudScale / XR), centre, the HUD alpha, and the geometry constants (the HUD
+  // lab can edit _HLF live; in the game they never move, and a few numbers are cheaper than a stale
+  // layer). See _hlfLayer for the rest of the contract.
+  const _lk = W + 'x' + H + '|' + vm + '|' + I.cx + ',' + I.cy + '|' + I.ga + '|' + TOP.a0 + ',' + TOP.a1 +
+              '|' + SH.rIn + ',' + SH.rOut + '|' + HP.rIn + ',' + HP.rOut + '|' + AB.rIn + ',' + AB.rOut +
+              '|' + FR.rIn + ',' + FR.rOut;
+  // ...and the run's own context: the live one, or a layer being baked at the same device transform.
+  const _J = (c, baked) => (baked ? Object.assign({}, I, { ctx: c }) : I);
+
   // THE OUTER BORDER — one frame around HP and SHIELD together, shield colour
   // at its outer edge fading to hull colour at its inner edge. ONE radial
   // gradient does that; two strokes read as two rings.
-  const g = ctx.createRadialGradient(I.cx, I.cy, FR.rIn * vm, I.cx, I.cy, (FR.rOut + 0.6) * vm);
-  g.addColorStop(0, hpCol);
-  g.addColorStop(0.42, hpCol);
-  g.addColorStop(0.58, shCol);
-  g.addColorStop(1, shCol);
-  _hlfBorderPath(ctx, I.cx, I.cy, FR.rIn * vm, FR.rOut * vm, TOP.a0 - 2, TOP.a1 + 2,
-                 4, 0.62 * vm, 3.6, 2.0);
-  ctx.strokeStyle = g;
-  ctx.lineWidth = Math.max(1.2, vm * 0.20);
-  ctx.stroke();
-
   // SHIELD — one continuous solid band with a glow.
-  _hlfBarRow(I, SH.rIn, SH.rOut, TOP.a0, TOP.a1, 1, 0, v.shieldPct, shCol,
-             null, { solid: true, glow: 1 });
-  // HP — chassis plates at uneven widths, square ends, tight seam.
-  _hlfBarRow(I, HP.rIn, HP.rOut, TOP.a0, TOP.a1, segs, 1.6, v.healthPct, hpCol,
-             _hlfUneven(segs), { bevel: 0 });
+  // (v48.38) CACHED RUN 'frame': border + SHIELD. Its three glow fills are the single biggest raster cost in
+  // the HUD. Margin 9vm + 4 = >1.5x the 5.4vm pass (4vm measurably clipped the tail).
+  _hlfLayer(ctx, 'frame', _lk + '|F|' + hpCol + '|' + shCol + '|' + v.shieldPct,
+    _hlfLayerBox(I.cx, I.cy, Math.min(FR.rIn, HP.rIn) * vm, (FR.rOut + 0.62) * vm, TOP.a0 - 2, TOP.a1 + 2, 9 * vm + 4),
+    2, (c, baked) => {
+      const J = _J(c, baked);
+      const g = c.createRadialGradient(I.cx, I.cy, FR.rIn * vm, I.cx, I.cy, (FR.rOut + 0.6) * vm);
+      g.addColorStop(0, hpCol);
+      g.addColorStop(0.42, hpCol);
+      g.addColorStop(0.58, shCol);
+      g.addColorStop(1, shCol);
+      _hlfBorderPath(c, I.cx, I.cy, FR.rIn * vm, FR.rOut * vm, TOP.a0 - 2, TOP.a1 + 2,
+                     4, 0.62 * vm, 3.6, 2.0);
+      c.strokeStyle = g;
+      c.lineWidth = Math.max(1.2, vm * 0.20);
+      c.stroke();
+      _hlfBarRow(J, SH.rIn, SH.rOut, TOP.a0, TOP.a1, 1, 0, v.shieldPct, shCol,
+                 null, { solid: true, glow: 1 });
+    });
 
+  // HP — chassis plates at uneven widths, square ends, tight seam.
   // The two overlays that would have been lost with `_hlArcBar`, re-pointed at
   // the new geometry. Synthetic parts: same walker (`_hlNanoSpan`), same
   // colours, landing on the rows above instead of the old rings.
@@ -110027,10 +110193,27 @@ function _hlfDraw(ctx, W, H, v) {
     a0: TOP.a0, a1: TOP.a1, seg: seg, gapDeg: gapDeg, rot: 0,
     thick: (rowOut - rowIn) * 0.9,
   });
-  _hlNanoOverlay(ctx, _hlPlace({ a: 'mc', x: 0, y: 0, r: (HP.rIn + HP.rOut) / 2 }, W, H),
-                 _synth(HP.rIn, HP.rOut, segs, 1.6));
-  _hlOverShieldOverlay(ctx, _hlPlace({ a: 'mc', x: 0, y: 0, r: (SH.rIn + SH.rOut) / 2 }, W, H),
-                       _synth(SH.rIn, SH.rOut, 1, 0));
+  // (v48.38) CACHED RUN 'hp': the HP plates + the nano-overheal and overshield overlays. The overlays read
+  // player.* and the perk bag directly, so those go in the key raw; the hatch's own knob too. ⚠ The box
+  // reaches the SHIELD row: _hlOverShieldOverlay is part of this run but draws at the SHIELD radius.
+  {
+    let _pk = '-';
+    try { const pk = (typeof _perkEffectiveBag === 'function') ? _perkEffectiveBag() : null; if (pk) _pk = pk.regenPerSec + ',' + pk.overhealMult; } catch (_) {}
+    const _hAll = (typeof window !== 'undefined' && window.__hudHatchAll) ? 1 : 0;
+    _hlfLayer(ctx, 'hp', _lk + '|H|' + hpCol + '|' + v.healthPct + '|' + segs + '|' + _hAll + '|' +
+      player.health + ',' + player.maxHealth + ',' + player.overShield + ',' + player.maxShield + ',' +
+      player.shipState + '|' + _pk,
+      _hlfLayerBox(I.cx, I.cy, HP.rIn * vm, (SH.rOut + 0.5) * vm, TOP.a0 - 2, TOP.a1 + 2, 2 * vm + 4),
+      2, (c, baked) => {
+        const J = _J(c, baked);
+        _hlfBarRow(J, HP.rIn, HP.rOut, TOP.a0, TOP.a1, segs, 1.6, v.healthPct, hpCol,
+                   _hlfUneven(segs), { bevel: 0 });
+        _hlNanoOverlay(c, _hlPlace({ a: 'mc', x: 0, y: 0, r: (HP.rIn + HP.rOut) / 2 }, W, H),
+                       _synth(HP.rIn, HP.rOut, segs, 1.6));
+        _hlOverShieldOverlay(c, _hlPlace({ a: 'mc', x: 0, y: 0, r: (SH.rIn + SH.rOut) / 2 }, W, H),
+                             _synth(SH.rIn, SH.rOut, 1, 0));
+      });
+  }
 
   // ── CORE ── (v47.01) one arc'd bar across the whole row the three ability
   // pills used to share. Owner: "it's too hard to see when core is ready ...
@@ -110056,12 +110239,41 @@ function _hlfDraw(ctx, W, H, v) {
   // hatched - the row is too thin for a hatch to be anything but noise, which is
   // what the ability pills found out; chevrons are a SHAPE, not a texture, which
   // is why they survive 0.85vm where the hatch did not.
-  _hlfChevronRow(I, AB.rIn, AB.rOut, TOP.a0, TOP.a1, v.corePct, coreCol,
-                 coreReady ? 1.2 : 0);
-  ctx.globalAlpha = I.ga;
-  _hlReadyFlash(ctx, _abR,
-                { a0: TOP.a0, a1: TOP.a1, seg: 1, rot: 0, thick: (AB.rOut - AB.rIn) * 0.9 },
-                3, v.t, '#fffdb4');   // (v44.39) idx 3 is CORE's ready slot
+  // (v48.38) CACHED RUN 'core': the chevron run + the ready double-flash. The flash runs on its OWN clock
+  // (_hudRF.t0[3]), so while its window is open - the same test _hlReadyFlash applies - the run draws live.
+  // The READY pulse reaches it through coreCol (quantised to 11 values upstream), so it is keyed, and the
+  // LRU holds a full pulse cycle on a desktop (12). Phones and XR hold 4: there the pulse mostly draws live,
+  // which costs exactly what it did - the layers are GPU memory on the devices that have least of it.
+  {
+    let _cFlash = false;
+    try {
+      const F = (typeof window !== 'undefined') ? window.__hudFlash : null;
+      if (!(F && F.on === false) && v.t != null) {
+        const age = v.t - _hudRF.t0[3];
+        const dur = (F && F.dur > 0) ? F.dur : 0.12, gp = (F && F.gap >= 0) ? F.gap : 0.10;
+        _cFlash = age >= 0 && age < dur * 2 + gp;
+      }
+    } catch (_) { _cFlash = true; }
+    let _gu = 1;
+    try { const K = window.__hudCore; if (K && K.glowUnion === 0) _gu = 0; } catch (_) {}
+    let _small = false;
+    try {
+      _small = !!((typeof _fxSmallDevice === 'function' && _fxSmallDevice()) ||
+                  (typeof isXRPresenting === 'function' && isXRPresenting()));
+    } catch (_) {}
+    _hlfLayer(ctx, 'core', _cFlash ? null : (_lk + '|C|' + v.corePct + '|' + coreCol + '|' + coreReady + '|' +
+      _hlfCoreK('pitch') + ',' + _hlfCoreK('thick') + ',' + _hlfCoreK('depth') + '|' + _gu),
+      _hlfLayerBox(I.cx, I.cy, AB.rIn * vm, AB.rOut * vm, TOP.a0, TOP.a1, 4 * vm + 4),
+      _small ? 4 : 12, (c, baked) => {
+        const J = _J(c, baked);
+        _hlfChevronRow(J, AB.rIn, AB.rOut, TOP.a0, TOP.a1, v.corePct, coreCol,
+                       coreReady ? 1.2 : 0);
+        c.globalAlpha = I.ga;
+        _hlReadyFlash(c, _abR,
+                      { a0: TOP.a0, a1: TOP.a1, seg: 1, rot: 0, thick: (AB.rOut - AB.rIn) * 0.9 },
+                      3, v.t, '#fffdb4');   // (v44.39) idx 3 is CORE's ready slot
+      });
+  }
 
   // NRG and AMMO, as flat blades in the tick strips' band. NRG carries the
   // loadout ENERGY meter; a hull without one draws no strip, exactly as the
@@ -121589,6 +121801,7 @@ function buildSettingsPage() {
       input.hudScale = v;
       if (hudScaleVal) hudScaleVal.textContent = v.toFixed(2) + 'x';
       try { _hlArcTextCache.clear(); } catch (_) {}
+      try { _hlfLayerClear(); } catch (_) {}   // (v48.38) every layer is keyed on vmin anyway - this just frees them
     };
     hudScaleSel.addEventListener('input', _applyHudScale);
     hudScaleSel.addEventListener('change', () => { _applyHudScale(); saveSettings(); });

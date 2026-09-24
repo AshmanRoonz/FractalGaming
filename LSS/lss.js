@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "48.37";
+const LSS_BUILD = "48.38";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -69002,6 +69002,10 @@ function pollGamepad() {
 
 const hudCanvas = document.getElementById('circumpunct-hud');
 const hudCtx = hudCanvas.getContext('2d');
+try {
+  hudCanvas.addEventListener('contextlost', () => { try { _hlfLayerClear(); } catch (_) {} });
+  hudCanvas.addEventListener('contextrestored', () => { try { _hlfLayerClear(); } catch (_) {} });
+} catch (_) {}
 let _hudLastW = 0, _hudLastH = 0, _hudLastDPR = 0;
 let _hudFontCache = '';
 const _hudRF = { arr: null, cd: [0, 0, 0], core: false, t0: [-1e9, -1e9, -1e9, -1e9] };
@@ -70237,6 +70241,101 @@ const _HLF_DASH = (function () {
   });
 })();
 
+function _hlfLayerOn() {
+  return !(typeof window !== 'undefined' && window.__hudLayerCache === false);
+}
+function _hlfLayerState() {
+  const S = _hlfLayer.S || (_hlfLayer.S = {
+    gen: 0, groups: new Map(), last: new Map(), hit: 0, bake: 0, live: 0, px: 0,
+    IN: ['globalAlpha', 'globalCompositeOperation', 'lineJoin', 'lineCap', 'miterLimit', 'lineDashOffset',
+         'shadowBlur', 'shadowColor', 'shadowOffsetX', 'shadowOffsetY', 'imageSmoothingEnabled'],
+    OUT: ['globalAlpha', 'globalCompositeOperation', 'strokeStyle', 'fillStyle', 'lineWidth', 'lineJoin',
+          'lineCap', 'miterLimit', 'lineDashOffset', 'shadowBlur', 'shadowColor', 'shadowOffsetX',
+          'shadowOffsetY', 'imageSmoothingEnabled'],
+  });
+  return S;
+}
+function _hlfLayerClear() {
+  const S = _hlfLayerState();
+  S.gen++; S.groups.clear(); S.last.clear();
+}
+function _hlfLayerCanvas() {
+  const cv = document.createElement('canvas');
+  try {
+    cv.addEventListener('contextlost', _hlfLayerClear);
+    cv.addEventListener('contextrestored', _hlfLayerClear);
+  } catch (_) {}
+  return cv;
+}
+function _hlfLayer(ctx, name, key, bb, maxEnt, draw) {
+  const S = _hlfLayerState();
+  if (key == null || !bb || !_hlfLayerOn()) { S.live++; draw(ctx, false); return; }
+  let T = null;
+  try { T = ctx.getTransform(); } catch (_) {}
+  if (!T || T.b !== 0 || T.c !== 0 || !(T.a > 0) || !(T.d > 0)) { S.live++; draw(ctx, false); return; }
+  const cw = ctx.canvas.width, chh = ctx.canvas.height;
+  const X0 = Math.max(0, Math.floor(T.a * bb[0] + T.e)), Y0 = Math.max(0, Math.floor(T.d * bb[1] + T.f));
+  const X1 = Math.min(cw, Math.ceil(T.a * bb[2] + T.e)), Y1 = Math.min(chh, Math.ceil(T.d * bb[3] + T.f));
+  if (X1 <= X0 || Y1 <= Y0) { S.live++; draw(ctx, false); return; }
+  let sig = '';
+  for (let i = 0; i < S.IN.length; i++) sig += ctx[S.IN[i]] + ';';
+  const dash = (typeof ctx.getLineDash === 'function') ? ctx.getLineDash().join(',') : '';
+  const full = S.gen + '#' + key + '|' + T.a + ',' + T.d + ',' + T.e + ',' + T.f + '|' +
+               X0 + ',' + Y0 + ',' + X1 + ',' + Y1 + '|' + sig + dash;
+  let G = S.groups.get(name);
+  if (!G) { G = new Map(); S.groups.set(name, G); }
+  let e = G.get(full);
+  if (e) {
+    G.delete(full); G.set(full, e);   // LRU touch
+    S.hit++;
+  } else {
+    if (S.last.get(name) !== full) { S.last.set(name, full); S.live++; draw(ctx, false); return; }
+    const w = X1 - X0, h = Y1 - Y0;
+    let lc = null;
+    if (G.size >= Math.max(1, maxEnt | 0)) { const k0 = G.keys().next().value; lc = G.get(k0).cv; G.delete(k0); }
+    if (!lc) lc = _hlfLayerCanvas();
+    if (lc.width !== w || lc.height !== h) { lc.width = w; lc.height = h; }
+    const g = lc.getContext('2d');
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.clearRect(0, 0, w, h);
+    g.save();
+    for (let i = 0; i < S.IN.length; i++) g[S.IN[i]] = ctx[S.IN[i]];
+    if (typeof g.setLineDash === 'function') g.setLineDash(dash ? dash.split(',').map(Number) : []);
+    g.setTransform(T.a, 0, 0, T.d, T.e - X0, T.f - Y0);
+    draw(g, true);
+    const end = {};
+    for (let i = 0; i < S.OUT.length; i++) end[S.OUT[i]] = g[S.OUT[i]];
+    end.dash = (typeof g.getLineDash === 'function') ? g.getLineDash().slice() : [];
+    g.restore();
+    e = { cv: lc, x: X0, y: Y0, end: end };
+    G.set(full, e);
+    S.bake++;
+  }
+  S.last.set(name, full);
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+  ctx.shadowBlur = 0; ctx.shadowColor = 'rgba(0,0,0,0)'; ctx.shadowOffsetX = 0; ctx.shadowOffsetY = 0;
+  ctx.drawImage(e.cv, e.x, e.y);
+  ctx.restore();
+  const end = e.end;
+  for (let i = 0; i < S.OUT.length; i++) ctx[S.OUT[i]] = end[S.OUT[i]];
+  if (typeof ctx.setLineDash === 'function') ctx.setLineDash(end.dash);
+  S.px += e.cv.width * e.cv.height;
+}
+function _hlfLayerBox(cx, cy, rIn, rOut, a0, a1, m) {
+  const o = _hlfSectorBox(cx, cy, rIn, rOut, a0, a1);
+  return [o[0] - m, o[1] - m, o[2] + m, o[3] + m];
+}
+if (typeof window !== 'undefined') {
+  window.__hudLayerStats = () => {
+    const S = _hlfLayerState();
+    const held = {}; let mb = 0;
+    for (const [k, G] of S.groups) { held[k] = G.size; for (const e of G.values()) mb += e.cv.width * e.cv.height * 4 / 1048576; }
+    return { on: _hlfLayerOn(), hit: S.hit, bake: S.bake, live: S.live, held, MB: +mb.toFixed(2), gen: S.gen };
+  };
+}
+
 function _hlfDraw(ctx, W, H, v) {
   const TOP = _HLF.TOP, SH = _HLF.SH, HP = _HLF.HP, AB = _HLF.AB, FR = _HLF.FR;
   const base = _hlPlace(_HL.shield, W, H);            // any centred part gives cx/cy/vmin
@@ -70251,30 +70350,51 @@ function _hlfDraw(ctx, W, H, v) {
   ctx.save();
   ctx.globalAlpha = I.ga;
 
-  const g = ctx.createRadialGradient(I.cx, I.cy, FR.rIn * vm, I.cx, I.cy, (FR.rOut + 0.6) * vm);
-  g.addColorStop(0, hpCol);
-  g.addColorStop(0.42, hpCol);
-  g.addColorStop(0.58, shCol);
-  g.addColorStop(1, shCol);
-  _hlfBorderPath(ctx, I.cx, I.cy, FR.rIn * vm, FR.rOut * vm, TOP.a0 - 2, TOP.a1 + 2,
-                 4, 0.62 * vm, 3.6, 2.0);
-  ctx.strokeStyle = g;
-  ctx.lineWidth = Math.max(1.2, vm * 0.20);
-  ctx.stroke();
+  const _lk = W + 'x' + H + '|' + vm + '|' + I.cx + ',' + I.cy + '|' + I.ga + '|' + TOP.a0 + ',' + TOP.a1 +
+              '|' + SH.rIn + ',' + SH.rOut + '|' + HP.rIn + ',' + HP.rOut + '|' + AB.rIn + ',' + AB.rOut +
+              '|' + FR.rIn + ',' + FR.rOut;
+  const _J = (c, baked) => (baked ? Object.assign({}, I, { ctx: c }) : I);
 
-  _hlfBarRow(I, SH.rIn, SH.rOut, TOP.a0, TOP.a1, 1, 0, v.shieldPct, shCol,
-             null, { solid: true, glow: 1 });
-  _hlfBarRow(I, HP.rIn, HP.rOut, TOP.a0, TOP.a1, segs, 1.6, v.healthPct, hpCol,
-             _hlfUneven(segs), { bevel: 0 });
+  _hlfLayer(ctx, 'frame', _lk + '|F|' + hpCol + '|' + shCol + '|' + v.shieldPct,
+    _hlfLayerBox(I.cx, I.cy, Math.min(FR.rIn, HP.rIn) * vm, (FR.rOut + 0.62) * vm, TOP.a0 - 2, TOP.a1 + 2, 9 * vm + 4),
+    2, (c, baked) => {
+      const J = _J(c, baked);
+      const g = c.createRadialGradient(I.cx, I.cy, FR.rIn * vm, I.cx, I.cy, (FR.rOut + 0.6) * vm);
+      g.addColorStop(0, hpCol);
+      g.addColorStop(0.42, hpCol);
+      g.addColorStop(0.58, shCol);
+      g.addColorStop(1, shCol);
+      _hlfBorderPath(c, I.cx, I.cy, FR.rIn * vm, FR.rOut * vm, TOP.a0 - 2, TOP.a1 + 2,
+                     4, 0.62 * vm, 3.6, 2.0);
+      c.strokeStyle = g;
+      c.lineWidth = Math.max(1.2, vm * 0.20);
+      c.stroke();
+      _hlfBarRow(J, SH.rIn, SH.rOut, TOP.a0, TOP.a1, 1, 0, v.shieldPct, shCol,
+                 null, { solid: true, glow: 1 });
+    });
 
   const _synth = (rowIn, rowOut, seg, gapDeg) => ({
     a0: TOP.a0, a1: TOP.a1, seg: seg, gapDeg: gapDeg, rot: 0,
     thick: (rowOut - rowIn) * 0.9,
   });
-  _hlNanoOverlay(ctx, _hlPlace({ a: 'mc', x: 0, y: 0, r: (HP.rIn + HP.rOut) / 2 }, W, H),
-                 _synth(HP.rIn, HP.rOut, segs, 1.6));
-  _hlOverShieldOverlay(ctx, _hlPlace({ a: 'mc', x: 0, y: 0, r: (SH.rIn + SH.rOut) / 2 }, W, H),
-                       _synth(SH.rIn, SH.rOut, 1, 0));
+  {
+    let _pk = '-';
+    try { const pk = (typeof _perkEffectiveBag === 'function') ? _perkEffectiveBag() : null; if (pk) _pk = pk.regenPerSec + ',' + pk.overhealMult; } catch (_) {}
+    const _hAll = (typeof window !== 'undefined' && window.__hudHatchAll) ? 1 : 0;
+    _hlfLayer(ctx, 'hp', _lk + '|H|' + hpCol + '|' + v.healthPct + '|' + segs + '|' + _hAll + '|' +
+      player.health + ',' + player.maxHealth + ',' + player.overShield + ',' + player.maxShield + ',' +
+      player.shipState + '|' + _pk,
+      _hlfLayerBox(I.cx, I.cy, HP.rIn * vm, (SH.rOut + 0.5) * vm, TOP.a0 - 2, TOP.a1 + 2, 2 * vm + 4),
+      2, (c, baked) => {
+        const J = _J(c, baked);
+        _hlfBarRow(J, HP.rIn, HP.rOut, TOP.a0, TOP.a1, segs, 1.6, v.healthPct, hpCol,
+                   _hlfUneven(segs), { bevel: 0 });
+        _hlNanoOverlay(c, _hlPlace({ a: 'mc', x: 0, y: 0, r: (HP.rIn + HP.rOut) / 2 }, W, H),
+                       _synth(HP.rIn, HP.rOut, segs, 1.6));
+        _hlOverShieldOverlay(c, _hlPlace({ a: 'mc', x: 0, y: 0, r: (SH.rIn + SH.rOut) / 2 }, W, H),
+                             _synth(SH.rIn, SH.rOut, 1, 0));
+      });
+  }
 
   const _coreBase = sh.core || _HL.core.col;
   const coreCol = v.coreFiring ? (v.coreCol || _HL.core.col)
@@ -70282,12 +70402,36 @@ function _hlfDraw(ctx, W, H, v) {
                 : _coreBase);
   const coreReady = v.corePct >= 1 || !!v.coreState;
   const _abR = _hlPlace({ a: 'mc', x: 0, y: 0, r: (AB.rIn + AB.rOut) / 2 }, W, H);
-  _hlfChevronRow(I, AB.rIn, AB.rOut, TOP.a0, TOP.a1, v.corePct, coreCol,
-                 coreReady ? 1.2 : 0);
-  ctx.globalAlpha = I.ga;
-  _hlReadyFlash(ctx, _abR,
-                { a0: TOP.a0, a1: TOP.a1, seg: 1, rot: 0, thick: (AB.rOut - AB.rIn) * 0.9 },
-                3, v.t, '#fffdb4');   // (v44.39) idx 3 is CORE's ready slot
+  {
+    let _cFlash = false;
+    try {
+      const F = (typeof window !== 'undefined') ? window.__hudFlash : null;
+      if (!(F && F.on === false) && v.t != null) {
+        const age = v.t - _hudRF.t0[3];
+        const dur = (F && F.dur > 0) ? F.dur : 0.12, gp = (F && F.gap >= 0) ? F.gap : 0.10;
+        _cFlash = age >= 0 && age < dur * 2 + gp;
+      }
+    } catch (_) { _cFlash = true; }
+    let _gu = 1;
+    try { const K = window.__hudCore; if (K && K.glowUnion === 0) _gu = 0; } catch (_) {}
+    let _small = false;
+    try {
+      _small = !!((typeof _fxSmallDevice === 'function' && _fxSmallDevice()) ||
+                  (typeof isXRPresenting === 'function' && isXRPresenting()));
+    } catch (_) {}
+    _hlfLayer(ctx, 'core', _cFlash ? null : (_lk + '|C|' + v.corePct + '|' + coreCol + '|' + coreReady + '|' +
+      _hlfCoreK('pitch') + ',' + _hlfCoreK('thick') + ',' + _hlfCoreK('depth') + '|' + _gu),
+      _hlfLayerBox(I.cx, I.cy, AB.rIn * vm, AB.rOut * vm, TOP.a0, TOP.a1, 4 * vm + 4),
+      _small ? 4 : 12, (c, baked) => {
+        const J = _J(c, baked);
+        _hlfChevronRow(J, AB.rIn, AB.rOut, TOP.a0, TOP.a1, v.corePct, coreCol,
+                       coreReady ? 1.2 : 0);
+        c.globalAlpha = I.ga;
+        _hlReadyFlash(c, _abR,
+                      { a0: TOP.a0, a1: TOP.a1, seg: 1, rot: 0, thick: (AB.rOut - AB.rIn) * 0.9 },
+                      3, v.t, '#fffdb4');   // (v44.39) idx 3 is CORE's ready slot
+      });
+  }
 
   const nrgCol = v.nrgWarn ? v.energyCol : (sh.speed || _HL.speed.col);
   if (v.energyPct != null) {
@@ -78070,6 +78214,7 @@ function buildSettingsPage() {
       input.hudScale = v;
       if (hudScaleVal) hudScaleVal.textContent = v.toFixed(2) + 'x';
       try { _hlArcTextCache.clear(); } catch (_) {}
+      try { _hlfLayerClear(); } catch (_) {}   // (v48.38) every layer is keyed on vmin anyway - this just frees them
     };
     hudScaleSel.addEventListener('input', _applyHudScale);
     hudScaleSel.addEventListener('change', () => { _applyHudScale(); saveSettings(); });

@@ -28,7 +28,7 @@ Implemented and measured in the pane against a byte-exact v48.32 served beside i
 | O2.22 CORE glow union | **shipped, owner to judge** | 2.45 -> 0.92 ms/redraw (harness); not pixel-identical - `__hudCore = {glowUnion: 0}` reverts live |
 | O2.27 endless corpse sweep | **shipped** | watched live: entities stay at one wave's 6 across waves 2-3 |
 | O2.29 VR label adoption | **shipped** | not yet exercised in XR |
-| O2.23 HUD layer cache | open | needs its own session in the HUD lab |
+| O2.23 HUD layer cache | **shipped v48.38** | GPU-process per HUD draw at 1080p/DPR 1.25: full 3.24 -> 1.25, CORE ready 3.41 -> 1.25, combat 2.50 -> 1.46 ms (harness, real span); pixels within Skia's own variance; no in-pane fps change either way |
 
 ---
 
