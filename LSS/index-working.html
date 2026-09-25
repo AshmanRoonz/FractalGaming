@@ -2133,12 +2133,12 @@ body:has(#ship-select.active) #lss-version-badge { display: none !important; }
    the animations kept ticking style work every step. Paused while the container is not showing. ⚠ PAUSED, never
    `animation: none` or display:none (v40.94: the element's compositor layer must stay alive; the transform is
    owned by these two animations). Resuming mid-loop is invisible: both are endless loops with no start.
-   #ov-banner / #ov-killstreak keep `.show` after their one-shot animation ends (replay() only re-adds it), so
-   they go idle on that animation's own animationend (`lt-idle`, set in _lssTagIdleWire, cleared by replay()). */
+   (v48.50) #ov-banner / #ov-killstreak lose `.show` when their one-shot animation ends (_ovOneShot), so
+   `:not(.show)` covers them between callouts - the v48.46 `lt-idle` class that stood in for that is gone. */
 #ship-select-countdown:not(.active) .lss-tag,
 #ss-mode-label:not(.on) .lss-tag,
-#ov-banner:not(.show) .lss-tag, #ov-banner.lt-idle .lss-tag,
-#ov-killstreak:not(.show) .lss-tag, #ov-killstreak.lt-idle .lss-tag { animation-play-state: paused; }
+#ov-banner:not(.show) .lss-tag,
+#ov-killstreak:not(.show) .lss-tag { animation-play-state: paused; }
 /* the same chromatic text, for lines that sit where a bracket has no room (pinned centre lines) */
 .lss-chroma {
   font-family: 'Orbitron', 'Courier New', monospace;
@@ -6871,7 +6871,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "48.49";
+const LSS_BUILD = "48.58";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -51443,6 +51443,12 @@ function _carrierSpawn(opts) {
     _carrierClear(true);
     _carrierAttach(_carrier.proto.clone(true), keep);
     _carrier.t = t;   // keep its place on the route across the swap
+    // (v48.55) _carrierAttach lays the route at the city centre again; a round that already has its field
+    // would otherwise fly the new hull to the wrong place for good (`_aimedAtField` stays true).
+    try {
+      const _C = game._cyber, _F = _C && _C.field;
+      if (_F && _F.position && _C._aimedAtField) _carrierAimAt(_F.position);
+    } catch (_) {}
   });
   return _carrier.ent;
 }
@@ -51478,6 +51484,20 @@ function _carrierEngineStart() {
     pan.refDistance = 900;      // a capital ship carries a long way
     pan.maxDistance = 26000;
     pan.rolloffFactor = 0.85;
+    // ⭐ (v48.55) START WHERE THE HULL IS. Owner: "A pop in sound when starting the round on fight, on either
+    // team". The panner was created without a position - (0,0,0), the world origin, 6-37 km from any
+    // carrier - and the only thing that moves it, _carrierEngineTick, ran below _carrierFrame's hold-station
+    // returns. So the whole build, lineup and 3-2-1 played this 1.8-gain sub-bass drone from the origin,
+    // almost silent, and on FIGHT's first frame it stepped onto the hull in one render quantum: a +17..30 dB
+    // jump for an attacker standing on the deck (the pop), a smaller step + a swing of direction for a
+    // defender. Placed at creation here, and ticked through the holds (see _carrierFrame).
+    try {
+      if (_carrier.obj) {
+        const _p0 = _carrier.obj.position;
+        if (pan.positionX) { pan.positionX.value = _p0.x; pan.positionY.value = _p0.y; pan.positionZ.value = _p0.z; }
+        else if (pan.setPosition) pan.setPosition(_p0.x, _p0.y, _p0.z);
+      }
+    } catch (_) {}
     src.connect(lp); lp.connect(g); g.connect(pan);
     pan.connect(audio.sfxBus || audio.masterGain || ctx.destination);
     src.start(now, Math.random() * buf.duration * 0.9);
@@ -51532,6 +51552,7 @@ function _carrierClear(keepSound) {
     if (i >= 0) game.entities.splice(i, 1);
   }
   _carrier.obj = null; _carrier.ent = null;
+  _carrier.fieldFloor = null;   // (v48.58)
   // NB: _carrier.team is deliberately KEPT - the model swap clears and re-attaches
   _carrier.spawns.length = 0; _carrier.guns.length = 0; _carrier.thrusters.length = 0;
 }
@@ -51626,7 +51647,9 @@ function _carrierRide(dt, snap) {
   // (v38.01) It rides AT the clearance rather than ratcheting up to the highest thing it ever
   // crossed - climb hard over a tower, then settle back down over the far side, so it arrives
   // hovering above the objective instead of parked at the altitude of the tallest spire on route.
-  const want = gy + _cl;
+  let want = gy + _cl;
+  // (v48.58) never settle onto the Cyberpunk objective - see the floor in _cyberFrame
+  if (typeof _carrier.fieldFloor === 'number' && want < _carrier.fieldFloor) want = _carrier.fieldFloor;
   const cur = (_carrier.rideY == null) ? o.position.y : _carrier.rideY;
   // (v39.55) gentler, and capped at window.__carrier.vMax units a second (180): with the forward
   // corridor above the climb starts long before the tower, so it no longer needs to be a lunge.
@@ -51639,10 +51662,19 @@ function _carrierRide(dt, snap) {
 }
 // (v38.01) Point the hull down its route. Its NOSE is -X, the same canonical axis the ship GLBs
 // use; see the note at the attach site.
+const _cfrY = new THREE.Vector3(0, 1, 0);
 function _carrierFaceRoute() {
   const o = _carrier.obj;
   if (!o || !_carrier.dir) return;
-  o.quaternion.setFromUnitVectors(new THREE.Vector3(-1, 0, 0), _carrier.dir);
+  // ⭐ (v48.55) YAW ONLY. `setFromUnitVectors(-X, dir)` takes the SHORTEST ARC from the nose to the route
+  // direction, and when a route runs nearly +X (the nose turned almost all the way round) with any pitch in
+  // it - the portal-to-city route carries a small dir.y - that arc is a ~178 deg rotation about Z: the hull
+  // came out ROLLED ONTO ITS BACK. The ride owns altitude (_carrierRide), so the hull never needed the pitch
+  // anyway; the heading alone is atan2(hz, -hx) about +Y (nose -X -> (-cos, 0, sin)). A level route gives
+  // the identical rotation it always did.
+  const hx = _carrier.dir.x, hz = _carrier.dir.z;
+  if (hx * hx + hz * hz < 1e-8) return;
+  o.quaternion.setFromAxisAngle(_cfrY, Math.atan2(hz, -hx));
   const _yd = _carrierKnobs().yawDeg;
   if (typeof _yd === 'number' && _yd) o.rotateY(_yd * Math.PI / 180);
 }
@@ -51754,8 +51786,9 @@ function _carrierFrame(dt) {
   // (95 u/s x 7.3 s, against a 1367-unit hull) - and the attacker SPAWNS ON THAT DECK. Worse,
   // _carrierSteer rebases the route from each peer's own position, so the gap never closed.
   // Nobody's carrier moves until the round is live, which costs one comparison and needs no packet.
-  if (game.state !== 'playing' && typeof _isCyber === 'function' && _isCyber()) { _carrierRide(dt, false); return; }
-  if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) { _carrierRide(dt, false); return; }
+  // (v48.55) the engine voice follows the hull through both holds too - see _carrierEngineStart
+  if (game.state !== 'playing' && typeof _isCyber === 'function' && _isCyber()) { _carrierRide(dt, false); try { _carrierEngineTick(); } catch (_) {} return; }
+  if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) { _carrierRide(dt, false); try { _carrierEngineTick(); } catch (_) {} return; }
   // (v42.41) ...and only on the machine that owns the route; a peer that steered locally would
   // fight the replicated one every frame and win half of it.
   if (_carrierOwned()) { try { _carrierSteer(dt); } catch (_) {} }   // (v39.55) around the towers, not through them
@@ -52245,7 +52278,8 @@ const CYBER = {
   defenders: null,
   respawn: 6,         // seconds before a downed bot returns
   reviveProtect: 3,   // (v40.45) seconds of spawn grace on a revive - what _owReviveBot gives a city fighter
-  capture: 12,        // seconds an attacker must hold the field to win
+  capture: 12,        // (retired v48.53 - the carrier no longer scores; kept for the state readout)
+  fieldGap: 400,      // (v48.58) open air kept between the field's claim zone and the carrier's keel
   botShips: ['VORTEX', 'PYRO', 'TRACKER', 'SLAYER', 'PUNCTURE', 'SYPHON', 'BLASTER'],
 };
 // (v37.91) fetch the hull NOW, while the player is still on ship select
@@ -52418,6 +52452,9 @@ function _cyberApplyStart(sector, routeT, fx, fy, fz) {
       game.championField = f;
       game.championSpawned = true;
       C.field = f;
+      // (v48.55) a joiner's carrier aims before FIGHT too - see _cyberSetup. (Its route also arrives by
+      // cyber_carrier at 5 Hz; aiming here just means the first packet agrees instead of snapping it.)
+      if (game.state !== 'playing') { try { if (_carrierAimAt(f.position)) C._aimedAtField = true; } catch (_) {} }
     } catch (_) {}
   }
 }
@@ -52683,6 +52720,7 @@ function _cyberNextRound(C) {
   }
   C.bots.length = 0;
   C.started = false; C.over = false; C.lost = false; C.hold = 0; C.deadT = 0;
+  C._onStationSaid = false;   // (v48.53)
   C.sector = null; C.prePlaced = false;
   C._aimedAtField = false; C._wingLaunched = false; C._noSpawnSaid = false;
   C._fieldT = 0; C._cityT = 0; C._shellSaidT = 0; C._carrT = 0;   // (v42.41) carrier route send
@@ -52754,7 +52792,13 @@ function _cyberRoundIntro(C) {
   // the lineup cinematic that is supposed to show it parked there.
   try { _anchorTimer('warmupTimer', swap + 11); } catch (_) {}
   try { if (typeof enterShipSelect === 'function') enterShipSelect(); } catch (_) {}
-  try { if (typeof launchCountdown === 'function') launchCountdown(swap); } catch (_) {}
+  // ⭐ (v48.55) SILENT. Owner: "Two Count downs in Cyberpunk city". From round 2 this picker window counted
+  // 8..1 and fired LAUNCH / WARP-IN, and then the lineup's own launchCountdown below counted 3-2-1 and fired
+  // LAUNCH again - two countdowns back to back on the one element, two stings, both roles (and on a peer
+  // with no lineup the second one is a 10-count). The arena modes had the identical pair and v45.14 made
+  // their pick window silent; this intro never got it. Silent still commits the staged hull, drops the
+  // picker and relocks the pointer at its end - the seconds ride the LAUNCH button instead of the digits.
+  try { if (typeof launchCountdown === 'function') launchCountdown(swap, { silent: true }); } catch (_) {}
   // launchCountdown owns three things at its LAUNCH beat - the visible timer, the staged-ship
   // commit and the picker teardown - so the swap window is just that call. The round is built
   // immediately after it, which is what puts the NEW hull on the deck.
@@ -52901,16 +52945,26 @@ function _cyberBotWaypoint(bot) {
   // beeline branch (`subVectors(goal,pos).normalize()`) and the entire combat-steering block below
   // it - retreat, flank, strafe - is skipped. Every Cyberpunk City bot was handed a waypoint every
   // frame, so no cyber bot could ever do anything but fly straight at its objective.
-  const t = bot.combatTarget;
-  if (t && t.alive !== false && t.position && bot.position.distanceTo(t.position) < 1800) return null;
   const field = (C.field && C.field.alive && C.field.position) ? C.field.position : null;
   const carrier = (_carrier.obj && _carrier.ent && _carrier.ent.alive) ? _carrier.obj.position : null;
+  // ⭐⭐ (v48.53) BREAKERS GO FOR THE SHELL. Owner: "bots try to attack the shell". The objective-fire block
+  // in Bot.update already lets an attacking BREAKER (even id - the same split, v41.93) shoot the shell
+  // whenever it is in range, but this function handed every attacker to its dogfight AI the moment any
+  // enemy came inside 1800 u - and the fight happens AT the objective, so they chased defenders round the
+  // city and the shell only ever fell to spill. While the shell stands a breaker keeps the field as its
+  // waypoint whatever is near (its fire block still takes the shell first), and skips the timed trip back
+  // to the carrier - only real damage sends it home. Escorts keep the old rule and screen them. Once the
+  // shell is down there is nothing to break: everyone reverts, and the carrier comes down to land.
+  const _shellUp = !!(game.championShell && game.championShell.alive);
+  const _breaker = !!bot._cyberAttacker && (((bot.id | 0) % 2) === 0) && _shellUp && !!field;
+  const t = bot.combatTarget;
+  if (!_breaker && t && t.alive !== false && t.position && bot.position.distanceTo(t.position) < 1800) return null;
   const now = (game.time || 0);
   if (bot._cyberAttacker) {
     // push, then circle back: on a timer, or early when hurt
     const hurt = (bot.maxHealth > 0) && (bot.health / bot.maxHealth) < 0.45;
     if (bot._cyNext == null) bot._cyNext = now + 30 + Math.random() * 20;
-    if ((hurt || now > bot._cyNext) && carrier) {
+    if ((hurt || (now > bot._cyNext && !_breaker)) && carrier) {
       if (bot.position.distanceTo(carrier) < 1100) {
         bot._cyNext = now + 30 + Math.random() * 20;      // made it home, push again
       } else {
@@ -53338,7 +53392,11 @@ function _cyberDeckPlace(C) {
     const d = _carrierDeckSpot(0);
     if (!d) return false;
     player.position.copy(d);
-    player.velocity.set(0, 0, 0);
+    // (v48.55) ...moving WITH the deck once the round is live: at zero the hull slid out from under the
+    // ship the moment the hold let go (95 u/s of carrier against a ship standing still) - the second,
+    // smaller jerk after FIGHT. Before FIGHT the carrier holds station, so this is still a zero there.
+    if (game.state === 'playing' && _carrier.ent && _carrier.ent.velocity) player.velocity.copy(_carrier.ent.velocity);
+    else player.velocity.set(0, 0, 0);
     // (v37.89) ...and FACING the way the lineup drew it. The cinematic poses the MESH; the real
     // heading was still the free-flight spawn's, so the moment the rig took over the hull swung
     // back through ~1.4 radians (measured 0.92 -> -0.52 -> 0.92) and the chase camera, following a
@@ -53372,6 +53430,14 @@ function _cyberSetup(C) {
       const _sector = (C.sector != null) ? C.sector : Math.floor(Math.random() * 6);
       _cyberApplyStart(_sector, 0);
       try { C.field = _cyberSpawnField(); } catch (_) {}
+      // ⭐ (v48.55) AIM IT NOW. Owner: "If attacking, the carrier and my ship jerks a little with the pop sound".
+      // The aim at the objective (_carrierAimAt, in _cyberFrame) sat behind that function's
+      // `game.state !== 'playing'` return, so it fired on FIGHT's first live frame: the hull snapped from
+      // its city-centre heading onto the field's (up to ~16 deg of yaw, plus the route's pitch dropped),
+      // and the deck hold re-pinned the attacker to the ROTATED deck spot in the same frame - measured,
+      // the pilot's ship jumped 28.9 u in one frame against 1.5-1.8 u either side. Aimed here, before the
+      // bots, the deck placement and the lineup, the lineup SHOWS the heading it will fly.
+      try { if (C.field && C.field.position && _carrierAimAt(C.field.position)) C._aimedAtField = true; } catch (_) {}
       try { _cyberSpawnBots(C); } catch (e) { console.warn('[cyber] bots:', e); }
       if (net.active && net.sendEvent && C.field) {
         try {
@@ -53478,6 +53544,45 @@ function _cyberFrame(dt) {
       } catch (_) {}
     }
   }
+  // ⭐⭐ (v48.58) ...AND IT MUST NOT SIT ON THE FIELD. Owner: "the carrier actually lowered itself onto the field
+  // and blocked it from being captured". The ride keeps the hull's centre CARRIER.clearance (450) over the
+  // ground; parked over the field's open ground its roof memory decays and it settles until the hull box
+  // spans ~176-724 u above the ground - and the field stands 300 u up, INSIDE it. The collision body then
+  // pushes every ship out of the claim zone: under v48.53's rule (the carrier no longer scores) that is a
+  // round nobody can win. It was the same wall v38.23 answered by letting the hover score. Now, within reach
+  // of the field, the ride may not bring the keel lower than `fieldGap` (400) above the TOP of the claim zone
+  // (field centre + holdRadius), so ships fly in underneath it. Set on every peer (each flies its own
+  // altitude), cleared the moment the hull is clear of the field.
+  try {
+    const _Fg = C.field;
+    let _floor = null;
+    if (!C.over && _Fg && _Fg.position && _carrier.obj && _carrier.half && _carrier.ctr) {
+      const _hr = _Fg.holdRadius || _Fg.radius || 50;
+      const _dxz = Math.hypot(_carrier.obj.position.x - _Fg.position.x, _carrier.obj.position.z - _Fg.position.z);
+      if (_dxz < _carrierLength() * 0.5 + _hr + 800) {
+        const _Kf = (typeof window !== 'undefined' && window.__cyber) ? window.__cyber : {};
+        const _gap = (typeof _Kf.fieldGap === 'number') ? _Kf.fieldGap : CYBER.fieldGap;
+        _floor = _Fg.position.y + _hr + _gap - _carrier.ctr.y + _carrier.half.y;   // centre height that puts the keel there
+      }
+    }
+    _carrier.fieldFloor = _floor;
+  } catch (_) {}
+  // (v48.53) ...and the one thing its arrival still means: say it, once a round, on every peer (a
+  // presentation fact - the carrier no longer scores anything, see the objective block).
+  try {
+    const _Fl = C.field;
+    if (!C.over && !C._onStationSaid && game.state === 'playing' && _Fl && _Fl.position &&
+        _carrier.obj && _carrier.ent && _carrier.ent.alive) {
+      const _cr = (_Fl.radius || 50) + 120 + _carrierLength() * 0.35;
+      if (Math.hypot(_carrier.obj.position.x - _Fl.position.x, _carrier.obj.position.z - _Fl.position.z) < _cr) {
+        C._onStationSaid = true;
+        if (window.Overlays && Overlays.banner) {
+          Overlays.banner('CARRIER ON STATION', _cyberPlayerAttacks(C) ? 'break the shell and claim the field'
+                                                                       : 'hold the shell - bring the carrier down');
+        }
+      }
+    }
+  } catch (_) {}
   if (C.over) return;
   if (net.active && !C.authority) return;     // (v37.80) a joiner mirrors; it does not adjudicate
   try { _cyberReviveBots(C, dt || 0.016); } catch (_) {}
@@ -53525,14 +53630,20 @@ function _cyberFrame(dt) {
     // of either side can be in there, so no claim can ever start and the round could never end.
     // Station-keeping over the objective IS the attack succeeding, and since nothing can stand
     // inside a hull nothing contests it - the owner's "automatic win", reached by the rules.
-    let carrierOn = false;
-    try {
-      if (_carrier.obj && _carrier.ent && _carrier.ent.alive) {
-        const _cr = (F.radius || 50) + 120 + _carrierLength() * 0.35;
-        carrierOn = Math.hypot(_carrier.obj.position.x - F.position.x,
-                               _carrier.obj.position.z - F.position.z) < _cr;
-      }
-    } catch (_) {}
+    // ⭐⭐⭐ (v48.53) THE CARRIER NO LONGER SCORES AT ALL. Owner: "I defended but they still got the point. The
+    // carrier was above the champion field but the shell wasn't even broken". The v38.23 rule above scored
+    // a HOVER: a 12 s clock that ran while the hull's XZ was over the field, the shell never consulted
+    // (every ship claim checks it; this one alone did not), so a carrier parked ~680 u up over an intact
+    // 3000 HP shell took the round by itself - and the defenders could not stop it short of 400,000 HP of
+    // hull. The owner's rule: "carrier or attacking ships need to touch the champion field to win, not
+    // just be over top... once the champion field is claimed, it's round over"; a landing was tried and
+    // dropped the same session ("the carrier can't go down in that spot, too many buildings" - a
+    // 1367 x 816 hull does not fit the city block the field stands in), so the carrier is SUPPORT: it
+    // flies to the field, keeps station over it as a gun platform and a respawn deck, and fights. The
+    // round is the attackers' only when a SHIP claims the field - the champion machinery, which will not
+    // start a claim while the shell stands (v34.68) - and the defenders' when the carrier goes down
+    // (below). The attacker bots now break the shell on purpose (_cyberBotWaypoint) and the defender bots
+    // now go for the carrier (_acquireCombatTarget), so neither half of that can stall.
     // (v38.26) WHY IT IS NOT CAPTURING. The objective spawns sealed inside a 3000 HP shell that
     // ships BOUNCE off at 170 units, and the claim needs you inside it - so an attacker parked on
     // the shell is sitting on the objective and charging nothing, with no reason given (owner: "i
@@ -53547,19 +53658,7 @@ function _cyberFrame(dt) {
         if (window.Overlays && Overlays.banner) Overlays.banner('SHELL UP', 'break it to reach the field');
       }
     } catch (_) {}
-    const need = (window.__cyber && window.__cyber.capture != null) ? window.__cyber.capture : CYBER.capture;
-    if (carrierOn) {
-      const was = C.hold;
-      C.hold += (dt || 0.016);
-      if (was < 0.05) {
-        try {
-          if (window.Overlays && Overlays.banner) Overlays.banner('CARRIER ON STATION', 'the field is under its guns');
-        } catch (_) {}
-      }
-      if (C.hold >= need) _cyberRoundEnd(C, _cyberAtkFleet(C), 'FIELD TAKEN', 'the carrier holds it');
-    } else if (C.hold > 0) {
-      C.hold = Math.max(0, C.hold - (dt || 0.016) * 0.5);   // slips back at half speed
-    }
+
   }
 
   // ---- the other way it ends: the carrier is down. (v38.23) It used to wait for the carrier
@@ -66531,7 +66630,26 @@ class Bot {
         try {
           var _tgt = (typeof _enemyFleetCentroid === 'function') ? _enemyFleetCentroid(this.team) : null;
           if (!_tgt && typeof _monsterArenaInfo === 'function') _tgt = _monsterArenaInfo().center;
-          if (_tgt) this.mesh.lookAt(_tgt.x, this.position.y, _tgt.z);
+          if (_tgt) {
+            this.mesh.lookAt(_tgt.x, this.position.y, _tgt.z);
+            // ⭐⭐ (v48.52) ...AND THE HEADING, NOT JUST THE HULL. Owner: "my team bots fly the opposite way at
+            // start of elimination". This turned the MESH to the enemy and left the flight heading
+            // (`targetDir`) at the constructor's world -Z - and spawnBots() builds every bot fresh each
+            // round, so every round opened from it. On FIGHT's first frame the steering lerps FROM
+            // targetDir, velocity builds along it, and the speed > 1 lookAt swings the nose back onto it.
+            // On The Nexus (the default map) and the other +-Z maps -Z is dead AWAY from the enemy for
+            // Fleet A - the owner's fleet - and a lerp from a 180-degree start turns slowest of all:
+            // measured, the owner's wingmen flew backwards at up to 190 u/s, were 267 u behind their
+            // own start line at +2 s and only back on it at +3 s, while the enemy charged from frame one.
+            // The enemy fleet escaped it only because the cinematic's far-fleet block writes its
+            // targetDir (v47.42); _updateProxyBot has done this since v47.50 for the same reason. Not in
+            // RACE: there the "enemy centroid" is the neighbouring start grid (see _faceRaceFirstRing),
+            // and a racer's first heading belongs to the course, not the other fleet.
+            if (!(typeof LSS !== 'undefined' && LSS.MODE === 'race')) {
+              const _hx = _tgt.x - this.position.x, _hz = _tgt.z - this.position.z;
+              if (_hx * _hx + _hz * _hz > 1) this.targetDir.set(_hx, 0, _hz).normalize();
+            }
+          }
         } catch (_) {}
       }
       return;
@@ -67262,7 +67380,14 @@ class Bot {
       // shell needs just as much: its radius is CHAMP_SHELL_SIZE*0.5, so centre-distance would put a
       // bot parked against the hull "out of range" of its own objective.
       const _bigR = (_fireTgt.isOwBoss || _fireTgt.name === 'ChampionShell') ? (_fireTgt.collisionRadius || 0) * 0.85 : 0;
-      const distToTgt = toTgt.length() - _bigR;
+      let distToTgt = toTgt.length() - _bigR;
+      // ⭐ (v48.53) ...and THE CARRIER, which has a hull box, not a radius. By its centre a bot touching the
+      // hull was 400-700 u from its target, out of range for half the weapons - and the line-of-sight ray
+      // below, aimed at that centre, stopped on the carrier's own skin (raycastLevel includes the hull unless
+      // told otherwise), so `losDist >= distToTgt - 5` never held and no bot ever fired at the carrier.
+      // Range is the hull distance, and the LOS ray skips the carrier (city geometry still blocks it).
+      const _tgtCarrier = !!_fireTgt.isCarrier;
+      if (_tgtCarrier) { try { const _hd = _carrierHullDist(this.position); if (isFinite(_hd)) distToTgt = Math.max(1, _hd); } catch (_) {} }
       // Range Mode (BLASTER utility approximation) extends reach while active.
       const _rangeMul = (this._rangeModeT > 0) ? 1.6 : 1.0;
       if (distToTgt < this.loadout.weapon.range * _rangeMul) {
@@ -67283,7 +67408,7 @@ class Bot {
           const now = (typeof game !== 'undefined' && typeof game.time === 'number') ? game.time : 0;
           if (now - this._fireLosT > 0.15) {
             this._fireLosT = now;
-            this._fireLosDist = raycastLevel(this.position, toTgt, distToTgt + 10, true);
+            this._fireLosDist = raycastLevel(this.position, toTgt, distToTgt + 10, true, _tgtCarrier);   // (v48.53) skip the target's own hull
           }
           const losDist = this._fireLosDist;
           if (losDist >= distToTgt - 5) {
@@ -68718,6 +68843,19 @@ class Bot {
       if (b.isEarthLife) continue;
       let d2 = this.position.distanceToSquared(b.position);
       if (b.isOwCarrier && this._owCity != null) d2 *= 6.25;   // (v38.81) a carrier counts as 2.5x farther: fighters pick fighters and pilots first
+      // ⭐⭐ (v48.53) CYBERPUNK DEFENDERS GO FOR THE CARRIER. Owner: "bots defending should attack the carrier
+      // mostly". Measured to the HULL, not the centre - the centre is ~680 u inside 1367 u of ship, so by
+      // centre distance a defender flying along the hull still "saw" every fighter as nearer - and then
+      // counted as a FIFTH of that distance while the shell stands (the field is safe; the carrier is the
+      // only thing that ends the round their way), HALF once it is down (now an attacker at the field is
+      // a claim in progress and has to be answered). Measured at half-distance throughout, the defenders
+      // were on the carrier ~20% of samples - fighters near the field always won.
+      if (b.isCarrier && this._cyberAttacker === false && game._cyber && game._cyber.armed) {
+        let _hd = Infinity;
+        try { _hd = _carrierHullDist(this.position); } catch (_) {}
+        if (isFinite(_hd)) d2 = _hd * _hd;
+        d2 *= (game.championShell && game.championShell.alive) ? 0.04 : 0.25;
+      }
       if (d2 < bestScore) { bestScore = d2; best = b; }
     }
     return best;
@@ -71076,6 +71214,7 @@ class Projectile {
     // (v37.85) THE CARRIER STOPS BULLETS. Blocking is separate from damage: the loops below skip
     // anything on your own team, so your own carrier was a ghost to your guns. A shot that enters
     // the hull ends there ; whether it hurts it is the entity loops' business, not the wall's.
+    this._carrierHit = false;   // (v48.56) see below
     if (this.alive && typeof _carrierBlocks === 'function') {
       // (v37.93) SWEPT, and it DESTROYS. Testing only where the shot is now missed glancing hits -
       // 3000 u/s is 50 units a frame against ~34-unit map cells - and setting alive = false without
@@ -71092,10 +71231,38 @@ class Projectile {
           : this.position.clone();
         this.position.copy(_at);
         if (this.mesh) this.mesh.position.copy(_at);
-        try { if (typeof spawnImpactSparks === 'function') spawnImpactSparks(_at.clone(), 6); } catch (_) {}
-        try { this.spawnImpactExplosion(_at); } catch (_) {}
-        this.destroy();
-        return;
+        // ⭐⭐⭐ (v48.56) THIS IS WHERE A SHOT MEETS THE CARRIER - FOR DAMAGE TOO. Owner: "when i tried to shoot
+        // cluster missile at the carrier, i noticed it hit an invisible barrier outside the range of its
+        // explosions... ya, all rockets, not just cluster". The hit loops below test an ENEMY SHIP with a
+        // sphere round its centre - `chassis.hullLength * 1.2` for the player's shots (1.1 for bots') - and
+        // the carrier publishes its 816-u WIDTH as hullLength (the v38.38 note), so a rocket "hit" it 979 u
+        // from the centre: up to ~570 u off the side of a hull 408 u half-wide, and ~700 u above its deck.
+        // The rocket burst in open air, and its splash (to the BODY, v38.37) fell short of the hull. v42.80
+        // fixed exactly this for the overworld's CITY carriers (`isOwCarrier` -> hullDist); this carrier
+        // (`isCarrier`) never got the branch.
+        // The sphere could not simply be tightened: this block runs FIRST and only ever STOPPED shots ("whether
+        // it hurts it is the entity loops' business") - it was the oversized sphere catching hostile rockets
+        // before they reached the hull that made them do damage at all. So: a hostile shot that the loops
+        // below know how to resolve (the player's, or a bot's non-network one) is handed to them right here,
+        // on the hull, flagged `_carrierHit`; the loops take the carrier ONLY on that flag and never by
+        // sphere. Everything else - a friendly shot (your own carrier stays a wall, no damage), a remote peer's
+        // cosmetic shot, a stun bolt that already paid its one hit - stops here as before.
+        let _pass = false;
+        try {
+          const _ce = _carrier.ent;
+          const _myT = (this.owner === 'player') ? ((typeof player !== 'undefined' && player) ? player.team : null) : this.ownerTeam;
+          const _loops = (this.owner === 'player') || (this.ownerTeam != null && !this.isNetwork);
+          const _arcDone = !!(this.isArcWave && this._arcHitBots && _ce && this._arcHitBots.has(_ce.id));
+          _pass = !!(_ce && _ce.alive && _myT != null && _ce.team !== _myT && _loops && !_arcDone);
+        } catch (_) { _pass = false; }
+        if (_pass) {
+          this._carrierHit = true;
+        } else {
+          try { if (typeof spawnImpactSparks === 'function') spawnImpactSparks(_at.clone(), 6); } catch (_) {}
+          try { this.spawnImpactExplosion(_at); } catch (_) {}
+          this.destroy();
+          return;
+        }
       }
     }
     if (this.owner === 'player') {
@@ -71103,11 +71270,14 @@ class Projectile {
         if (!bot.alive || bot.team === player.team) continue;
         // Stun Bolt already hit this bot ; skip so it pierces past.
         if (this.isArcWave && this._arcHitBots && this._arcHitBots.has(bot.id)) continue;
+        if (bot.isCarrier && !this._carrierHit) continue;   // (v48.56) the swept hull test above owns it
         const hitRadius = bot.chassis.hullLength * 1.2;
         const hasShield = bot.shield > 0;
         const _usesSplashSlop = (this.splash || 0) >= 25;
         let isHit;
-        if (bot.isOwBoss && typeof bot.contains === 'function') {
+        if (bot.isCarrier) {
+          isHit = true;   // (v48.56) `_carrierHit`: already ON the hull - see the carrier block above
+        } else if (bot.isOwBoss && typeof bot.contains === 'function') {
           isHit = bot.contains(this.position, 30);   // (v38.88) the leviathan: its column, not a sphere round its centre
         } else if (bot.isOwCarrier && typeof bot.hullDist === 'function') {
           // ⚠⚠ (v42.80) A CITY CARRIER IS NOT A SPHERE EITHER. Owner: "i was shooting at the
@@ -71323,7 +71493,8 @@ class Projectile {
         for (const bot of game.entities) {
           if (!bot || !bot.alive || bot === this.ownerRef || bot.team === this.ownerTeam) continue;
           const r = bot.chassis.hullLength * 1.1;
-          if (this.position.distanceToSquared(bot.position) < r * r) {
+          // (v48.56) the carrier only on `_carrierHit` (the swept hull test), never by sphere - see there
+          if (bot.isCarrier ? this._carrierHit : (this.position.distanceToSquared(bot.position) < r * r)) {
             bot.takeDamage(this.damage * 0.6, this.ownerRef || 'bot', this.position);
             if (this.isCluster) this.spawnClusterChildren();
             this.spawnImpactExplosion(this.position);
@@ -71367,6 +71538,13 @@ class Projectile {
           return;
         }
       }
+    }
+
+    // (v48.56) ...and a shot handed on by the carrier block that no loop took still ends at the hull.
+    if (this.alive && this._carrierHit) {
+      try { this.spawnImpactExplosion(this.position); } catch (_) {}
+      this.destroy();
+      return;
     }
 
     // (bugfix) Projectiles despawned at ARENA_SIZE (25000) while the free-flight SHIP flies to
@@ -96838,6 +97016,9 @@ function _lssStartSpectatorCinematic() {
     // Face the way the line faces. The player steers by `euler`; a bot's mesh keeps whatever
     // quaternion it holds until it moves (`mesh.lookAt` only runs at speed > 1), so the slot
     // orientation survives on its own.
+    // ⚠ (v48.52) ...but only the MESH does. The first frame it moves, steering lerps from `targetDir`,
+    // which this loop never wrote - the owner's own wingmen opened every elimination round flying
+    // AWAY from the enemy. Bot.update's warmup branch now keeps targetDir on the enemy (see there).
     // ⭐⭐⭐ (v47.56) OUR OWN SHIP MUST NOT TURN. Owner: "in elimination, my ship rotates 90 degrees
     // as the camera is panning around... my ship shouldn't rotate at all in the cinematic or after".
     // THE PAN IS NOT DOING IT - the arrival blend is. Over the final 1.4 s `_lssUpdateSpectatorCinematic`
@@ -130356,11 +130537,53 @@ const Overlays = (() => {
   // Restart a CSS animation by removing and re-adding the class.
   function replay(el, cls) {
     if (!el) return;
-    el.classList.remove('lt-idle');   // (v48.46) O3.12 - showing again: the tag animates (see _lssTagIdleWire)
+    _ovOneShot(el, cls);   // (v48.50) the class comes off again when the animation is over - see below
     el.classList.remove(cls);
     // Force reflow so the animation restarts cleanly.
     void el.offsetWidth;
     el.classList.add(cls);
+    _ovOneShotWatch(el);
+  }
+  // ⭐ (v48.50) A ONE-SHOT OVERLAY DROPS ITS CLASS WHEN ITS ANIMATION IS OVER. Owner: "going out of selfie
+  // view triggers old text on the screen like kill streaks". The kill streak, the round banner and the
+  // ability flash are one-shot CSS animations keyed on a class, and nothing ever took the class OFF again -
+  // `forwards` parks the element at its end state (opacity 0) with the animation still attached. The selfie
+  // (orbit) view hides them with display:none (v45.44), as do ghost mode, the cinematic and the picker, and
+  // a CSS animation on an element that comes back from display:none STARTS OVER: leaving the selfie view
+  // replayed whatever had last fired, however long ago - the last DOUBLE KILL, the last ROUND banner, the
+  // last ability flash. (The pre-launch overlay rehearsal restores each element's saved class list too, so a
+  // stale `.show` could replay behind the curtain.) Now the class comes off when the element's OWN
+  // animation ends - the base rule is the same opacity 0 the animation ended on, so nothing on screen
+  // changes - and when it is hidden MID-FLIGHT (a callout you missed stays missed instead of ambushing you
+  // on the way back). ⚠ Chrome does not fire `animationcancel` when display:none kills a CSS animation
+  // (measured: the class stayed and the animation restarted on the way back), so that half is a watch:
+  // while the class is on, every 250 ms, if nothing is RUNNING on the element any more it was hidden, and
+  // the class comes off. A running one is left to its animationend. replay()'s own restart re-arms the
+  // watch and its new animation is already running, so an earlier cancel cannot touch it. A child's event
+  // (the tag's loops, the banner's rules) is ignored - only the element's own animation counts.
+  function _ovOneShot(el, cls) {
+    if (el._ovOneShot) { el._ovOneShot.cls = cls; return; }
+    const st = el._ovOneShot = { cls: cls, t: 0 };
+    const done = (e) => {
+      if (e.target !== el) return;
+      if (e.type === 'animationcancel') { try { if (el.getAnimations().length) return; } catch (_) { return; } }
+      el.classList.remove(st.cls);
+    };
+    el.addEventListener('animationend', done);
+    el.addEventListener('animationcancel', done);   // where a browser does fire it
+  }
+  function _ovOneShotWatch(el) {
+    const st = el._ovOneShot; if (!st) return;
+    if (st.t) clearTimeout(st.t);
+    const check = () => {
+      st.t = 0;
+      if (!el.classList.contains(st.cls)) return;
+      let running = false;
+      try { running = el.getAnimations().some((a) => a.playState === 'running'); } catch (_) { return; }
+      if (running) { st.t = setTimeout(check, 250); return; }
+      el.classList.remove(st.cls);
+    };
+    st.t = setTimeout(check, 250);
   }
 
   // ---- Damage vignette ----
@@ -130578,19 +130801,6 @@ const Overlays = (() => {
 
 // Expose globally for ease of debugging / future hooks.
 window.Overlays = Overlays;
-// (v48.46) (review O3.12) the banner and the kill streak go IDLE when their own one-shot animation ends (they
-// are at opacity 0 from there on, with `.show` still on), which pauses their tag's endless loops - see the CSS
-// note above `.lss-chroma`. Only the container's own animation counts: the tag's loops never end, and the
-// banner's rules (.ban-line) end on their own clock.
-(function _lssTagIdleWire() {
-  try {
-    for (const [id, anim] of [['ov-banner', 'ovBanner'], ['ov-killstreak', 'ovKillStreak']]) {
-      const el = document.getElementById(id);
-      if (!el) continue;
-      el.addEventListener('animationend', (e) => { if (e.target === el && e.animationName === anim) el.classList.add('lt-idle'); });
-    }
-  } catch (_) {}
-})();
 
 // ---- SCREEN SHAKE ----
 

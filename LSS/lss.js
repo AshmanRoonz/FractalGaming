@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "48.49";
+const LSS_BUILD = "48.58";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -30098,6 +30098,10 @@ function _carrierSpawn(opts) {
     _carrierClear(true);
     _carrierAttach(_carrier.proto.clone(true), keep);
     _carrier.t = t;   // keep its place on the route across the swap
+    try {
+      const _C = game._cyber, _F = _C && _C.field;
+      if (_F && _F.position && _C._aimedAtField) _carrierAimAt(_F.position);
+    } catch (_) {}
   });
   return _carrier.ent;
 }
@@ -30122,6 +30126,13 @@ function _carrierEngineStart() {
     pan.refDistance = 900;      // a capital ship carries a long way
     pan.maxDistance = 26000;
     pan.rolloffFactor = 0.85;
+    try {
+      if (_carrier.obj) {
+        const _p0 = _carrier.obj.position;
+        if (pan.positionX) { pan.positionX.value = _p0.x; pan.positionY.value = _p0.y; pan.positionZ.value = _p0.z; }
+        else if (pan.setPosition) pan.setPosition(_p0.x, _p0.y, _p0.z);
+      }
+    } catch (_) {}
     src.connect(lp); lp.connect(g); g.connect(pan);
     pan.connect(audio.sfxBus || audio.masterGain || ctx.destination);
     src.start(now, Math.random() * buf.duration * 0.9);
@@ -30173,6 +30184,7 @@ function _carrierClear(keepSound) {
     if (i >= 0) game.entities.splice(i, 1);
   }
   _carrier.obj = null; _carrier.ent = null;
+  _carrier.fieldFloor = null;   // (v48.58)
   _carrier.spawns.length = 0; _carrier.guns.length = 0; _carrier.thrusters.length = 0;
 }
 const _crP = new THREE.Vector3();
@@ -30239,7 +30251,8 @@ function _carrierRide(dt, snap) {
   if (typeof gy !== 'number' || !isFinite(gy)) return;
   const K = _carrierKnobs();
   const _cl = (typeof K.clearance === 'number') ? K.clearance : CARRIER.clearance;
-  const want = gy + _cl;
+  let want = gy + _cl;
+  if (typeof _carrier.fieldFloor === 'number' && want < _carrier.fieldFloor) want = _carrier.fieldFloor;
   const cur = (_carrier.rideY == null) ? o.position.y : _carrier.rideY;
   const rate = (want > cur) ? (K.riseRate != null ? K.riseRate : 1.2) : (K.fallRate != null ? K.fallRate : 0.3);
   let _vstep = (want - cur) * Math.min(1, (dt || 0.016) * rate);
@@ -30248,10 +30261,13 @@ function _carrierRide(dt, snap) {
   const next = (snap || _carrier.rideY == null) ? Math.max(o.position.y, want) : cur + _vstep;
   if (isFinite(next)) { _carrier.rideY = next; o.position.y = next; if (_carrier.ent) _carrier.ent.position.copy(o.position); }
 }
+const _cfrY = new THREE.Vector3(0, 1, 0);
 function _carrierFaceRoute() {
   const o = _carrier.obj;
   if (!o || !_carrier.dir) return;
-  o.quaternion.setFromUnitVectors(new THREE.Vector3(-1, 0, 0), _carrier.dir);
+  const hx = _carrier.dir.x, hz = _carrier.dir.z;
+  if (hx * hx + hz * hz < 1e-8) return;
+  o.quaternion.setFromAxisAngle(_cfrY, Math.atan2(hz, -hx));
   const _yd = _carrierKnobs().yawDeg;
   if (typeof _yd === 'number' && _yd) o.rotateY(_yd * Math.PI / 180);
 }
@@ -30327,8 +30343,8 @@ function _carrierSteer(dt) {
 function _carrierFrame(dt) {
   if (!_carrier.obj || !_carrier.ent) return;
   if (!_carrier.ent.alive) return;
-  if (game.state !== 'playing' && typeof _isCyber === 'function' && _isCyber()) { _carrierRide(dt, false); return; }
-  if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) { _carrierRide(dt, false); return; }
+  if (game.state !== 'playing' && typeof _isCyber === 'function' && _isCyber()) { _carrierRide(dt, false); try { _carrierEngineTick(); } catch (_) {} return; }
+  if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) { _carrierRide(dt, false); try { _carrierEngineTick(); } catch (_) {} return; }
   if (_carrierOwned()) { try { _carrierSteer(dt); } catch (_) {} }   // (v39.55) around the towers, not through them
   _carrier.t += (dt || 0.016);
   const travelled = Math.min(_carrier.dist, _carrierSpeed() * _carrier.t);
@@ -30705,7 +30721,8 @@ const CYBER = {
   defenders: null,
   respawn: 6,         // seconds before a downed bot returns
   reviveProtect: 3,   // (v40.45) seconds of spawn grace on a revive - what _owReviveBot gives a city fighter
-  capture: 12,        // seconds an attacker must hold the field to win
+  capture: 12,        // (retired v48.53 - the carrier no longer scores; kept for the state readout)
+  fieldGap: 400,      // (v48.58) open air kept between the field's claim zone and the carrier's keel
   botShips: ['VORTEX', 'PYRO', 'TRACKER', 'SLAYER', 'PUNCTURE', 'SYPHON', 'BLASTER'],
 };
 function _cyberPrefetch() {
@@ -30814,6 +30831,7 @@ function _cyberApplyStart(sector, routeT, fx, fy, fz) {
       game.championField = f;
       game.championSpawned = true;
       C.field = f;
+      if (game.state !== 'playing') { try { if (_carrierAimAt(f.position)) C._aimedAtField = true; } catch (_) {} }
     } catch (_) {}
   }
 }
@@ -31002,6 +31020,7 @@ function _cyberNextRound(C) {
   }
   C.bots.length = 0;
   C.started = false; C.over = false; C.lost = false; C.hold = 0; C.deadT = 0;
+  C._onStationSaid = false;   // (v48.53)
   C.sector = null; C.prePlaced = false;
   C._aimedAtField = false; C._wingLaunched = false; C._noSpawnSaid = false;
   C._fieldT = 0; C._cityT = 0; C._shellSaidT = 0; C._carrT = 0;   // (v42.41) carrier route send
@@ -31035,7 +31054,7 @@ function _cyberRoundIntro(C) {
   try { game.currentRound = C.round || 1; } catch (_) {}
   try { _anchorTimer('warmupTimer', swap + 11); } catch (_) {}
   try { if (typeof enterShipSelect === 'function') enterShipSelect(); } catch (_) {}
-  try { if (typeof launchCountdown === 'function') launchCountdown(swap); } catch (_) {}
+  try { if (typeof launchCountdown === 'function') launchCountdown(swap, { silent: true }); } catch (_) {}
   setTimeout(() => {
     let cine = false;
     try {
@@ -31081,15 +31100,17 @@ const _cyWp = new THREE.Vector3();
 function _cyberBotWaypoint(bot) {
   const C = game._cyber;
   if (!C || !C.armed || !bot || bot._cyberAttacker == null) return null;
-  const t = bot.combatTarget;
-  if (t && t.alive !== false && t.position && bot.position.distanceTo(t.position) < 1800) return null;
   const field = (C.field && C.field.alive && C.field.position) ? C.field.position : null;
   const carrier = (_carrier.obj && _carrier.ent && _carrier.ent.alive) ? _carrier.obj.position : null;
+  const _shellUp = !!(game.championShell && game.championShell.alive);
+  const _breaker = !!bot._cyberAttacker && (((bot.id | 0) % 2) === 0) && _shellUp && !!field;
+  const t = bot.combatTarget;
+  if (!_breaker && t && t.alive !== false && t.position && bot.position.distanceTo(t.position) < 1800) return null;
   const now = (game.time || 0);
   if (bot._cyberAttacker) {
     const hurt = (bot.maxHealth > 0) && (bot.health / bot.maxHealth) < 0.45;
     if (bot._cyNext == null) bot._cyNext = now + 30 + Math.random() * 20;
-    if ((hurt || now > bot._cyNext) && carrier) {
+    if ((hurt || (now > bot._cyNext && !_breaker)) && carrier) {
       if (bot.position.distanceTo(carrier) < 1100) {
         bot._cyNext = now + 30 + Math.random() * 20;      // made it home, push again
       } else {
@@ -31391,7 +31412,8 @@ function _cyberDeckPlace(C) {
     const d = _carrierDeckSpot(0);
     if (!d) return false;
     player.position.copy(d);
-    player.velocity.set(0, 0, 0);
+    if (game.state === 'playing' && _carrier.ent && _carrier.ent.velocity) player.velocity.copy(_carrier.ent.velocity);
+    else player.velocity.set(0, 0, 0);
     if (_carrier.dir && _carrier.dir.lengthSq() > 0.5 && player.euler) {
       const h = _carrier.dir;
       player.euler.y = Math.atan2(-h.x, -h.z);
@@ -31415,6 +31437,7 @@ function _cyberSetup(C) {
       const _sector = (C.sector != null) ? C.sector : Math.floor(Math.random() * 6);
       _cyberApplyStart(_sector, 0);
       try { C.field = _cyberSpawnField(); } catch (_) {}
+      try { if (C.field && C.field.position && _carrierAimAt(C.field.position)) C._aimedAtField = true; } catch (_) {}
       try { _cyberSpawnBots(C); } catch (e) { console.warn('[cyber] bots:', e); }
       if (net.active && net.sendEvent && C.field) {
         try {
@@ -31490,6 +31513,34 @@ function _cyberFrame(dt) {
       } catch (_) {}
     }
   }
+  try {
+    const _Fg = C.field;
+    let _floor = null;
+    if (!C.over && _Fg && _Fg.position && _carrier.obj && _carrier.half && _carrier.ctr) {
+      const _hr = _Fg.holdRadius || _Fg.radius || 50;
+      const _dxz = Math.hypot(_carrier.obj.position.x - _Fg.position.x, _carrier.obj.position.z - _Fg.position.z);
+      if (_dxz < _carrierLength() * 0.5 + _hr + 800) {
+        const _Kf = (typeof window !== 'undefined' && window.__cyber) ? window.__cyber : {};
+        const _gap = (typeof _Kf.fieldGap === 'number') ? _Kf.fieldGap : CYBER.fieldGap;
+        _floor = _Fg.position.y + _hr + _gap - _carrier.ctr.y + _carrier.half.y;   // centre height that puts the keel there
+      }
+    }
+    _carrier.fieldFloor = _floor;
+  } catch (_) {}
+  try {
+    const _Fl = C.field;
+    if (!C.over && !C._onStationSaid && game.state === 'playing' && _Fl && _Fl.position &&
+        _carrier.obj && _carrier.ent && _carrier.ent.alive) {
+      const _cr = (_Fl.radius || 50) + 120 + _carrierLength() * 0.35;
+      if (Math.hypot(_carrier.obj.position.x - _Fl.position.x, _carrier.obj.position.z - _Fl.position.z) < _cr) {
+        C._onStationSaid = true;
+        if (window.Overlays && Overlays.banner) {
+          Overlays.banner('CARRIER ON STATION', _cyberPlayerAttacks(C) ? 'break the shell and claim the field'
+                                                                       : 'hold the shell - bring the carrier down');
+        }
+      }
+    }
+  } catch (_) {}
   if (C.over) return;
   if (net.active && !C.authority) return;     // (v37.80) a joiner mirrors; it does not adjudicate
   try { _cyberReviveBots(C, dt || 0.016); } catch (_) {}
@@ -31518,14 +31569,6 @@ function _cyberFrame(dt) {
 
   const F = C.field;
   if (F && F.position) {
-    let carrierOn = false;
-    try {
-      if (_carrier.obj && _carrier.ent && _carrier.ent.alive) {
-        const _cr = (F.radius || 50) + 120 + _carrierLength() * 0.35;
-        carrierOn = Math.hypot(_carrier.obj.position.x - F.position.x,
-                               _carrier.obj.position.z - F.position.z) < _cr;
-      }
-    } catch (_) {}
     try {
       const _sh = game.championShell;
       const _now = (game.time || 0);
@@ -31536,19 +31579,7 @@ function _cyberFrame(dt) {
         if (window.Overlays && Overlays.banner) Overlays.banner('SHELL UP', 'break it to reach the field');
       }
     } catch (_) {}
-    const need = (window.__cyber && window.__cyber.capture != null) ? window.__cyber.capture : CYBER.capture;
-    if (carrierOn) {
-      const was = C.hold;
-      C.hold += (dt || 0.016);
-      if (was < 0.05) {
-        try {
-          if (window.Overlays && Overlays.banner) Overlays.banner('CARRIER ON STATION', 'the field is under its guns');
-        } catch (_) {}
-      }
-      if (C.hold >= need) _cyberRoundEnd(C, _cyberAtkFleet(C), 'FIELD TAKEN', 'the carrier holds it');
-    } else if (C.hold > 0) {
-      C.hold = Math.max(0, C.hold - (dt || 0.016) * 0.5);   // slips back at half speed
-    }
+
   }
 
   if (_carrier.dead) {
@@ -40759,7 +40790,13 @@ class Bot {
         try {
           var _tgt = (typeof _enemyFleetCentroid === 'function') ? _enemyFleetCentroid(this.team) : null;
           if (!_tgt && typeof _monsterArenaInfo === 'function') _tgt = _monsterArenaInfo().center;
-          if (_tgt) this.mesh.lookAt(_tgt.x, this.position.y, _tgt.z);
+          if (_tgt) {
+            this.mesh.lookAt(_tgt.x, this.position.y, _tgt.z);
+            if (!(typeof LSS !== 'undefined' && LSS.MODE === 'race')) {
+              const _hx = _tgt.x - this.position.x, _hz = _tgt.z - this.position.z;
+              if (_hx * _hx + _hz * _hz > 1) this.targetDir.set(_hx, 0, _hz).normalize();
+            }
+          }
         } catch (_) {}
       }
       return;
@@ -41174,7 +41211,9 @@ class Bot {
     if (this.fireTimer <= 0 && game.state === 'playing' && this._mayFight() && _fireTgt) {
       const toTgt = this._tempVec3a.subVectors(_fireTgt.position, this.position);
       const _bigR = (_fireTgt.isOwBoss || _fireTgt.name === 'ChampionShell') ? (_fireTgt.collisionRadius || 0) * 0.85 : 0;
-      const distToTgt = toTgt.length() - _bigR;
+      let distToTgt = toTgt.length() - _bigR;
+      const _tgtCarrier = !!_fireTgt.isCarrier;
+      if (_tgtCarrier) { try { const _hd = _carrierHullDist(this.position); if (isFinite(_hd)) distToTgt = Math.max(1, _hd); } catch (_) {} }
       const _rangeMul = (this._rangeModeT > 0) ? 1.6 : 1.0;
       if (distToTgt < this.loadout.weapon.range * _rangeMul) {
         const preferredDist = this.aiRangePreference;
@@ -41186,7 +41225,7 @@ class Bot {
           const now = (typeof game !== 'undefined' && typeof game.time === 'number') ? game.time : 0;
           if (now - this._fireLosT > 0.15) {
             this._fireLosT = now;
-            this._fireLosDist = raycastLevel(this.position, toTgt, distToTgt + 10, true);
+            this._fireLosDist = raycastLevel(this.position, toTgt, distToTgt + 10, true, _tgtCarrier);   // (v48.53) skip the target's own hull
           }
           const losDist = this._fireLosDist;
           if (losDist >= distToTgt - 5) {
@@ -42147,6 +42186,12 @@ class Bot {
       if (b.isEarthLife) continue;
       let d2 = this.position.distanceToSquared(b.position);
       if (b.isOwCarrier && this._owCity != null) d2 *= 6.25;   // (v38.81) a carrier counts as 2.5x farther: fighters pick fighters and pilots first
+      if (b.isCarrier && this._cyberAttacker === false && game._cyber && game._cyber.armed) {
+        let _hd = Infinity;
+        try { _hd = _carrierHullDist(this.position); } catch (_) {}
+        if (isFinite(_hd)) d2 = _hd * _hd;
+        d2 *= (game.championShell && game.championShell.alive) ? 0.04 : 0.25;
+      }
       if (d2 < bestScore) { bestScore = d2; best = b; }
     }
     return best;
@@ -43846,6 +43891,7 @@ class Projectile {
       }
     }
 
+    this._carrierHit = false;   // (v48.56) see below
     if (this.alive && typeof _carrierBlocks === 'function') {
       let _hit = _carrierBlocks(this.position, 0) ? 0 : -1;
       if (_hit < 0 && prevPos && typeof _carrierRayDist === 'function') {
@@ -43859,21 +43905,36 @@ class Projectile {
           : this.position.clone();
         this.position.copy(_at);
         if (this.mesh) this.mesh.position.copy(_at);
-        try { if (typeof spawnImpactSparks === 'function') spawnImpactSparks(_at.clone(), 6); } catch (_) {}
-        try { this.spawnImpactExplosion(_at); } catch (_) {}
-        this.destroy();
-        return;
+        let _pass = false;
+        try {
+          const _ce = _carrier.ent;
+          const _myT = (this.owner === 'player') ? ((typeof player !== 'undefined' && player) ? player.team : null) : this.ownerTeam;
+          const _loops = (this.owner === 'player') || (this.ownerTeam != null && !this.isNetwork);
+          const _arcDone = !!(this.isArcWave && this._arcHitBots && _ce && this._arcHitBots.has(_ce.id));
+          _pass = !!(_ce && _ce.alive && _myT != null && _ce.team !== _myT && _loops && !_arcDone);
+        } catch (_) { _pass = false; }
+        if (_pass) {
+          this._carrierHit = true;
+        } else {
+          try { if (typeof spawnImpactSparks === 'function') spawnImpactSparks(_at.clone(), 6); } catch (_) {}
+          try { this.spawnImpactExplosion(_at); } catch (_) {}
+          this.destroy();
+          return;
+        }
       }
     }
     if (this.owner === 'player') {
       for (const bot of game.entities) {
         if (!bot.alive || bot.team === player.team) continue;
         if (this.isArcWave && this._arcHitBots && this._arcHitBots.has(bot.id)) continue;
+        if (bot.isCarrier && !this._carrierHit) continue;   // (v48.56) the swept hull test above owns it
         const hitRadius = bot.chassis.hullLength * 1.2;
         const hasShield = bot.shield > 0;
         const _usesSplashSlop = (this.splash || 0) >= 25;
         let isHit;
-        if (bot.isOwBoss && typeof bot.contains === 'function') {
+        if (bot.isCarrier) {
+          isHit = true;   // (v48.56) `_carrierHit`: already ON the hull - see the carrier block above
+        } else if (bot.isOwBoss && typeof bot.contains === 'function') {
           isHit = bot.contains(this.position, 30);   // (v38.88) the leviathan: its column, not a sphere round its centre
         } else if (bot.isOwCarrier && typeof bot.hullDist === 'function') {
           isHit = bot.hullDist(this.position) <= 30;
@@ -44020,7 +44081,7 @@ class Projectile {
         for (const bot of game.entities) {
           if (!bot || !bot.alive || bot === this.ownerRef || bot.team === this.ownerTeam) continue;
           const r = bot.chassis.hullLength * 1.1;
-          if (this.position.distanceToSquared(bot.position) < r * r) {
+          if (bot.isCarrier ? this._carrierHit : (this.position.distanceToSquared(bot.position) < r * r)) {
             bot.takeDamage(this.damage * 0.6, this.ownerRef || 'bot', this.position);
             if (this.isCluster) this.spawnClusterChildren();
             this.spawnImpactExplosion(this.position);
@@ -44049,6 +44110,12 @@ class Projectile {
           return;
         }
       }
+    }
+
+    if (this.alive && this._carrierHit) {
+      try { this.spawnImpactExplosion(this.position); } catch (_) {}
+      this.destroy();
+      return;
     }
 
     const s = _lssFlightArena();
@@ -84852,10 +84919,35 @@ const Overlays = (() => {
 
   function replay(el, cls) {
     if (!el) return;
-    el.classList.remove('lt-idle');   // (v48.46) O3.12 - showing again: the tag animates (see _lssTagIdleWire)
+    _ovOneShot(el, cls);   // (v48.50) the class comes off again when the animation is over - see below
     el.classList.remove(cls);
     void el.offsetWidth;
     el.classList.add(cls);
+    _ovOneShotWatch(el);
+  }
+  function _ovOneShot(el, cls) {
+    if (el._ovOneShot) { el._ovOneShot.cls = cls; return; }
+    const st = el._ovOneShot = { cls: cls, t: 0 };
+    const done = (e) => {
+      if (e.target !== el) return;
+      if (e.type === 'animationcancel') { try { if (el.getAnimations().length) return; } catch (_) { return; } }
+      el.classList.remove(st.cls);
+    };
+    el.addEventListener('animationend', done);
+    el.addEventListener('animationcancel', done);   // where a browser does fire it
+  }
+  function _ovOneShotWatch(el) {
+    const st = el._ovOneShot; if (!st) return;
+    if (st.t) clearTimeout(st.t);
+    const check = () => {
+      st.t = 0;
+      if (!el.classList.contains(st.cls)) return;
+      let running = false;
+      try { running = el.getAnimations().some((a) => a.playState === 'running'); } catch (_) { return; }
+      if (running) { st.t = setTimeout(check, 250); return; }
+      el.classList.remove(st.cls);
+    };
+    st.t = setTimeout(check, 250);
   }
 
   const _DV_FLASH_KEYS = [{ opacity: 0, offset: 0, easing: 'ease-out' }, { opacity: 1, offset: 0.15, easing: 'ease-out' }, { opacity: 0, offset: 1 }];
@@ -85011,15 +85103,6 @@ const Overlays = (() => {
 })();
 
 window.Overlays = Overlays;
-(function _lssTagIdleWire() {
-  try {
-    for (const [id, anim] of [['ov-banner', 'ovBanner'], ['ov-killstreak', 'ovKillStreak']]) {
-      const el = document.getElementById(id);
-      if (!el) continue;
-      el.addEventListener('animationend', (e) => { if (e.target === el && e.animationName === anim) el.classList.add('lt-idle'); });
-    }
-  } catch (_) {}
-})();
 
 
 function triggerScreenShake(intensity) {
