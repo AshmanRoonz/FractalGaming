@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "49.31";
+const LSS_BUILD = "49.32";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -42318,6 +42318,8 @@ if (typeof window !== 'undefined') window.__skinProbe = function (opt) {
   return out;
 };
 
+const _ENGINE_ORB_K = { PUNCTURE: 0.8, VORTEX: 0.8, TRACKER: 0.8, SYPHON: 0.8 };
+if (typeof window !== 'undefined') window.__engineOrbK = _ENGINE_ORB_K;
 function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId) {
   const group = new THREE.Group();
   const proto = shipModelCache.loaded[loadoutKey];
@@ -42464,12 +42466,14 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId) {
     if (_markerGlowMat.uniforms.uBaseColor) _markerGlowMat.uniforms.uBaseColor.value.set(_classColor);
     if (_markerGlowMat.uniforms.uBrightness) _markerGlowMat.uniforms.uBrightness.value = 3.6;
     group.userData.shaderEngineMats = (group.userData.shaderEngineMats || []).concat([_markerGlowMat]);
-    const glowGeo = new THREE.SphereGeometry(ho * 0.30, 12, 8);
+    const _orbK = (_ENGINE_ORB_K[loadoutKey] != null) ? +_ENGINE_ORB_K[loadoutKey] : 1;   // (v49.32)
+    const glowGeo = new THREE.SphereGeometry(ho * 0.30 * _orbK, 12, 8);
     const _wp = new THREE.Vector3();
     for (const t of _thrusterNodes) {
       t.node.getWorldPosition(_wp);
       const p = group.worldToLocal(_wp.clone());
       const g = addGlow(glowGeo, _markerGlowMat, p.x, p.y, p.z);
+      g.userData.orbKey = loadoutKey; g.userData.orbK0 = _orbK;   // (v49.32) the live knob rescales relative to the built size
       if (!engineMesh) engineMesh = g;
     }
   } else if (name === 'Frigate') {
@@ -42958,7 +42962,8 @@ function animateShipMesh(mesh, speed, maxSpeed, isFiring, dt, doomed) {
       }
       const baseScale = 0.7 + t * 0.9;
       const flicker = 1 + Math.sin(time * 18) * 0.05 * t;
-      glow.scale.setScalar(baseScale * flicker);
+      const _ok = (glow.userData && glow.userData.orbKey) ? (((_ENGINE_ORB_K[glow.userData.orbKey] != null) ? +_ENGINE_ORB_K[glow.userData.orbKey] : 1) / (glow.userData.orbK0 || 1)) : 1;
+      glow.scale.setScalar(baseScale * flicker * _ok);
     }
   }
   if (mesh.userData.enginePlumes) {
