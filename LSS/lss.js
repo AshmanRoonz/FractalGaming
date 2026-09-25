@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "49.16";
+const LSS_BUILD = "49.26";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -240,30 +240,33 @@ const SHIP_SKINS = {
   },
   bone: {
     id: 'bone', name: 'BONE WHITE', swatch: '#ddd8cc',
-    desc: 'Bleached ceramic plating. High roughness keeps it off-white, never glare.',
-    hue: 42, hueMix: 1.0, sat: 0.32, mul: 1.14, lift: 0.34, metalness: 0.06, roughness: 0.74,
-    envMapIntensity: 0.10, emissive: 0x000000,
+    desc: 'Bleached ceramic plating. Every panel, seam and engine collar still reads through the white.',
+    pattern: 'solid', c0: 0xd6cfc0, shade: 'ratio', patKeep: 0.9, patFloor: 0.05, patCap: 1.3,
+    metalness: 0.06, roughness: 0.74, envMapIntensity: 0.10, emissive: 0x000000,
   },
   volcanic: {
     id: 'volcanic', name: 'VOLCANIC TIGER', swatch: '#5a5d68', swatch2: '#15161a',
     desc: 'Scorched basalt, burned through in stripes. Ember heat still in the seams.',
     pattern: 'tiger', c0: 0x939aa8, c1: 0x45484f, c2: 0x141519,
-    patScale: 7.0, patBands: [0.42, 0.68], patSoft: 0.02, patLift: 0.72, patGain: 6.0,
+    patScale: 7.0, patBands: [0.42, 0.68], patSoft: 0.02,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.4, patFlat: 0.35,
     metalness: 0.14, roughness: 0.64, envMapIntensity: 0.14, emissive: 0x120400,
   },
   chrome: {
     id: 'chrome', name: 'HEX ALLOY', swatch: '#cfd8e6', swatch2: '#8b98ab',
     desc: 'Hex-plated alloy. Near-monochrome; the seams catch the light, not the paint.',
     pattern: 'hex', c0: 0x9fadc0, c1: 0xc8d4e4, c2: 0xf0f6ff,
-    patScale: 9.0, patBands: [0.42, 0.80], patSoft: 0.015, patLift: 0.50, patGain: 4.5,
-    metalness: 0.62, roughness: 0.26, envMapIntensity: 0.85, emissive: 0x0c1420,
+    patScale: 9.0, patBands: [0.42, 0.80], patSoft: 0.015,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.3, patFlat: 0.2,
+    metalness: 0.40, roughness: 0.30, envMapIntensity: 0.55, emissive: 0x0c1420,
   },
   copper: {
     id: 'copper', name: 'OXIDE BLOOM', swatch: '#a86a34', swatch2: '#3f5b4a',
     desc: 'Beaten copper going green. Verdigris blooms across the plate.',
     pattern: 'organic', c0: 0x7a4620, c1: 0xd89a52, c2: 0x2f7060,
-    patScale: 3.4, patBands: [0.40, 0.62], patSoft: 0.055, patLift: 0.66, patGain: 6.5,
-    metalness: 0.40, roughness: 0.46, envMapIntensity: 0.24, emissive: 0x080200,
+    patScale: 3.4, patBands: [0.40, 0.62], patSoft: 0.055,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.4, patFlat: 0.25,
+    metalness: 0.30, roughness: 0.48, envMapIntensity: 0.24, emissive: 0x080200,
   },
   purpletiger: {
     id: 'purpletiger', name: 'PURPLE TIGER', swatch: '#3308aa',
@@ -273,21 +276,13 @@ const SHIP_SKINS = {
     patScale: 10.9, patBands: [0.55, 0.75], patSoft: 0.012, patLift: 0.04, patGain: 6.9, patMix: 0.67,
     metalness: 0.49, roughness: 0.66, envMapIntensity: 0.2, emissive: 0x0a0510,
   },
-  chromehex: {
-    id: 'chromehex', name: 'HEX ALLOY', swatch: '#cfd8e6',
-    desc: 'Hex-plated alloy. Near-monochrome; the seams catch the light, not the paint.',
-    hue: 163, hueMix: 0.8, sat: 0.58, mul: 2, lift: 0,
-    pattern: 'hex', c0: 0x000000, c1: 0x8a8a8a, c2: 0x4f4f4f,
-    patScale: 7.7, patBands: [0.71, 0.8], patSoft: 0.073, patLift: 0.5, patGain: 2.7,
-    metalness: 0, roughness: 0.26, envMapIntensity: 0.82, emissive: 0x0c1420,
-  },
   mint: {
-    id: 'mint', name: 'MINTY', swatch: '#a86a34',
-    desc: 'metallic green and silver',
-    hue: 42, hueMix: 1, sat: 0.32, mul: 1, lift: 0.34,
-    pattern: 'organic', c0: 0x00ff11, c1: 0x000000, c2: 0xf2f2f2,
-    patScale: 20, patBands: [0.51, 0.7], patSoft: 0, patLift: 0.61, patGain: 14,
-    metalness: 1, roughness: 0.28, envMapIntensity: 0.29, emissive: 0x080200,
+    id: 'mint', name: 'MINTY', swatch: '#8fd8b4', swatch2: '#c9d3cf',
+    desc: 'Metallic mint over brushed silver.',
+    pattern: 'organic', c0: 0x6fd0a0, c1: 0x2c3a36, c2: 0xd9e2de,
+    patScale: 8, patBands: [0.46, 0.66], patSoft: 0.03,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.2,
+    metalness: 0.45, roughness: 0.34, envMapIntensity: 0.40, emissive: 0x000000,
   },
   hueshift: {
     id: 'hueshift', name: 'hueshifter', swatch: '#455778',
@@ -299,17 +294,103 @@ const SHIP_SKINS = {
   },
   signal: {
     id: 'signal', name: 'SIGNAL SPLINTER', swatch: '#ff8a1e', swatch2: '#14151a',
-    desc: 'Rescue-orange shard camo on black. Impossible to lose in a dogfight.',
+    desc: 'Rescue-orange shard camo on graphite. Impossible to lose in a dogfight.',
     pattern: 'splinter', c0: 0xff8a1e, c1: 0x16171c, c2: 0xffdcae,
-    patScale: 5.0, patBands: [0.40, 0.74], patSoft: 0.006, patLift: 0.60, patGain: 6.0,
+    patScale: 5.0, patBands: [0.40, 0.74], patSoft: 0.006,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.4,
     metalness: 0.12, roughness: 0.58, envMapIntensity: 0.18, emissive: 0x080200,
   },
   void: {
     id: 'void', name: 'VOID DIGITAL', swatch: '#6a4fd0', swatch2: '#241a4d',
     desc: 'Pixelated violet composite. Breaks the silhouette in the dark.',
     pattern: 'digital', c0: 0x7d5fe6, c1: 0x2b2260, c2: 0xc9baff,
-    patScale: 2.4, patBands: [0.44, 0.72], patSoft: 0.004, patLift: 0.66, patGain: 6.5,
+    patScale: 2.4, patBands: [0.44, 0.72], patSoft: 0.004,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.4, patFlat: 0.3,
     metalness: 0.30, roughness: 0.45, envMapIntensity: 0.32, emissive: 0x0c0320,
+  },
+  img_army: {
+    id: 'img_army', name: 'ARMY', swatch: '#756e51', thumb: 'skins/army.webp',
+    desc: 'Woodland digital: greens, khaki and bark brown in pixel blocks.',
+    pattern: 'image', image: 'skins/army.webp', imageMean: 0x756e51, patScale: 1.6,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.1,
+    metalness: 0.20, roughness: 0.55, envMapIntensity: 0.25, emissive: 0x000000,
+  },
+  img_bronze_reptile: {
+    id: 'img_bronze_reptile', name: 'BRONZE REPTILE', swatch: '#41372b', thumb: 'skins/bronze_reptile.webp',
+    desc: 'Black snakeskin, bronze scales catching the light.',
+    pattern: 'image', image: 'skins/bronze_reptile.webp', imageMean: 0x41372b, patScale: 2.0,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.1,
+    metalness: 0.20, roughness: 0.55, envMapIntensity: 0.25, emissive: 0x000000,
+  },
+  img_fracture: {
+    id: 'img_fracture', name: 'FRACTURE', swatch: '#494c50', thumb: 'skins/fracture.webp',
+    desc: 'Midnight marble split by silver veins.',
+    pattern: 'image', image: 'skins/fracture.webp', imageMean: 0x494c50, patScale: 1.5,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.2,
+    metalness: 0.20, roughness: 0.55, envMapIntensity: 0.25, emissive: 0x000000,
+  },
+  img_hex_armor: {
+    id: 'img_hex_armor', name: 'HEX ARMOR', swatch: '#51555a', thumb: 'skins/hex-armor.webp',
+    desc: 'Overlapping charcoal hex plates in every grey.',
+    pattern: 'image', image: 'skins/hex-armor.webp', imageMean: 0x51555a, patScale: 1.8,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.1,
+    metalness: 0.20, roughness: 0.55, envMapIntensity: 0.25, emissive: 0x000000,
+  },
+  img_navy: {
+    id: 'img_navy', name: 'NAVY', swatch: '#546b86', thumb: 'skins/navy.webp',
+    desc: 'Deep-water blob camo in three blues.',
+    pattern: 'image', image: 'skins/navy.webp', imageMean: 0x546b86, patScale: 1.6,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.1,
+    metalness: 0.20, roughness: 0.55, envMapIntensity: 0.25, emissive: 0x000000,
+  },
+  img_red_splinter: {
+    id: 'img_red_splinter', name: 'RED SPLINTER', swatch: '#685e5f', thumb: 'skins/red-splinter.webp',
+    desc: 'Black, grey and white shards, cut with red.',
+    pattern: 'image', image: 'skins/red-splinter.webp', imageMean: 0x685e5f, patScale: 1.4,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.2,
+    metalness: 0.20, roughness: 0.55, envMapIntensity: 0.25, emissive: 0x000000,
+  },
+  img_scales: {
+    id: 'img_scales', name: 'SCALES', swatch: '#49535f', thumb: 'skins/scales.webp',
+    desc: 'Slate dragon scales, row on row.',
+    pattern: 'image', image: 'skins/scales.webp', imageMean: 0x49535f, patScale: 2.2,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.1,
+    metalness: 0.20, roughness: 0.55, envMapIntensity: 0.25, emissive: 0x000000,
+  },
+  img_skycamo: {
+    id: 'img_skycamo', name: 'SKY CAMO', swatch: '#9eb2c0', thumb: 'skins/skycamo.webp',
+    desc: 'Ice-blue and white shards, built for the high air.',
+    pattern: 'image', image: 'skins/skycamo.webp', imageMean: 0x9eb2c0, patScale: 1.5,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.1,
+    metalness: 0.20, roughness: 0.55, envMapIntensity: 0.25, emissive: 0x000000,
+  },
+  img_skycamo2: {
+    id: 'img_skycamo2', name: 'SKY CAMO II', swatch: '#6f7479', thumb: 'skins/skycamo2.webp',
+    desc: 'Storm-grey streaks raked across navy.',
+    pattern: 'image', image: 'skins/skycamo2.webp', imageMean: 0x6f7479, patScale: 1.6,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.2,
+    metalness: 0.20, roughness: 0.55, envMapIntensity: 0.25, emissive: 0x000000,
+  },
+  img_topocamo: {
+    id: 'img_topocamo', name: 'TOPO CAMO', swatch: '#4c4d46', thumb: 'skins/topocamo.webp',
+    desc: 'Olive contour lines - a map of the hull.',
+    pattern: 'image', image: 'skins/topocamo.webp', imageMean: 0x4c4d46, patScale: 1.4,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.1,
+    metalness: 0.20, roughness: 0.55, envMapIntensity: 0.25, emissive: 0x000000,
+  },
+  img_vortex_hex: {
+    id: 'img_vortex_hex', name: 'VORTEX HEX', swatch: '#496a9e', thumb: 'skins/vortex-hex.webp',
+    desc: 'Neon magenta and cyan hex circuitry.',
+    pattern: 'image', image: 'skins/vortex-hex.webp', imageMean: 0x496a9e, patScale: 1.6,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.1,
+    metalness: 0.20, roughness: 0.55, envMapIntensity: 0.25, emissive: 0x000000,
+  },
+  img_zebra: {
+    id: 'img_zebra', name: 'ZEBRA', swatch: '#b7b6b7', thumb: 'skins/zebra.webp',
+    desc: 'Black and white stripes. Subtle it is not.',
+    pattern: 'image', image: 'skins/zebra.webp', imageMean: 0xb7b6b7, patScale: 1.5,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.3,
+    metalness: 0.20, roughness: 0.55, envMapIntensity: 0.25, emissive: 0x000000,
   },
 };
 const _SKIN_TUNE_HEX = { c0: 1, c1: 1, c2: 1, emissive: 1 };
@@ -3084,7 +3165,8 @@ const EndlessMode = {
   onBuildWorld() {
     const run = game.endlessRun;
     if (!run) return;
-    try {
+    if (run.hub) { try { _lssEndlessHubStart(run); } catch (e) { console.warn('[endless-hub] start failed:', e); } }
+    else try {
       let si = 1;
       for (let i = 0; i < run.segs.length; i++) {
         const s = run.segs[i];
@@ -3180,14 +3262,15 @@ const EndlessMode = {
     for (let i = 0; i < run.segs.length; i++) { if (run.segs[i].gid === run.progGid) { idx = i; break; } }
     if (run.progGid < 0) idx = 0;
     let bestK = -1, bestT = 0;
-    for (let k = idx; k < Math.min(idx + 3, run.segs.length); k++) {
+    const _hub = !!run.hub, _tube = _hub ? ENDLESS_HUB.tube : 4200, _win = _hub ? 2 : 3;
+    for (let k = idx; k < Math.min(idx + _win, run.segs.length); k++) {
       const s = run.segs[k];
-      const ex = s.b.x - s.a.x, ey = s.b.y - s.a.y, ez = s.b.z - s.a.z;
+      const ex = s.b.x - s.a.x, ey = _hub ? 0 : (s.b.y - s.a.y), ez = s.b.z - s.a.z;
       const l2 = ex * ex + ey * ey + ez * ez || 1;
       let t = ((p.x - s.a.x) * ex + (p.y - s.a.y) * ey + (p.z - s.a.z) * ez) / l2;
       t = t < 0 ? 0 : (t > 1 ? 1 : t);
-      const qx = p.x - (s.a.x + ex * t), qy = p.y - (s.a.y + ey * t), qz = p.z - (s.a.z + ez * t);
-      if (qx * qx + qy * qy + qz * qz < 4200 * 4200) { bestK = k; bestT = t; }
+      const qx = p.x - (s.a.x + ex * t), qy = _hub ? 0 : (p.y - (s.a.y + ey * t)), qz = p.z - (s.a.z + ez * t);
+      if (qx * qx + qy * qy + qz * qz < _tube * _tube) { bestK = k; bestT = t; }
     }
     if (bestK >= 0) {
       const tgt = run.segs[bestK];
@@ -3215,12 +3298,12 @@ const EndlessMode = {
         let wk = -1, wt = 0;
         for (let k = idx; k < run.segs.length; k++) {
           const s = run.segs[k];
-          const ex = s.b.x - s.a.x, ey = s.b.y - s.a.y, ez = s.b.z - s.a.z;
+          const ex = s.b.x - s.a.x, ey = _hub ? 0 : (s.b.y - s.a.y), ez = s.b.z - s.a.z;
           const l2 = ex * ex + ey * ey + ez * ez || 1;
           let t = ((p.x - s.a.x) * ex + (p.y - s.a.y) * ey + (p.z - s.a.z) * ez) / l2;
           t = t < 0 ? 0 : (t > 1 ? 1 : t);
-          const qx = p.x - (s.a.x + ex * t), qy = p.y - (s.a.y + ey * t), qz = p.z - (s.a.z + ez * t);
-          if (qx * qx + qy * qy + qz * qz < 4200 * 4200) {
+          const qx = p.x - (s.a.x + ex * t), qy = _hub ? 0 : (p.y - (s.a.y + ey * t)), qz = p.z - (s.a.z + ez * t);
+          if (qx * qx + qy * qy + qz * qz < _tube * _tube) {
             if (k > idx || run.progGid < 0 || (s.gid === run.progGid && t > run.progT)) { wk = k; wt = t; }
             break;
           }
@@ -3243,18 +3326,27 @@ const EndlessMode = {
     }
     let guard = 0;
     while (guard < 2 && run.segs.length) {
-      const end = run.segs[run.segs.length - 1].b;
-      const dx = p.x - end.x, dy = p.y - end.y, dz = p.z - end.z;
-      if (dx * dx + dy * dy + dz * dz > 7000 * 7000) break;
-      _lssEndlessApplySeg(run, _lssEndlessNextSeg(run));
+      if (_hub) {
+        let ahead = 0;
+        for (let i = run.segs.length - 1; i >= 0 && run.segs[i].gid > run.progGid; i--) ahead++;
+        if (ahead >= ENDLESS_HUB.ahead) break;
+      } else {
+        const end = run.segs[run.segs.length - 1].b;
+        const dx = p.x - end.x, dy = p.y - end.y, dz = p.z - end.z;
+        if (dx * dx + dy * dy + dz * dz > 7000 * 7000) break;
+      }
+      _lssEndlessGrow(run);   // (v49.21) the open world's step or the cavern's
       guard++;
     }
     let pruned = false;
-    while (run.segs.length > 18) {
+    while (run.segs.length > (_hub ? 4 : 18)) {
       const s0 = run.segs[0];
       if (run.progGid >= 0 && s0.gid >= run.progGid) break;
-      const dx = p.x - s0.b.x, dz = p.z - s0.b.z;
-      if (dx * dx + dz * dz < 8000 * 8000) break;
+      if (_hub) { if (run.progGid < 0 || s0.gid >= run.progGid - ENDLESS_HUB.behind) break; }   // (v49.22) keep `behind` for the respawn
+      else {
+        const dx = p.x - s0.b.x, dz = p.z - s0.b.z;
+        if (dx * dx + dz * dz < 8000 * 8000) break;
+      }
       run.segs.shift();
       try { if (s0._bolts && typeof _lssEndlessFreeBolts === 'function') _lssEndlessFreeBolts(run, s0); } catch (_) {}
       if (s0.cyl) { const i = game.levelCylinders.indexOf(s0.cyl); if (i >= 0) game.levelCylinders.splice(i, 1); }
@@ -3337,7 +3429,7 @@ const EndlessMode = {
       if (s0.spur) { const j = game.levelCylinders.indexOf(s0.spur); if (j >= 0) game.levelCylinders.splice(j, 1); }
       if (s0.sph) { const j = game.levelSpheres.indexOf(s0.sph); if (j >= 0) game.levelSpheres.splice(j, 1); }
       try {
-        if (!window.__endlessNoRebake) {
+        if (!window.__endlessNoRebake && !run.hub) {   // (v49.21) nothing carved in the open world - and a rebake there drops the trees
           const rax = s0.cyl ? s0.cyl.ax : s0.a.x, raz = s0.cyl ? s0.cyl.az : s0.a.z;
           const rbx = s0.cyl ? s0.cyl.bx : s0.b.x, rbz = s0.cyl ? s0.cyl.bz : s0.b.z;
           const cr = (s0.cyl ? s0.cyl.r : 400) + soft;
@@ -3370,13 +3462,14 @@ const EndlessMode = {
       g.x = p.x + Math.sin(hd) * 2600;
       g.z = p.z + Math.cos(hd) * 2600;
       g.y = Math.max(-260, Math.min(260, p.y));
+      if (run.hub) { const _T = game.sandwichTerrain; g.y = ((_T && _T.WL != null) ? _T.WL : -720) + ENDLESS_HUB.H; }   // (v49.21) over the water
     }
     g.heading = hd; g.sinceHall = 0;
-    for (let i = 0; i < 8; i++) { try { _lssEndlessApplySeg(run, _lssEndlessNextSeg(run)); } catch (_) {} }
+    for (let i = 0; i < 8; i++) { try { _lssEndlessGrow(run); } catch (_) {} }
     run.progGid = -1; run.progT = 0; run.lostT = 0; run.farT = 0;
     run.lastHall = { x: p.x, y: p.y, z: p.z };
     run.reanchors = (run.reanchors || 0) + 1;
-    try { if (window.Overlays && Overlays.banner) Overlays.banner('THE CAVERN SHIFTS', 'a new route finds you'); } catch (_) {}
+    try { if (window.Overlays && Overlays.banner) Overlays.banner(run.hub ? 'NEW HEADING' : 'THE CAVERN SHIFTS', 'a new route finds you'); } catch (_) {}
     try { announcerSay('New route plotted.', { key: 'endless_reroute', cooldown: 20 }); } catch (_) {}
     try { if (typeof invalidateMinimapExtent === 'function') invalidateMinimapExtent(); } catch (_) {}
   },
@@ -3384,7 +3477,9 @@ const EndlessMode = {
     if (player && player.shipState === 'dead') return;
     run.phaseT += dt;
     if (run.phase === 'travel') {
-      const clock = Math.max(28, 58 - (run.dist / 1000) * 1.2);
+      const _HK = ENDLESS_HUB;
+      const clock = run.hub ? Math.max(_HK.clockMin, _HK.clockMax - (run.dist / 1000) * _HK.clockPerKm)   // (v49.24) the open world
+                            : Math.max(28, 58 - (run.dist / 1000) * 1.2);
       if (run.phaseT >= clock) {
         run.phase = 'warning'; run.phaseT = 0;
         try { announcerSay('Warning. Hostile signatures closing.', { key: 'endless_warn', cooldown: 10, priority: true }); } catch (_) {}
@@ -3513,7 +3608,8 @@ const EndlessMode = {
             const nx = b.x + nox, nz = b.z + noz; let ny = b.y + noy;
             try {
               const _mq = _bendToFlat(nx, ny, nz);   // (v39.59) bend: clamp in flat space, keep the world x/z
-              const gy = _stGroundYCarved(_mq.x, _mq.z, T) + 170, cv = _stCeilYCarved(_mq.x, _mq.z, T) - 170;
+              let gy = _stGroundYCarved(_mq.x, _mq.z, T) + 170; const cv = _stCeilYCarved(_mq.x, _mq.z, T) - 170;
+              if (run.hub) gy = Math.max(gy, ((T && T.WL != null) ? T.WL : -720) + 170);   // (v49.21) a mote never flees into the sea
               if (cv > gy) { const _fy = _mq.y < gy ? gy : (_mq.y > cv ? cv : _mq.y); if (_fy !== _mq.y) ny = _bendToWorld(_mq.x, _fy, _mq.z).y; }   // carved-gap clamp
               const cy0 = b.y + poy;
               if (worldSDF(nx, ny, nz) < -60) { b.ox = nox; b.oy = ny - b.y; b.oz = noz; }
@@ -3655,7 +3751,9 @@ const EndlessMode = {
       if (swept) { game.entities = keep; run.swept = (run.swept || 0) + swept; }
     } catch (_) {}
     run.waveN++;
-    const n = Math.min(6, 2 + Math.floor(run.dist / 3000));
+    const _HK = ENDLESS_HUB;
+    const n = run.hub ? Math.min(_HK.waveMax, _HK.waveMin + Math.floor((run.waveN - 1) / Math.max(1, _HK.waveEvery)))   // (v49.25) the open world: by wave, not distance
+                      : Math.min(6, 2 + Math.floor(run.dist / 3000));
     const elite = (run.waveN % 5 === 0);
     const pool = (game._botShipDeal && game._botShipDeal.enemy) || ['SLAYER', 'PYRO', 'TRACKER'];
     const pp = player.position;
@@ -3685,6 +3783,7 @@ const EndlessMode = {
         if (bot.mesh) bot.mesh.position.copy(bot.position);
         if (elite && bot.maxHealth) { bot.maxHealth *= 1.6; bot.health = bot.maxHealth; }
         bot._endlessWave = run.waveN;
+        if (run.hub) bot._riftGuard = true;   // (v49.21) open-sky nav: hold the target's altitude over the terrain, not mid-"gap"
         game.entities.push(bot);
         run.waveBots.push(bot);
       } catch (_) {}
@@ -3695,6 +3794,7 @@ const EndlessMode = {
   _world(dt, run) {
     const T = game.sandwichTerrain;
     if (!T) return;
+    if (run.hub) return;   // (v49.21) biome stretches, god rays and storms are the cavern's - the open world keeps its own
     if (run.dist >= run.nextBiomeAt) {
       run.nextBiomeAt = run.dist + 9000 + run.gen.cos() * 6000;
       const order = ['rocky', 'snow', 'volcanic', 'goldmine', 'grassy'];
@@ -3990,7 +4090,7 @@ if (typeof window !== 'undefined') window.__endlessInfo = function () {
   const o = { mode: LSS.MODE, hasMode: !!GameModes.endless, isActive: activeMode() === GameModes.endless,
               run: !!run, state: game.state };
   if (run) {
-    o.dist = run.dist; o.progGid = run.progGid; o.progT = run.progT;
+    o.dist = run.dist; o.progGid = run.progGid; o.progT = run.progT; o.hub = !!run.hub;   // (v49.21)
     o.segs = run.segs.length;
     o.gid0 = run.segs.length ? run.segs[0].gid : -1;
     o.gidN = run.segs.length ? run.segs[run.segs.length - 1].gid : -1;
@@ -5252,6 +5352,7 @@ function enterShipSelect() {
   try { setTimeout(_ssSpreadRails, 0); } catch (_) {}
   try { if (typeof _lssModeAnnounceBurst === 'function') _lssModeAnnounceBurst(); } catch (_) {}
   try { if (typeof _ovWarpClear === 'function') _ovWarpClear(); } catch (_) {}
+  try { if (typeof _raceCircuitHudHide === 'function') _raceCircuitHudHide(); } catch (_) {}   // (v49.20) the GATE n / N line too
   try { if (typeof _clipHideSaveBtn === 'function') _clipHideSaveBtn(); } catch (_) {}
   _stagedRoundShip = null;
   try { if (window._lssLockLandscape) window._lssLockLandscape(true); } catch (_) {}
@@ -28549,6 +28650,8 @@ function _swBuildHubWater(T) {
             if (!_mm || !_mm.color || _mm._reflLiftT === _reflPassId) continue;
             if (_mm.transparent) continue;
             _mm._reflLiftT = _reflPassId;
+            const _su = _mm.userData && _mm.userData._skinHueU;
+            if (_su && _su.uSkinReflPass) { _su.uSkinReflPass.value = 1; _reflLift.push({ m: _mm, su: _su }); }
             if (typeof _mm.envMapIntensity === 'number' && _E !== 1) { _reflLift.push({ m: _mm, env: _mm.envMapIntensity }); _mm.envMapIntensity *= _E; }
             if (!(_L > 0)) continue;
             if (_mm.emissive && _mm.emissive.isColor) {
@@ -28726,7 +28829,7 @@ function _swBuildHubWater(T) {
         if (_wUv) _wU.visible = true;
         if (_cp) { _cp.visible = _cpWas; if (_cp.material) { _cp.material.opacity = _cpOp; if (_cpCol) _cp.material.color.copy(_cpCol); } }   // (v38.50/51/57) back to the direct-view rule, brightness and colour
         try { _reflFxRestore(); } catch (_) {}   // (v38.74)
-        if (_showShip) ship.traverse(_shipReflRestore); for (let _i = 0; _i < _reflPeerMs.length; _i++) _reflPeerMs[_i].traverse(_shipReflRestore); for (let _i = 0; _i < _reflLift.length; _i++) { const _e = _reflLift[_i]; if (_e.u != null) _e.m.uniforms.uBrightness.value = _e.u; else if (_e.env != null) _e.m.envMapIntensity = _e.env; else if (_e.c) _e.m.color.copy(_e.c); else { _e.m.emissive.copy(_e.e); _e.m.emissiveIntensity = _e.i; if (_e.sw) { _e.m.emissiveMap = _e.em || null; _e.m.needsUpdate = true; } } } _reflLift.length = 0; for (let _i = 0; _i < _shields.length; _i++) _shields[_i].visible = _shieldsWas[_i]; for (let _i = 0; _i < _shDim.length; _i++) _shDim[_i][0].opacity = _shDim[_i][1];   /* (v40.02) */ _reflSkipSet = null; if (ship) ship.visible = wasVis;
+        if (_showShip) ship.traverse(_shipReflRestore); for (let _i = 0; _i < _reflPeerMs.length; _i++) _reflPeerMs[_i].traverse(_shipReflRestore); for (let _i = 0; _i < _reflLift.length; _i++) { const _e = _reflLift[_i]; if (_e.su) { _e.su.uSkinReflPass.value = 0; continue; } if (_e.u != null) _e.m.uniforms.uBrightness.value = _e.u; else if (_e.env != null) _e.m.envMapIntensity = _e.env; else if (_e.c) _e.m.color.copy(_e.c); else { _e.m.emissive.copy(_e.e); _e.m.emissiveIntensity = _e.i; if (_e.sw) { _e.m.emissiveMap = _e.em || null; _e.m.needsUpdate = true; } } } _reflLift.length = 0; for (let _i = 0; _i < _shields.length; _i++) _shields[_i].visible = _shieldsWas[_i]; for (let _i = 0; _i < _shDim.length; _i++) _shDim[_i][0].opacity = _shDim[_i][1];   /* (v40.02) */ _reflSkipSet = null; if (ship) ship.visible = wasVis;
         if (_ghostWas) { try { _ghostHullApply(ship); } catch (_) {} }
       }
       _reflNrm.set(0, 0, 1).applyMatrix4(_reflRot.extractRotation(this.matrixWorld));
@@ -41598,6 +41701,14 @@ const _SKIN_HUE_PARS = [
   'uniform vec3  uSkinPatC0;',
   'uniform vec3  uSkinPatC1;',
   'uniform vec3  uSkinPatC2;',
+  'uniform float uSkinRatio;',     // 1 = shade by the hull's own value RATIO (see the v49.26 table note)
+  'uniform float uSkinHullLum;',   // this hull's typical plate luminance, linear (x the skin's mul)
+  'uniform float uSkinPatKeep;',   // ratio exponent: 1 = exact, <1 eases the extremes
+  'uniform float uSkinPatFloor;',
+  'uniform float uSkinPatCap;',
+  'uniform float uSkinPatFlat;',   // 0 = the camo as drawn, 1 = its mean colour everywhere
+  'uniform float uSkinReflPass;',  // 1 only inside the water-mirror pass (the emissive recolour)
+  'uniform sampler2D uSkinPatTex;',
   'varying vec3 vSkinPos;',
   'varying vec3 vSkinNrm;',
   'vec3 lssSkinHue(vec3 c, float th, float mixAmt, float s, float lift){',
@@ -41677,6 +41788,12 @@ const _SKIN_HUE_PARS = [
   'float lssPatHex(vec3 p, vec3 w){',
   '  return lssHex2(p.zy) * w.x + lssHex2(p.xz) * w.y + lssHex2(p.xy) * w.z;',
   '}',
+  'vec3 lssPatImage(vec3 p, vec3 w){',
+  '  vec3 a = texture2D(uSkinPatTex, p.zy + vec2(0.37, 0.11)).rgb;',
+  '  vec3 b = texture2D(uSkinPatTex, p.xz + vec2(0.71, 0.53)).rgb;',
+  '  vec3 c = texture2D(uSkinPatTex, p.xy).rgb;',
+  '  return a * w.x + b * w.y + c * w.z;',
+  '}',
   'float lssPatTiger(vec3 p, vec3 ax){',
   '  float t = dot(p, ax);',
   '  float warp = (lssPF(p * 0.55) - 0.5) * 1.05;',
@@ -41684,9 +41801,16 @@ const _SKIN_HUE_PARS = [
   '  float s = sin((t + warp) * 3.14159265);',
   '  return clamp(0.5 + 0.95 * (s + br), 0.0, 1.0);',
   '}',
-  'vec3 lssSkinPattern(vec3 base){',
+  'vec3 lssSkinPattern(vec3 base, vec3 raw){',
   '  vec3 sp = vSkinPos * uSkinPatScale;',
   '  vec3 n = normalize(vSkinNrm);',
+  '  vec3 camo;',
+  '  if (uSkinPat > 6.5) camo = uSkinPatC0;',   // (v49.26) SOLID: one colour on the hull's own shading
+  '  else if (uSkinPat > 5.5) {',               // (v49.26) IMAGE
+  '    vec3 w8 = pow(abs(n), vec3(8.0));',
+  '    w8 /= max(w8.x + w8.y + w8.z, 1e-4);',
+  '    camo = lssPatImage(sp, w8);',
+  '  } else {',
   '  vec3 w = pow(abs(n), vec3(4.0));',
   '  w /= max(w.x + w.y + w.z, 1e-4);',
   '  float v;',
@@ -41696,13 +41820,17 @@ const _SKIN_HUE_PARS = [
   '  else if (uSkinPat < 4.5) v = lssPatHex(sp, w);',
   '  else                     v = lssPatTiger(sp, uSkinPatAxis);',
   '  float aa = clamp(fwidth(v) * 0.6 + uSkinPatSoft, 0.0015, 0.5);',
-  '  vec3 camo = mix(uSkinPatC0, uSkinPatC1, smoothstep(uSkinPatBands.x - aa, uSkinPatBands.x + aa, v));',
+  '  camo = mix(uSkinPatC0, uSkinPatC1, smoothstep(uSkinPatBands.x - aa, uSkinPatBands.x + aa, v));',
   '  camo = mix(camo, uSkinPatC2, smoothstep(uSkinPatBands.y - aa, uSkinPatBands.y + aa, v));',
+  '  }',
   '  float px = max(max(fwidth(sp.x), fwidth(sp.y)), fwidth(sp.z));',
   '  camo = mix(camo, (uSkinPatC0 + uSkinPatC1 + uSkinPatC2) * 0.3333333, smoothstep(0.12, 0.55, px));',
-  '  float lum = dot(base, vec3(0.2126, 0.7152, 0.0722));',
-  '  float shade = uSkinPatLift + (1.0 - uSkinPatLift) * clamp(lum * uSkinPatGain, 0.0, 1.0);',
-  '  return mix(base, camo * shade, uSkinPatMix);',
+  '  camo = mix(camo, (uSkinPatC0 + uSkinPatC1 + uSkinPatC2) * 0.3333333, uSkinPatFlat);',
+  '  float lum = dot(raw, vec3(0.2126, 0.7152, 0.0722));',
+  '  float shade;',
+  '  if (uSkinRatio > 0.5) shade = clamp(pow(max(lum / max(uSkinHullLum, 1e-4), 0.0), uSkinPatKeep), uSkinPatFloor, uSkinPatCap);',
+  '  else shade = uSkinPatLift + (1.0 - uSkinPatLift) * clamp(lum * uSkinPatGain, 0.0, 1.0);',
+  '  return mix(base, min(camo * shade, vec3(1.0)), uSkinPatMix);',
   '}',
 ].join('\n');
 
@@ -41712,7 +41840,66 @@ const _SKIN_PAT_VERT = [
   'varying vec3 vSkinNrm;',
 ].join('\n');
 
-const _SKIN_PAT_ID = { none: 0, splinter: 1, digital: 2, organic: 3, hex: 4, tiger: 5 };
+const _SKIN_PAT_ID = { none: 0, splinter: 1, digital: 2, organic: 3, hex: 4, tiger: 5, image: 6, solid: 7 };   // (v49.26) + image, solid
+let _skinWhiteTex = null;
+function _skinDefaultTex() {
+  if (!_skinWhiteTex) { _skinWhiteTex = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1); _skinWhiteTex.needsUpdate = true; }
+  return _skinWhiteTex;
+}
+const _skinImgTex = new Map();
+function _skinImageTex(url) {
+  let t = _skinImgTex.get(url);
+  if (t) return t;
+  t = new THREE.TextureLoader().load(url, (tx) => { try { if (typeof renderer !== 'undefined' && renderer && renderer.initTexture) renderer.initTexture(tx); } catch (_) {} });
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.colorSpace = THREE.SRGBColorSpace;
+  try { t.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy()); } catch (_) {}
+  _skinImgTex.set(url, t);
+  return t;
+}
+const _skinTexLumC = new Map();
+function _skinTexLum(tex) {
+  if (!tex || !tex.image) return null;
+  if (_skinTexLumC.has(tex.uuid)) return _skinTexLumC.get(tex.uuid);
+  let v = null;
+  try {
+    const S = 64, cv = document.createElement('canvas'); cv.width = S; cv.height = S;
+    const cx = cv.getContext('2d', { willReadFrequently: true });
+    cx.drawImage(tex.image, 0, 0, S, S);
+    const d = cx.getImageData(0, 0, S, S).data;
+    const lin = (c) => { c /= 255; return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
+    const L = [];
+    for (let i = 0; i < d.length; i += 4) { const l = 0.2126 * lin(d[i]) + 0.7152 * lin(d[i + 1]) + 0.0722 * lin(d[i + 2]); if (l > 0.001) L.push(l); }
+    if (L.length > 64) { L.sort((a, b) => a - b); v = L[L.length >> 1]; }
+  } catch (_) { v = null; }
+  _skinTexLumC.set(tex.uuid, v);
+  return v;
+}
+function _skinHullLum(root, mats) {
+  const rud = root.userData || (root.userData = {});
+  if (rud._skinHullLum) return rud._skinHullLum;
+  const hull = new Set(mats), tris = new Map();
+  try {
+    root.traverse((o) => {
+      if (!o.isMesh || !o.geometry) return;
+      const ms = Array.isArray(o.material) ? o.material : [o.material];
+      const g = o.geometry, t = g.index ? g.index.count / 3 : ((g.attributes && g.attributes.position) ? g.attributes.position.count / 3 : 0);
+      for (const m of ms) if (m && hull.has(m)) tris.set(m, (tris.get(m) || 0) + t / ms.length);
+    });
+  } catch (_) {}
+  let sw = 0, sl = 0;
+  for (const m of mats) {
+    const b = m.userData && m.userData._skinBase;
+    const c = b ? b.color : m.color; if (!c) continue;
+    const tl = m.map ? _skinTexLum(m.map) : 1;
+    if (tl == null) continue;
+    const w = tris.get(m) || 0; if (!(w > 0)) continue;
+    sw += w; sl += w * Math.log(Math.max(1e-4, (0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b) * tl));
+  }
+  const v = sw > 0 ? Math.exp(sl / sw) : 0.05;
+  rud._skinHullLum = v;
+  return v;
+}
 const _skinCycle = new Set();
 function _skinHueCycleTick() {
   if (!_skinCycle.size) return;
@@ -41742,6 +41929,9 @@ function _skinPatchHueShader(m) {
     uSkinPatC0: { value: new THREE.Color(0xffffff) },
     uSkinPatC1: { value: new THREE.Color(0x808080) },
     uSkinPatC2: { value: new THREE.Color(0x202020) },
+    uSkinRatio: { value: 0 }, uSkinHullLum: { value: 0.05 }, uSkinPatKeep: { value: 0.85 },
+    uSkinPatFloor: { value: 0.05 }, uSkinPatCap: { value: 1.4 }, uSkinPatFlat: { value: 0 },
+    uSkinReflPass: { value: 0 }, uSkinPatTex: { value: _skinDefaultTex() },
   };
   ud._skinHueU = u;
   const prevOBC = m.onBeforeCompile;
@@ -41755,11 +41945,14 @@ function _skinPatchHueShader(m) {
     shader.fragmentShader = shader.fragmentShader
       .replace('void main() {', _SKIN_HUE_PARS + '\nvoid main() {')
       .replace('#include <map_fragment>',
-        '#include <map_fragment>\n\tdiffuseColor.rgb = lssSkinHue(diffuseColor.rgb, uSkinHue, uSkinMix, uSkinSat, uSkinLift);'
-        + '\n\tif (uSkinPatMix > 0.001) diffuseColor.rgb = lssSkinPattern(diffuseColor.rgb);')
+        '#include <map_fragment>\n\tvec3 lssRaw = diffuseColor.rgb;'   // (v49.26) the hull's own paint, for the ratio shade
+        + '\n\tdiffuseColor.rgb = lssSkinHue(diffuseColor.rgb, uSkinHue, uSkinMix, uSkinSat, uSkinLift);'
+        + '\n\tif (uSkinPatMix > 0.001) diffuseColor.rgb = lssSkinPattern(diffuseColor.rgb, lssRaw);')
       .replace('#include <emissivemap_fragment>',
-        '#include <emissivemap_fragment>\n\ttotalEmissiveRadiance = lssSkinHue(totalEmissiveRadiance, uSkinHue, uSkinMix, uSkinSat, 0.0);'
-        + '\n\tif (uSkinPatMix > 0.001) totalEmissiveRadiance = lssSkinPattern(totalEmissiveRadiance);');
+        '#include <emissivemap_fragment>\n\tif (uSkinReflPass > 0.5) {'
+        + '\n\ttotalEmissiveRadiance = lssSkinHue(totalEmissiveRadiance, uSkinHue, uSkinMix, uSkinSat, 0.0);'
+        + '\n\tif (uSkinPatMix > 0.001) totalEmissiveRadiance = lssSkinPattern(totalEmissiveRadiance, totalEmissiveRadiance);'
+        + '\n\t}');
   };
   const prevKey = m.customProgramCacheKey;
   m.customProgramCacheKey = function () {
@@ -41833,6 +42026,8 @@ function _applyShipSkin(root, skinId) {
   let mats;
   try { mats = _shipSkinHullMats(root); } catch (_) { return null; }
   try { _skinBakePatternSpace(root, mats); } catch (_) {}
+  let _hullLum = 0.05;   // (v49.26) the hull's typical plate, for the ratio shade
+  try { _hullLum = _skinHullLum(root, mats); } catch (_) {}
   for (let i = 0; i < mats.length; i++) {
     const m = mats[i];
     const ud = m.userData || (m.userData = {});
@@ -41862,10 +42057,10 @@ function _applyShipSkin(root, skinId) {
       hu.uSkinHue.value = ((sk.hue || 0) % 360) / 360;
       if (sk.hueCycle) { hu._cyc = { base: hu.uSkinHue.value, rate: sk.hueCycle / 360 }; _skinCycle.add(hu); }
       else { hu._cyc = null; _skinCycle.delete(hu); }
-      hu.uSkinMix.value = (sk.hueMix != null) ? sk.hueMix : 1;
+      const pid = _SKIN_PAT_ID[sk.pattern] || 0;
+      hu.uSkinMix.value = (sk.hueMix != null) ? sk.hueMix : (pid ? 0 : 1);
       hu.uSkinSat.value = (sk.sat != null) ? sk.sat : 1;
       hu.uSkinLift.value = (sk.lift != null) ? sk.lift : 0;
-      const pid = _SKIN_PAT_ID[sk.pattern] || 0;
       hu.uSkinPat.value = pid;
       hu.uSkinPatMix.value = pid ? ((sk.patMix != null) ? sk.patMix : 1) : 0;
       if (pid) {
@@ -41878,6 +42073,17 @@ function _applyShipSkin(root, skinId) {
         hu.uSkinPatC0.value.setHex((sk.c0 != null) ? sk.c0 : 0xffffff);
         hu.uSkinPatC1.value.setHex((sk.c1 != null) ? sk.c1 : 0x808080);
         hu.uSkinPatC2.value.setHex((sk.c2 != null) ? sk.c2 : 0x202020);
+        hu.uSkinRatio.value = (sk.shade === 'ratio') ? 1 : 0;
+        hu.uSkinPatKeep.value = (sk.patKeep != null) ? sk.patKeep : 0.85;
+        hu.uSkinPatFloor.value = (sk.patFloor != null) ? sk.patFloor : 0.05;
+        hu.uSkinPatCap.value = (sk.patCap != null) ? sk.patCap : 1.4;
+        hu.uSkinPatFlat.value = (sk.patFlat != null) ? sk.patFlat : 0;
+        hu.uSkinHullLum.value = _hullLum * ((sk.mul != null) ? sk.mul : 1);
+        if (sk.image) {
+          hu.uSkinPatTex.value = _skinImageTex(sk.image);
+          const _mc = (sk.imageMean != null) ? sk.imageMean : 0x808080;
+          hu.uSkinPatC0.value.setHex(_mc); hu.uSkinPatC1.value.setHex(_mc); hu.uSkinPatC2.value.setHex(_mc);
+        } else hu.uSkinPatTex.value = _skinDefaultTex();
       }
       if (m.color) {
         m.color.copy(b.color);
@@ -54536,7 +54742,10 @@ function _lssHubWorld() {
   try {
     if (typeof LSS === 'undefined') return false;
     if (LSS.MODE === 'freeflight') return true;
-    return LSS.MODE === 'race' && _raceCircuitKind() === 'overworld';
+    if (LSS.MODE === 'endless') { const m = (typeof MAP_DATA !== 'undefined' && game && game.selectedMap) ? MAP_DATA[game.selectedMap] : null; return !!(m && m.endlessHub); }
+    if (LSS.MODE !== 'race') return false;
+    const _k = _raceCircuitKind();
+    return _k === 'overworld' || _k === 'archipelago';   // (v49.17) the ARCHIPELAGO CIRCUIT races the same world
   } catch (_) { return false; }
 }
 function _raceCircuitReady() { const C = (typeof game !== 'undefined' && game) ? game.raceCircuit : null; return !!(C && C.ready && C.rings && C.rings.length); }
@@ -54980,6 +55189,365 @@ function _rcGenOverworld(seed) {
   return { kind: 'overworld', seed: seed >>> 0, rings, start, fin: _rcFinish(Q0, P, start), upm: 7 };
 }
 
+const RACE_ARCH = {
+  G: 150,                 // water grid cell: the canals are 300-900 wide, so 2-6 cells
+  half: 6400,             // grid half-size about the region centre (the loop tops out ~5200 out)
+  openC: 1.35, wallC: 0.14, bankC: 0.7,   // water cost: open, minus per walled axis (0-4), plus touching a bank
+  landC: 5, landPer: 50,  // land: 5 + height/50 - a low sandbar is a hop, a 450 plateau costs 14x a canal
+  wallCells: 3,           // "walled" = land within this many cells on BOTH sides of an axis
+  anchors: 10, loopR: [3300, 4000], petals: [3, 5], petalK: [0.20, 0.30], snapR: 900,
+  smooth: 3, spacing: 1700, gatesMin: 12, gatesMax: 18, slide: 380, minGap: 1000,
+  canalY: [250, 300], canalD: 460,   // a canal gate STANDS ON THE WATER: centre 250-300 up puts the hoop's foot at the surface
+  landUp: 330,                       // a gate the route could not keep off an island sits this far over it
+  underMin: 560, underY: 230, underD: 420,   // UNDER a shelf whose underside clears the water by underMin
+  overUp: 260, overD: 540,                   // OVER a shelf: this far above its top
+  shelfLow: 420, shelfC: 4,   // a shelf hanging lower than this over the water is an obstacle to the line
+  shelfGap: 2200,             // a shelf further than this off the loop is not worth the detour
+  startBack: [1200, 3400],    // the grid lines up this far behind gate 1, wherever that stretch is most open
+  lineY: 230, lineLand: 260, lineStep: 420, lineR: [220, 600],
+  mmRange: 6500,
+};
+if (typeof window !== 'undefined') window.__raceArchK = RACE_ARCH;
+let _rcArchGridC = null;
+function _rcArchSite() {
+  const HT = (typeof game !== 'undefined' && game && game._hubTerra) ? game._hubTerra : null;
+  return { x: (HT && HT.arX != null) ? +HT.arX : -12500, z: (HT && HT.arZ != null) ? +HT.arZ : -11000,
+           key: HT ? [HT.arOn, HT.arX, HT.arZ, HT.arR, HT.arRamp, HT.arCell, HT.arCanal, HT.arDepth].join(',') : '' };
+}
+function _rcArchGrid() {
+  const T = (typeof game !== 'undefined' && game) ? game.sandwichTerrain : null;
+  if (!T || !T.ON || !T.HUB) return null;
+  const K = RACE_ARCH, S = _rcArchSite();
+  const WL = (T.WL != null) ? T.WL : -720;
+  const key = S.x + ',' + S.z + ',' + WL + ',' + K.G + ',' + K.half + ',' + K.wallCells + ',' + [K.openC, K.wallC, K.bankC, K.landC, K.landPer, K.shelfLow, K.shelfC].join(',') + '|' + S.key;
+  if (_rcArchGridC && _rcArchGridC.key === key) return _rcArchGridC;
+  const t0 = performance.now();
+  const G = K.G, n = Math.ceil(2 * K.half / G) + 1, x0 = S.x - K.half, z0 = S.z - K.half, N2 = n * n;
+  const h = new Float32Array(N2);
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) h[j * n + i] = _rcOwGroundY(x0 + i * G, z0 + j * G) - WL;
+  const dl = new Uint8Array(N2).fill(255), q = new Int32Array(N2);
+  let qh = 0, qt = 0;
+  for (let k = 0; k < N2; k++) if (h[k] >= -25) { dl[k] = 0; q[qt++] = k; }
+  while (qh < qt) {
+    const k = q[qh++], i = k % n, j = (k / n) | 0, d = dl[k];
+    if (d >= 6) continue;
+    for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
+      if (!di && !dj) continue;
+      const ii = i + di, jj = j + dj; if (ii < 0 || jj < 0 || ii >= n || jj >= n) continue;
+      const kk = jj * n + ii; if (dl[kk] > d + 1) { dl[kk] = d + 1; q[qt++] = kk; }
+    }
+  }
+  const wl = new Uint8Array(N2);
+  const AX = [[1, 0], [1, 1], [0, 1], [-1, 1]];
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+    if (h[j * n + i] >= -25) continue;
+    let pairs = 0;
+    for (let a = 0; a < 4; a++) {
+      const ax = AX[a][0], az = AX[a][1];
+      let p = false, m = false;
+      for (let d = 1; d <= K.wallCells; d++) {
+        const i1 = i + ax * d, j1 = j + az * d, i2 = i - ax * d, j2 = j - az * d;
+        if (!p && i1 >= 0 && j1 >= 0 && i1 < n && j1 < n && h[j1 * n + i1] >= -25) p = true;
+        if (!m && i2 >= 0 && j2 >= 0 && i2 < n && j2 < n && h[j2 * n + i2] >= -25) m = true;
+      }
+      if (p && m) pairs++;
+    }
+    wl[j * n + i] = pairs;
+  }
+  const su = new Float32Array(N2).fill(1e9);
+  const shelves = [];
+  try {
+    const A = (typeof SKY_I !== 'undefined' && SKY_I) ? SKY_I.arch : null;
+    if (A && A.on && typeof _skArchClusterAt === 'function') {
+      const i0 = Math.floor(x0 / A.cell) - 1, i1 = Math.floor((x0 + n * G) / A.cell) + 1;
+      const j0 = Math.floor(z0 / A.cell) - 1, j1 = Math.floor((z0 + n * G) / A.cell) + 1;
+      for (let ci = i0; ci <= i1; ci++) for (let cj = j0; cj <= j1; cj++) {
+        const cl = _skArchClusterAt(ci, cj);
+        if (!cl || !cl.length) continue;
+        shelves.push(cl);
+        for (const I of cl) {
+          const under = I.y - I.R * I.dn - WL, rr = I.R * 0.85;
+          const a0 = Math.max(0, Math.floor((I.x - rr - x0) / G)), a1 = Math.min(n - 1, Math.ceil((I.x + rr - x0) / G));
+          const b0 = Math.max(0, Math.floor((I.z - rr - z0) / G)), b1 = Math.min(n - 1, Math.ceil((I.z + rr - z0) / G));
+          for (let jj = b0; jj <= b1; jj++) for (let ii = a0; ii <= a1; ii++) {
+            const dx = x0 + ii * G - I.x, dz = z0 + jj * G - I.z;
+            if (dx * dx + dz * dz > rr * rr) continue;
+            const k = jj * n + ii; if (under < su[k]) su[k] = under;
+          }
+        }
+      }
+    }
+  } catch (e) { console.warn('[race] archipelago shelves:', e); }
+  const cost = new Float32Array(N2);
+  for (let k = 0; k < N2; k++) {
+    const hh = h[k];
+    let c = (hh >= -25) ? (K.landC + Math.max(0, hh) / K.landPer) : (K.openC - K.wallC * wl[k] + (dl[k] <= 1 ? K.bankC : 0));
+    if (su[k] < K.shelfLow) c += K.shelfC;
+    cost[k] = c;
+  }
+  _rcArchGridC = { key, G, n, x0, z0, WL, cx: S.x, cz: S.z, h, dl, wl, su, cost, shelves,
+                   gS: new Float32Array(N2), from: new Int32Array(N2), stamp: new Int32Array(N2), closed: new Int32Array(N2), st: 0,
+                   hk: new Int32Array(N2 * 8), hf: new Float32Array(N2 * 8), ms: performance.now() - t0 };
+  return _rcArchGridC;
+}
+function _rcArchCell(Gd, x, z) {
+  const n = Gd.n;
+  return Math.max(0, Math.min(n - 1, Math.round((z - Gd.z0) / Gd.G))) * n + Math.max(0, Math.min(n - 1, Math.round((x - Gd.x0) / Gd.G)));
+}
+function _rcArchAstar(Gd, a, b) {
+  const n = Gd.n, cost = Gd.cost, gS = Gd.gS, from = Gd.from, stamp = Gd.stamp, closed = Gd.closed, hk = Gd.hk, hf = Gd.hf, cap = hk.length;
+  const st = ++Gd.st;
+  const bi = b % n, bj = (b / n) | 0;
+  let hn = 0;
+  const H = (k) => { const dx = Math.abs(k % n - bi), dz = Math.abs(((k / n) | 0) - bj); return Math.max(dx, dz) + 0.4142 * Math.min(dx, dz); };
+  const push = (k, f) => {
+    if (hn >= cap) return;
+    let c = hn++; hk[c] = k; hf[c] = f;
+    while (c > 0) { const p = (c - 1) >> 1; if (hf[p] <= hf[c]) break; const tk = hk[p], tf = hf[p]; hk[p] = hk[c]; hf[p] = hf[c]; hk[c] = tk; hf[c] = tf; c = p; }
+  };
+  const pop = () => {
+    const k = hk[0]; hn--;
+    if (hn > 0) {
+      hk[0] = hk[hn]; hf[0] = hf[hn]; let c = 0;
+      for (;;) { const l = 2 * c + 1, r = l + 1; let m = c; if (l < hn && hf[l] < hf[m]) m = l; if (r < hn && hf[r] < hf[m]) m = r; if (m === c) break; const tk = hk[m], tf = hf[m]; hk[m] = hk[c]; hf[m] = hf[c]; hk[c] = tk; hf[c] = tf; c = m; }
+    }
+    return k;
+  };
+  stamp[a] = st; gS[a] = 0; from[a] = -1; push(a, H(a));
+  while (hn) {
+    const k = pop(); if (k === b) break; if (closed[k] === st) continue; closed[k] = st;
+    const i = k % n, j = (k / n) | 0;
+    for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
+      if (!di && !dj) continue;
+      const ii = i + di, jj = j + dj; if (ii < 0 || jj < 0 || ii >= n || jj >= n) continue;
+      const kk = jj * n + ii; if (closed[kk] === st) continue;
+      const g = gS[k] + ((di && dj) ? 1.4142 : 1) * 0.5 * (cost[k] + cost[kk]);
+      if (stamp[kk] !== st || g < gS[kk]) { stamp[kk] = st; gS[kk] = g; from[kk] = k; push(kk, g + H(kk)); }
+    }
+  }
+  if (stamp[b] !== st) return null;
+  const out = []; for (let k = b; k !== -1; k = from[k]) { out.push(k); if (out.length > n * n) return null; }
+  out.reverse();
+  return out;
+}
+function _rcGenArchipelago(seed) {
+  const Gd = _rcArchGrid(); if (!Gd) return null;
+  const K = RACE_ARCH, rng = _hcMulberry32(seed >>> 0);
+  const n = Gd.n, G = Gd.G, WL = Gd.WL, cx = Gd.cx, cz = Gd.cz, h = Gd.h, dl = Gd.dl, wl = Gd.wl, su = Gd.su;
+  const cellAt = (x, z) => _rcArchCell(Gd, x, z);
+  const Rl = K.loopR[0] + rng() * (K.loopR[1] - K.loopR[0]);
+  const pet = K.petals[0] + Math.floor(rng() * (K.petals[1] - K.petals[0] + 1));
+  const pk = K.petalK[0] + rng() * (K.petalK[1] - K.petalK[0]);
+  const ph = rng() * 6.283, rot = rng() * 6.283, dir = rng() < 0.5 ? 1 : -1;
+  const rOf = (a) => Rl * (1 + pk * Math.sin(pet * a + ph));
+  const M = K.anchors, S = Math.ceil(K.snapR / G);
+  const anc = [];
+  for (let k = 0; k < M; k++) {
+    const a = rot + dir * (k / M) * 6.283185 + (rng() - 0.5) * (0.3 * 6.283 / M);
+    const rr = rOf(a), ax = cx + Math.cos(a) * rr, az = cz + Math.sin(a) * rr;
+    const c0 = cellAt(ax, az), ci = c0 % n, cj = (c0 / n) | 0;
+    let best = -1, bs = -1e9;
+    for (let dj = -S; dj <= S; dj++) for (let di = -S; di <= S; di++) {
+      const i = ci + di, j = cj + dj; if (i < 1 || j < 1 || i >= n - 1 || j >= n - 1) continue;
+      const kk = j * n + i; if (h[kk] > -40 || su[kk] < K.shelfLow) continue;
+      const d = Math.hypot(di, dj) * G; if (d > K.snapR) continue;
+      const s = -d / K.snapR + 0.35 * wl[kk] + 0.25 * Math.min(1, dl[kk] / 3);
+      if (s > bs) { bs = s; best = kk; }
+    }
+    anc.push({ k: best >= 0 ? best : c0, t: k / M, gate: null, pi: 0 });
+  }
+  const cands = [];
+  for (const cl of Gd.shelves) {
+    let big = cl[0], top = -1e9;
+    for (const I of cl) { if (I.R > big.R) big = I; top = Math.max(top, I.y + 0.7 * I.R * I.up); }
+    const ang = Math.atan2(big.z - cz, big.x - cx), r = Math.hypot(big.x - cx, big.z - cz);
+    const off = Math.abs(r - rOf(ang));
+    if (off > K.shelfGap || r > K.half - 800) continue;
+    let under = null;
+    for (const I of cl) {
+      const ki = cellAt(I.x, I.z);
+      if (h[ki] < -60 && dl[ki] >= 2 && (I.y - I.R * I.dn - WL) >= K.underMin && (!under || I.R > under.R)) under = I;
+    }
+    cands.push({ big, top, off, under });
+  }
+  let uPick = null, oPick = null;
+  for (const c of cands) if (c.under && (!uPick || c.off < uPick.off)) uPick = c;
+  for (const c of cands) if (c !== uPick && (!oPick || c.off < oPick.off)) oPick = c;
+  const fixed = [];
+  if (uPick) { const I = uPick.under; fixed.push({ x: I.x, z: I.z, y: WL + K.underY, d: K.underD, tag: 2, high: false }); }
+  if (oPick) { const I = oPick.big; fixed.push({ x: I.x, z: I.z, y: oPick.top + K.overUp, d: K.overD, tag: 3, high: true }); }
+  for (const f of fixed) {
+    let t = dir * (Math.atan2(f.z - cz, f.x - cx) - rot) / 6.283185; t -= Math.floor(t);
+    for (let k = anc.length - 1; k >= 0; k--) { let dt = Math.abs(anc[k].t - t); dt = Math.min(dt, 1 - dt); if (!anc[k].gate && dt < 0.5 / M) anc.splice(k, 1); }
+    anc.push({ k: cellAt(f.x, f.z), t, gate: f, pi: 0 });
+  }
+  anc.sort((a, b) => a.t - b.t);
+  if (anc.length < 3) return null;
+  const path = [];
+  for (let k = 0; k < anc.length; k++) {
+    const seg = _rcArchAstar(Gd, anc[k].k, anc[(k + 1) % anc.length].k);
+    if (!seg) { console.warn('[race] archipelago: no route between anchors', k); return null; }
+    anc[k].pi = path.length ? path.length - 1 : 0;
+    if (path.length) seg.shift();
+    for (const c of seg) path.push(c);
+  }
+  path.pop();   // the loop closes on its first cell
+  const NP = path.length;
+  if (NP < 8) return null;
+  let P = path.map(k => [Gd.x0 + (k % n) * G, Gd.z0 + ((k / n) | 0) * G]);
+  const pin = new Uint8Array(NP);
+  for (const a of anc) if (a.gate) { P[a.pi] = [a.gate.x, a.gate.z]; pin[a.pi] = 1; }
+  const hAt = (x, z) => h[cellAt(x, z)];
+  for (let pass = 0; pass < K.smooth; pass++) {
+    const Q = new Array(NP);
+    for (let i = 0; i < NP; i++) {
+      const p = P[i];
+      if (pin[i]) { Q[i] = p; continue; }
+      let sx = 0, sz = 0;
+      for (let d = -2; d <= 2; d++) { const r = P[(i + d + NP) % NP]; sx += r[0]; sz += r[1]; }
+      const q2 = [sx / 5, sz / 5];
+      Q[i] = (hAt(p[0], p[1]) < -25 && hAt(q2[0], q2[1]) >= -25) ? p : q2;
+    }
+    P = Q;
+  }
+  const cum = new Float64Array(NP + 1);
+  for (let i = 1; i <= NP; i++) { const a = P[i - 1], b = P[i % NP]; cum[i] = cum[i - 1] + Math.hypot(b[0] - a[0], b[1] - a[1]); }
+  const L = cum[NP];
+  const cyc = (a, b) => { let d = Math.abs(a - b) % L; return Math.min(d, L - d); };
+  const tanAt = (i) => {
+    const a = P[(i - 1 + NP) % NP], b = P[(i + 1) % NP];
+    let tx = b[0] - a[0], tz = b[1] - a[1]; const l = Math.hypot(tx, tz) || 1; return [tx / l, tz / l];
+  };
+  const gates = [];
+  for (const a of anc) if (a.gate) { const f = a.gate; gates.push({ x: f.x, y: f.y, z: f.z, d: f.d, tag: f.tag, high: f.high, s: cum[a.pi], i: a.pi }); }
+  const NG = Math.max(K.gatesMin, Math.min(K.gatesMax, Math.round(L / K.spacing)));
+  const off0 = rng() * (L / NG);
+  for (let g = 0; g < NG; g++) {
+    const s0 = off0 + g * L / NG;
+    let skip = false;
+    for (const q2 of gates) if (cyc(q2.s, s0) < K.minGap) { skip = true; break; }
+    if (skip) continue;
+    let best = -1, bsc = -1e9;
+    for (let i = 0; i < NP; i++) {
+      const ds = cyc(cum[i], s0); if (ds > K.slide) continue;
+      let near = false;
+      for (const q2 of gates) if (cyc(q2.s, cum[i]) < K.minGap) { near = true; break; }
+      if (near) continue;
+      const kk = cellAt(P[i][0], P[i][1]);
+      let sc = (h[kk] < -40 ? 1 : -2) + 0.3 * wl[kk] + (dl[kk] >= 2 ? 0.8 : -0.8) + (dl[kk] >= 3 ? 0.2 : 0) - ds / K.slide * 0.6;
+      if (su[kk] < K.canalY[1] + 320) sc -= 3;
+      if (sc > bsc) { bsc = sc; best = i; }
+    }
+    if (best < 0) continue;
+    const p = P[best], kk = cellAt(p[0], p[1]);
+    const wet = h[kk] < -40;
+    const y = wet ? WL + K.canalY[0] + rng() * (K.canalY[1] - K.canalY[0]) : WL + Math.max(0, h[kk]) + K.landUp;
+    gates.push({ x: p[0], y, z: p[1], d: K.canalD, tag: wet ? 0 : 1, high: false, s: cum[best], i: best });
+  }
+  gates.sort((a, b) => a.s - b.s);
+  const rings = gates.map(g => { const t = tanAt(g.i); return { x: g.x, y: g.y, z: g.z, d: g.d, tx: t[0], tz: t[1], high: !!g.high, tag: g.tag | 0 }; });
+  const g0 = gates[0];
+  let st = null, stScore = 1e9;
+  for (let back = K.startBack[0]; back <= K.startBack[1]; back += G) {
+    let s = g0.s - back; s = ((s % L) + L) % L;
+    let i = 0; while (i < NP - 1 && cum[i + 1] < s) i++;
+    const p = P[i], t = tanAt(i), px = -t[1], pz = t[0];
+    let top = -1e9, shelf = false;
+    for (let row = 0; row < 3; row++) for (let c = 0; c < 6; c++) {
+      const o = (c - 2.5) * 260;
+      const kk = cellAt(p[0] + px * o - t[0] * 360 * row, p[1] + pz * o - t[1] * 360 * row);
+      top = Math.max(top, Math.max(0, h[kk]) - 40 * row);
+      if (su[kk] < 1e8) shelf = true;
+    }
+    const y = Math.max(320, top + 220);
+    const score = y + (shelf ? 4000 : 0);
+    if (score < stScore) { stScore = score; st = { x: p[0], y: WL + y, z: p[1], tx: t[0], tz: t[1] }; }
+  }
+  if (!st) return null;
+  const fin = { x: st.x, y: st.y + 600, z: st.z, r: 480 };
+  return { kind: 'archipelago', seed: seed >>> 0, rings, start: st, fin, upm: 7, lapLen: L,
+           dbg: { Rl: Math.round(Rl), petals: pet, pk: +pk.toFixed(2), anchors: anc.length, under: !!uPick, over: !!oPick, gridMs: Math.round(Gd.ms || 0) } };
+}
+function _rcArchLine(C) {
+  const Gd = _rcArchGrid(); if (!Gd || !C || !Array.isArray(C.rings) || !C.rings.length || !C.start) return null;
+  const K = RACE_ARCH, n = Gd.n, G = Gd.G, WL = Gd.WL, h = Gd.h, dl = Gd.dl;
+  const cellAt = (x, z) => _rcArchCell(Gd, x, z);
+  const floorY = (x, z) => { const hh = h[cellAt(x, z)]; return (hh >= -25) ? WL + Math.max(0, hh) + K.lineLand : WL + K.lineY; };
+  const rOf = (x, z) => { const kk = cellAt(x, z); return (h[kk] >= -25) ? K.lineR[0] : Math.max(K.lineR[0], Math.min(K.lineR[1], dl[kk] * G)); };
+  const N = C.rings.length, legs = [];
+  for (let i = 0; i < N; i++) {
+    const A = (i === 0) ? C.start : C.rings[i - 1], B = C.rings[i];
+    const seg = _rcArchAstar(Gd, cellAt(A.x, A.z), cellAt(B.x, B.z));
+    let Q = (seg && seg.length >= 2) ? seg.map(k => [Gd.x0 + (k % n) * G, Gd.z0 + ((k / n) | 0) * G]) : [[A.x, A.z], [B.x, B.z]];
+    Q[0] = [A.x, A.z]; Q[Q.length - 1] = [B.x, B.z];
+    for (let pass = 0; pass < 2; pass++) {
+      const R2 = Q.map((p, j) => (j === 0 || j === Q.length - 1) ? p : [(Q[j - 1][0] + p[0] + Q[j + 1][0]) / 3, (Q[j - 1][1] + p[1] + Q[j + 1][1]) / 3]);
+      Q = R2;
+    }
+    const c2 = [0]; for (let j = 1; j < Q.length; j++) c2.push(c2[j - 1] + Math.hypot(Q[j][0] - Q[j - 1][0], Q[j][1] - Q[j - 1][1]));
+    const L2 = c2[c2.length - 1] || 1;
+    const nS = Math.max(1, Math.round(L2 / K.lineStep));
+    const p = [], cum = [], rAt = [];
+    let j = 0;
+    for (let s = 0; s <= nS; s++) {
+      const ss = L2 * s / nS;
+      while (j < Q.length - 2 && c2[j + 1] < ss) j++;
+      const seg2 = (c2[j + 1] - c2[j]) || 1, u = Math.max(0, Math.min(1, (ss - c2[j]) / seg2));
+      const x = Q[j][0] + (Q[j + 1][0] - Q[j][0]) * u, z = Q[j][1] + (Q[j + 1][1] - Q[j][1]) * u;
+      const f = ss / L2, e = f * f * (3 - 2 * f);
+      let y = A.y + (B.y - A.y) * e;
+      if (s > 0 && s < nS) y = Math.max(y, floorY(x, z));
+      if (p.length) { const o = p[p.length - 1]; cum.push(cum[cum.length - 1] + Math.hypot(x - o[0], y - o[1], z - o[2])); } else cum.push(0);
+      p.push([x, y, z]); rAt.push(rOf(x, z));
+    }
+    const turnAt = new Array(p.length).fill(0);
+    for (let q = 1; q < p.length - 1; q++) {
+      const ux = p[q][0] - p[q - 1][0], uy = p[q][1] - p[q - 1][1], uz = p[q][2] - p[q - 1][2];
+      const vx = p[q + 1][0] - p[q][0], vy = p[q + 1][1] - p[q][1], vz = p[q + 1][2] - p[q][2];
+      const nu = Math.hypot(ux, uy, uz) || 1, nv = Math.hypot(vx, vy, vz) || 1;
+      turnAt[q] = Math.acos(Math.max(-1, Math.min(1, (ux * vx + uy * vy + uz * vz) / (nu * nv))));
+    }
+    legs.push({ p, cum, len: cum[cum.length - 1], roomR: rAt[rAt.length - 1], turn: 0, turnAt, rAt, rooms: p.length });
+  }
+  legs.push(null);
+  for (let i = 0; i < legs.length - 1; i++) {
+    const A = legs[i], B = legs[i + 1]; if (!A || !B || A.p.length < 2 || B.p.length < 2) continue;
+    const a = A.p[A.p.length - 2], b = A.p[A.p.length - 1], c = B.p[0], d = B.p[1];
+    const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2], vx = d[0] - c[0], vy = d[1] - c[1], vz = d[2] - c[2];
+    const nu = Math.hypot(ux, uy, uz) || 1, nv = Math.hypot(vx, vy, vz) || 1;
+    A.turn = Math.acos(Math.max(-1, Math.min(1, (ux * vx + uy * vy + uz * vz) / (nu * nv))));
+  }
+  return { legs, n: legs.filter(Boolean).length };
+}
+let _rcArchLineK = null;
+function _rcArchLineEnsure(C) {
+  if (!C || C.kind !== 'archipelago') return null;
+  if (!_rcArchLineK) {
+    _rcArchLineK = Object.assign({}, RACE_LINE, { sharpDeg: 26, turnD: 2.4, exitD: 320, vMin: 520 });
+    try { window.__raceArchLineK = _rcArchLineK; } catch (_) {}
+  }
+  C._lineK = _rcArchLineK;
+  if (C._line === undefined) {
+    C._line = null;
+    const t0 = performance.now();
+    try { C._line = _rcArchLine(C); } catch (e) { console.warn('[race] archipelago line failed:', e); C._line = null; }
+    C._lineMs = Math.round(performance.now() - t0);
+  }
+  return C._line;
+}
+function _rcArchWaypoint(bot, idx, C) {
+  if (typeof window !== 'undefined' && window.__raceLine === false) return null;
+  if (!_rcArchLineEnsure(C)) return null;
+  return _rcLineWaypoint(bot, idx, C);
+}
+function _rcArchGateHint(r) {
+  const t = r ? (r.tag | 0) : 0;
+  if (t === 2) return 'Next gate - UNDER the floating island';
+  if (t === 3) return 'Next gate is UP on a floating island';
+  if (t === 1) return 'Next gate - over the island';
+  return 'Next gate - low, down the canal';
+}
+
 function _rcGenTrack(level, rooms) {
   const g = (typeof game !== 'undefined' && game) ? game.raceGraph : null;
   if (!g || !g.finishId || !g.nodes || !Array.isArray(rooms)) return null;
@@ -55155,7 +55723,7 @@ function _rcLineWaypoint(bot, idx, C) {
     const d2 = qx * qx + qy * qy + qz * qz;
     if (d2 < bD2) { bD2 = d2; bS = leg.cum[j] + t * Math.sqrt(L2); bJ = j; }
   }
-  const K = RACE_LINE, v = bot.velocity, spd = v ? v.length() : 0;
+  const K = (C && C._lineK) ? C._lineK : RACE_LINE, v = bot.velocity, spd = v ? v.length() : 0;   // (v49.18) a circuit may carry its own table
   const look = Math.max(K.lookMin, Math.min(K.lookMax, spd * K.lookK));
   _rcLinePointAt(leg, Math.min(bS + look, leg.len), _rcV2);
   try { window.__raceLineN = (window.__raceLineN | 0) + 1; } catch (_) {}
@@ -55212,6 +55780,7 @@ function _raceCircuitInstall() {
   rooms.push({ id: 'race_finish', team: null, champion: true, x: C.fin.x, y: C.fin.y, z: C.fin.z, r: C.fin.r || 480, _race: true });
   game.sdfRoomData = rooms;
   game.raceNoTimer = true;
+  if (C.kind === 'archipelago') { try { _rcArchLineEnsure(C); } catch (_) {} }
 }
 function _raceCircuitResetProgress() {
   try { player._raceIdx = 0; player._raceCleared = false; } catch (_) {}
@@ -55308,8 +55877,8 @@ function _raceCircuitOnLocalCapture(idx) {
       if (typeof musicPlayChampionCue === 'function') musicPlayChampionCue();
     } else if (window.Overlays) {
       const nr = C.rings[player._raceIdx];
-      Overlays.banner('RING ' + (idx + 1) + ' / ' + N, nr.high ? 'Next gate is UP HIGH'
-                      : ((C.kind === 'track') ? 'Next gate - through the hoop' : 'Next gate is low, between the buildings'));
+      Overlays.banner('RING ' + (idx + 1) + ' / ' + N, (C.kind === 'archipelago') ? _rcArchGateHint(nr) : (nr.high ? 'Next gate is UP HIGH'
+                      : ((C.kind === 'track') ? 'Next gate - through the hoop' : 'Next gate is low, between the buildings')));
     }
   } catch (_) {}
   _raceCircuitRefreshVis();
@@ -55352,7 +55921,7 @@ function _raceCanClaim(ship) {
 function _raceCircuitPacket() {
   const C = game.raceCircuit; if (!C || !C.ready) return null;
   return { type: 'race_circuit', id: C.id, kind: C.kind, seed: C.seed, upm: C.upm,
-           rings: C.rings.map(r => [Math.round(r.x), Math.round(r.y), Math.round(r.z), r.d, +r.tx.toFixed(4), +r.tz.toFixed(4), r.high ? 1 : 0]),
+           rings: C.rings.map(r => [Math.round(r.x), Math.round(r.y), Math.round(r.z), r.d, +r.tx.toFixed(4), +r.tz.toFixed(4), r.high ? 1 : 0, r.tag | 0]),
            start: [Math.round(C.start.x), Math.round(C.start.y), Math.round(C.start.z), +C.start.tx.toFixed(4), +C.start.tz.toFixed(4)],
            fin: [Math.round(C.fin.x), Math.round(C.fin.y), Math.round(C.fin.z), C.fin.r || 480] };
 }
@@ -55360,7 +55929,7 @@ function _raceCircuitFromPacket(p) {
   try {
     if (!p || !Array.isArray(p.rings) || !p.rings.length || !Array.isArray(p.start) || !Array.isArray(p.fin)) return null;
     return { kind: p.kind, seed: p.seed >>> 0, id: String(p.id || ''), upm: +p.upm || 7, ready: true, fromDecree: true,
-      rings: p.rings.map(a => ({ x: +a[0], y: +a[1], z: +a[2], d: +a[3] || 440, tx: +a[4], tz: +a[5], high: !!a[6] })),
+      rings: p.rings.map(a => ({ x: +a[0], y: +a[1], z: +a[2], d: +a[3] || 440, tx: +a[4], tz: +a[5], high: !!a[6], tag: (a.length > 7) ? (a[7] | 0) : 0 })),
       start: { x: +p.start[0], y: +p.start[1], z: +p.start[2], tx: +p.start[3], tz: +p.start[4] },
       fin: { x: +p.fin[0], y: +p.fin[1], z: +p.fin[2], r: +p.fin[3] || 480 } };
   } catch (_) { return null; }
@@ -55487,9 +56056,11 @@ function _raceCircuitEarthPoll() {
               'high:', C.rings.filter(r => r.high).length);
 }
 function _raceCircuitOverworldBuild() {
-  if (_raceCircuitKind() !== 'overworld') return;
+  const _kind = _raceCircuitKind();
+  if (_kind !== 'overworld' && _kind !== 'archipelago') return;
   const T = game.sandwichTerrain; if (!T || !T.ON) return;
   game.raceNoTimer = true;
+  if (_kind === 'archipelago') { _raceCircuitArchBuild(); return; }
   try {
     if (typeof _owEnsureSites === 'function' && _owEnsureSites(T) && typeof OW !== 'undefined' && OW.cities) {
       for (const c of OW.cities) {
@@ -55511,6 +56082,24 @@ function _raceCircuitOverworldBuild() {
   _rcNet.acked = new Set(); _rcNet.t = 0;
   _raceCircuitInstall();
   console.log('[race] overworld circuit:', C.rings.length, 'gates over', _rcOwCities().length, 'cities, seed', seed);
+}
+function _raceCircuitArchBuild() {
+  const t0 = performance.now();
+  try { _rcArchGrid(); } catch (e) { console.warn('[race] archipelago grid failed:', e); }
+  const tg = Math.round(performance.now() - t0);
+  const have = game.raceCircuit;
+  if (have && have.ready && have.kind === 'archipelago') { _raceCircuitInstall(); return; }   // round 2+: the same lap
+  if (!_raceCircuitAuthority()) return;   // the decree brings it
+  const seed = _raceCircuitSeed();
+  let C = null;
+  try { C = _rcGenArchipelago(seed); } catch (e) { console.warn('[race] archipelago circuit failed:', e); }
+  if (!C) { console.warn('[race] archipelago circuit: no lap'); return; }
+  C.ready = true;
+  { let me = 'solo'; try { if (typeof net !== 'undefined' && net && net.myPeerId) me = String(net.myPeerId); } catch (_) {} C.id = me + ':' + C.seed + ':' + Date.now(); }
+  game.raceCircuit = C;
+  _rcNet.acked = new Set(); _rcNet.t = 0;
+  _raceCircuitInstall();
+  console.log('[race] archipelago circuit:', C.rings.length, 'gates, lap', Math.round(C.lapLen || 0), 'u, seed', seed, 'grid', tg, 'ms', JSON.stringify(C.dbg || {}));
 }
 function _owRaceFrame(dt) {
   if (_raceCircuitKind() !== 'overworld') return;
@@ -55601,7 +56190,10 @@ function _raceCircuitBotWaypoint(bot, dt) {
   const dist = Math.hypot(gx - bot.position.x, gy - bot.position.y, gz - bot.position.z);
   const ahead = Math.min(dist * 0.55, 900);
   const climb = Math.max(0, Math.min(900, (dist - 320) * 0.6));
-  if (dist > 320) _rcV2.set(gx - tx * ahead, gy + climb, gz - tz * ahead); else _rcV2.set(gx, gy, gz);
+  let _arcWp = null;
+  if (C.kind === 'archipelago') { try { _arcWp = _rcArchWaypoint(bot, idx, C); } catch (_) { _arcWp = null; } }
+  if (_arcWp) { /* _rcV2 holds the line point */ }
+  else if (dist > 320) _rcV2.set(gx - tx * ahead, gy + climb, gz - tz * ahead); else _rcV2.set(gx, gy, gz);
   const now = (game && typeof game.time === 'number') ? game.time : 0;
   const gyB = _raceBotGroundY(bot.position.x, bot.position.z);
   if (isFinite(gyB) && _rcV2.y < gyB + 170) _rcV2.y = gyB + 170;
@@ -55645,7 +56237,9 @@ function _raceBotGroundY(x, z) {
   try {
     const W = _rcEarthWorld();
     if (W && typeof W.groundYWorld === 'function') return W.groundYWorld(x, z);
-    if (_raceCircuitKind() === 'overworld') return _rcOwGroundY(x, z);
+    const _k = _raceCircuitKind();
+    if (_k === 'overworld') return _rcOwGroundY(x, z);
+    if (_k === 'archipelago') { const T = game.sandwichTerrain; return Math.max(_rcOwGroundY(x, z), (T && T.WL != null) ? T.WL : -720); }
   } catch (_) {}
   return -Infinity;
 }
@@ -55705,8 +56299,13 @@ function _raceCircuitRespawnTick(dt) {
   if (changed && typeof net !== 'undefined' && net && net.active && typeof _botSendRoster === 'function') { try { _botSendRoster(); } catch (_) {} }
 }
 
+function _raceCircuitHudHide() {
+  try { const el = _rc.hudEl || document.getElementById('race-hud'); if (el && el.style.display !== 'none') el.style.display = 'none'; _rc.hudTxt = ''; } catch (_) {}
+}
 function _raceCircuitHud() {
-  const on = _isCircuitRace() && (game.state === 'playing' || game.state === 'warmup') && _raceCircuitReady() &&
+  let _pick = false;
+  try { const ss = document.getElementById('ship-select'); _pick = !!(ss && ss.classList.contains('active') && ss.style.display !== 'none'); } catch (_) {}
+  const on = !_pick && _isCircuitRace() && (game.state === 'playing' || game.state === 'warmup') && _raceCircuitReady() &&
              typeof player !== 'undefined' && player && player.position;
   let el = _rc.hudEl || document.getElementById('race-hud');
   if (!on) { if (el && el.style.display !== 'none') el.style.display = 'none'; _rc.hudTxt = ''; return; }
@@ -55747,7 +56346,7 @@ function _raceCircuitHud() {
       const pitch = Math.atan2(r.y - player.position.y, hd) * 180 / Math.PI;
       if (pitch > 20) way += ' UP'; else if (pitch < -20) way += ' DOWN';
     } catch (_) {}
-    txt = 'GATE ' + (idx + 1) + ' / ' + N + ' · ' + dist + way + (r.high ? ' · HIGH' : '');
+    txt = 'GATE ' + (idx + 1) + ' / ' + N + ' · ' + dist + way + (r.high ? ' · HIGH' : '') + ((r.tag | 0) === 2 ? ' · UNDER' : '');
   }
   if (txt !== _rc.hudTxt) { _rc.hudTxt = txt; el.textContent = txt; }
 }
@@ -55799,7 +56398,16 @@ if (typeof window !== 'undefined') window.__race = {
              bots: (game.entities || []).filter(e => e instanceof Bot).map(b => ({ id: b.id, alive: b.alive, idx: b._raceIdx | 0, proxy: !!b.isProxy })),
              auth: _raceCircuitAuthority(), pending: _rc.pendingSince > 0 };
   },
-  rings: function () { const C = game.raceCircuit; return C ? C.rings.map((r, i) => ({ i, x: Math.round(r.x), y: Math.round(r.y), z: Math.round(r.z), d: r.d, high: r.high })) : []; },
+  rings: function () { const C = game.raceCircuit; return C ? C.rings.map((r, i) => ({ i, x: Math.round(r.x), y: Math.round(r.y), z: Math.round(r.z), d: r.d, high: r.high, tag: r.tag | 0 })) : []; },
+  arch: function () {
+    const C = game.raceCircuit, Gd = _rcArchGridC;
+    const WL = Gd ? Gd.WL : -720;
+    return { kind: C && C.kind, grid: Gd ? { n: Gd.n, ms: Math.round(Gd.ms || 0), shelves: Gd.shelves.length } : null,
+             lap: C ? Math.round(C.lapLen || 0) : 0, dbg: C && C.dbg,
+             gates: C ? C.rings.map(r => (r.tag | 0) + '@' + Math.round(r.y - WL)).join(' ') : '',
+             line: (C && C._line) ? { legs: C._line.legs.length, ok: C._line.n, ms: C._lineMs } : (C ? String(C._line) : null),
+             start: C && C.start ? { x: Math.round(C.start.x), y: Math.round(C.start.y - WL), z: Math.round(C.start.z) } : null };
+  },
   skip: function () { const C = game.raceCircuit; if (!C) return 'no circuit'; _raceCircuitOnLocalCapture(player._raceIdx | 0); return player._raceIdx; },
   tp: function (i) { const C = game.raceCircuit; if (!C) return 'no circuit'; const r = C.rings[i | 0]; if (!r) return 'no ring'; player.position.set(r.x - r.tx * 600, r.y, r.z - r.tz * 600); if (player.velocity) player.velocity.set(0, 0, 0); return [Math.round(player.position.x), Math.round(player.position.y), Math.round(player.position.z)]; },
   regen: function () { game.raceCircuit = null; game._raceSeed = null; if (_isEarthCircuit()) _raceCircuitEarthKick(); else _raceCircuitOverworldBuild(); return _raceCircuitReady(); },
@@ -63319,6 +63927,7 @@ function spawnBots() {
 
 function playerTakeDamage(amount, attacker, projectile, hitOpts) {
   if (player.shipState === 'dead' || player.spawnProtection > 0) return;
+  if (typeof window !== 'undefined' && window.__god) return;
   if (typeof game !== 'undefined' && game && game.state === 'warmup') return;
   if (player.phaseInvuln) return;
   player.lastDamageTime = game.time;
@@ -71581,6 +72190,7 @@ function returnToRootMenu(opts) {
 
   game.state = 'select';
   try { if (typeof _ovWarpClear === 'function') _ovWarpClear(); } catch (_) {}
+  try { if (typeof _raceCircuitHudHide === 'function') _raceCircuitHudHide(); } catch (_) {}   // (v49.20) nor the race's GATE line
 
   if (document.exitPointerLock) {
     try { document.exitPointerLock(); } catch (e) {}
@@ -75420,6 +76030,7 @@ function updateMinimap() {
   if (_mode === 'endless') _mmR = 2600;
   else if (_mode === 'race' && typeof _raceCircuitKind === 'function' && _raceCircuitKind() === 'earth') _mmR = RACE_CIRCUIT.mmRangeEarth;   // (v46.82) a lap is wider than an arena
   else if (_mode === 'race' && typeof _raceCircuitKind === 'function' && _raceCircuitKind() === 'overworld') _mmR = RACE_CIRCUIT.mmRangeOw;
+  else if (_mode === 'race' && typeof _raceCircuitKind === 'function' && _raceCircuitKind() === 'archipelago') _mmR = RACE_ARCH.mmRange;   // (v49.17)
   else if (_mode === 'campaign' && game.campaign) _mmR = CAMP_RADAR_HALF_SPAN * (68 / 75);
   if (typeof window !== 'undefined' && typeof window.__mmRange === 'number' && window.__mmRange > 0) _mmR = window.__mmRange;
   const viewExtent = _mmR * (75 / 68);
@@ -76436,9 +77047,10 @@ function _renderSkinPicker() {
     card.className = 'perk-card skin-card' + (id === curId ? ' selected' : '');
     card.dataset.skinId = id;
     card.title = sk.name + ' — ' + sk.desc;
-    const _bg = sk.swatch2
-      ? 'linear-gradient(126deg, ' + sk.swatch + ' 0 52%, ' + sk.swatch2 + ' 52% 100%)'
-      : sk.swatch;
+    const _bg = sk.thumb ? ('url(' + sk.thumb + ') 38% 42% / 420% auto ' + sk.swatch)
+      : (sk.swatch2
+        ? 'linear-gradient(126deg, ' + sk.swatch + ' 0 52%, ' + sk.swatch2 + ' 52% 100%)'
+        : sk.swatch);
     card.innerHTML = '<span class="skin-sw" style="background:' + _bg + ';"></span>';
     card.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -76460,9 +77072,10 @@ function _renderSkinPicker() {
   const swEl = document.getElementById('skin-toggle-sw');
   const tgEl = document.getElementById('skin-toggle');
   if (swEl && cur) {
-    swEl.style.background = cur.swatch2
-      ? 'linear-gradient(126deg, ' + cur.swatch + ' 0 52%, ' + cur.swatch2 + ' 52% 100%)'
-      : cur.swatch;
+    swEl.style.background = cur.thumb ? ('url(' + cur.thumb + ') 38% 42% / 420% auto ' + cur.swatch)   // (v49.26)
+      : (cur.swatch2
+        ? 'linear-gradient(126deg, ' + cur.swatch + ' 0 52%, ' + cur.swatch2 + ' 52% 100%)'
+        : cur.swatch);
   }
   if (tgEl && cur) tgEl.title = 'Hull livery — ' + cur.name + ' (click to change)';
   try { setShipPreviewSkin(curId); } catch (_) {}
@@ -85238,7 +85851,8 @@ function _lssEndlessStasisSpot(aliveFields) {
   const z = sph.cz + Math.sin(ang) * rad;
   let y = sph.cy;
   try {
-    const gy = _stGroundYCarved(x, z, T) + 200, cy = _stCeilYCarved(x, z, T) - 200;
+    let gy = _stGroundYCarved(x, z, T) + 200, cy = _stCeilYCarved(x, z, T) - 200;
+    if (run.hub) { const _hb = _lssEndlessHubBand(x, z, T, 200); gy = _hb.gy; cy = Math.min(cy, _hb.cy); }   // (v49.21) water floor, open-sky roof
     if (cy < gy) return null;
     y = gy + (cy - gy) * (0.30 + 0.25 * _lssEndlessBoltHash(gid, 53));
     y = Math.max(gy, Math.min(cy, y));
@@ -86285,6 +86899,12 @@ MAP_DATA.race_overworld = Object.assign({}, MAP_DATA.hub_overworld, {
   name: 'The Overworld Circuit',
   description: 'One massive lap through all seven cities of the overworld: thread the towers, climb for the high gates, dive for the finish over the hub.',
 });
+MAP_DATA.race_archipelago = Object.assign({}, MAP_DATA.hub_overworld, {
+  circuit: 'archipelago',
+  name: 'Archipelago Circuit',
+  description: 'A lap low through the canals of the archipelago: skim the water between the islands, under one floating shelf and over another, then climb for the finish over the grid.',
+  noMonsters: true,
+});
 
 const CAMPAIGN_LEG_HALF_Z = 18000;
 const CAMPAIGN_LEG_MAP = {
@@ -86322,6 +86942,146 @@ MAP_DATA.endless_bend = {
   thumb: 'map_thumbs/endless_bend.png',   // (v43.78) owner's concept art, resized to the 468x220 the other thumbs use   // (v43.76) mode prefix dropped from the label - the picker already says which mode you are in
   bend: true,
 };
+
+MAP_DATA.endless_archipelago = Object.assign({}, MAP_DATA.hub_overworld, {
+  name: 'The Archipelago',
+  description: 'An endless run out through the archipelago - canals, lagoons, floating shelves. No walls and no ceiling: the ambush finds you in the open.',
+  endlessHub: true,
+  noMonsters: true,
+});
+const ENDLESS_HUB = {
+  H: 220,                    // the route's height over the water
+  band: 700,                 // floor .. floor+band = the open world's stand-in for the carved gap
+  segLen: [1500, 2600], step: 150, minLen: 900,
+  turnSmall: 0.30, turnBig: 1.0,
+  cand: [0, 0.35, -0.35, 0.7, -0.7, 1.05, -1.05, 1.4, -1.4],
+  landStop: 60,              // a sample standing this far over the water ends a heading's clear run (a sandbar does not)
+  soft: 5200,                // past this from the region centre the route is pulled home
+  visCell: 1400, visKeep: 48,
+  hallEvery: [2, 4], hallR: [700, 1300],
+  tube: 1500, ahead: 7, behind: 3,
+  waveMin: 1, waveEvery: 3, waveMax: 6,
+  clockMax: 70, clockMin: 40, clockPerKm: 0.6,
+};
+if (typeof window !== 'undefined') window.__endlessHubK = ENDLESS_HUB;
+function _lssEndlessHubSite() {
+  const HT = (typeof game !== 'undefined' && game && game._hubTerra) ? game._hubTerra : null;
+  return { x: (HT && HT.arX != null) ? +HT.arX : -12500, z: (HT && HT.arZ != null) ? +HT.arZ : -11000 };
+}
+function _lssEndlessHubBand(x, z, T, pad) {
+  const WL = (T && T.WL != null) ? T.WL : -720;
+  let g = WL;
+  try { g = Math.max(_stGroundYCarved(x, z, T), WL); } catch (_) {}
+  const gy = g + pad;
+  return { gy, cy: gy + ENDLESS_HUB.band };
+}
+function _lssGenEndlessHubRun(base) {
+  const solo = !(net && net.active);
+  const seed = (((((net && typeof net.worldSeed === 'number') ? net.worldSeed : 0x5EED) >>> 0) ^ 0xE7D1E55) +
+                (solo ? (((game.currentRound | 0) + 1) * 0x9E3779B9 + ((Math.random() * 0x7fffffff) | 0)) : 0)) >>> 0;
+  const rand = mulberry32((seed ^ 0x9D2C5680) >>> 0);
+  const cos = mulberry32((seed ^ 0x41C64E6D) >>> 0);
+  const gen = { rand, cos, x: 0, y: 0, z: 0, heading: rand() * Math.PI * 2, sinceHall: 0, nextGid: 0 };
+  game.endlessRun = { gen, bend: false, hub: true, segs: [], dist: 0, progGid: -1, progT: 0, lives: 1,
+                      over: false, overT: 0, lastHall: { x: 0, y: 80, z: 0 }, _hudTxt: '', startedAt: Date.now() };
+  game.bendWorld = false; game._bendSegs = null;
+  return game.endlessRun;
+}
+function _lssEndlessHubStart(run) {
+  const T = game.sandwichTerrain; if (!T || !T.ON) return;
+  const K = ENDLESS_HUB, g = run.gen, S = _lssEndlessHubSite();
+  const WL = (T.WL != null) ? T.WL : -720;
+  const hAt = (x, z) => Math.round(_stGroundYCarved(x, z, T) - WL);
+  let sx = S.x, sz = S.z, found = false, bestD = 1e9;
+  for (let r = 0; r <= 2400 && !found; r += 300) {
+    const nA = r ? 16 : 1;
+    for (let k = 0; k < nA && !found; k++) {
+      const a = k * Math.PI / 8, x = S.x + Math.cos(a) * r, z = S.z + Math.sin(a) * r;
+      const d = hAt(x, z);
+      if (d > -60) continue;
+      let open = true;
+      for (let q = 0; q < 8 && open; q++) { const b = q * Math.PI / 4; if (hAt(x + Math.cos(b) * 350, z + Math.sin(b) * 350) > -25) open = false; }
+      if (open) { sx = x; sz = z; found = true; }
+      else if (d < bestD) { bestD = d; sx = x; sz = z; }
+    }
+  }
+  g.x = sx; g.z = sz; g.y = WL + K.H;
+  for (let i = 0; i < 8; i++) _lssEndlessGrow(run);
+  try {
+    const s0 = run.segs[0];
+    player.position.set(sx, WL + K.H + 60, sz);
+    if (player.velocity) player.velocity.set(0, 0, 0);
+    if (s0 && player.euler) { const dx = s0.b.x - s0.a.x, dz = s0.b.z - s0.a.z; player.euler.y = Math.atan2(-dx, -dz); player.euler.x = 0; }
+    if (typeof _spawnPickSet === 'function') _spawnPickSet(player.position.clone());
+    player._swYClampCache = null;
+  } catch (_) {}
+  console.log('[endless-hub] start', Math.round(sx), Math.round(sz), found ? '(open water)' : '(deepest seen)', 'segs', run.segs.length);
+}
+function _lssEndlessNextSegHub(run) {
+  const g = run.gen, rand = g.rand, K = ENDLESS_HUB;
+  const T = game.sandwichTerrain;
+  const WL = (T && T.WL != null) ? T.WL : -720;
+  const r1 = rand(), r2 = rand(), r3 = rand(), r4 = rand(), r5 = rand();
+  rand(); rand();   // r6, r7: reserved, so a later use never shifts the stream
+  let hall = false;
+  g.sinceHall++;
+  if (g.sinceHall >= K.hallEvery[0] + Math.floor(r4 * (K.hallEvery[1] - K.hallEvery[0] + 1))) { hall = true; g.sinceHall = 0; }
+  const turn = (r2 - 0.5) * (r1 < 0.45 ? K.turnSmall : K.turnBig);
+  const L = K.segLen[0] + r3 * (K.segLen[1] - K.segLen[0]);
+  const S = _lssEndlessHubSite();
+  const vis = g.vis || (g.vis = { n: {}, fifo: [], r1: -1, r2: -1, r3: -1 });
+  const dC = Math.hypot(g.x - S.x, g.z - S.z);
+  const homeA = Math.atan2(S.x - g.x, S.z - g.z);   // a heading h points along (sin h, cos h)
+  let bi = 0, bs = -1e9, bRun = 0;
+  for (let ci = 0; ci < K.cand.length; ci++) {
+    const hd = g.heading + turn + K.cand[ci];
+    const dx = Math.sin(hd), dz = Math.cos(hd);
+    let clear = 0;
+    for (let s = K.step; s <= L + 0.5; s += K.step) {
+      if (Math.round(_stGroundYCarved(g.x + dx * s, g.z + dz * s, T) - WL) > K.landStop) break;
+      clear = s;
+    }
+    const reach = Math.max(clear, K.minLen);
+    const ex = g.x + dx * reach, ez = g.z + dz * reach;
+    let sc = Math.round(clear / K.step) * 10 - Math.round(Math.abs(K.cand[ci]) * 15);
+    const dE = Math.hypot(ex - S.x, ez - S.z);
+    if (dE > K.soft) sc -= Math.round((dE - K.soft) / 30);
+    if (dC > K.soft) {
+      let dh = homeA - hd;
+      while (dh > Math.PI) dh -= 2 * Math.PI;
+      while (dh < -Math.PI) dh += 2 * Math.PI;
+      sc -= Math.round(Math.abs(dh) * 20);
+    }
+    const ck = (Math.round(ex / K.visCell) + 2048) * 4096 + (Math.round(ez / K.visCell) + 2048);
+    if (vis.n[ck] && ck !== vis.r1 && ck !== vis.r2 && ck !== vis.r3) sc -= 40;
+    if (sc > bs) { bs = sc; bi = ci; bRun = clear; }
+  }
+  g.heading += turn + K.cand[bi];
+  const len = Math.max(K.minLen, Math.min(L, bRun));
+  const a = { x: g.x, y: g.y, z: g.z };
+  g.x += Math.sin(g.heading) * len;
+  g.z += Math.cos(g.heading) * len;
+  const hb = Math.round(_stGroundYCarved(g.x, g.z, T) - WL);
+  g.y = WL + Math.max(K.H, hb + 180);   // over the water, or clear of whatever the chord ends above
+  const b = { x: g.x, y: g.y, z: g.z };
+  {
+    const ck = (Math.round(g.x / K.visCell) + 2048) * 4096 + (Math.round(g.z / K.visCell) + 2048);
+    if (ck !== vis.r1) { vis.r3 = vis.r2; vis.r2 = vis.r1; vis.r1 = ck; }
+    if (!vis.n[ck]) { vis.n[ck] = 1; vis.fifo.push(ck); if (vis.fifo.length > K.visKeep) delete vis.n[vis.fifo.shift()]; }
+  }
+  const hallR = hall ? (K.hallR[0] + r5 * (K.hallR[1] - K.hallR[0])) : 0;
+  return { a, b, r: 400, hall, hallR, hp: null, gid: g.nextGid++ };
+}
+function _lssEndlessApplySegHub(run, s) {
+  const sph = s.hall ? { cx: s.b.x, cy: s.b.y, cz: s.b.z, r: s.hallR } : null;
+  run.segs.push({ gid: s.gid, a: s.a, b: s.b, hall: s.hall, len: Math.hypot(s.b.x - s.a.x, s.b.y - s.a.y, s.b.z - s.a.z),
+                  dive: 0, cyl: null, sph, spur: null });
+  try { if (typeof _lssEndlessBolts === 'function') _lssEndlessBolts(run, run.segs[run.segs.length - 1]); } catch (_) {}
+}
+function _lssEndlessGrow(run) {
+  if (run && run.hub) _lssEndlessApplySegHub(run, _lssEndlessNextSegHub(run));
+  else _lssEndlessApplySeg(run, _lssEndlessNextSeg(run));
+}
 function _lssEndlessNextSeg(run) {
   const g = run.gen, rand = g.rand;
   const kindRoll = rand();
@@ -86619,7 +87379,8 @@ function _lssEndlessBolts(run, seg) {
   }
   try {
     const _bq = _bendToFlat(x, y, z);
-    const gy = _stGroundYCarved(_bq.x, _bq.z, T) + 170, cy = _stCeilYCarved(_bq.x, _bq.z, T) - 170;
+    let gy = _stGroundYCarved(_bq.x, _bq.z, T) + 170, cy = _stCeilYCarved(_bq.x, _bq.z, T) - 170;
+    if (run.hub) { const _hb = _lssEndlessHubBand(_bq.x, _bq.z, T, 170); gy = _hb.gy; cy = Math.min(cy, _hb.cy); }   // (v49.21) water floor, open-sky roof
     if (cy < gy) return;
     let fy = _bq.y;
     if (!chamber) fy = gy + (cy - gy) * (0.62 + 0.3 * _lssEndlessBoltHash(gid, 19));
@@ -87120,6 +87881,9 @@ function buildRoomGraphLevel(level) {
   if (level && level.procedural === 'endless' && typeof _lssGenEndlessLevel === 'function') {
     try { level = _lssGenEndlessLevel((level && level.bend) ? level : (MAP_DATA.endless_caverns || level)); }
     catch (e) { console.warn('[endless] generate failed, using static fallback:', e); game.endlessRun = null; }
+  }
+  if (level && level.endlessHub && typeof LSS !== 'undefined' && LSS.MODE === 'endless' && typeof _lssGenEndlessHubRun === 'function') {
+    try { _lssGenEndlessHubRun(level); } catch (e) { console.warn('[endless-hub] run state failed:', e); game.endlessRun = null; }
   }
   for (const m of game.mapMeshes) { if (m.parent) scene.remove(m); }
   game.mapMeshes = [];
@@ -90215,7 +90979,7 @@ function _gameLoopBody(timestamp) {
       __pmark('hub:underwater');
       try { _birdFlockTick(_wallDt); } catch (_) {}
       try { _fishSchoolTick(_wallDt); } catch (_) {}
-      try { if (typeof _ecrTick === 'function' && game.endlessRun) _ecrTick(_wallDt); } catch (_) {}   // (v39.64) endless fish + bats
+      try { if (typeof _ecrTick === 'function' && game.endlessRun && !game.endlessRun.hub) _ecrTick(_wallDt); } catch (_) {}   // (v49.21) not in the open world   // (v39.64) endless fish + bats
       __pmark('hub:critters');
       try {
         const _zc = (game._cyber && game._cyber.armed && (!window.__cyber || window.__cyber.zonePin !== false) &&
@@ -90247,7 +91011,7 @@ function _gameLoopBody(timestamp) {
   __pmark('smokeLights+cloudDots');
   if (_vrThrottleTier < 3) updateDots(dt); else if (game.dots && game.dots.length) disposeAllDots();
   if (typeof _arenaCloudTick === 'function') { try { _arenaCloudTick(dt); } catch (_) {} }
-  if (game.endlessRun && typeof _endlessCloudsTick === 'function') { try { _endlessCloudsTick(dt); } catch (_) {} }   // (v39.69)
+  if (game.endlessRun && !game.endlessRun.hub && typeof _endlessCloudsTick === 'function') { try { _endlessCloudsTick(dt); } catch (_) {} }   // (v49.21) not in the open world   // (v39.69)
   if (typeof _tickTrackerSonarDOT === 'function') { try { _tickTrackerSonarDOT(dt); } catch (_) {} }
   if (typeof _sweepTrackerLocks === 'function' && player && player.loadoutKey === 'TRACKER') {
     _sweepTrackerLocks._t = (_sweepTrackerLocks._t || 0) - (dt || 0.016);
