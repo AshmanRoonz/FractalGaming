@@ -2128,6 +2128,17 @@ body:has(#ship-select.active) #lss-version-badge { display: none !important; }
   text-shadow: 0 0 4px currentColor;
   background: rgba(5, 8, 18, 0.30);
 }
+/* (v48.46) (review O3.12) A HIDDEN TAG STOPS ANIMATING. The jitter (0.18 s, steps) and glitch (4.7 s) loops
+   ran forever on every tag, shown or not - the overlays are hidden by opacity / visibility, never display, so
+   the animations kept ticking style work every step. Paused while the container is not showing. ⚠ PAUSED, never
+   `animation: none` or display:none (v40.94: the element's compositor layer must stay alive; the transform is
+   owned by these two animations). Resuming mid-loop is invisible: both are endless loops with no start.
+   #ov-banner / #ov-killstreak keep `.show` after their one-shot animation ends (replay() only re-adds it), so
+   they go idle on that animation's own animationend (`lt-idle`, set in _lssTagIdleWire, cleared by replay()). */
+#ship-select-countdown:not(.active) .lss-tag,
+#ss-mode-label:not(.on) .lss-tag,
+#ov-banner:not(.show) .lss-tag, #ov-banner.lt-idle .lss-tag,
+#ov-killstreak:not(.show) .lss-tag, #ov-killstreak.lt-idle .lss-tag { animation-play-state: paused; }
 /* the same chromatic text, for lines that sit where a bracket has no room (pinned centre lines) */
 .lss-chroma {
   font-family: 'Orbitron', 'Courier New', monospace;
@@ -6860,7 +6871,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "48.41";
+const LSS_BUILD = "48.49";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -12573,8 +12584,8 @@ const EndlessMode = {
     for (let i = 0; i < 6; i++) {
       const m = new THREE.Mesh(
         new THREE.PlaneGeometry(110, 1500),
-        new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0,
-          blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false, color: 0xcfe4ff }));
+        _lssAddOnePass(new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0,
+          blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false, color: 0xcfe4ff })));
       m.visible = false; m.renderOrder = 2;
       scene.add(m);
       run.rays.push({ mesh: m, life: 0 });
@@ -18797,7 +18808,9 @@ function spawnTripWireOrb(pos, owner, team, ownerPeerId, netId, broadcast, group
   }
 }
 
-const _energyShieldMaterials = [];
+// (v48.45) (review O3.19) a Set that forgets a material when it is disposed - the Array only ever grew (one per
+// hull build, every one ticked every frame for the rest of the session).
+const _energyShieldMaterials = new Set();
 // Each shield material holds a small ring buffer of recent hits. Each entry
 // is a unit-length object-space direction (where the projectile struck the
 // sphere, normalized) plus an age in seconds. The fragment shader reads
@@ -18914,8 +18927,47 @@ function makeEnergyShieldMaterial(color) {
     depthWrite: false,
     side: THREE.DoubleSide,
   });
-  _energyShieldMaterials.push(mat);
+  _energyShieldMaterials.add(mat);
+  mat.addEventListener('dispose', () => { _energyShieldMaterials.delete(mat); });
+  mat.onBeforeRender = _esMarkDrawn;   // (v48.45) see _esGateBefore
   return mat;
+}
+
+// ⭐ (v48.45) AN IDLE SHIELD BUBBLE IS NOT DRAWN (review O2.14). Every ship carries an 80-140 u additive
+// DoubleSide sphere whose fragment shader evaluates four rippleSample() calls and then DISCARDS the fragment when
+// `intensity < 0.001 && rippleA < 0.001` - which is nearly always: the player's intensity is zeroed every frame,
+// peers light it only under spawn protection, bots only for the doomed nemesis, and a ripple lives 0.55 s. So the
+// bubble drew a full screen-sized layer of discarded fragments (per eye in XR, again in the mirror) for nothing.
+// The test below is the shader's own, per material: with intensity <= 0 and every ripple slot aged out
+// (`age >= uRippleMaxAge` is exactly where rippleSample returns), every fragment discards, so not drawing is the
+// same picture. It hides through `material.visible` (projectObject skips it; renderer.compile does not look at it,
+// so the warmups still link the program), only for the length of one render of the main scene (hidden in
+// scene.onBeforeRender, handed back in onAfterRender - no other scene or code path ever sees a hidden shield), and
+// only once the material has been drawn at least once, so its first draw still happens behind the curtain.
+// ⚠ It reads the uniforms at the moment the render starts, so there is no writer to hook and no frame of lag: any
+// code that lights a shield (setShieldIntensity, recordShieldHit, the nemesis dome, a future one) is seen by the
+// next render as it is. NaN-safe the same way the shader is (`!(x <= 0)` / `!(age >= max)`).
+// A/B: window.__esGateOff = true draws them all again.
+function _esMarkDrawn() { this.userData._esDrawn = true; }
+const _esHidden = [];
+function _esGateAfter() {
+  for (let i = 0; i < _esHidden.length; i++) _esHidden[i].visible = true;
+  _esHidden.length = 0;
+}
+function _esGateBefore() {
+  _esGateAfter();   // a render that threw never reached onAfterRender - start from nothing hidden
+  if (typeof window !== 'undefined' && window.__esGateOff) return;
+  for (const m of _energyShieldMaterials) {
+    if (!m.visible || !m.userData._esDrawn) continue;
+    const u = m.uniforms;
+    if (!u || !u.intensity || !u.uHitAges || !u.uRippleMaxAge) continue;
+    if (!(u.intensity.value <= 0)) continue;
+    const ages = u.uHitAges.value, max = Math.fround(u.uRippleMaxAge.value);
+    let live = false;
+    for (let i = 0; i < ages.length; i++) { if (!(ages[i] >= max)) { live = true; break; } }
+    if (live) continue;
+    m.visible = false; _esHidden.push(m);
+  }
 }
 
 // Drive time + decay any active impact each frame.
@@ -23187,6 +23239,12 @@ function cleanupPendingHits() {
 // ---- THREE.JS SETUP ----
 
 const scene = new THREE.Scene();
+// (v48.45) main-scene render hooks: the idle shield gate (see _esGateBefore). Nothing else assigns these.
+scene.onBeforeRender = function (r, s, cam) {
+  try { _esGateBefore(); } catch (_) {}
+  try { _swTreeShadowCull(r, cam); } catch (_) {}   // (v48.47) see _swTreeShadowCull - its own try: dirLight is a later const
+};
+scene.onAfterRender = function () { try { _esGateAfter(); } catch (_) {} };
 
 // ================================================================
 // BillboardCloudSystem ; custom instanced billboard cloud
@@ -23294,11 +23352,20 @@ class BillboardCloudSystem {
         // fragment shader so lighting can attenuate by distance from
         // each light source. All fragments of one sprite share this.
         'varying vec3  vSpritePos;',
+        // ⭐ (v48.44) THE LIGHT LOOP RUNS PER VERTEX (review O2.5, step 1). Its only per-pixel input was
+        // vSpritePos, which is the SAME for every fragment of a sprite, so the 8-slot loop computed one
+        // constant per sprite on every pixel of it. Same expressions in the same order, once per vertex,
+        // handed over FLAT (no interpolation: every fragment gets exactly the vertex value).
+        'uniform vec3  uLightPos[8];',
+        'uniform vec3  uLightColor[8];',
+        'uniform float uLightStrength[8];',
+        'flat varying vec3 vLit;',
         'void main() {',
         '  vUv = uv;',
         '  vColor = iColor;',
         '  vAlpha = iAlpha;',
         '  vSeed = iSeed;',
+        '  vLit = iColor;',
         '  if (iAlpha < 0.001 || iScale < 0.001) {',
         // Cull dead slots: project to a degenerate position behind the camera.
         '    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);',
@@ -23315,6 +23382,14 @@ class BillboardCloudSystem {
         '    sin(uTime * _dsp * 1.3 + iDrift.z) * iDriftAmp * 0.55,',
         '    sin(uTime * _dsp * 0.85 + iDrift.w) * iDriftAmp);',
         '  vSpritePos = _spritePos;',
+        '  vec3 _lit = iColor;',
+        '  for (int li = 0; li < 8; li++) {',
+        '    vec3 toL = uLightPos[li] - _spritePos;',
+        '    float d2 = dot(toL, toL);',
+        '    float atten = 1.0 / (1.0 + d2 * 0.0002);',
+        '    _lit += uLightColor[li] * atten * uLightStrength[li];',
+        '  }',
+        '  vLit = _lit;',
         '  vec3 cameraRight = vec3(viewMatrix[0][0], viewMatrix[1][0], viewMatrix[2][0]);',
         '  vec3 cameraUp    = vec3(viewMatrix[0][1], viewMatrix[1][1], viewMatrix[2][1]);',
         '  vec3 worldPos = _spritePos + (position.x * cameraRight + position.y * cameraUp) * iScale;',
@@ -23328,6 +23403,7 @@ class BillboardCloudSystem {
         'varying float vAlpha;',
         'varying float vSeed;',
         'varying vec3  vSpritePos;',
+        'flat varying vec3 vLit;',   // (v48.44) see the vertex shader
         // Dynamic-light slots. Per-frame `updateBCSLighting`
         // populates these from nearby projectiles ; the cloud picks up
         // the projectile's class color when shots fly close. Strength 0
@@ -23410,13 +23486,7 @@ class BillboardCloudSystem {
         '  float warpedRadial = smoothstep(0.55, 0.0, warpedR);',
         '  float a = maskedNoise * warpedRadial * vAlpha;',
         '  if (a < 0.005) discard;',
-        '  vec3 lit = vColor;',
-        '  for (int li = 0; li < 8; li++) {',
-        '    vec3 toL = uLightPos[li] - vSpritePos;',
-        '    float d2 = dot(toL, toL);',
-        '    float atten = 1.0 / (1.0 + d2 * 0.0002);',
-        '    lit += uLightColor[li] * atten * uLightStrength[li];',
-        '  }',
+        '  vec3 lit = vLit;',   // (v48.44) computed per vertex - see the vertex shader
         // Apply user brightness control, then branch on
         // the selected blend mode so the fragment output matches what GL
         // expects for each blending equation. See uBlendMode comment above.
@@ -29835,7 +29905,29 @@ function _waterRefractBind(rnd, scn, cam) {
     // : 0`, so x = y = 0 either way, same texture object, same copyTexSubImage2D. Byte-identical GL.
     // On r180 the compat branch is GONE: the old form throws on _wrZero.image and the catch at the
     // bottom of this try silently zeroes uRefract - refraction would die with an empty console.
-    rnd.copyFramebufferToTexture(postFX.rtRefractCopy);
+    // ⭐ (v48.47) (review O2.8) ...AND COPY ONLY THE LIVE BUCKET. r165 copyFramebufferToTexture copies
+    // `texture.image` worth of pixels, and grow-only (v40.16, above) left that at the LARGEST rectangle the
+    // session ever reached - so after one shed on MEGA every frame blitted the whole grown copy (the v39.86
+    // 4608x2592-against-1920x1080 case, back again) for pixels the shader never reads: it clamps its sample to
+    // uSceneMax - 0.0015, i.e. inside the live width A.w, and bw >= A.w, so a copy of bw + 2 by bh + 2 holds
+    // every texel it can fetch, bilinear neighbour included. The image size is trimmed only AROUND the copy
+    // and restored in the finally, so the allocation and uSceneRes / uSceneMax below never see it - and only
+    // once the texture's storage exists (`__version === version`): trimming the call that ALLOCATES would size
+    // the storage to the trim, and every later full copy would fail with INVALID_VALUE (refraction silently 0).
+    // window.__waterCopyTrim = 0 copies the whole grown texture again (A/B).
+    {
+      const C2 = postFX.rtRefractCopy;
+      const _tw = Math.min(C2.image.width, bw + 2), _th = Math.min(C2.image.height, bh + 2);
+      let _trim = (_tw < C2.image.width || _th < C2.image.height) && !(typeof window !== 'undefined' && window.__waterCopyTrim === 0);
+      if (_trim) { try { const tp = rnd.properties.get(C2); _trim = !!(tp && tp.__webglTexture && tp.__version === C2.version); } catch (_) { _trim = false; } }
+      if (_trim) {
+        const _ow = C2.image.width, _oh = C2.image.height;
+        C2.image.width = _tw; C2.image.height = _th;
+        try { rnd.copyFramebufferToTexture(C2); } finally { C2.image.width = _ow; C2.image.height = _oh; }
+      } else {
+        rnd.copyFramebufferToTexture(C2);
+      }
+    }
     if (window.__f8seg) window.__f8seg('scene');   // (v40.59)
     u.uSceneTex.value = postFX.rtRefractCopy;
     // gl_FragCoord is in the live viewport's own pixels, and the copy starts at its origin, so the
@@ -31702,7 +31794,7 @@ function _rplPjSlot() {
   g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
   g.setAttribute('color', new THREE.BufferAttribute(col, 3));
   g.setIndex(new THREE.BufferAttribute(idx, 1));
-  const rib = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }));
+  const rib = new THREE.Mesh(g, _lssAddOnePass(new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide })));
   rib.frustumCulled = false;
   add(rib);
   return { core: core, glow: glow, haze: haze, rib: rib, pos: pos, col: col, c: undefined, s: undefined, vis: true };
@@ -34141,8 +34233,8 @@ function _stRidged(x,z,seed,T,sp){
   return Math.pow(sum/norm,T.EXPONENT);
 }
 function _stGroundY(x,z,T,sp){
-  const wx=x+T.WARP*_stNoise2(x*T.WARP_FREQ,z*T.WARP_FREQ);
-  const wz=z+T.WARP*_stNoise2(x*T.WARP_FREQ+31.7,z*T.WARP_FREQ+17.3);
+  const wx=T.WARP!==0?x+T.WARP*_stNoise2(x*T.WARP_FREQ,z*T.WARP_FREQ):x;
+  const wz=T.WARP!==0?z+T.WARP*_stNoise2(x*T.WARP_FREQ+31.7,z*T.WARP_FREQ+17.3):z;
   // (v33.04) THE OVERWORLD HUB heightfield (world.html look) : low-freq continents
   // (broad highlands + basins that flood into lakes) + a mountain MASK so peaks are
   // occasional not omnipresent + rolling hills everywhere + carved river channels
@@ -34396,8 +34488,8 @@ function _stGroundY(x,z,T,sp){
 }
 function _stCeilY(x,z,T){
   const ax=x+4000, az=z-4000;
-  const wx=ax+T.WARP*_stNoise2(ax*T.WARP_FREQ,az*T.WARP_FREQ);
-  const wz=az+T.WARP*_stNoise2(ax*T.WARP_FREQ+31.7,az*T.WARP_FREQ+17.3);
+  const wx=T.WARP!==0?ax+T.WARP*_stNoise2(ax*T.WARP_FREQ,az*T.WARP_FREQ):ax;
+  const wz=T.WARP!==0?az+T.WARP*_stNoise2(ax*T.WARP_FREQ+31.7,az*T.WARP_FREQ+17.3):az;
   return T.YCEIL-T.CEIL_AMP*_stRidged(wx,wz,5.9,T);
 }
 // Gap slab SDF: negative inside the open gap (air), positive in mountain rock.
@@ -34589,9 +34681,16 @@ function _stRidged(x,z,seed,T,sp){
   }
   return Math.pow(sum/norm,T.EXPONENT);
 }
+// (v48.40 map, v48.43) THE WARP IS SKIPPED WHEN IT IS ZERO (review O2.34). `T.WARP = _isHubMap ? 250 : 0`,
+// so every non-hub map paid two _stNoise2 calls per sample for `x + 0 * n`. `T.WARP!==0 ? ... : x` is the
+// same double for every finite noise value (x + 0*n == x; an undefined WARP still takes the old NaN path),
+// in both terrain surfaces, on the main thread AND in the marching-cubes worker's copy (whose code lines
+// must stay identical to these). Cheaper shells, cheaper worldSDF / collision / raycasts on every arena
+// map. ⚠ It edits an _hbFamily source, so the hub's baked height tables re-key: the first hub launch after
+// this build re-bakes once behind the curtain (~9 s; hub values are unchanged - WARP is 250 there).
 function _stGroundY(x,z,T,sp){
-  const wx=x+T.WARP*_stNoise2(x*T.WARP_FREQ,z*T.WARP_FREQ);
-  const wz=z+T.WARP*_stNoise2(x*T.WARP_FREQ+31.7,z*T.WARP_FREQ+17.3);
+  const wx=T.WARP!==0?x+T.WARP*_stNoise2(x*T.WARP_FREQ,z*T.WARP_FREQ):x;
+  const wz=T.WARP!==0?z+T.WARP*_stNoise2(x*T.WARP_FREQ+31.7,z*T.WARP_FREQ+17.3):z;
   // (v33.04) THE OVERWORLD HUB heightfield (world.html look) : low-freq continents
   // (broad highlands + basins that flood into lakes) + a mountain MASK so peaks are
   // occasional not omnipresent + rolling hills everywhere + carved river channels
@@ -34845,8 +34944,8 @@ function _stGroundY(x,z,T,sp){
 }
 function _stCeilY(x,z,T){
   const ax=x+4000, az=z-4000;
-  const wx=ax+T.WARP*_stNoise2(ax*T.WARP_FREQ,az*T.WARP_FREQ);
-  const wz=az+T.WARP*_stNoise2(ax*T.WARP_FREQ+31.7,az*T.WARP_FREQ+17.3);
+  const wx=T.WARP!==0?ax+T.WARP*_stNoise2(ax*T.WARP_FREQ,az*T.WARP_FREQ):ax;
+  const wz=T.WARP!==0?az+T.WARP*_stNoise2(ax*T.WARP_FREQ+31.7,az*T.WARP_FREQ+17.3):az;
   return T.YCEIL-T.CEIL_AMP*_stRidged(wx,wz,5.9,T);
 }
 function _stGapSDF(px,py,pz,T){
@@ -35735,6 +35834,15 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
       +'float _tpatch(vec2 p){float n=_tvn(p*0.0016+vec2(5.1,-2.3))*0.62+_tvn(p*0.0041+vec2(11.0,7.0))*0.38;return clamp((n+1.0)*0.5,0.0,1.0);}\n'
       +'float _detN(vec2 p){return _tvn(p*0.035)*0.55+_tvn(p*0.09+vec2(11.0,5.0))*0.30+_tvn(p*0.22+vec2(3.0,9.0))*0.15;}float _snowWander(vec2 p){return _tvn(p*0.00085)*0.62+_tvn(p*0.0031+vec2(19.0,7.0))*0.26+_tvn(p*0.0092+vec2(4.0,13.0))*0.12;}\n'
       +sh.fragmentShader;
+    // ⭐ (v48.44) (review O2.7) _snowWander(vWPos.xz) is evaluated ONCE, at the head of main(), and both the
+    // ground colour (snow line) and the roughness (snow sheen) read `_swSW` - they were the same 3-octave
+    // call on the same input, per fragment, twice on every ground pixel. v35.46 duplicated it on purpose
+    // because the two uses sit in different CHUNKS (color_fragment vs roughnessmap_fragment), and a local
+    // declared inside one chunk's injection is not in scope in the other; a declaration at the head of
+    // main() is in scope for both. Unconditional on purpose: all 8 terrain materials share ONE program key,
+    // so the injected SOURCE must never depend on runtime state.
+    // ...and the ground AO block is skipped past 2200 u, where its own fade is exactly 0 (mix(1, x, 0) = 1).
+    sh.fragmentShader=sh.fragmentShader.replace('void main() {', 'void main() {\n float _swSW=_snowWander(vWPos.xz);');
     // ground surface: grass on gentle slopes, bare rock on steep faces, snow on peaks, with a mossy mottle
     sh.fragmentShader=sh.fragmentShader.replace('#include <color_fragment>',
       '#include <color_fragment>\n if(uCeil<0.5){\n vec3 fn = uSmooth>0.5 ? normalize(vSN) : normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n float fl=clamp((abs(fn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0);\n float pc=_tpatch(vWPos.xz);\n float _mD=length(uCam.xz-vWPos.xz);\n float _mW=(1.0-smoothstep(240.0,950.0,_mD))*uGrassD;\n float _mN=0.0;\n if(_mW>0.001){ float _ma=_tvn(vWPos.xz*0.009)*3.1416; vec2 _md=vec2(cos(_ma),sin(_ma)); vec2 _mp=vec2(dot(vWPos.xz,_md),dot(vWPos.xz,vec2(-_md.y,_md.x))); _mN=_tvn(vec2(_mp.x*0.055,_mp.y*0.165))*0.46+_tvn(vec2(_mp.x*0.145,_mp.y*0.430)+vec2(11.0,4.0))*0.34+_tvn(vec2(_mp.x*0.360,_mp.y*1.050)+vec2(3.0,19.0))*0.20; _mN*=0.45+0.95*clamp(0.5+0.5*_tvn(vWPos.xz*0.018+vec2(27.0,6.0)),0.0,1.0); }\n vec3 grass=mix(uColMoss,uColGrass,smoothstep(0.32,0.72,pc));\n float moss1=_tvn(vWPos.xz*0.07);\n float moss2=_tvn(vWPos.xz*0.19+vec2(7.0,3.0));\n float mott=clamp(0.5+0.5*(moss1*0.62+moss2*0.38),0.0,1.0);\n grass*=(0.78+0.34*mott);\n grass=mix(grass,uColMoss*(0.7+0.4*mott),(1.0-smoothstep(0.28,0.62,pc))*0.6);\n float rkA=_tvn(vWPos.xz*0.045+vec2(vWPos.y*0.03));\n float rkB=_tvn(vWPos.xz*0.12+vec2(13.0,7.0));\n float rkC=_tvn(vWPos.xz*0.30+vec2(vWPos.y*0.05,0.0));\n float rockMott=clamp(0.5+0.5*(rkA*0.55+rkB*0.3+rkC*0.15),0.0,1.0);\n float strata=0.5+0.5*sin(vWPos.y*0.05+_tvn(vWPos.xz*0.025)*3.0);\n vec3 rock=uColRock*(0.70+0.55*rockMott)*(1.0-uStrata*0.57+uStrata*strata);\n if(uMossy>0.5){ float mc=_tvn(vWPos.xz*0.022+vec2(vWPos.y*0.015,0.0))*0.55+_tvn(vWPos.xz*0.06+vec2(9.0,4.0))*0.45; float mossSide=smoothstep(0.5,0.82,0.5+0.5*mc)*(1.0-fl); rock=mix(rock,uColMoss*(0.62+0.5*mott),mossSide*0.72); }\n vec3 terr=mix(rock,grass,fl);\n if(uMossy>0.5 && uSat>0.001){ float _gl=dot(grass,vec3(0.299,0.587,0.114)); vec3 _gd=mix(grass,vec3(_gl),uSat*0.85); float _dry=_tpatch(vWPos.xz*1.7+vec2(31.0,12.0)); float _dirt=clamp(0.5+0.5*_tvn(vWPos.xz*0.011+vec2(4.0,8.0)),0.0,1.0); _gd=mix(_gd,_gd*mix(vec3(1.0),vec3(0.46,0.42,0.20)*2.2,smoothstep(0.62,0.86,_dry)),uSat*0.55); _gd=mix(_gd,_gd*mix(vec3(1.0),vec3(0.27,0.20,0.12)*2.6,1.0-smoothstep(0.18,0.42,_dirt)),uSat*0.45); grass=mix(grass,_gd,clamp(uSat*1.4,0.0,1.0)); terr=mix(rock,grass,fl); }\n'
@@ -35747,9 +35855,9 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
       // always sit next to bare earth). Rubble is slope-biased: it collects on
       // the steeper grass near rock, the way scree actually does.
       +' if(uMossy>0.5){\n float _sA=_tvn(vWPos.xz*0.0030*uPatchScale+vec2(21.0,9.0));\n float _sB=_tvn(vWPos.xz*0.0105*uPatchScale+vec2(3.0,17.0));\n float _sC=_tvn(vWPos.xz*0.0330*uPatchScale+vec2(9.0,2.0));\n float _sN=_sA*0.55+_sB*0.32+_sC*0.13;\n float _rN=_tvn(vWPos.xz*0.0062*uPatchScale+vec2(41.0,-13.0))*0.62+_tvn(vWPos.xz*0.0210*uPatchScale+vec2(7.0,29.0))*0.38;\n float _spk=clamp(0.5+0.5*_tvn(vWPos.xz*1.15),0.0,1.0);\n float _grit=clamp(0.5+0.5*_tvn(vWPos.xz*0.42+vec2(5.0,23.0)),0.0,1.0);\n float _mE=_mN*0.085*_mW;\n float _dirtM=smoothstep(0.16,0.46,_sN+_mE)*uPatchMix.x;\n float _ovgM=smoothstep(0.14,0.44,-_sN+_mE)*uPatchMix.z;\n float _rubM=smoothstep(0.20,0.52,_rN+_mE)*uPatchMix.y*(0.45+0.55*(1.0-fl));\n vec3 _dirtC=uColDirt*(1.55+1.45*_grit);\n vec3 _rubC=uColRock*(0.70+1.05*_spk);\n vec3 _ovgC=mix(uColMoss,uColGrass,0.30)*(0.46+0.32*mott);\n grass=mix(grass,_ovgC,clamp(_ovgM,0.0,0.80));\n grass=mix(grass,_dirtC,clamp(_dirtM,0.0,0.90));\n grass=mix(grass,_rubC,clamp(_rubM,0.0,0.78));\n terr=mix(rock,grass,fl);\n }\n'
-      +' if(_mW>0.001){\n  terr*=1.0+_mN*0.33*_mW;\n  terr*=1.0-clamp(-_mN,0.0,1.0)*0.26*_mW;\n  vec3 _mh=mix(vec3(0.84,0.95,0.88),vec3(1.16,1.05,0.66),clamp(0.5+0.5*_mN,0.0,1.0));\n  terr=mix(terr,terr*_mh,fl*_mW*0.75);\n }\n float th=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _sl=uSnow+_snowWander(vWPos.xz)*uSnowVary+(1.0-fl)*uSnowSlope;\n float snow=smoothstep(_sl,_sl+0.10+0.07*(1.0-fl),th);\n terr=mix(terr,uColSnow,snow*max(fl,0.30));\n if(uAO>0.001){ float _aoCav=mix(0.62,1.0,smoothstep(uSlopeRock,1.0,clamp(fn.y,0.0,1.0))); float _aoDet=mix(0.74,1.06,clamp(0.5+0.5*_detN(vWPos.xz),0.0,1.0)); float _aoVal=mix(0.80,1.0,th); float _aoBlob=mix(0.86,1.04,_tpatch(vWPos.xz*0.6+vec2(17.0,5.0))); float _aoRaw=clamp(_aoCav*_aoDet*_aoVal*_aoBlob,0.45,1.08); float _aoFade=1.0-smoothstep(900.0,2200.0,length(uCam.xz-vWPos.xz)); float _ao=mix(1.0,_aoRaw,uAO*_aoFade*(1.0-snow*0.6)); terr*=_ao; }\n if(uRelief>0.001 && uCeil<0.5){ float _rD=length(uCam.xz-vWPos.xz); float _rW=(1.0-smoothstep(700.0,2400.0,_rD))*uRelief; if(_rW>0.001){ float _e2=9.0; float _c0=_detN(vWPos.xz); float _cx=_detN(vWPos.xz+vec2(_e2,0.0))+_detN(vWPos.xz-vec2(_e2,0.0)); float _cz=_detN(vWPos.xz+vec2(0.0,_e2))+_detN(vWPos.xz-vec2(0.0,_e2)); float _curv=(_cx+_cz)*0.25-_c0; float _cav=clamp(-_curv*9.0,0.0,1.0); float _ridge=clamp(_curv*7.0,0.0,1.0); vec2 _sg=vec2(_detN(vWPos.xz+vec2(_e2,0.0))-_c0,_detN(vWPos.xz+vec2(0.0,_e2))-_c0); float _sunFace=clamp(0.5-dot(normalize(_sg+vec2(1e-5)),normalize(uSunDir.xz+vec2(1e-5)))*0.5,0.0,1.0); float _shade=1.0-(_cav*(0.30+0.22*_sunFace))*_rW+_ridge*0.10*_rW; terr*=clamp(_shade,0.45,1.15); } }\n if(uAerial>0.001){ float _camD=length(uCam.xz-vWPos.xz); float _ap=smoothstep(uAerialStart,uAerialFar,_camD)*uAerial; _ap*=(1.0-clamp((vWY-(uYMid-uAMP*0.2))/(uAMP*1.4),0.0,1.0)*0.55); terr=mix(terr,uAerialColor,clamp(_ap,0.0,0.85)); }\n  if(uWaterOn>0.001 && vWPos.y<uWaterY){ float _cdp=uWaterY-vWPos.y; float _cf=(1.0-smoothstep(80.0,1100.0,_cdp))*smoothstep(0.0,30.0,_cdp)*uWaterOn; vec2 _cq=vWPos.xz*0.021; float _c1=sin(_cq.x*2.3+_cq.y*1.1+uTime*1.35)*sin(_cq.y*1.9-_cq.x*1.3-uTime*1.05); float _c2=sin((_cq.x+_cq.y)*1.45+uTime*0.85)*sin((_cq.x-_cq.y*0.7)*1.7-uTime*0.65); float _cc=pow(clamp(0.5+0.5*(_c1*0.6+_c2*0.4),0.0,1.0),3.5); terr*=1.0+_cf*_cc*1.15*clamp(fn.y,0.0,1.0); }\n diffuseColor.rgb=terr;\n }\n if(uCeil>0.5){ float _cm1=_tvn(vWPos.xz*0.045+vec2(vWPos.y*0.03));\n float _cm2=_tvn(vWPos.xz*0.12+vec2(13.0,7.0));\n float _cmott=clamp(0.5+0.5*(_cm1*0.6+_cm2*0.4),0.0,1.0);\n float _cstr=0.5+0.5*sin(vWPos.y*0.05+_tvn(vWPos.xz*0.025)*3.0);\n diffuseColor.rgb*=(0.80+0.36*_cmott)*(1.0-uStrata*0.57+uStrata*_cstr);\n if(uAO>0.001){ vec3 _cn2=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n float _cao=mix(0.68,1.0,smoothstep(0.0,0.85,abs(_cn2.y)));\n float _caoD=mix(0.80,1.05,clamp(0.5+0.5*_detN(vWPos.xz),0.0,1.0));\n diffuseColor.rgb*=mix(1.0,clamp(_cao*_caoD,0.5,1.05),uAO); }\n if(uAerial>0.001){ float _cad=length(uCam.xz-vWPos.xz);\n float _cap=smoothstep(uAerialStart,uAerialFar,_cad)*uAerial;\n diffuseColor.rgb=mix(diffuseColor.rgb,uAerialColor,clamp(_cap,0.0,0.85)); }\n }\n if(uRim>0.001){ vec3 _rn=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n vec3 _rv=normalize(uCam-vWPos);\n float _rf=pow(1.0-abs(dot(_rn,_rv)),3.0);\n diffuseColor.rgb=mix(diffuseColor.rgb,uAerialColor*1.25,_rf*uRim); }\n if(uGlitch>0.5 && uCeil>0.5){ float zone=_tpatch(vWPos.xz+vec2(uTime*2.5,0.0)); vec2 gid=floor(vWPos.xz/240.0); float r=_thsh(gid+floor(uTime*0.8)); float r2=_thsh(gid*1.93+floor(uTime*1.5)); if(zone>0.62 && r>0.45) discard; if(zone>0.5){ if(r2>0.55) diffuseColor.rgb=diffuseColor.rgb.gbr; diffuseColor.rgb*=mix(0.75,1.25,r2); } }');
+      +' if(_mW>0.001){\n  terr*=1.0+_mN*0.33*_mW;\n  terr*=1.0-clamp(-_mN,0.0,1.0)*0.26*_mW;\n  vec3 _mh=mix(vec3(0.84,0.95,0.88),vec3(1.16,1.05,0.66),clamp(0.5+0.5*_mN,0.0,1.0));\n  terr=mix(terr,terr*_mh,fl*_mW*0.75);\n }\n float th=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _sl=uSnow+_swSW*uSnowVary+(1.0-fl)*uSnowSlope;\n float snow=smoothstep(_sl,_sl+0.10+0.07*(1.0-fl),th);\n terr=mix(terr,uColSnow,snow*max(fl,0.30));\n if(uAO>0.001 && _mD<2200.0){ float _aoCav=mix(0.62,1.0,smoothstep(uSlopeRock,1.0,clamp(fn.y,0.0,1.0))); float _aoDet=mix(0.74,1.06,clamp(0.5+0.5*_detN(vWPos.xz),0.0,1.0)); float _aoVal=mix(0.80,1.0,th); float _aoBlob=mix(0.86,1.04,_tpatch(vWPos.xz*0.6+vec2(17.0,5.0))); float _aoRaw=clamp(_aoCav*_aoDet*_aoVal*_aoBlob,0.45,1.08); float _aoFade=1.0-smoothstep(900.0,2200.0,length(uCam.xz-vWPos.xz)); float _ao=mix(1.0,_aoRaw,uAO*_aoFade*(1.0-snow*0.6)); terr*=_ao; }\n if(uRelief>0.001 && uCeil<0.5){ float _rD=length(uCam.xz-vWPos.xz); float _rW=(1.0-smoothstep(700.0,2400.0,_rD))*uRelief; if(_rW>0.001){ float _e2=9.0; float _c0=_detN(vWPos.xz); float _cx=_detN(vWPos.xz+vec2(_e2,0.0))+_detN(vWPos.xz-vec2(_e2,0.0)); float _cz=_detN(vWPos.xz+vec2(0.0,_e2))+_detN(vWPos.xz-vec2(0.0,_e2)); float _curv=(_cx+_cz)*0.25-_c0; float _cav=clamp(-_curv*9.0,0.0,1.0); float _ridge=clamp(_curv*7.0,0.0,1.0); vec2 _sg=vec2(_detN(vWPos.xz+vec2(_e2,0.0))-_c0,_detN(vWPos.xz+vec2(0.0,_e2))-_c0); float _sunFace=clamp(0.5-dot(normalize(_sg+vec2(1e-5)),normalize(uSunDir.xz+vec2(1e-5)))*0.5,0.0,1.0); float _shade=1.0-(_cav*(0.30+0.22*_sunFace))*_rW+_ridge*0.10*_rW; terr*=clamp(_shade,0.45,1.15); } }\n if(uAerial>0.001){ float _camD=length(uCam.xz-vWPos.xz); float _ap=smoothstep(uAerialStart,uAerialFar,_camD)*uAerial; _ap*=(1.0-clamp((vWY-(uYMid-uAMP*0.2))/(uAMP*1.4),0.0,1.0)*0.55); terr=mix(terr,uAerialColor,clamp(_ap,0.0,0.85)); }\n  if(uWaterOn>0.001 && vWPos.y<uWaterY){ float _cdp=uWaterY-vWPos.y; float _cf=(1.0-smoothstep(80.0,1100.0,_cdp))*smoothstep(0.0,30.0,_cdp)*uWaterOn; vec2 _cq=vWPos.xz*0.021; float _c1=sin(_cq.x*2.3+_cq.y*1.1+uTime*1.35)*sin(_cq.y*1.9-_cq.x*1.3-uTime*1.05); float _c2=sin((_cq.x+_cq.y)*1.45+uTime*0.85)*sin((_cq.x-_cq.y*0.7)*1.7-uTime*0.65); float _cc=pow(clamp(0.5+0.5*(_c1*0.6+_c2*0.4),0.0,1.0),3.5); terr*=1.0+_cf*_cc*1.15*clamp(fn.y,0.0,1.0); }\n diffuseColor.rgb=terr;\n }\n if(uCeil>0.5){ float _cm1=_tvn(vWPos.xz*0.045+vec2(vWPos.y*0.03));\n float _cm2=_tvn(vWPos.xz*0.12+vec2(13.0,7.0));\n float _cmott=clamp(0.5+0.5*(_cm1*0.6+_cm2*0.4),0.0,1.0);\n float _cstr=0.5+0.5*sin(vWPos.y*0.05+_tvn(vWPos.xz*0.025)*3.0);\n diffuseColor.rgb*=(0.80+0.36*_cmott)*(1.0-uStrata*0.57+uStrata*_cstr);\n if(uAO>0.001){ vec3 _cn2=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n float _cao=mix(0.68,1.0,smoothstep(0.0,0.85,abs(_cn2.y)));\n float _caoD=mix(0.80,1.05,clamp(0.5+0.5*_detN(vWPos.xz),0.0,1.0));\n diffuseColor.rgb*=mix(1.0,clamp(_cao*_caoD,0.5,1.05),uAO); }\n if(uAerial>0.001){ float _cad=length(uCam.xz-vWPos.xz);\n float _cap=smoothstep(uAerialStart,uAerialFar,_cad)*uAerial;\n diffuseColor.rgb=mix(diffuseColor.rgb,uAerialColor,clamp(_cap,0.0,0.85)); }\n }\n if(uRim>0.001){ vec3 _rn=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n vec3 _rv=normalize(uCam-vWPos);\n float _rf=pow(1.0-abs(dot(_rn,_rv)),3.0);\n diffuseColor.rgb=mix(diffuseColor.rgb,uAerialColor*1.25,_rf*uRim); }\n if(uGlitch>0.5 && uCeil>0.5){ float zone=_tpatch(vWPos.xz+vec2(uTime*2.5,0.0)); vec2 gid=floor(vWPos.xz/240.0); float r=_thsh(gid+floor(uTime*0.8)); float r2=_thsh(gid*1.93+floor(uTime*1.5)); if(zone>0.62 && r>0.45) discard; if(zone>0.5){ if(r2>0.55) diffuseColor.rgb=diffuseColor.rgb.gbr; diffuseColor.rgb*=mix(0.75,1.25,r2); } }');
     sh.fragmentShader=sh.fragmentShader.replace('#include <roughnessmap_fragment>',
-      '#include <roughnessmap_fragment>\n float _tr=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _rsl=uSnow+_snowWander(vWPos.xz)*uSnowVary;\n float _snow=smoothstep(_rsl,_rsl+0.12,_tr);\n roughnessFactor=mix(roughnessFactor,uSnowRough,_snow);');
+      '#include <roughnessmap_fragment>\n float _tr=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _rsl=uSnow+_swSW*uSnowVary;\n float _snow=smoothstep(_rsl,_rsl+0.12,_tr);\n roughnessFactor=mix(roughnessFactor,uSnowRough,_snow);');
     // lava: glowing icing on the peaks + drips running down (volcanic biome, ground only)
     sh.fragmentShader=sh.fragmentShader.replace('#include <emissivemap_fragment>',
       '#include <emissivemap_fragment>\n if(uLava>0.02 && uCeil<0.5){\n float _h=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float capStart=0.66;\n float cap=smoothstep(capStart,capStart+0.12,_h);\n float c1=_tvn(vWPos.xz*0.020);\n float c2=_tvn(vWPos.xz*0.055+vec2(13.0,5.0));\n float colId=clamp(0.5+0.5*(c1*0.6+c2*0.4),0.0,1.0);\n float dripCols=smoothstep(0.50,0.74,colId);\n float dripLen=0.14+0.32*colId;\n float dripBot=capStart-dripLen;\n float wob=0.03*_tvn(vWPos.xz*0.12);\n float band=smoothstep(dripBot+wob,dripBot+wob+0.05,_h)*(1.0-smoothstep(capStart-0.02,capStart+0.04,_h));\n float tip=smoothstep(dripBot+wob,dripBot+wob+0.025,_h)*(1.0-smoothstep(dripBot+wob+0.025,dripBot+wob+0.09,_h));\n float drips=(band+tip*0.8)*dripCols;\n float pool=(1.0-smoothstep(0.04,0.17,_h)); float poolN=_tvn(vWPos.xz*0.012)*0.6+_tvn(vWPos.xz*0.03+vec2(9.0,4.0))*0.4; float poolMask=smoothstep(0.12,0.5,0.5+0.5*poolN); float poolGlow=pool*poolMask;\n float _pulse=0.72+0.28*sin(uTime*1.6+vWY*0.02);\n float glow=clamp(cap+drips+poolGlow*1.15,0.0,1.7)*_pulse;\n vec3 lavaCol=mix(vec3(1.2,0.08,0.0),vec3(1.7,0.5,0.08),smoothstep(0.0,0.08,_h)); float emInt=glow*mix(0.78,1.0,smoothstep(0.0,0.08,_h)); totalEmissiveRadiance+=lavaCol*emInt*uLavaGlow*clamp(uLava,0.0,1.0);\n }\n if(uRocky>0.02 && uCeil<0.5){ vec3 ffn = uSmooth>0.5 ? normalize(vSN) : normalize(cross(dFdx(vWPos),dFdy(vWPos))); float ffl=clamp((abs(ffn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0); float fA=_tvn(vWPos.xz*0.02)*0.55+_tvn(vWPos.xz*0.05+vec2(19.0,7.0))*0.30+_tvn(vWPos.xz*0.11+vec2(3.0,11.0))*0.15; float fung=smoothstep(0.60,0.78,0.5+0.5*fA); float spore=smoothstep(0.82,0.97,0.5+0.5*_tvn(vWPos.xz*0.6)); float breathe=0.6+0.4*sin(uTime*0.7+fA*6.0+vWPos.x*0.012); vec3 glowCol=mix(vec3(0.16,0.95,0.55),vec3(0.20,0.70,1.0),0.5+0.5*_tvn(vWPos.xz*0.03)); float fglow=fung*(0.18+spore*1.2)*breathe*(1.0-ffl); totalEmissiveRadiance+=glowCol*fglow*clamp(uRocky,0.0,1.0); }if(uGold>0.02){vec3 gfn = uSmooth>0.5 ? normalize(vSN) : normalize(cross(dFdx(vWPos),dFdy(vWPos)));float gfl=clamp((abs(gfn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0);float gA=_tvn(vWPos.xz*0.016+vec2(vWPos.y*0.05,3.0))*0.55+_tvn(vWPos.xz*0.044+vec2(17.0,9.0))*0.30+_tvn(vWPos.xz*0.11+vec2(5.0,13.0))*0.15;float vein=smoothstep(0.56,0.72,0.5+0.5*gA);float glint=smoothstep(0.86,0.985,0.5+0.5*_tvn(vWPos.xz*0.9+vec2(vWPos.y*0.2,0.0)));float shimmer=0.82+0.18*sin(uTime*1.1+gA*7.0+vWPos.y*0.03);vec3 goldCol=mix(vec3(1.0,0.72,0.18),vec3(1.5,1.18,0.6),0.4+0.6*glint);float gglow=(vein*0.30+glint*1.2*vein)*shimmer*(1.0-gfl*0.7);totalEmissiveRadiance+=goldCol*gglow*uGold;}if(uCrystal>0.02){vec3 cfn = uSmooth>0.5 ? normalize(vSN) : normalize(cross(dFdx(vWPos),dFdy(vWPos)));float cfl=clamp((abs(cfn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0);float cA=_tvn(vWPos.xz*0.02+vec2(vWPos.y*0.06,4.0))*0.5+_tvn(vWPos.xz*0.05+vec2(13.0,17.0))*0.3+_tvn(vWPos.xz*0.12+vec2(5.0,9.0))*0.2;float cryst=smoothstep(0.62,0.82,0.5+0.5*cA);float facet=smoothstep(0.80,0.97,0.5+0.5*_tvn(vWPos.xz*0.7+vec2(vWPos.y*0.15,0.0)));float twinkle=0.6+0.4*sin(uTime*1.6+cA*9.0+vWPos.y*0.04);vec3 crysCol=mix(vec3(0.25,0.85,1.2),vec3(0.7,0.4,1.3),0.5+0.5*sin(uTime*0.5+cA*4.0+vWPos.x*0.01));float cglow=(cryst*0.30+facet*1.3*cryst)*twinkle*(1.0-cfl*0.6);totalEmissiveRadiance+=crysCol*cglow*uCrystal;}\n if(uGlitch>0.5 && uCeil>0.5){ float gz=_tpatch(vWPos.xz+vec2(uTime*2.5,0.0)); float scan=step(0.92,fract(vWPos.y*0.04+uTime*1.5)); totalEmissiveRadiance+=vec3(0.45,0.12,0.85)*scan*step(0.45,gz)*0.7; }\n if(uVolcN>0.5 && uCeil<0.5){ float vm=0.0,vr=2.0,vu=0.0,va=0.0; for(int i=0;i<4;i++){ if(float(i)>=uVolcN) break; vec4 V=uVolc[i];   float d=length(vWPos.xz-V.xy)/max(V.z,1.0);   float mm=1.0-smoothstep(0.62,1.20,d);   if(mm>vm){ vm=mm; vr=d; vu=clamp((vWY-V.w)/max(uVolcH[i],1.0),0.0,1.0); va=atan(vWPos.z-V.y,vWPos.x-V.x); } } if(vm>0.004){   float basalt=vm*smoothstep(1.05,0.55,vr);   diffuseColor.rgb=mix(diffuseColor.rgb,diffuseColor.rgb*vec3(0.32,0.27,0.26)+vec3(0.012,0.008,0.008),basalt*0.88);   float crat=1.0-smoothstep(0.045,0.145,vr);   float chN=_tvn(vWPos.xz*0.0007);   float ch=0.5+0.5*sin(va*(9.0+7.0*chN)+chN*6.0);   ch=smoothstep(0.70,0.97,ch)*smoothstep(0.05,0.19,vr)*(1.0-smoothstep(0.42,0.86,vr))*smoothstep(0.26,0.72,vu);   float pulse=0.74+0.26*sin(uTime*1.25+vr*8.0);   float glow=(crat*2.3+ch*1.15)*pulse*vm;   vec3 lc=mix(vec3(1.9,0.26,0.02),vec3(2.3,1.00,0.22),crat);   totalEmissiveRadiance+=lc*glow*uLavaGlow; } }');
@@ -35920,8 +36028,16 @@ function _swGenTree(opt){
   const bark=opt.bark||[0.30,0.21,0.12], leafC=opt.leaf||[0.22,0.46,0.18];
   const Y=new THREE.Vector3(0,1,0), X=new THREE.Vector3(1,0,0), fstr=opt.force||0;
   const qTmp=new THREE.Quaternion(), qF=new THREE.Quaternion(), eTmp=new THREE.Euler(), vT=new THREE.Vector3(), dir=new THREE.Vector3();
-  function vtx(p,c){ POS.push(p.x,p.y,p.z); COL.push(c[0],c[1],c[2]); }
-  function tri(a,b,c,col){ vtx(a,col); vtx(b,col); vtx(c,col); }
+  // ⭐ (v48.44) INDEXED (review O2.6). Every leaf card emitted 6 vertices for 4 corners (w0 and w2 twice), so
+  // 21% of all tree vertices were exact duplicates - and the instanced Standard vertex shader (6 sin sway terms
+  // + shadow coordinates) and the depth pass ran once per CORNER. Cards now emit 4 vertices + 6 indices in the
+  // same triangle order and winding; bark keeps its own 3 vertices per triangle (flat shading unchanged -
+  // computeVertexNormals gives a vertex used by one triangle exactly that triangle's normal). The only change is
+  // a card's two shared corners, whose normal becomes the average of its two coplanar triangles' (they were
+  // each one triangle's before): ~0.02 deg, 0-1 LSB. Triangle counts are unchanged.
+  const IDX=[];
+  function vtx(p,c){ const i=POS.length/3; POS.push(p.x,p.y,p.z); COL.push(c[0],c[1],c[2]); return i; }
+  function tri(a,b,c,col){ const i=vtx(a,col); vtx(b,col); vtx(c,col); IDX.push(i,i+1,i+2); }
   function ringPt(center,q,r,j,seg){ const a=j/seg*Math.PI*2; return vT.set(Math.cos(a)*r,0,Math.sin(a)*r).applyQuaternion(q).clone().add(center); }
   function leafCard(center,q,sz){
     // (v33.12) THREE crossed billboard planes (was 2) for a fuller canopy, each with a
@@ -35932,7 +36048,7 @@ function _swGenTree(opt){
     const cBot=[cTop[0]*0.5, cTop[1]*0.5, cTop[2]*0.5];
     const cr=[[-sz,0,0],[sz,0,0],[sz,sz*1.6,0],[-sz,sz*1.6,0]];
     const emit=(qq)=>{ const w=cr.map(p=>vT.set(p[0],p[1],p[2]).applyQuaternion(qq).clone().add(center));
-      vtx(w[0],cBot); vtx(w[1],cBot); vtx(w[2],cTop); vtx(w[0],cBot); vtx(w[2],cTop); vtx(w[3],cTop); };
+      const i=vtx(w[0],cBot); vtx(w[1],cBot); vtx(w[2],cTop); vtx(w[3],cTop); IDX.push(i,i+1,i+2, i,i+2,i+3); };   // (v48.44) was (w0,w1,w2)(w0,w2,w3) as 6 vertices
     emit(q);
     emit(q.clone().multiply(qTmp.setFromAxisAngle(Y,1.0472)));   
     emit(q.clone().multiply(qTmp.setFromAxisAngle(Y,2.0944)));   
@@ -35988,6 +36104,7 @@ function _swGenTree(opt){
   const g=new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(POS),3));
   g.setAttribute('color', new THREE.Float32BufferAttribute(new Float32Array(COL),3));
+  g.setIndex(IDX);   // (v48.44)
   g.computeVertexNormals(); return g;
 }
 // (v35.12) Bioluminescent MUSHROOM — the "tree" of the hub's glowing-blue
@@ -36215,6 +36332,8 @@ function _hzFungusAt(x, z) {
 // systems _stGroundY carves, sampled with the same seeds and widths so the
 // planting follows the water the terrain actually has), and simple lowness —
 // valley floors collect what drains off the slopes.
+// (v48.46) the largest factor the ecology can put on a tree's planting density - see _swBuildTrees
+const _ECO_MAX = 1.77;   // (0.22 + 1.55 * moisture) * (1 - 0.78 * exposure) at moisture 1, exposure 0
 function _swMoistAt(x, z, T) {
   if (!T || !T.HUB || typeof _stFbm !== 'function') return 0.5;
   const wx = x + T.WARP * _stNoise2(x * T.WARP_FREQ, z * T.WARP_FREQ);
@@ -36344,6 +36463,15 @@ function _swBuildTrees(x0,z0,T){
     // buys the whole effect for zero extra draws.
     let _eco = 1;
     if (kind !== 'shroom') {
+      // ⭐ (v48.46) (review O3.5) REJECT BEFORE THE ECOLOGY. The density test below throws away ~98 % of the
+      // candidates, and every one of them had already paid for _swMoistAt (a warped 3-field fbm + a ground
+      // height) and _swExposeAt (8 more ground heights). The ecology factor on `dens` is at most _ECO_MAX
+      // (moisture 1, exposure 0: (0.22 + 1.55) * 1, exactly 1.77 in doubles), so a draw above dens * _ECO_MAX
+      // fails the final test whatever the ecology says. BOTH random draws are taken here, in the order they
+      // were taken before (the growth stage, then the density test) - the ecology draws none - so every
+      // chunk plants the same trees in the same places at the same sizes.
+      const _rEco = Math.random(), _rDens = Math.random();
+      if (_rDens > dens * _ECO_MAX) continue;
       _moist = _swMoistAt(x, z, T);
       _expo = _swExposeAt(x, z, y, T);
       // Wet valley floors carry real forest; scoured ridges carry almost
@@ -36361,9 +36489,9 @@ function _swBuildTrees(x0,z0,T){
       // mid-sized, which is exactly the "they're all the same size" read. A
       // power curve is how real stands are actually distributed — mostly young
       // and small, a few mature, the occasional giant.
-      _eco *= 0.30 + 1.15 * Math.pow(Math.random(), 1.9);
-    }
-    if(Math.random() > dens) continue;
+      _eco *= 0.30 + 1.15 * Math.pow(_rEco, 1.9);
+      if (_rDens > dens) continue;
+    } else if (Math.random() > dens) continue;
     const set=buckets[kind];
     // Per-TREE hash picks within the chunk's palette. Applies to snow as well
     // as std: the snow set MIRRORS the std pool index-for-index, so the same
@@ -36434,7 +36562,7 @@ function _swBuildTrees(x0,z0,T){
         im.setColorAt(k,_tc);
       } }
     im.instanceMatrix.needsUpdate=true; if(im.instanceColor) im.instanceColor.needsUpdate=true;
-    im.frustumCulled=true; im.castShadow=!noShadow; im.receiveShadow=true; im.userData={isSandwichTerrain:true}; scene.add(im); meshes.push(im);
+    im.frustumCulled=true; im.castShadow=!noShadow; im.receiveShadow=true; im.userData={isSandwichTerrain:true, _cs:!noShadow}; scene.add(im); meshes.push(im);   // (v48.47) _cs: see _swTreeShadowCull
   };
   // NOTE both tree emits pass a tint even when it is the identity family: std and
   // snow SHARE _swTreeMatGet(), and instanceColor is a program define, so a mesh
@@ -36507,6 +36635,102 @@ function _swTreeVisTick(cx, cz) {
     }
   }
   try { window.__treeVis = { hidden: _hid, shown: _shown, fadeB: Math.round(B) }; } catch (_) {}
+}
+
+// ⭐ (v48.47) (review O2.2) A TREE CHUNK CASTS ONLY IF ITS SHADOW CAN LAND WHERE A CAMERA LOOKS. three r165
+// culls shadow casters against the SHADOW camera alone (WebGLShadowMap.renderObject), so every tree chunk inside
+// the +-6800 sun box was drawn into the shadow map each frame - the half behind the view included, and on a
+// hub that pass carries ~100-125 draws / 2.5-3.3 M tris. A caster O can darken a receiver only inside its
+// SHADOW VOLUME: O swept along the light's travel direction (to the shadow camera's far plane, past which the
+// map holds nothing). A receiver that ends up in a pixel sits inside the view frustum, so a chunk whose swept
+// volume misses the frustum cannot change one pixel. Tested per chunk mesh as a CAPSULE (the instanced
+// bounding sphere, padded by the filter reach: 3 shadow texels for PCF-soft + normalBias + 24 u, swept along
+// the sun) against the camera's six planes - and, because the water MIRROR renders inside this same render()
+// with this same shadow map (three's Reflector turns shadowMap.autoUpdate off for its pass), the capsule's
+// mirror image across the water plane against the four SIDE planes (the virtual camera is the reflected main
+// camera; its oblique near/far are ignored, which only keeps more).
+// Runs in scene.onBeforeRender with the camera render() was handed (Panini's wide render and ADS zoom are
+// already in its projection) and only when this render draws the shadow map (autoUpdate / needsUpdate: the
+// nested mirror / ADS / silhouette renders turn it off). It stands down - every flag restored - in XR, the
+// bent world, ADS (its overlay reuses the map with a WIDER camera), behind the curtain / prebake / warm draws
+// (first draws link programs), and for window.__treeShadowCull = 0 (live A/B). Only `c.trees` InstancedMeshes
+// that were emitted as casters (`userData._cs`): mushrooms never cast; drapes, parks and sky islands are
+// untouched. A far chunk the v47.05 fade gate already hid is skipped (hidden objects never reach the pass).
+const _swTSC = { fr: null, m4: null, c: null, dirty: false, kept: 0, culled: 0 };
+function _swTreeShadowRestore() {
+  const chunks = game.sandwichChunks;
+  if (chunks) for (const c of chunks.values()) {
+    const arr = c.trees; if (!arr) continue;
+    for (let i = 0; i < arr.length; i++) { const im = arr[i]; if (im && im.isInstancedMesh && im.userData && im.userData._cs && !im.castShadow) im.castShadow = true; }
+  }
+  _swTSC.dirty = false;
+}
+// true when the capsule (c, radius r, swept by t in [0, L] along unit d) is not wholly outside any of planes[0..n)
+function _swCapsuleIn(planes, n, cx, cy, cz, r, dx, dy, dz, L) {
+  for (let i = 0; i < n; i++) {
+    const p = planes[i], nx = p.normal.x, ny = p.normal.y, nz = p.normal.z;
+    const a = nx * cx + ny * cy + nz * cz, b = a + (nx * dx + ny * dy + nz * dz) * L;
+    if ((a > b ? a : b) + p.constant < -r) return false;
+  }
+  return true;
+}
+function _swTreeShadowCull(r, cam) {
+  const S = _swTSC;
+  const sm = r && r.shadowMap;
+  if (!sm || !sm.enabled || !(sm.autoUpdate || sm.needsUpdate)) return;   // this render does not draw the map
+  let off = (typeof window !== 'undefined' && window.__treeShadowCull === 0);
+  if (!off) off = !!((r.xr && r.xr.isPresenting) || game.bendWorld || game._adsOvOn || game._worldPrebaking ||
+                     game._swPreloading || game._swapStaging || game._rrStaging || (typeof _PREBAKE !== 'undefined' && _PREBAKE && _PREBAKE.on));
+  if (!off) { try { if (window.__lssWarmDraw) off = true; } catch (_) {} }
+  if (!off && !(cam && cam.isCamera && !cam.isArrayCamera && cam.projectionMatrix)) off = true;
+  if (!off && !(dirLight && dirLight.castShadow && dirLight.shadow && dirLight.shadow.camera)) off = true;
+  if (off) { if (S.dirty) _swTreeShadowRestore(); return; }
+  const chunks = game.sandwichChunks;
+  if (!chunks || !chunks.size) return;
+  if (!S.fr) { S.fr = new THREE.Frustum(); S.m4 = new THREE.Matrix4(); S.c = new THREE.Vector3(); }
+  S.m4.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+  S.fr.setFromProjectionMatrix(S.m4);
+  const planes = S.fr.planes;
+  // the light's TRAVEL direction (light -> target; both are scene-root children, so .position is world)
+  let dx = dirLight.target.position.x - dirLight.position.x, dy = dirLight.target.position.y - dirLight.position.y, dz = dirLight.target.position.z - dirLight.position.z;
+  const dl = Math.hypot(dx, dy, dz); if (!(dl > 0)) { if (S.dirty) _swTreeShadowRestore(); return; }
+  dx /= dl; dy /= dl; dz /= dl;
+  const sc = dirLight.shadow.camera, L = sc.far;
+  const texel = (sc.right - sc.left) / Math.max(1, dirLight.shadow.mapSize.width);
+  const pad = 3 * texel + Math.abs(dirLight.shadow.normalBias || 0) + 24;
+  const hw = game._hubWater;
+  const mirY = (hw && hw.isReflector && hw.visible) ? hw.matrixWorld.elements[13] : null;
+  // Where the sweep can stop. (1) The shadow camera's far plane: the map holds nothing past it, so a tree
+  // `s` along the light axis sweeps at most far - s (+ its radius). (2) The lowest thing that can RECEIVE:
+  // below the terrain's floor there is nothing to see a shadow on, and a 16 km capsule diving underground
+  // was brushing the frustum's lower planes down there and keeping trees for nothing. The floor is
+  // min(YFLOOR, WL) - 2 * AMP - on the hub -2960, against a sampled carved-ground minimum of -1348 over
+  // +-30 km (lake beds included, 250 u grid) - ~1600 u of slack under the lowest ground found.
+  const lx = dirLight.position.x, ly = dirLight.position.y, lz = dirLight.position.z;
+  const T = game.sandwichTerrain;
+  const yMin = (T && isFinite(T.YFLOOR) && isFinite(T.AMP)) ? Math.min(T.YFLOOR, isFinite(T.WL) ? T.WL : T.YFLOOR) - 2 * Math.abs(T.AMP) : null;
+  let kept = 0, culled = 0;
+  for (const c of chunks.values()) {
+    const arr = c.trees; if (!arr) continue;
+    for (let i = 0; i < arr.length; i++) {
+      const im = arr[i];
+      if (!im || !im.isInstancedMesh || !im.userData || !im.userData._cs || !im.visible) continue;
+      if (im.boundingSphere === null) im.computeBoundingSphere();
+      const bs = im.boundingSphere;
+      S.c.copy(bs.center).applyMatrix4(im.matrixWorld);
+      const rad = bs.radius * im.matrixWorld.getMaxScaleOnAxis() + pad;
+      let Lc = L - ((S.c.x - lx) * dx + (S.c.y - ly) * dy + (S.c.z - lz) * dz) + rad;
+      if (yMin !== null && dy < -1e-4) { const tf = (S.c.y + rad - yMin) / (-dy); if (tf < Lc) Lc = tf; }
+      if (!(Lc > 0)) Lc = 0;
+      let keep = _swCapsuleIn(planes, 6, S.c.x, S.c.y, S.c.z, rad, dx, dy, dz, Lc);
+      if (!keep && mirY !== null) keep = _swCapsuleIn(planes, 4, S.c.x, 2 * mirY - S.c.y, S.c.z, rad, dx, -dy, dz, Lc);
+      if (im.castShadow !== keep) im.castShadow = keep;
+      if (keep) kept++; else culled++;
+    }
+  }
+  S.dirty = culled > 0 || S.dirty;
+  S.kept = kept; S.culled = culled;
+  try { window.__treeShadow = { kept, culled }; } catch (_) {}
 }
 
 // ⭐ (v48.33) THE SAME GATE FOR THE FOLIAGE v47.05 COULD NOT SEE. `_swTreeVisTick` walks
@@ -38418,10 +38642,10 @@ function _ensureBrokenSimForcefield(T) {
   const span = (F ? Math.max(F.maxX - F.minX, F.maxZ - F.minZ) : 24000) + 9000;
   const y = ((T && T.YCEIL != null) ? T.YCEIL : 1200) + ((T && T.ARENA_RISE) || 420) + 350;
   const geo = new THREE.PlaneGeometry(span, span, 1, 1);
-  const mat = new THREE.MeshBasicMaterial({
+  const mat = _lssAddOnePass(new THREE.MeshBasicMaterial({
     color: 0x9a6cff, transparent: true, opacity: 0.16, side: THREE.DoubleSide,
     blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
-  });
+  }));
   const mesh = new THREE.Mesh(geo, mat);
   mesh.rotation.x = -Math.PI / 2;     
   mesh.position.set(cx, y, cz);
@@ -39246,6 +39470,79 @@ const _swHPf = new THREE.Vector3(), _swHPu = new THREE.Vector3(), _swHPqi = new 
 // pose - deliberate: the plan outline is what this needs and a pose-following
 // silhouette would mean re-rendering the RT every frame for a shape that barely
 // changes. It is also why the cache key is the body, not the animation time.
+// ⭐⭐⭐ (v48.42) ONE SILHOUETTE PER BODY, ONE DEPTH MATERIAL FOR EVER, AND NEVER THE HEADSET'S CAMERA.
+// Three faults in this function, the third found chasing the owner's Quest report ("when i put VR Water
+// Effects enabled while in VR on Quest, it makes the depth perception/stereo vision go wonky"):
+//  1. (review O2.18) The cache was PER SLOT. `_swEntityWaterTick` hands the two entity slots to the top
+//     two bodies each frame, so a swap (A,B) -> (B,A) - the camera crossing their bisector - rebuilt
+//     both: a new Scene and clones, a new render target, a synchronous readPixels, 3-13 ms. Now every
+//     built record is kept in `_swSil.cache` by body key (LRU, 16) and a slot just points at it. A
+//     cached record keeps the pose it was first drawn in - the stated intent below ("the cache key is
+//     the body, not the animation time").
+//  2. (review O2.18) The override MeshDepthMaterial was created and DISPOSED per build, so its program
+//     (usedTimes 1) was freed and relinked every time. One material now lives for the session.
+//  3. ⚠⚠ THE RENDER WAS NOT GUARDED FOR XR. With a session presenting, three's render() ignores the
+//     camera it is given: it calls xr.updateCamera(thatCamera) and draws with the headset's stereo
+//     ArrayCamera instead. Here that meant (a) the eye cameras were rebuilt with THIS ortho camera's
+//     parent - none - so they sat at the raw headset pose at the world origin, not in the cockpit, and
+//     the silhouette came back EMPTY; (b) an empty silhouette was not cached, so it was rebuilt on the
+//     NEXT tick, and the next: every frame the hull skimmed the water, a scene + render target + a
+//     SYNCHRONOUS readRenderTargetPixels (a full GPU pipeline stall) inside the headset's frame, plus
+//     (c) session.updateRenderState({ depthNear: 0, depthFar: range }) from the ortho camera's planes,
+//     overridden later in the frame by the main render's. VR only ever reached this with VR Water
+//     Effects on (the hull and body patches run only with the displaced sheet), which is exactly the
+//     owner's switch. Now: renderer.xr.enabled = false around the draw - GPUComputationRenderer's own
+//     doRenderTarget idiom, the one every other offscreen pass in the water already goes through - and
+//     an empty result is remembered for 1.5 s per body instead of retried every tick.
+// ⚠ A record's texture can be BOUND to the sim's uHullTex / uEntTex0 / uEntTex1 (and referenced by the
+// pose records R.hullP / R._hullPrev / R.entP / R._entPrev) after it has left a slot - never dispose one
+// that is (the null-sampler trap): _swSilInUse checks all of them before any eviction.
+// window.__water.hullRedo = 1 flushes the cache; window.__silCache() reports it.
+const _swSil = { cache: new Map(), empty: new Map(), orphans: new Set(), mat: null, max: 16, builds: 0, hits: 0, emptyN: 0 };
+function _swSilInUse(rec) {
+  const R = _swRipple;
+  if (!rec) return false;
+  if (R.hullSil === rec || R.hullSil1 === rec || R.hullSil2 === rec) return true;
+  if ((R.hullP && R.hullP.sil === rec) || (R._hullPrev && R._hullPrev.sil === rec)) return true;
+  const arr = (a) => { if (a) for (let i = 0; i < a.length; i++) { if (a[i] && a[i].sil === rec) return true; } return false; };
+  if (arr(R.entP) || arr(R._entPrev)) return true;
+  try {
+    const u = R.heightVar && R.heightVar.material && R.heightVar.material.uniforms;
+    if (u && ((u.uHullTex && u.uHullTex.value === rec.tex) || (u.uEntTex0 && u.uEntTex0.value === rec.tex) || (u.uEntTex1 && u.uEntTex1.value === rec.tex))) return true;
+  } catch (_) {}
+  return false;
+}
+function _swSilSweep() {
+  const C = _swSil.cache;
+  for (const [k, rec] of C) {            // Map order = least recently used first
+    if (C.size <= _swSil.max) break;
+    if (_swSilInUse(rec)) continue;
+    C.delete(k); rec._cached = false;
+    try { rec.rt.dispose(); } catch (_) {}
+  }
+  for (const rec of _swSil.orphans) {    // dropped by a flush while still bound; free them once they are not
+    if (_swSilInUse(rec)) continue;
+    _swSil.orphans.delete(rec);
+    try { rec.rt.dispose(); } catch (_) {}
+  }
+}
+function _swSilFlush() {
+  for (const rec of _swSil.cache.values()) {
+    rec._cached = false;
+    if (_swSilInUse(rec)) _swSil.orphans.add(rec); else { try { rec.rt.dispose(); } catch (_) {} }
+  }
+  _swSil.cache.clear(); _swSil.empty.clear();
+}
+function _swSilAssign(sn, rec, slot) {
+  const R = _swRipple, old = R[sn];
+  R[sn] = rec;
+  if (old && old !== rec && !old._cached) {
+    if (_swSilInUse(old)) _swSil.orphans.add(old); else { try { old.rt.dispose(); } catch (_) {} }
+  }
+  try { if (!slot) window.__hullSil = R.hullSil; } catch (_) {}
+}
+if (typeof window !== 'undefined') window.__silCache = () => ({ size: _swSil.cache.size, builds: _swSil.builds, hits: _swSil.hits,
+  empty: _swSil.emptyN, orphans: _swSil.orphans.size, keys: Array.from(_swSil.cache.keys()).map(k => k.slice(0, 8)) });
 function _swHullSilhouette(mesh, slot) {
   const R = _swRipple;
   if (!mesh) return null;
@@ -39260,7 +39557,14 @@ function _swHullSilhouette(mesh, slot) {
   const res = Math.max(16, Math.min(256, (W.hullRes) ? (+W.hullRes | 0) : 64));
   const key = hull.uuid + ':' + res;
   if (R[_sn] && R[_sn].key === key && !W.hullRedo) return R[_sn];
+  if (W.hullRedo) _swSilFlush();   // (v48.42) the knob now empties the per-body cache as well
   if (!slot) W.hullRedo = 0;
+  // (v48.42) a body drawn before - into any slot - is reused as drawn (see _swSil)
+  const _hit = _swSil.cache.get(key);
+  if (_hit) { _swSil.cache.delete(key); _swSil.cache.set(key, _hit); _swSil.hits++; _swSilAssign(_sn, _hit, slot); return _hit; }
+  // (v48.42) ...and one that came back EMPTY is not re-tried every tick: 1.5 s per body
+  const _em = _swSil.empty.get(key);
+  if (_em !== undefined && (performance.now() - _em) < 1500) return null;
   if (typeof renderer === 'undefined' || !renderer) return null;
   try {
     mesh.updateWorldMatrix(true, true);
@@ -39349,17 +39653,30 @@ function _swHullSilhouette(mesh, slot) {
     cam.matrixWorld.multiplyMatrices(frame, cam.matrix);
     cam.matrixWorldNeedsUpdate = false;
     cam.matrixWorldInverse.copy(cam.matrixWorld).invert();
-    sc.overrideMaterial = new THREE.MeshDepthMaterial({ depthPacking: THREE.BasicDepthPacking, side: THREE.DoubleSide });
+    // (v48.42) ONE material for the session - disposing it per build freed its program (see _swSil)
+    if (!_swSil.mat) _swSil.mat = new THREE.MeshDepthMaterial({ depthPacking: THREE.BasicDepthPacking, side: THREE.DoubleSide });
+    sc.overrideMaterial = _swSil.mat;
     const rt = new THREE.WebGLRenderTarget(res, res, { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
       format: THREE.RGBAFormat, type: THREE.UnsignedByteType, depthBuffer: true, stencilBuffer: false, generateMipmaps: false });
     rt.texture.wrapS = rt.texture.wrapT = THREE.ClampToEdgeWrapping;
     const prevRT = renderer.getRenderTarget();
     const prevClear = new THREE.Color(); renderer.getClearColor(prevClear); const prevAlpha = renderer.getClearAlpha();
     const prevAuto = renderer.autoClear;
-    renderer.setRenderTarget(rt); renderer.setClearColor(0x000000, 1); renderer.autoClear = true;
-    renderer.render(sc, cam);
-    renderer.setRenderTarget(prevRT); renderer.setClearColor(prevClear, prevAlpha); renderer.autoClear = prevAuto;
-    sc.overrideMaterial.dispose();
+    // ⚠⚠ (v48.42) NOT THE HEADSET'S CAMERA - see fault 3 in the _swSil note. doRenderTarget's idiom.
+    const _xrOn = !!(renderer.xr && renderer.xr.enabled);
+    const _shAuto = renderer.shadowMap ? renderer.shadowMap.autoUpdate : undefined;
+    try {
+      if (_xrOn) renderer.xr.enabled = false;
+      if (renderer.shadowMap) renderer.shadowMap.autoUpdate = false;
+      renderer.setRenderTarget(rt); renderer.setClearColor(0x000000, 1); renderer.autoClear = true;
+      renderer.render(sc, cam);
+    } finally {
+      if (_xrOn) renderer.xr.enabled = true;
+      if (renderer.shadowMap && _shAuto !== undefined) renderer.shadowMap.autoUpdate = _shAuto;
+      renderer.setRenderTarget(prevRT); renderer.setClearColor(prevClear, prevAlpha); renderer.autoClear = prevAuto;
+    }
+    sc.overrideMaterial = null;
+    _swSil.builds++;
     // ⭐⭐ (v46.80) AN EMPTY SILHOUETTE MUST FAIL BACK TO THE ROUND SEED, NOT TO NOTHING.
     // The skinning bug above produced a perfectly well-formed record whose texture was blank, and
     // the consequence was worse than the bug it was fixing: `_swEntityWaterTick` suppresses a
@@ -39381,14 +39698,16 @@ function _swHullSilhouette(mesh, slot) {
     const _minFill = (W.silMinFill != null) ? +W.silMinFill : 0.004;   // ~16 texels of 64x64
     if (_fill < _minFill) {
       try { rt.dispose(); } catch (_) {}
+      _swSil.empty.set(key, performance.now()); _swSil.emptyN++;   // (v48.42) not again for 1.5 s
       if (!R._silWarned) { R._silWarned = 1; console.warn('[water] silhouette came back empty (fill ' + _fill + ') - body keeps its round seed'); }
       return null;
     }
-    const old = R[_sn];
-    R[_sn] = { key, rt, tex: rt.texture, x0, x1, z0, z1, zMin: all.min.z, zMax: all.max.z, y0, range, beam, len, rimR, res, cnt, fill: +_fill.toFixed(4) };
-    try { if (old && old.rt) old.rt.dispose(); } catch (_) {}
-    try { if (!slot) window.__hullSil = R.hullSil; } catch (_) {}
-    return R[_sn];
+    const rec = { key, rt, tex: rt.texture, x0, x1, z0, z1, zMin: all.min.z, zMax: all.max.z, y0, range, beam, len, rimR, res, cnt, fill: +_fill.toFixed(4), _cached: true };
+    _swSil.empty.delete(key);
+    _swSil.cache.set(key, rec);
+    _swSilAssign(_sn, rec, slot);
+    _swSilSweep();
+    return rec;
   } catch (e) { console.warn('[water] hull silhouette failed:', e); return null; }
 }
 // (v46.78) THE WALLS CRASHING TOGETHER. Owner: "the water needs to also crash
@@ -41268,7 +41587,9 @@ function _swRippleMaskJobTick(cine) {
     while (J.row < RES) {
       _swRippleBakeMaskRow(stage, J.cx, J.cz, J.row, RES, B, T, WL, true);
       J.row++;
-      if ((J.row & 3) === 0 && performance.now() - t0 > budget) break;
+      // (v48.46) (review O3.17, step 1) every row, not every 4th: a 4-row stride let a frame overshoot its
+      // budget by up to three rows. Same rows, same mask - only where the frames split the job moves.
+      if (performance.now() - t0 > budget) break;
     }
     if (J.row >= RES) {
       R.maskData.set(stage);
@@ -41295,7 +41616,7 @@ function _swRippleMaskJobTick(cine) {
   while (F.row < RES) {
     _swRippleBakeMaskRow(stage, F.cx, F.cz, F.row, RES, B, T, WL, false);
     F.row++;
-    if ((F.row & 3) === 0 && performance.now() - t0 > budget) break;
+    if (performance.now() - t0 > budget) break;   // (v48.46) every row - see the near lane above
   }
   if (F.row >= RES) {
     R._maskEverBaked = true;   // either lane satisfies the curtain; see hideLoadingOverlay
@@ -43671,7 +43992,34 @@ function _swRippleUpsample() {
 // doRenderTarget so XR and the bound target are restored; and the matching world->uv matrix
 // (mesh._reflWorld, captured after every above-water render) so the decal stays put on the surface
 // as the camera moves below it.
-const _swAboveCopy = { mat: null };
+const _swAboveCopy = { mat: null, warm: false };
+function _swAboveCopyMat() {
+  if (!_swAboveCopy.mat) {
+    _swAboveCopy.mat = new THREE.ShaderMaterial({
+      uniforms: { uSrc: { value: null }, uOut: { value: new THREE.Vector2(1, 1) } },
+      vertexShader: 'void main(){ gl_Position = vec4(position, 1.0); }',
+      fragmentShader: 'uniform sampler2D uSrc; uniform vec2 uOut; void main(){ gl_FragColor = texture2D(uSrc, gl_FragCoord.xy / uOut); }',
+      depthTest: false, depthWrite: false, toneMapped: false });
+  }
+  return _swAboveCopy.mat;
+}
+// (v48.43) LINKED BEHIND THE CURTAIN (review O3.16). This copy's program used to link on the frame the camera
+// first went under (4-8 ms cold). _prebakeGpuPrime calls this once: one copy into a 4x4 target of the
+// mirror's own texel type, through the same doRenderTarget.
+function _swAboveCopyWarm() {
+  const R = _swRipple;
+  if (_swAboveCopy.warm || !R.gpu || !game._hubWater) return false;
+  const m = _swAboveCopyMat();
+  const src = (game._hubWater.getRenderTarget) ? game._hubWater.getRenderTarget() : null;
+  const rt = new THREE.WebGLRenderTarget(4, 4, { type: (src && src.texture) ? src.texture.type : THREE.HalfFloatType,
+    format: THREE.RGBAFormat, depthBuffer: false, stencilBuffer: false, generateMipmaps: false });
+  try {
+    m.uniforms.uSrc.value = src ? src.texture : null; m.uniforms.uOut.value.set(4, 4);
+    R.gpu.doRenderTarget(m, rt);
+    _swAboveCopy.warm = true;
+  } finally { m.uniforms.uSrc.value = null; try { rt.dispose(); } catch (_) {} }
+  return true;
+}
 function _swReflSnapshotAbove(mesh) {
   const R = _swRipple; if (!R.gpu || !mesh || !mesh.material || !mesh.material.uniforms || !mesh._reflWorld) return false;
   const U = mesh.material.uniforms;
@@ -43686,14 +44034,7 @@ function _swReflSnapshotAbove(mesh) {
       wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
       depthBuffer: false, stencilBuffer: false, generateMipmaps: false });
   }
-  if (!_swAboveCopy.mat) {
-    _swAboveCopy.mat = new THREE.ShaderMaterial({
-      uniforms: { uSrc: { value: null }, uOut: { value: new THREE.Vector2(1, 1) } },
-      vertexShader: 'void main(){ gl_Position = vec4(position, 1.0); }',
-      fragmentShader: 'uniform sampler2D uSrc; uniform vec2 uOut; void main(){ gl_FragColor = texture2D(uSrc, gl_FragCoord.xy / uOut); }',
-      depthTest: false, depthWrite: false, toneMapped: false });
-  }
-  const m = _swAboveCopy.mat;
+  const m = _swAboveCopyMat();   // (v48.43) shared with the prebake's warm
   m.uniforms.uSrc.value = src; m.uniforms.uOut.value.set(w, h);
   R.gpu.doRenderTarget(m, mesh._aboveRT);
   U.uAboveTex.value = mesh._aboveRT.texture;
@@ -43710,9 +44051,12 @@ function _swRippleDispose() {
   const R = _swRipple;
   try { if (R.upRT && R.upRT.dispose) R.upRT.dispose(); } catch (_) {}   // (v44.21)
   R.upRT = null; R.upTex = null;
-  try { if (R.hullSil && R.hullSil.rt) R.hullSil.rt.dispose(); } catch (_) {}   // (v46.78)
-  try { if (R.hullSil1 && R.hullSil1.rt) R.hullSil1.rt.dispose(); } catch (_) {}   // (v46.80)
-  try { if (R.hullSil2 && R.hullSil2.rt) R.hullSil2.rt.dispose(); } catch (_) {}
+  // (v48.42) every silhouette ever built lives in _swSil now; the slots only point into it
+  try {
+    const _all = new Set([R.hullSil, R.hullSil1, R.hullSil2, ..._swSil.cache.values(), ..._swSil.orphans]);
+    for (const _r of _all) { if (_r && _r.rt) { try { _r.rt.dispose(); } catch (_) {} } }
+    _swSil.cache.clear(); _swSil.empty.clear(); _swSil.orphans.clear();
+  } catch (_) {}
   R.hullSil = null; R.hullP = null; R._hullPrev = null;
   R.hullSil1 = null; R.hullSil2 = null; R.entP = null; R._entPrev = null;
   try { if (R.gpu && R.gpu.dispose) R.gpu.dispose(); } catch (_) {}
@@ -44187,6 +44531,13 @@ function _birdFlockTick(dt) {
   const B = (typeof window !== 'undefined' && window.__birds) ? window.__birds : {};
   if (F.mesh) F.mesh.visible = (B.on !== 0);
   if (B.on === 0) return;
+  // (v48.46) (review O2.32) STILL LINKING - the same gate the fish have had since v39.72. _birdFlockInit sets
+  // F._pending through _critterPrecompile, but this tick never read it, so a flock rebuilt in play (a relaunch,
+  // a world change) ran its first compute() - and drew its mesh - before compileAsync had linked either
+  // program: the synchronous link the precompile exists to avoid (up to ~1-2 s on a cold cache). Hidden and
+  // not simulated until the link lands (8 s unwedge timer in _critterPrecompile); the prebake's direct
+  // compute() primes are untouched. (The v39.72 map entry said both ticks were gated - only the fish was.)
+  if (F._pending) { if (F.mesh) F.mesh.visible = false; return; }
   const _t = _swU ? _swU.uTime.value : 0;
   const vu = F.velVar.material.uniforms;
   if (player && player.position) vu.uShip.value.copy(player.position);   
@@ -47364,6 +47715,7 @@ function _swDisposeHubWater() {
   if (game && game._hubWater) {
     try {
       if (game._hubWater.parent) scene.remove(game._hubWater);
+      if (game._hubWater._aboveRT) { try { game._hubWater._aboveRT.dispose(); } catch (_) {} game._hubWater._aboveRT = null; }   // (v48.43) the Snell's-window copy target was never freed
       if (game._hubWater.getRenderTarget) { const rt = game._hubWater.getRenderTarget(); if (rt && rt.dispose) rt.dispose(); }  
       if (game._hubWater.geometry) game._hubWater.geometry.dispose();
       if (game._hubWater.material) game._hubWater.material.dispose();
@@ -48959,11 +49311,11 @@ function _hcMakeMeshes(city, site) {
   // cannot cross the opaque/transparent split, see the VR launch cover), and a
   // matching polygonOffset stops the ground's own offset from winning the depth test
   // at range.
-  const ringMat = _padGlowPatch(new THREE.MeshBasicMaterial({
+  const ringMat = _padGlowPatch(_lssAddOnePass(new THREE.MeshBasicMaterial({
     color: 0xffffff, blending: THREE.AdditiveBlending, transparent: true,
     depthWrite: false, toneMapped: false, side: THREE.DoubleSide,
     polygonOffset: true, polygonOffsetFactor: -8, polygonOffsetUnits: -8,
-  }), true);
+  })), true);
   const add = (key, geo, mat, maxH, shad) => {
     const arr = city.layers[key];
     if (!arr || !arr.length) return null;
@@ -49114,10 +49466,10 @@ function _hcMakeMeshes(city, site) {
   const hero = city.hero;
   const beam = new THREE.Mesh(
     new THREE.CylinderGeometry(28, 44, 6000, 10, 1, true),
-    new THREE.MeshBasicMaterial({
+    _lssAddOnePass(new THREE.MeshBasicMaterial({
       color: (_site.palette && _site.palette.beam) || 0x54ffe8, blending: THREE.AdditiveBlending, transparent: true,
       opacity: 0.30, depthWrite: false, toneMapped: false, side: THREE.DoubleSide,
-    })
+    }))
   );
   beam.position.set(hero.x, hero.y1 + 3000, hero.z);
   group.add(beam);
@@ -49127,10 +49479,10 @@ function _hcMakeMeshes(city, site) {
     const cg = new THREE.ConeGeometry(680, 5200, 10, 1, true);
     cg.rotateX(Math.PI);
     cg.translate(0, 2600, 0);
-    const cone = new THREE.Mesh(cg, new THREE.MeshBasicMaterial({
+    const cone = new THREE.Mesh(cg, _lssAddOnePass(new THREE.MeshBasicMaterial({
       color: 0xbfe8ff, blending: THREE.AdditiveBlending, transparent: true,
       opacity: 0.055, depthWrite: false, toneMapped: false, side: THREE.DoubleSide,
-    }));
+    })));
     cone.rotation.z = 0.5 + i * 0.12;
     const holder = new THREE.Group();
     holder.rotation.y = i * (Math.PI * 2 / 3);
@@ -49916,7 +50268,11 @@ function _hcAttachBanner(holder, i, sc) {
   });
   const banner = new THREE.Mesh(geo, mat);
   banner.position.set(0, -8 * sc, -(tail + cable + W * 0.5));
-  banner.frustumCulled = false;
+  // (v48.45) CULLED (review O2.11, #28) - every banner used to draw every frame, on screen or not. The vertex
+  // shader moves a vertex at most uAmp (H * 0.05) along x, off the plane, so a sphere grown by that much still
+  // holds every displaced vertex: sqrt(r^2 + a^2) <= r + a. Nothing that draws is culled.
+  geo.computeBoundingSphere(); geo.boundingSphere.radius += H * 0.05;
+  banner.frustumCulled = true;
   banner.userData.isHubCity = true; banner.userData._adBanner = true;
   holder.add(banner);
   const cg = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, -tail), new THREE.Vector3(0, -8 * sc, -(tail + cable))]);
@@ -53729,10 +54085,10 @@ function _skMats() {
   _skGlowMat = new THREE.MeshBasicMaterial({ color: 0x64e8ff, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true });
   // Separate from _skGlowMat on purpose: that one is also the building beacons, and
   // they should NOT dim when you fly away from a pad.
-  _skRingMat = _padGlowPatch(new THREE.MeshBasicMaterial({
+  _skRingMat = _padGlowPatch(_lssAddOnePass(new THREE.MeshBasicMaterial({
     color: 0x7df0ff, blending: THREE.AdditiveBlending, depthWrite: false,
     transparent: true, toneMapped: false, side: THREE.DoubleSide,
-  }), false);
+  })), false);
   _skBldMat = new THREE.MeshLambertMaterial();
   _skBldMat.onBeforeCompile = (sh) => {
     // ⚠ vNormal is VIEW space. Asking it "wall or roof?" gives an answer that changes
@@ -56719,6 +57075,7 @@ function _skyAudioFrame(dt) {
   // ALWAYS drifting, faster when the track is loud. Never stops, never jumps.
   _SKY_A.flow += dt * (0.016 + 0.085 * _SKY_A.lvl);
   U.uFlow.value = _SKY_A.flow;
+  if (U.uGateOff) U.uGateOff.value = (typeof window !== 'undefined' && window.__skyGateOff) ? 1 : 0;   // (v48.44) A/B of the galaxy gates
   U.uAudio.value.set(_SKY_A.bass, _SKY_A.mid, _SKY_A.lvl);
 
   // The sun is THREE things - the dome's glow (handled in the shader) plus a disc and
@@ -56791,6 +57148,7 @@ function _wxMakeDome() {
       // fast. Loud passages surge it, silence still drifts.
       uFlow:  { value: 0 },
       uAudio: { value: new THREE.Vector3(0, 0, 0) },   // bass, mid, level (smoothed)
+      uGateOff: { value: 0 },   // (v48.44) 1 = evaluate the dust + HII everywhere again (A/B: window.__skyGateOff)
     },
     vertexShader: `
       varying vec3 vDir;
@@ -56804,6 +57162,7 @@ function _wxMakeDome() {
       uniform float uBelowBlend;
       uniform vec3 uGalPole, uGalCore, uAudio;
       uniform float uSpace, uStars, uMilky, uDust, uFlow, uVivid, uDay;
+      uniform float uGateOff;
       varying vec3 vDir;
 
       float gh1(vec3 p){ p = fract(p * 0.1031); p += dot(p, p.yzx + 33.33); return fract((p.x + p.y) * p.z); }
@@ -56896,20 +57255,33 @@ function _wxMakeDome() {
           gal = mix(gal, vivid, uVivid);
 
           // HII REGIONS: the little pink puffs strung along the band.
-          float hii = smoothstep(0.66, 0.88, gfbm(sp * 26.0 + 31.0)) * band;
-          gal = mix(gal, mix(vec3(1.25, 0.42, 0.72), ghsv(vec3(fract(hue + 0.42), 0.95, 1.3)), uVivid),
-                    clamp(hii * 0.65, 0.0, 1.0));
+          // (v48.44) gated: hii carries a factor of band, and band underflows to EXACTLY 0 over most of
+          // the sky (exp of minus hundreds), where the mix below is mix(gal, X, 0) = gal exactly - so the
+          // 4-octave gfbm is skipped there with no change to any pixel (review O1.5).
+          if (uGateOff > 0.5 || band > 0.0) {
+            float hii = smoothstep(0.66, 0.88, gfbm(sp * 26.0 + 31.0)) * band;
+            gal = mix(gal, mix(vec3(1.25, 0.42, 0.72), ghsv(vec3(fract(hue + 0.42), 0.95, 1.3)), uVivid),
+                      clamp(hii * 0.65, 0.0, 1.0));
+          }
 
           // DUST IS ABSORPTION, NOT DARK PAINT. This is the whole difference between
           // a glowing stripe and a galaxy: model TRANSMISSION and multiply the light
           // by it, so the lanes only bite where there is light behind them - and the
           // rift reads as something IN FRONT of the core rather than a black smear
           // on top of it. Domain-warped so the filaments run lengthwise.
-          vec3 dp = vec3(lon * 1.8, lat2 * 7.0, 0.0) + d * 0.9;
-          dp += (gfbm(dp * 4.5 + 5.0 + fl * 1.6) - 0.5) * (0.85 + uAudio.y * 0.35);
-          float dust = gridged(dp * 11.0);
-          dust = pow(clamp(dust * 1.5, 0.0, 1.0), 1.25);
-          float trans = exp(-dust * 4.2 * uDust * smoothstep(0.01, 0.22, band));
+          // (v48.44) GATED, BIT FOR BIT (review O1.5). smoothstep(0.01, 0.22, band) is exactly 0 wherever
+          // band <= 0.01 - about 79% of a level view - so trans is exp(-0) = 1 there and the warp gfbm, the
+          // 4-octave ridged dust, the pow and the exp change nothing. ⚠ The 0.01 in the test and the 0.01 in
+          // the smoothstep are ONE edge: move one, move both. A GLSL typo here makes the dome silently vanish
+          // (renderer.debug.checkShaderErrors is off) - check the sky after any edit.
+          float trans = 1.0;
+          if (uGateOff > 0.5 || band > 0.01) {
+            vec3 dp = vec3(lon * 1.8, lat2 * 7.0, 0.0) + d * 0.9;
+            dp += (gfbm(dp * 4.5 + 5.0 + fl * 1.6) - 0.5) * (0.85 + uAudio.y * 0.35);
+            float dust = gridged(dp * 11.0);
+            dust = pow(clamp(dust * 1.5, 0.0, 1.0), 1.25);
+            trans = exp(-dust * 4.2 * uDust * smoothstep(0.01, 0.22, band));
+          }
           glow *= trans;
 
           // bass lifts the whole band, mid pushes it warmer - gentle, so it breathes
@@ -64682,6 +65054,13 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId) {
       // animateShipMesh hides them past 300 u: in a 5-bot arena that is ~230k triangles and the
       // same again in the shadow pass, a quarter of the frame's geometry, for nothing visible.
       if (mats.some((mm) => mm && /_CP_/.test(mm.name || ''))) { child.userData._cockpitPart = true; child.castShadow = false; }
+      // (v48.43) ...AND THE CABIN (review O2.12). The v42.08 GLBs moved the seat, harness and bulkhead onto
+      // `<Ship>_Cabin_*` materials, which the rule above no longer matches, so ~12-17k tris and 8 meshes per
+      // hull went back into the sun's shadow pass (-48 shadow draws / -95k depth tris in a cyberpunk 3v3).
+      // They sit inside the tub and under the windshield, which still casts (shadow depth ignores
+      // `transparent`), so nothing they cast can land anywhere visible. SHADOW ONLY: no _cockpitPart, so the
+      // 300 u cockpit LOD does not hide them - the seat is seen through the glass.
+      else if (mats.some((mm) => mm && /_Cabin_/.test(mm.name || ''))) { child.castShadow = false; child.userData._cockpitInteriorNoShadow = true; }
       // (v37.39) the painted FRAME ART strips (cockpit_frame) are a first-person
       // element like the PNG overlay they replace: hidden on every ship by
       // default, the rig shows them only while THIS player's cockpit is live.
@@ -64709,22 +65088,34 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId) {
   // use the LayeredFX 'engine_disc' / 'engine_plume' presets ; per-instance
   // uBaseColor overrides give each ship its team tint vs cyan thruster.
   // animateShipMesh writes uIntensity per-frame from the throttle ramp.
-  const engineGlowMat = _makeFXMaterial('engine_disc');
-  if (engineGlowMat.uniforms.uBaseColor) engineGlowMat.uniforms.uBaseColor.value.set(teamColor);
-  const thrusterMat   = _makeFXMaterial('engine_disc');
-  if (thrusterMat.uniforms.uBaseColor)   thrusterMat.uniforms.uBaseColor.value.set(0x66eeff);
+  // ⭐ (v48.45) (review O3.19) ...only for a hull WITHOUT thruster markers, which is the only kind that attaches
+  // them. A marker-driven hull (every GLB with thrusterN empties) draws its engines with _markerGlowMat alone, so
+  // these four were built, registered in _ACTIVE_LAYERED_FX, never attached to a mesh - and so never reached by
+  // _disposeShipGroup's traverse: four LayeredFX materials ticked every frame for the rest of the session, per
+  // hull build (every commit, every bot and peer ship). The marker scan moved up here from the layout below.
+  const _thrusterNodes = [];
+  model.traverse(o => {
+    const m = /^thruster(\d+)$/.exec(o.name || '');
+    if (m) _thrusterNodes.push({ n: +m[1], node: o });
+  });
+  _thrusterNodes.sort((a, b) => a.n - b.n);
+  const _legacyEngines = _thrusterNodes.length === 0;
+  const engineGlowMat = _legacyEngines ? _makeFXMaterial('engine_disc') : null;
+  if (engineGlowMat && engineGlowMat.uniforms.uBaseColor) engineGlowMat.uniforms.uBaseColor.value.set(teamColor);
+  const thrusterMat   = _legacyEngines ? _makeFXMaterial('engine_disc') : null;
+  if (thrusterMat && thrusterMat.uniforms.uBaseColor)   thrusterMat.uniforms.uBaseColor.value.set(0x66eeff);
   // Panel glow stays as a flat additive material — small surface area,
   // close to the hull, doesn't benefit much from internal animation.
   const panelGlowMat = new THREE.MeshBasicMaterial({
     color: teamColor, transparent: true, opacity: 0.85,
     blending: THREE.AdditiveBlending, depthWrite: false
   });
-  const plumeMat     = _makeFXMaterial('engine_plume');
-  if (plumeMat.uniforms.uBaseColor) plumeMat.uniforms.uBaseColor.value.copy(teamCol.clone().lerp(new THREE.Color(0xffffff), 0.35));
-  const plumeMatCool = _makeFXMaterial('engine_plume');
-  if (plumeMatCool.uniforms.uBaseColor) plumeMatCool.uniforms.uBaseColor.value.set(0xaaeeff);
+  const plumeMat     = _legacyEngines ? _makeFXMaterial('engine_plume') : null;
+  if (plumeMat && plumeMat.uniforms.uBaseColor) plumeMat.uniforms.uBaseColor.value.copy(teamCol.clone().lerp(new THREE.Color(0xffffff), 0.35));
+  const plumeMatCool = _legacyEngines ? _makeFXMaterial('engine_plume') : null;
+  if (plumeMatCool && plumeMatCool.uniforms.uBaseColor) plumeMatCool.uniforms.uBaseColor.value.set(0xaaeeff);
   // Track these so animateShipMesh can bump uIntensity each frame.
-  group.userData.shaderEngineMats = [engineGlowMat, thrusterMat, plumeMat, plumeMatCool];
+  group.userData.shaderEngineMats = _legacyEngines ? [engineGlowMat, thrusterMat, plumeMat, plumeMatCool] : [];
 
   // Engine layout per chassis. Anchor tail to the model's +Z bbox edge so
   // plumes sit flush behind the real hull, not at a synthetic coordinate.
@@ -64763,12 +65154,7 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId) {
   // the legacy hardcoded per-chassis layout below. Marker positions live in
   // the model's local space; the group isn't in the scene yet, but
   // updateMatrixWorld composes the detached subtree fine.
-  const _thrusterNodes = [];
-  model.traverse(o => {
-    const m = /^thruster(\d+)$/.exec(o.name || '');
-    if (m) _thrusterNodes.push({ n: +m[1], node: o });
-  });
-  _thrusterNodes.sort((a, b) => a.n - b.n);
+  // (v48.45) _thrusterNodes is scanned above, before the engine materials.
   let _markerGlowMat = null;
   if (_thrusterNodes.length) {
     group.updateMatrixWorld(true);
@@ -70067,14 +70453,14 @@ class Projectile {
     ribbonGeo.setAttribute('position', new THREE.BufferAttribute(this.trailRibbonPositions, 3));
     ribbonGeo.setAttribute('color', new THREE.BufferAttribute(ribbonColors, 3));
     ribbonGeo.setIndex(new THREE.BufferAttribute(ribbonIndices, 1));
-    const ribbonMat = new THREE.MeshBasicMaterial({
+    const ribbonMat = _lssAddOnePass(new THREE.MeshBasicMaterial({
       vertexColors: true,
       transparent: true,
       opacity: 0.85,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
       side: THREE.DoubleSide
-    });
+    }));
     this.trailRibbon = new THREE.Mesh(ribbonGeo, ribbonMat);
     this.trailRibbon.frustumCulled = false; 
     this.trailRibbon.renderOrder = 1;
@@ -71904,11 +72290,11 @@ const _SHIPL = {
     // walls — additive order-independent otherwise). DoubleSide: front+back
     // shells sum through the middle, a free 2-layer "thickness" read.
     const mkCone = () => {
-      const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({
+      const m = new THREE.Mesh(g, _lssAddOnePass(new THREE.MeshBasicMaterial({
         map: tex, color: 0xffe8c4, transparent: true, opacity: 0,
         blending: THREE.AdditiveBlending, depthWrite: false,
         side: THREE.DoubleSide, fog: false,
-      }));
+      })));
       m.visible = false;
       m.renderOrder = 2;   // with the god-ray shafts, after world transparents
       scene.add(m);
@@ -73039,6 +73425,7 @@ async function _warmupCombatShadersBody() {
       }
     } catch (_) {  }
 
+    try { _lssWarmOnePassTwins(group, matRefs); } catch (_) {}   // (v48.45) O2.11 - the single-pass twins
     scene.add(group);
 
     // (v36.17 warmup audit) GLB-material program pins — spectral-ghost monsters,
@@ -75227,8 +75614,16 @@ class DestructibleObstacle {
       this.fragmentLife += dt;
       if (this.fragmentLife > this.fragmentMaxLife) {
         this.alive = false;
-        if (this.mesh && this.mesh.parent) scene.remove(this.mesh);
-        if (this.edgeMesh && this.edgeMesh.parent) scene.remove(this.edgeMesh);
+        // (v48.43) disposed, not just unlinked (review O2.28) - _fragmentExplode's own idiom. A fragment
+        // that simply ran out of life orphaned its unique rock geometry and material every time; nulled so
+        // the round teardowns that also walk these objects see nothing left to free.
+        if (typeof _disposeVRRockMesh === 'function') {
+          _disposeVRRockMesh(this.mesh); _disposeVRRockMesh(this.edgeMesh);
+          this.mesh = null; this.edgeMesh = null;
+        } else {
+          if (this.mesh && this.mesh.parent) scene.remove(this.mesh);
+          if (this.edgeMesh && this.edgeMesh.parent) scene.remove(this.edgeMesh);
+        }
         return;
       }
       // Fragment-vs-entity contact: explode and damage
@@ -75535,14 +75930,24 @@ function _makeRockGeometry(detail, seed) {
   geo.computeVertexNormals();
   return geo;
 }
-const _atomFractalMaterials = [];        
+// ⭐ (v48.43) THE ROCK SHADERS SHARE THEIR CLOCK (review O2.28). Every cluster rock, fragment and rock
+// chunk made a material and PUSHED it here, and only the two warm teardowns ever spliced one out - so the
+// list only grew (~105 a classic round, ~4,000 after an hour solo, ~8,000 as a room guest, each pinning
+// ~4.9 KB of per-call shader source), and two per-frame loops (_syncVRLiteMaterialUniforms, updateEffects)
+// walked all of it to write the SAME two values into each: game.time and the XR flag. Now every atom
+// material holds the one `time` and the one `uVRLite` uniform OBJECT, so those loops are one write each and
+// nothing is pushed. `uBaseColor` and `uOpacity` stay per material. ⚠ ShaderMaterial.clone() would
+// deep-copy the uniforms and freeze the copy's clock - no atom material is cloned (checked v48.43).
+// The array is kept, empty: the two warm teardowns still indexOf() it.
+const _AFM_TIME = { value: 0 }, _AFM_VRLITE = { value: 0.0 };
+const _atomFractalMaterials = [];
 function _makeAtomFractalMaterial(baseColor) {
   const mat = new THREE.ShaderMaterial({
     uniforms: {
-      time:       { value: 0 },
+      time:       _AFM_TIME,     // (v48.43) shared
       uBaseColor: { value: new THREE.Color(baseColor) },
       uOpacity:   { value: 1.0 },
-      uVRLite:    { value: 0.0 },
+      uVRLite:    _AFM_VRLITE,   // (v48.43) shared
     },
     vertexShader: [
       'varying vec3 vLocalPos;',
@@ -75657,8 +76062,7 @@ function _makeAtomFractalMaterial(baseColor) {
     depthWrite: true,
     side: THREE.FrontSide,
   });
-  _atomFractalMaterials.push(mat);
-  return mat;
+  return mat;   // (v48.43) no push - the clock and the XR flag are shared uniforms now
 }
 
 // Spawn N small rock chunks at pos, exploding outward. Each chunk
@@ -80650,7 +81054,15 @@ class WildLeviathan {
       this.mesh.position.copy(this.position);
       this.mesh.rotation.y = this.heading;
     }
-    if (this._mixer) { try { this._mixer.update(dt); } catch (_) {} }
+    // (v48.46) (review O3.8) the authority's own 14 km camera gate (update(), below): beyond it the authority
+    // hides the animal and stops its mixer, and a proxy kept both going - a skinned draw and a mixer update per
+    // far animal, and a picture the authority itself never shows.
+    if (this._mixer) {
+      const vis = (typeof camera !== 'undefined' && camera && camera.position)
+        ? this.position.distanceToSquared(camera.position) < 14000 * 14000 : true;
+      if (this.mesh && this.mesh.visible !== vis) this.mesh.visible = vis;
+      if (vis) { try { this._mixer.update(dt); } catch (_) {} }
+    }
   }
 
   _groundY(x, z) {
@@ -81752,8 +82164,8 @@ function _raceGateLib() {
       shMat1: sh1, shMat2: sh2,
       sprMat: new THREE.SpriteMaterial({ map: (typeof _emberFalloffTexture !== 'undefined' ? _emberFalloffTexture : null),
         color: 0x55bbff, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false }),
-      rayMat: new THREE.MeshBasicMaterial({ map: rayTex, transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending,
-        depthWrite: false, side: THREE.DoubleSide, fog: false, color: 0x9fdcff }),
+      rayMat: _lssAddOnePass(new THREE.MeshBasicMaterial({ map: rayTex, transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending,
+        depthWrite: false, side: THREE.DoubleSide, fog: false, color: 0x9fdcff })),
     };
   } catch (e) { console.warn('[race] gate library failed:', e); _rcGateLib = null; }
   return _rcGateLib;
@@ -83521,10 +83933,10 @@ function _pickOrganicPaletteColor(palette) {
 
 function createOrganicMesh(type, scale, color, palette) {
   let geo, meshGroup;
-  const mat = new THREE.MeshBasicMaterial({
+  const mat = _lssAddOnePass(new THREE.MeshBasicMaterial({
     color: color, transparent: true, opacity: 0.7,
     blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide
-  });
+  }));
 
   switch (type) {
     case 'tendril': {
@@ -84457,6 +84869,55 @@ const _TRACER_TAIL_INNER_MAT_PROTO = new THREE.MeshBasicMaterial({ color: 0xffff
 const _TRACER_TAIL_OUTER_MAT_PROTO = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.18, blending: THREE.AdditiveBlending, depthWrite: false, vertexColors: true });
 const _TRACER_BACK_MAT_PROTO = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55, blending: THREE.NormalBlending, depthWrite: false, vertexColors: true });
 
+// ⭐ (v48.45) ONE PASS FOR ADDITIVE, DEPTH-WRITE-OFF, DOUBLE-SIDED BASIC FX (review O2.11). three r165 draws a
+// transparent DoubleSide material in TWO passes - BackSide, then FrontSide - and sets `needsUpdate` before each,
+// so every such object paid two full getProgram walks per draw (the ~130-field parameter object, the cache-key
+// join, the uniform list: 7-9 us each measured in node) plus a second program switch and uniform upload. The
+// two passes exist to lay a surface's far half down before its near half. For ADDITIVE blending with depthWrite
+// OFF the order cannot matter: the target receives dst + a + b either way, and since depth is only tested, never
+// written, neither half can hide the other. An unlit MeshBasicMaterial shades a back face the same in the
+// DOUBLE_SIDED program as in the FLIP_SIDED one (the flip only turns the normal, which Basic never lights with).
+// So these draw once, with one DOUBLE_SIDED program: the projectile and replay ribbons, headlight cones, god rays,
+// race-gate and bolt ray shafts, wall ripples, organic decorations, the hub pads / beams / cones, the Broken
+// Simulation forcefield. ⚠ ONLY this exact combination: normal blending or depthWrite on DO depend on the order.
+// ShaderMaterials are single-pass already (three sets forceSinglePass in their constructor). ⚠ The flag changes
+// WHICH program links (one DOUBLE_SIDED variant instead of the FLIP_SIDED + FRONT pair), so it is set at
+// CONSTRUCTION, before any compile sees the material, and every warm / pin group that holds an unflagged
+// material of this family also links and keeps its flagged twin (_lssWarmOnePassTwins / _lssOnePassTwin).
+// A/B: `window.__onePassOff = true` before a material is built keeps it two-pass.
+function _lssOnePassOK(m) {
+  return !!(m && m.isMeshBasicMaterial && m.transparent === true && m.side === THREE.DoubleSide &&
+            m.blending === THREE.AdditiveBlending && m.depthWrite === false);
+}
+function _lssAddOnePass(m) {
+  if (_lssOnePassOK(m) && !(typeof window !== 'undefined' && window.__onePassOff)) m.forceSinglePass = true;
+  return m;
+}
+function _lssOnePassTwin(m) {
+  if (!_lssOnePassOK(m) || m.forceSinglePass) return null;
+  const t = m.clone(); t.forceSinglePass = true;
+  return t;
+}
+// Adds, beside every mesh of `root` whose material is an unflagged member of the family, one mesh with the
+// flagged twin (one twin per material). Twins are pushed to `keep` so they are retained, never disposed: a
+// disposed last holder frees the program and the next draw relinks it (v39.81).
+function _lssWarmOnePassTwins(root, keep) {
+  if (!root || typeof root.traverse !== 'function') return 0;
+  const seen = new Set(), add = [];
+  root.traverse((o) => {
+    if (!o.isMesh || !o.material || Array.isArray(o.material) || seen.has(o.material)) return;
+    seen.add(o.material);
+    const t = _lssOnePassTwin(o.material);
+    if (!t) return;
+    const tm = new THREE.Mesh(o.geometry, t);
+    tm.frustumCulled = false; tm.position.copy(o.position);
+    add.push([o.parent || root, tm]);
+    if (keep) keep.push(t);
+  });
+  for (const [p, tm] of add) p.add(tm);
+  return add.length;
+}
+
 // ---- (perf 2026-06-12) per-round combat program pin ----
 // Three.js keys compiled GL programs on scene environment (fog etc.) as well
 // as material+geometry state, and DELETES a program when the last material
@@ -84690,6 +85151,7 @@ function _pinCombatEffectPrograms() {
       _shardGeo.setAttribute('color', new THREE.Float32BufferAttribute([1,1,1, 1,1,1, 1,1,1], 3));
       const _shardMat = new THREE.MeshBasicMaterial({ color: 0xffffff, vertexColors: true, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
       _add(_shardGeo, _shardMat);
+      { const _t = _lssOnePassTwin(_shardMat); if (_t) _add(_shardGeo, _t); }   // (v48.45) O2.11 - the ribbons' single-pass program
       // Opaque double-sided standard material (also traced re-linking).
       _add(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshStandardMaterial({ color: 0xffffff, side: THREE.DoubleSide }));
       // Comprehensive combat-shader pre-warm: pin one material per distinct
@@ -85153,10 +85615,14 @@ function _buildModelWarmGroup() {
   try {
     const coneN = (typeof _SHIPL !== 'undefined' && _SHIPL) ? _SHIPL.CONE_N : 1;
     if (coneN) {
-      add(new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({
+      const _bg = new THREE.PlaneGeometry(1, 1);
+      const _bm = new THREE.MeshBasicMaterial({
         map: tex, color: 0xffe8c4, transparent: true, opacity: 0.5,
         blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false,
-      })));
+      });
+      add(new THREE.Mesh(_bg, _bm));
+      // (v48.45) O2.11 - the cones, god rays and ray shafts are single-pass now: pin that program too
+      const _bt = _lssOnePassTwin(_bm); if (_bt) add(new THREE.Mesh(_bg, _bt));
     }
   } catch (_) {}
   // 6 : (v36.18) the RAW streamed-GLB PBR signature — cyanring.glb, cloned by
@@ -87311,6 +87777,7 @@ async function _prebakeGpuPrime() {
   // The ticks themselves gate on document.hidden / "near water" / flock visibility, so drive the
   // compute passes directly: one step of each GPUComputationRenderer links its programs.
   try { if (typeof _swRipple !== 'undefined' && _swRipple && _swRipple.gpu) _swRipple.gpu.compute(); } catch (_) {}
+  try { if (typeof _swAboveCopyWarm === 'function') _swAboveCopyWarm(); } catch (_) {}   // (v48.43) the Snell's-window copy
   try { if (typeof _birdFlock !== 'undefined' && _birdFlock && _birdFlock.gpu) _birdFlock.gpu.compute(); } catch (_) {}
   try { if (typeof _fishSchool !== 'undefined' && _fishSchool && _fishSchool.gpu) _fishSchool.gpu.compute(); } catch (_) {}
   // ⚠⚠ (v41.65) THE UNDERWATER BUBBLE CLOUD, which has never once been warmed - see the note at
@@ -88925,6 +89392,14 @@ function spawnLightningBolt(from, to, color, lifetime, branches, thickness, esse
 // Color is Syphon class blue (LSS.CLASS_COLORS.SYPHON) at both call
 // sites, matching the SYPHON identity ; Puncture's yellow stays
 // Puncture-only.
+// (v48.43) ONE SET OF STRANDS PER DRAIN, NOT THREE (review O3.10). The release fires this three times -
+// now, +130 ms, +270 ms - with the SAME endpoints, and every call built six TubeGeometries off two
+// CatmullRom curves (~2 ms of JS and ~400 KB of uploads, twice more in two timer tasks) for geometry that
+// depends on nothing but `from` and `to`. They are shared by exact endpoint key and REFCOUNTED: each helix
+// effect holds one reference and _disposeOrReleaseEffect drops it, so the strands are disposed only when
+// the last pulse using them expires (the shared-geometry disposal class - never dispose what another live
+// effect still draws). Colour and lifetime stay per call (materials are per helix).
+const _siphonGeo = new Map();   // key -> { geoA, geoB, geoA0, geoB0, geoA2, geoB2, refs }
 function spawnSiphonHelix(from, to, color, lifetime) {
   if (typeof scene === 'undefined' || typeof THREE === 'undefined') return;
   color = (color != null) ? color : 0x4169E1;
@@ -88932,6 +89407,9 @@ function spawnSiphonHelix(from, to, color, lifetime) {
   const dir = new THREE.Vector3().subVectors(to, from);
   const len = dir.length();
   if (len < 8) return;
+  const _gKey = from.x + ',' + from.y + ',' + from.z + '|' + to.x + ',' + to.y + ',' + to.z;
+  let _G = _siphonGeo.get(_gKey);
+  if (_G) _G.refs++;
   const fwd = dir.clone().multiplyScalar(1 / len);
   const upHint = (Math.abs(fwd.y) < 0.92) ? new THREE.Vector3(0, 1, 0)
                                           : new THREE.Vector3(1, 0, 0);
@@ -88978,8 +89456,8 @@ function spawnSiphonHelix(from, to, color, lifetime) {
   const tubeRadius      = 3.0;
   const radialSegments  = 5;
   const _coreCol = new THREE.Color(color).lerp(new THREE.Color(0xffffff), 0.30);
-  const geoA = new THREE.TubeGeometry(curveA, tubularSegments, tubeRadius, radialSegments, false);
-  const geoB = new THREE.TubeGeometry(curveB, tubularSegments, tubeRadius, radialSegments, false);
+  const geoA = _G ? _G.geoA : new THREE.TubeGeometry(curveA, tubularSegments, tubeRadius, radialSegments, false);
+  const geoB = _G ? _G.geoB : new THREE.TubeGeometry(curveB, tubularSegments, tubeRadius, radialSegments, false);
   const matA = new THREE.MeshBasicMaterial({
     color: _coreCol, transparent: true, opacity: 1.0,
     blending: THREE.AdditiveBlending,
@@ -88997,8 +89475,8 @@ function spawnSiphonHelix(from, to, color, lifetime) {
   // colored strand replaces the sky pixels instead: energy-bolt blue on
   // white backgrounds, extra body underneath the glow in the dark.
   const _BACK_OP = 0.75;
-  const geoA0 = new THREE.TubeGeometry(curveA, Math.min(100, numPoints * 2), 5.0, 5, false);
-  const geoB0 = new THREE.TubeGeometry(curveB, Math.min(100, numPoints * 2), 5.0, 5, false);
+  const geoA0 = _G ? _G.geoA0 : new THREE.TubeGeometry(curveA, Math.min(100, numPoints * 2), 5.0, 5, false);
+  const geoB0 = _G ? _G.geoB0 : new THREE.TubeGeometry(curveB, Math.min(100, numPoints * 2), 5.0, 5, false);
   // Muzzle-end alpha fade (RGBA vertex colors ; TubeGeometry uv.x runs
   // 0 -> 1 along the strand, 0 = the gun end).
   const _alphaFadeByU = (geo) => {
@@ -89013,7 +89491,7 @@ function spawnSiphonHelix(from, to, color, lifetime) {
     }
     geo.setAttribute('color', new THREE.BufferAttribute(rgba, 4));
   };
-  _alphaFadeByU(geoA0); _alphaFadeByU(geoB0);
+  if (!_G) { _alphaFadeByU(geoA0); _alphaFadeByU(geoB0); }   // (v48.43) a shared set already carries its fade
   const matA0 = new THREE.MeshBasicMaterial({
     color: 0x2a3fd4, transparent: true, opacity: _BACK_OP,
     blending: THREE.NormalBlending,
@@ -89027,8 +89505,9 @@ function spawnSiphonHelix(from, to, color, lifetime) {
   scene.add(meshA0); scene.add(meshB0);
   // Halo pair: same curves, fat radius, faint pure class color.
   const _GLOW_OP = 0.30;
-  const geoA2 = new THREE.TubeGeometry(curveA, Math.min(100, numPoints * 2), 8.0, 5, false);
-  const geoB2 = new THREE.TubeGeometry(curveB, Math.min(100, numPoints * 2), 8.0, 5, false);
+  const geoA2 = _G ? _G.geoA2 : new THREE.TubeGeometry(curveA, Math.min(100, numPoints * 2), 8.0, 5, false);
+  const geoB2 = _G ? _G.geoB2 : new THREE.TubeGeometry(curveB, Math.min(100, numPoints * 2), 8.0, 5, false);
+  if (!_G) { _G = { geoA, geoB, geoA0, geoB0, geoA2, geoB2, refs: 1 }; _siphonGeo.set(_gKey, _G); }
   const matA2 = new THREE.MeshBasicMaterial({
     color: color, transparent: true, opacity: _GLOW_OP,
     blending: THREE.AdditiveBlending,
@@ -89045,8 +89524,11 @@ function spawnSiphonHelix(from, to, color, lifetime) {
       meshA, meshB, matA, matB, geoA, geoB,
       meshA2, meshB2, matA2, matB2, geoA2, geoB2, _glowOp: _GLOW_OP,
       meshA0, meshB0, matA0, matB0, geoA0, geoB0, _backOp: _BACK_OP,
-      lifetime: _life, age: 0, type: 'siphonHelix',
+      lifetime: _life, age: 0, type: 'siphonHelix', _geoKey: _gKey,
     });
+  } else {
+    // (v48.43) no effect list to own the reference: give it back so the set can be freed
+    if (--_G.refs <= 0) { _siphonGeo.delete(_gKey); for (const g of [geoA, geoB, geoA0, geoB0, geoA2, geoB2]) { try { g.dispose(); } catch (_) {} } }
   }
 }
 if (typeof window !== 'undefined') window.spawnSiphonHelix = spawnSiphonHelix;
@@ -89791,6 +90273,52 @@ function _warmupEffectShaders() {
   }
 }
 
+// ⭐ (v48.43) THE OVER-CAP CULL IN ONE PASS (review O2.21). `while (length > cap) cullOldestParticle()`
+// rescanned the whole pool once per particle removed - O(k*n): a Slayer pull (+384 particles) landing on
+// a full 800-pool was one 1.8-7.4 ms frame. From 8 removals up, the k-th smallest life is found by a
+// quickselect over a scratch copy of the lives and the pool is compacted once, dropping everything below
+// that life plus enough of the ties: the SAME multiset of lives leaves as the loop would remove (only
+// which of several equal-life particles goes, and the survivors' order, can differ - additive points do
+// not care about order). A NaN life anywhere takes the old loop, whose `<` never picks one.
+const _pcLives = { a: new Float64Array(0) };
+function _pcQuickselect(a, n, k) {
+  let lo = 0, hi = n - 1;
+  while (hi > lo) {
+    const x = a[lo], y = a[(lo + hi) >> 1], z = a[hi];
+    const piv = (x < y) ? ((y < z) ? y : ((x < z) ? z : x)) : ((x < z) ? x : ((y < z) ? z : y));
+    let i = lo, j = hi;
+    while (i <= j) {
+      while (a[i] < piv) i++;
+      while (a[j] > piv) j--;
+      if (i <= j) { const t = a[i]; a[i] = a[j]; a[j] = t; i++; j--; }
+    }
+    if (k <= j) hi = j; else if (k >= i) lo = i; else return a[k];
+  }
+  return a[k];
+}
+function _cullParticlesToCap(cap) {
+  const P = game.particles, n = P.length, k = n - cap;
+  if (k <= 0) return;
+  if (k < 8) { for (let i = 0; i < k; i++) cullOldestParticle(); return; }
+  let L = _pcLives.a;
+  if (L.length < n) L = _pcLives.a = new Float64Array(Math.max(n, 1024));
+  for (let i = 0; i < n; i++) {
+    const v = P[i].life;
+    if (v !== v) { for (let q = 0; q < k; q++) cullOldestParticle(); return; }
+    L[i] = v;
+  }
+  const thr = _pcQuickselect(L, n, k - 1);
+  let below = 0;
+  for (let i = 0; i < n; i++) if (P[i].life < thr) below++;
+  let ties = k - below, w = 0;
+  for (let i = 0; i < n; i++) {
+    const p = P[i], v = p.life;
+    if (v < thr) continue;
+    if (v === thr && ties > 0) { ties--; continue; }
+    P[w++] = p;
+  }
+  P.length = w;
+}
 function cullOldestParticle() {
   // Remove the particle with the least remaining life
   let oldestIdx = 0, lowestLife = Infinity;
@@ -89938,7 +90466,7 @@ function updateParticles(dt) {
   }
   // Cap particle count: cull oldest when over budget (quality-aware)
   const _pCap = _particleCap();
-  while (game.particles.length > _pCap) cullOldestParticle();
+  _cullParticlesToCap(_pCap);   // (v48.43) one pass - see _cullParticlesToCap
 
   // (v37.09) Particle bounds are PLAYER-RELATIVE, not origin-absolute.
   // The old |pos| > LSS.ARENA_SIZE (25000) check erased every particle at
@@ -90269,7 +90797,17 @@ function _disposeOrReleaseEffect(e) {
     for (const k of ['meshA', 'meshB', 'meshA2', 'meshB2', 'meshA0', 'meshB0']) {
       if (e[k] && e[k].parent) e[k].parent.remove(e[k]);
     }
-    for (const k of ['geoA', 'geoB', 'geoA2', 'geoB2', 'geoA0', 'geoB0']) {
+    // (v48.43) the strands are shared by the drain's pulses (see _siphonGeo): drop this effect's reference,
+    // and free them only when it was the last one
+    let _freeGeo = true;
+    if (e._geoKey != null) {
+      const _G = (typeof _siphonGeo !== 'undefined') ? _siphonGeo.get(e._geoKey) : null;
+      if (_G && _G.geoA === e.geoA) {
+        if (--_G.refs > 0) _freeGeo = false; else _siphonGeo.delete(e._geoKey);
+      }
+      e._geoKey = null;
+    }
+    if (_freeGeo) for (const k of ['geoA', 'geoB', 'geoA2', 'geoB2', 'geoA0', 'geoB0']) {
       if (e[k] && e[k].dispose) { try { e[k].dispose(); } catch (_) {} }
     }
     for (const k of ['matA', 'matB', 'matA2', 'matB2', 'matA0', 'matB0']) {
@@ -90355,12 +90893,7 @@ const _fxArcFrom = new THREE.Vector3();
 const _fxArcTo = new THREE.Vector3();
 function _syncVRLiteMaterialUniforms() {
   const _vrLiteForMaterials = (typeof isXRPresenting === 'function' && isXRPresenting()) ? 1.0 : 0.0;
-  if (_atomFractalMaterials.length) {
-    for (let _mi = 0; _mi < _atomFractalMaterials.length; _mi++) {
-      const _am = _atomFractalMaterials[_mi];
-      if (_am && _am.uniforms && _am.uniforms.uVRLite) _am.uniforms.uVRLite.value = _vrLiteForMaterials;
-    }
-  }
+  _AFM_VRLITE.value = _vrLiteForMaterials;   // (v48.43) every atom material shares this uniform
   if (typeof billboardCloudSystem !== 'undefined' && billboardCloudSystem
       && billboardCloudSystem.material && billboardCloudSystem.material.uniforms
       && billboardCloudSystem.material.uniforms.uVRLite) {
@@ -90438,16 +90971,8 @@ function updateEffects(dt) {
   _syncVRLiteMaterialUniforms();
   // Tick the fractal atom shaders so they animate. Single shared
   // time value across all live atom mats (one uniform write per mat).
-  if (_atomFractalMaterials.length) {
-    const _gameT = (typeof game !== 'undefined' && typeof game.time === 'number') ? game.time : 0;
-    // Drive uVRLite from XR presence each frame. Cluster
-    // rocks share this uniform across all live mats so the branch flips on
-    // session start / end without recompile.
-    for (let _mi = 0; _mi < _atomFractalMaterials.length; _mi++) {
-      const _am = _atomFractalMaterials[_mi];
-      if (_am && _am.uniforms && _am.uniforms.time) _am.uniforms.time.value = _gameT;
-    }
-  }
+  // (v48.43) one write: every atom material shares this uniform object (see _AFM_TIME)
+  _AFM_TIME.value = (typeof game !== 'undefined' && typeof game.time === 'number') ? game.time : 0;
   // v8VR: drive the InstancedMesh particle pools from inside the same
   // per-frame effects update so they age on the same hitstop-respecting
   // dt and freeze when the game pauses (settings, lobby).
@@ -91685,6 +92210,20 @@ function updateDots(dt) {
 
 const _dmgEdgeWorld = new THREE.Vector3();
 const _dmgEdgeView = new THREE.Vector3();
+// ⭐ (v48.43) THE PULSE WITHOUT A REFLOW (review O2.16). The restart was `classList.remove('pulse'); void
+// el.offsetWidth; classList.add('pulse')` - the offsetWidth read forces a synchronous style + layout of
+// the whole page (~0.45 ms), and continuous damage (a bot's Mega Laser, standing in a firewall) calls
+// this EVERY FRAME: ~0.4 ms a frame on desktop, 2-3x on a phone. A Web Animation restarts with no layout
+// read. The keyframes are .dmg-edge.pulse's own (dmgEdgePulse: 0 -> 1 at 20% -> 0, 0.55 s, forwards)
+// and the easing sits on each KEYFRAME, because a CSS animation's timing function applies per keyframe
+// interval - an effect-level easing would be a different curve. Restarting every call is kept exactly
+// (continuous damage re-triggers it every frame, as before). The .pulse rule stays: the overlay
+// rehearsal warms it, and it is the fallback where element.animate is missing.
+// Knob: window.__dmgEdgeCss = true restores the class restart for an A/B.
+const _DE_KEYS = [{ opacity: 0, easing: 'ease-out' }, { opacity: 1, offset: 0.2, easing: 'ease-out' }, { opacity: 0 }];
+const _DE_OPTS = { duration: 550, fill: 'forwards' };
+const _dmgEdgeEls = {};
+const _dmgEdgeQ = new THREE.Quaternion();
 function showDirectionalDamage(attacker, projectile) {
   // Pick a world-space direction from the player TOWARD the source of damage.
   if (attacker && attacker.position) {
@@ -91699,7 +92238,7 @@ function showDirectionalDamage(attacker, projectile) {
   _dmgEdgeWorld.normalize();
   // Convert world direction to view space. View space: +X right, +Y up, -Z forward.
   // Rotating by the inverse camera quaternion lands the world vector in that frame.
-  _dmgEdgeView.copy(_dmgEdgeWorld).applyQuaternion(camera.quaternion.clone().conjugate());
+  _dmgEdgeView.copy(_dmgEdgeWorld).applyQuaternion(_dmgEdgeQ.copy(camera.quaternion).conjugate());   // (v48.43) no clone per hit
   const x = _dmgEdgeView.x;
   const y = _dmgEdgeView.y;
   // Project to the screen plane (drop Z), pick the dominant axis. If both
@@ -91711,10 +92250,18 @@ function showDirectionalDamage(attacker, projectile) {
   } else {
     edge = (y >= 0) ? 'top' : 'bottom';
   }
-  const el = document.getElementById('ov-dmg-' + edge);
+  let el = _dmgEdgeEls[edge];
+  if (!el || !el.isConnected) el = _dmgEdgeEls[edge] = document.getElementById('ov-dmg-' + edge);
   if (!el) return;
+  if (typeof el.animate === 'function' && !(typeof window !== 'undefined' && window.__dmgEdgeCss)) {
+    try {
+      if (el._deAnim) el._deAnim.cancel();
+      el._deAnim = el.animate(_DE_KEYS, _DE_OPTS);
+      return;
+    } catch (_) { el._deAnim = null; }
+  }
   el.classList.remove('pulse');
-  void el.offsetWidth; 
+  void el.offsetWidth;
   el.classList.add('pulse');
 }
 
@@ -95258,6 +95805,7 @@ function _tickOutlineOptics(active) {
       isModelShip: false,
       _shieldMat: mat,
       _outlineHug: true,
+      _cullNext: true,   // (v48.46) see attach()
     };
     return clone;
   }
@@ -95302,6 +95850,16 @@ function _tickOutlineOptics(active) {
       ship.mesh.add(m);
       ship._outlineHugMesh = m;
       ship._outlineHugAlly = ally;
+    } else if (ship._outlineHugMesh.userData && ship._outlineHugMesh.userData._cullNext) {
+      // ⭐ (v48.46) (review O3.7) THE RIM IS CULLED like the hull it wraps, from the tick after it was built (so
+      // its first draw - and program link - still happens the moment the perk goes on, not when a rim first
+      // turns towards the camera). _mirrorMeshTree builds every clone with frustumCulled = false; the rim is a
+      // plain BackSide Basic (no vertex displacement) and its enlargement is the ROOT's scale, which is in the
+      // matrixWorld the frustum test uses - so the hull geometry's own bounding sphere is exact for it.
+      // ~37 draws / 240k tris a frame with 5 bots, most of them off screen. (The hull-hug SHIELD shells share
+      // _mirrorMeshTree and keep frustumCulled = false: they are LayeredFX shaders.)
+      ship._outlineHugMesh.userData._cullNext = false;
+      ship._outlineHugMesh.traverse((o) => { if (o.isMesh) o.frustumCulled = true; });
     }
     _updateOutlineScale(ship);
   }
@@ -99396,11 +99954,11 @@ function _wallImpactFX(eff, px, py, pz) {
       // under sustained fire (the geometry never varies, only transforms).
       if (!_WALL_RIPPLE_GEO) _WALL_RIPPLE_GEO = new THREE.RingGeometry(0.62, 1.0, 28);
       const geo = _WALL_RIPPLE_GEO;
-      const mat = new THREE.MeshBasicMaterial({
+      const mat = _lssAddOnePass(new THREE.MeshBasicMaterial({
         color: 0xff8833, transparent: true, opacity: 0.45,
         blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
         depthWrite: false,
-      });
+      }));
       const ring = new THREE.Mesh(geo, mat);
       ring.userData._fxSharedGeo = true;   
       ring.position.set(px, py, pz);
@@ -128428,11 +128986,11 @@ function _lssEndlessBoltSlot(run) {
       }),
       rayMat: null,
     };
-    run._boltLib.rayMat = new THREE.MeshBasicMaterial({
+    run._boltLib.rayMat = _lssAddOnePass(new THREE.MeshBasicMaterial({
       map: run._boltLib.rayTex, transparent: true, opacity: 0.5,
       blending: THREE.AdditiveBlending, depthWrite: false,
       side: THREE.DoubleSide, fog: false, color: 0x9fdcff,
-    });
+    }));
   }
   const lib = run._boltLib, mob = _lssEndlessMobile();
   const grp = new THREE.Group();
@@ -129798,6 +130356,7 @@ const Overlays = (() => {
   // Restart a CSS animation by removing and re-adding the class.
   function replay(el, cls) {
     if (!el) return;
+    el.classList.remove('lt-idle');   // (v48.46) O3.12 - showing again: the tag animates (see _lssTagIdleWire)
     el.classList.remove(cls);
     // Force reflow so the animation restarts cleanly.
     void el.offsetWidth;
@@ -130019,6 +130578,19 @@ const Overlays = (() => {
 
 // Expose globally for ease of debugging / future hooks.
 window.Overlays = Overlays;
+// (v48.46) (review O3.12) the banner and the kill streak go IDLE when their own one-shot animation ends (they
+// are at opacity 0 from there on, with `.show` still on), which pauses their tag's endless loops - see the CSS
+// note above `.lss-chroma`. Only the container's own animation counts: the tag's loops never end, and the
+// banner's rules (.ban-line) end on their own clock.
+(function _lssTagIdleWire() {
+  try {
+    for (const [id, anim] of [['ov-banner', 'ovBanner'], ['ov-killstreak', 'ovKillStreak']]) {
+      const el = document.getElementById(id);
+      if (!el) continue;
+      el.addEventListener('animationend', (e) => { if (e.target === el && e.animationName === anim) el.classList.add('lt-idle'); });
+    }
+  } catch (_) {}
+})();
 
 // ---- SCREEN SHAKE ----
 
@@ -134329,6 +134901,36 @@ const audio = {
 
 // Generate a synthetic impulse response for metallic interior reverb.
 // Simulates a large enclosed metal space (like the inside of a sphere/tunnel).
+// (v48.46) The ConvolverNode normalisation scale, as the Web Audio spec defines it ("Calculating normalization
+// scale") and Chromium's Reverb::CalculateNormalizationScale computes it: 1 / RMS power over every channel, times
+// the -58 dB calibration and 44100 / sampleRate. Used to bake each IR's own scale into a pre-mixed buffer that is
+// then played with normalize = false (see the reverb graph in initAudio).
+function _lssConvolverNormScale(buf) {
+  const nc = buf.numberOfChannels, len = buf.length;
+  let power = 0;
+  for (let c = 0; c < nc; c++) { const d = buf.getChannelData(c); let p = 0; for (let i = 0; i < len; i++) p += d[i] * d[i]; power += p; }
+  power = Math.sqrt(power / (nc * len));
+  if (!isFinite(power) || power < 0.000125) power = 0.000125;
+  let scale = (1 / power) * Math.pow(10, -58 / 20);
+  if (buf.sampleRate) scale *= 44100 / buf.sampleRate;
+  if (nc === 4) scale *= 0.5;
+  return scale;
+}
+// Sum of gain * normScale(ir) * ir over `parts` ([[AudioBuffer, gain], ...]), as one stereo buffer as long as
+// the longest part - what a set of NORMALISED convolvers feeding those gains sums to.
+function _lssPremixIR(ctx, parts) {
+  let len = 1;
+  for (const pt of parts) len = Math.max(len, pt[0].length);
+  const out = ctx.createBuffer(2, len, ctx.sampleRate);
+  for (const pt of parts) {
+    const b = pt[0], k = pt[1] * _lssConvolverNormScale(b);
+    for (let c = 0; c < 2; c++) {
+      const o = out.getChannelData(c), d = b.getChannelData(Math.min(c, b.numberOfChannels - 1));
+      for (let i = 0; i < d.length; i++) o[i] += k * d[i];
+    }
+  }
+  return out;
+}
 function generateImpulseResponse(ctx, duration, decay, preDelay) {
   const rate = ctx.sampleRate;
   const len = Math.floor(rate * duration);
@@ -134499,24 +135101,46 @@ function initAudio() {
     // length ; 0.8s + 0.3s keeps the room character at ~1/3 the DSP of the
     // desktop 2.4s + 0.5s pair.
     const _mobIR = (typeof _audioIsMobileDevice === 'function' && _audioIsMobileDevice());
-    audio.convolverWide = audio.ctx.createConvolver();
-    audio.convolverWide.buffer = generateImpulseResponse(audio.ctx, _mobIR ? 0.8 : 2.4, 3.5, 0.015);
-    audio.convolverTight = audio.ctx.createConvolver();
-    audio.convolverTight.buffer = generateImpulseResponse(audio.ctx, _mobIR ? 0.3 : 0.5, 6.5, 0.004);
-    audio.reverbWideGain = audio.ctx.createGain();
-    audio.reverbTightGain = audio.ctx.createGain();
-    // Initial crossfade weights favor open volume; updated per-frame in updateAmbientBed.
-    audio.reverbWideGain.gain.value = 0.7;
-    audio.reverbTightGain.gain.value = 0.3;
-    audio.convolverWide.connect(audio.reverbWideGain);
-    audio.convolverTight.connect(audio.reverbTightGain);
-    audio.reverbWideGain.connect(audio.reverbGain);
-    audio.reverbTightGain.connect(audio.reverbGain);
+    const _irWide = generateImpulseResponse(audio.ctx, _mobIR ? 0.8 : 2.4, 3.5, 0.015);
+    const _irTight = generateImpulseResponse(audio.ctx, _mobIR ? 0.3 : 0.5, 6.5, 0.004);
     // Input hub: GainNode so existing `gain.connect(audio.convolver)` calls still work.
     audio.convolver = audio.ctx.createGain();
     audio.convolver.gain.value = 1.0;
-    audio.convolver.connect(audio.convolverWide);
-    audio.convolver.connect(audio.convolverTight);
+    // ⭐ (v48.46) (review O3.14) ONE CONVOLVER, THE TWO IMPULSE RESPONSES PRE-MIXED. The wide/tight crossfade
+    // never moved: `probeEnvironmentOpenness` returns its 0.7 default whenever `game.mapMeshes` is empty, and
+    // nothing has pushed a mesh into that list since the room-graph tunnels went - so every frame wrote
+    // 0.7 / 0.3 over 0.7 / 0.3, and the audio thread ran two convolutions to produce a fixed blend of both.
+    // Convolution is linear, so 0.7 * conv(x, W) + 0.3 * conv(x, T) IS conv(x, 0.7 W + 0.3 T) - with one
+    // catch: a ConvolverNode NORMALISES its buffer by the IR's RMS power, per node, so each IR is scaled by
+    // its own normalisation (_lssConvolverNormScale, the spec's formula) before the sum, and the pre-mixed
+    // node has `normalize = false` - set BEFORE `.buffer`, because the scale is computed when the buffer is
+    // assigned. The tight lane's node and both gains go away; the probe no longer runs (it had nothing to hit).
+    // ⚠ If a room probe ever comes back (anything that fills game.mapMeshes), the crossfade has a job again:
+    // `window.__reverbDual = true` before the audio starts restores the two-node graph.
+    if (typeof window !== 'undefined' && window.__reverbDual) {
+      audio.convolverWide = audio.ctx.createConvolver();
+      audio.convolverWide.buffer = _irWide;
+      audio.convolverTight = audio.ctx.createConvolver();
+      audio.convolverTight.buffer = _irTight;
+      audio.reverbWideGain = audio.ctx.createGain();
+      audio.reverbTightGain = audio.ctx.createGain();
+      // Initial crossfade weights favor open volume; updated per-frame in updateAmbientBed.
+      audio.reverbWideGain.gain.value = 0.7;
+      audio.reverbTightGain.gain.value = 0.3;
+      audio.convolverWide.connect(audio.reverbWideGain);
+      audio.convolverTight.connect(audio.reverbTightGain);
+      audio.reverbWideGain.connect(audio.reverbGain);
+      audio.reverbTightGain.connect(audio.reverbGain);
+      audio.convolver.connect(audio.convolverWide);
+      audio.convolver.connect(audio.convolverTight);
+    } else {
+      audio.convolverWide = audio.ctx.createConvolver();
+      audio.convolverWide.normalize = false;   // ⚠ before .buffer - see above
+      audio.convolverWide.buffer = _lssPremixIR(audio.ctx, [[_irWide, 0.7], [_irTight, 0.3]]);
+      audio.convolverTight = null; audio.reverbWideGain = null; audio.reverbTightGain = null;
+      audio.convolverWide.connect(audio.reverbGain);
+      audio.convolver.connect(audio.convolverWide);
+    }
 
     // Long lush send for explosions: separate ~5 s IR at low wet level. Not fed by
     // the main reverb input hub; triChord/playNoiseBurst opt in via audio._extraReverbSend
@@ -149064,6 +149688,20 @@ class LSSEarthTiles {
         const m = new THREE.Mesh(geo, roofMat);
         m.name = 'earth-roofs-' + c;
         m.castShadow = true; m.receiveShadow = true;
+        // (v48.43) ONE SHADOW DRAW, THEN NONE (review O1.6). A roof chunk is only the extrusions' TOP CAPS -
+        // every normal +Y - on a FrontSide material with shadowSide null, and three r165 draws a FrontSide
+        // caster BACKSIDE in the depth pass (every shadow type but VSM). With the sun clamped to 2-89 deg
+        // every roof triangle is therefore culled at rasterisation: 25-70 shadow draws a frame that write
+        // no texel (the walls' far faces are the real casters). The first shadow draw is kept, so the pass
+        // still uploads the roof buffers where it always did; then it stops casting. receiveShadow stays.
+        m.onAfterShadow = function () {
+          try {
+            if (renderer && renderer.shadowMap && renderer.shadowMap.type === THREE.VSMShadowMap) return;   // VSM keeps FrontSide: a roof DOES cast there
+            if (this.material && this.material.shadowSide != null) return;
+            this.castShadow = false;
+            this.onAfterShadow = THREE.Object3D.prototype.onAfterShadow;
+          } catch (_) {}
+        };
         this._publish(m);
       }
       if (walls[c].length) {

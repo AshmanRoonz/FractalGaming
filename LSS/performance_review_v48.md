@@ -42,6 +42,34 @@ Implemented and measured in the pane against a byte-exact v48.32 served beside i
 | O1.15 hub deck noise tables | **shipped v48.40** | byte-identical (`tools/hub_deck_bake_check.mjs`); `[hubcity] built` genMs 412 -> 60-65 |
 | O2.19 wild leviathan arrival | **shipped v48.41** (prebake) | 5 packs arriving: skinned sphere computes in play 11 -> 0, new programs 1 -> 0, LoAFs 100 + 74 ms -> none |
 | O2.17 hull ray grid | **shipped v48.41** | grid vs three on 9,000+ live segments: 100 % agree; 0.004-0.013 vs 0.46-1.96 ms per ray; grids prebuilt (39 in 136 ms) |
+| O2.18 water silhouettes per body | **shipped v48.42** (+ the owner's VR water bug) | slot swaps reuse a cached silhouette (was 3-13 ms each); fake XR session over water: 116 synchronous readbacks/s -> 1 (the silhouette render drew with the headset camera); **not yet tested on the Quest** |
+| O2.21 particle cap cull | **shipped v48.43** | 140 node runs: kept multiset identical; 1.01 -> 0.083 ms per cull |
+| O2.16 damage edge pulse | **shipped v48.43** | WAAPI vs CSS opacity identical at 9 instants; no forced layout per hit |
+| O2.28 rock shader clock | **shipped v48.43** | 135 atom meshes share one `time` + `uVRLite`; per-frame loops -> single writes; expired fragments disposed |
+| O2.12 cabin shadows | **shipped v48.43** | 0 bytes differ at 5 sun angles; 48 meshes / 87,846 tris out of the shadow pass |
+| O1.6 Earth roof shadows | **shipped v48.43** | 0 bytes differ at sun 59 / 15; 47 / 38 fewer draw calls |
+| O3.16 Snell copy link | **shipped v48.43** | copy program linked behind the curtain; `_aboveRT` freed on teardown |
+| O3.10 Syphon helix geometry | **shipped v48.43** | 3 pulses build 2.7 / 0.1 / 0.0 ms; 6 disposals after the last |
+| O2.34 zero-warp skip | **shipped v48.43** | `terrain_pair_check` vs HEAD bit-identical in 8 configs; warp-0 arena chunks ~4.6 -> ~3.3 ms |
+| O1.5 galaxy dome gates | **shipped v48.44** | 0 bytes differ (4 poses + galactic core); ~79 % of a level view skips the dust and HII noise |
+| O2.7 terrain snow noise + far AO | **shipped v48.44** | 0 bytes differ (6 clipmap materials, 267 k ground pixels) |
+| O2.6 tree cards indexed | **shipped v48.44** | 239,454 -> 188,310 vertices (-21.4 %), tris unchanged, 0 bytes differ |
+| O2.5 step 1 cloud light loop per vertex | **shipped v48.44** | 0 bytes differ (8 lights, 214 k cloud pixels); step 2 (mask bake) waits for the owner |
+| O2.11 single-pass additive FX | **shipped v48.45** | 7.9 us per object per render (40 ribbon-style objects 0.407 -> 0.092 ms); 8-bit target byte-identical, half-float target <= 2 ulps where a surface overlaps itself (same-mode noise is 4); no new cold links; towed banners culled: 360 poses, 0 px |
+| O2.14 idle shield bubbles | **shipped v48.45** | all idle shields skipped per render, 0 bytes differ (1280x720); a live ripple still draws (62 bytes) |
+| O3.19 LayeredFX / shield orphans | **shipped v48.45** | registered LayeredFX right after a Cyberpunk launch 270 -> 52 (mobile 212 -> 44); shield list forgets disposed materials |
+| O3.12 hidden tag animations | **shipped v48.46** | hidden tags paused; a banner runs while shown, pauses at its end |
+| O3.14 reverb pre-mixed IR | **shipped v48.46** | normalisation formula = Chrome's to 2.6e-6; output -114 dB below peak; 4 s of audio 80 -> 51 ms |
+| O3.5 tree planting order | **shipped v48.46** | `tools/tree_plant_check.mjs`: 60 chunks, 15,524 trees, 0 differ, same random draws; 54 % of ecology evaluations skipped (stub terrain) |
+| O3.7 Outline Optics rim culling | **shipped v48.46** | 36 poses, 0 px; 96.5 draws saved per render (134 max) with the perk on |
+| O2.32 bird flock link gate | **shipped v48.46** | pending -> hidden, not simulated; released -> back (the fish gate, now on birds too) |
+| O3.8 wild proxies 14 km gate | **shipped v48.46** | driven: 3.3 km drawn + animating, 20 km hidden + mixer frozen |
+| O3.17 step 1 shore-mask budget per row | **shipped v48.46** | same mask; per-frame overshoot capped at one row |
+| O2.8 MEGA refraction copy trim | **shipped v48.47** | copy GPU 0.31 -> 0.16 ms at 4608x2592 vs the live bucket; readable region 0 px; in play 225/239 copies trimmed, GL error 0 |
+| O2.2 sun-shadow tree cull | **shipped v48.48-49** | 0 bytes differ (4 sun angles; 16 headings with the mirror live); 32 of 64 caster meshes culled on average; 1080p render 1.898 -> 1.635 ms GPU at spawn |
+| O3.11 HUD while hidden | **not done** | the draw carries state (ready-flash latch, per-draw decays): skipping it would flash on return from orbit view; phone-only saving |
+| O3.13 joinRoom Promise.all | **not done** | menu latency only; network join path; relays unreachable from the dev machine |
+| O3.2 ULTRA MSAA check | **checked, owner call** | r165 invalidates MSAA only in the Oculus Browser - desktop safe; a Quest flat browser at strict ULTRA would draw the ADS / goo overlay over undefined colour |
 
 ---
 
