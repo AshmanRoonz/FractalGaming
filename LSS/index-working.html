@@ -1619,15 +1619,19 @@ body:has(#ship-select.active) #lss-version-badge { display: none !important; }
    available in every mode, which is why _renderSkinPicker has no early return.
    ⚠ _renderSkinPicker must NOT write an inline display — that is what owns the
    collapsed state now. */
+/* (v49.42) Now a child of #ship-select-body (static), so its containing block is the FIXED
+   #ship-select - top/left are written by _skinPanelPlace() from #ship-hero's rect (the values
+   here are only the fallback before the first placement). z-index 20 = above every ship-select
+   panel (info 7, perks 6, difficulty 12), below the full-screen overlays (45+). */
 #ship-preview-skin {
-  position: absolute; top: 100%; left: 50%; transform: translateX(-50%);
-  margin-top: 10px; z-index: 5; pointer-events: auto;
+  position: absolute; top: 120px; left: 50%; transform: translateX(-50%);
+  margin-top: 10px; z-index: 20; pointer-events: auto;
   display: none;
   flex-direction: column; align-items: center; gap: 5px;
   padding: 7px 12px 6px;
   max-width: 94vw;
 }
-#ship-hero.skin-open #ship-preview-skin { display: flex; }
+#ship-preview-skin.open { display: flex; }   /* (v49.42) was #ship-hero.skin-open #ship-preview-skin */
 /* ⚠ (v36.39) line-height MUST be restated: this panel is a descendant of
    #ship-hero, which sets `line-height: 0` to kill the inline strut under the
    nameline — inherited into the picker it collapses the label and the desc to
@@ -6215,7 +6219,13 @@ body.lss-land-lobby #lss-version-badge {
    ⚠ Placed at the end of block 2 so the landscape and short-viewport media blocks, which already
    restyle both panels' padding, cannot undo it later in the cascade. */
 #ship-preview-difficulty { z-index: 12 !important; }
-#ship-select-body:has(#ship-hero.skin-open) #ship-preview-info { pointer-events: none !important; }
+/* (v49.42) SUPERSEDED - the band no longer has to yield. v43.96 was right that no z-index on the panel
+   could lift it out of #ship-preview's stacking context, and made the spec band click-through while the
+   picker was open. That fixed the TAPS but the band still PAINTED over the swatches - owner (v49.41): "the
+   skin selection popup is blocked by the information about the ship... on phone and when i shrank the
+   browser on PC". It got much worse when v49.26 took the grid from 11 swatches to 22 (three rows). Measured
+   before the move: painted overlap with #ship-preview-info at EVERY size - 1920x1080 13.9k px2, 1366x768
+   25.2k, 800x500 25.3k, 740x360 most of the grid. The panel now lives beside the band (see the markup). */
 
 </style>
 
@@ -6328,18 +6338,21 @@ body.lss-land-lobby #lss-version-badge {
             </div>
           </div>
           <div id="ship-hero-class"></div>
-          <!-- (v36.31) SKIN THEME — _renderSkinPicker fills #skin-grid with seven
-               .perk-card.skin-card swatches (one per SHIP_SKINS entry) and writes
-               the hovered/selected name+blurb into #skin-desc. No mode gate.
-               (v36.39) Collapsed by default: visibility is owned by
-               `#ship-hero.skin-open`, NOT by an inline style. -->
-          <div id="ship-preview-skin">
-            <div class="perks-label">SKIN THEME</div>
-            <div id="skin-grid"></div>
-            <div id="skin-desc"></div>
-          </div>
         </div>
       </div>
+    </div>
+    <!-- (v36.31) SKIN THEME — _renderSkinPicker fills #skin-grid with the
+         .perk-card.skin-card swatches (one per SHIP_SKINS entry) and writes
+         the hovered/selected name+blurb into #skin-desc. No mode gate.
+         (v49.42) MOVED OUT OF #ship-hero, i.e. out of #ship-preview. #ship-preview is the
+         full-bleed 3D stage at z-index 0, a stacking context, so a popup inside it painted
+         under every side panel whatever its own z-index (v43.96 measured that). As a sibling
+         of the panels it stacks with them, at 20. _skinPanelPlace() puts it under the
+         nameplate; `.open` on the panel owns visibility, never an inline display. -->
+    <div id="ship-preview-skin">
+      <div class="perks-label">SKIN THEME</div>
+      <div id="skin-grid"></div>
+      <div id="skin-desc"></div>
     </div>
     <!-- (v35.20) LEFT COLUMN: the fleets run vertically down the left edge —
          your fleet over enemy fleet, chips wrapping into a grid. The left side
@@ -6900,7 +6913,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "49.41";
+const LSS_BUILD = "49.43";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -120200,15 +120213,37 @@ let _skinToggleWired = false;
 function _setSkinPanelOpen(open) {
   const hero = document.getElementById('ship-hero');
   if (!hero) return;
-  hero.classList.toggle('skin-open', !!open);
+  hero.classList.toggle('skin-open', !!open);   // still drives the toggle button's own styling
+  const panel = document.getElementById('ship-preview-skin');
+  if (panel) panel.classList.toggle('open', !!open);   // (v49.42) the panel is no longer inside #ship-hero
   const btn = document.getElementById('skin-toggle');
   if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) _skinPanelPlace();
+}
+// (v49.42) The popup sits in #ship-select-body now (see the markup), so it is placed from the nameplate's
+// rect: just under its bottom edge - exactly where `top:100%` inside the hero used to put it (the hero's
+// height moves with the media queries: 97 / 169 / 153 / 72 px measured). Re-placed on every open and on
+// resize while open; the horizontal centre is pure CSS.
+function _skinPanelPlace() {
+  const panel = document.getElementById('ship-preview-skin');
+  const hero = document.getElementById('ship-hero');
+  const ss = document.getElementById('ship-select');
+  if (!panel || !hero || !ss || !panel.classList.contains('open')) return;
+  const hr = hero.getBoundingClientRect(), sr = ss.getBoundingClientRect();
+  if (!(hr.width > 0 && hr.height > 0)) return;   // hero not laid out: keep the CSS fallback
+  panel.style.top = Math.round(hr.bottom - sr.top) + 'px';
+  // (v49.43) LEFT IS CSS ONLY (`left: 50%` of the full-screen #ship-select). #ship-hero spans the whole
+  // viewport at every size (measured 1920/900/800: centre = vw/2), so the centre needs no event. A
+  // JS-written left went stale on a live resize wherever the resize event did not arrive - it held the
+  // 1280 layout's x = 640 and squeezed the grid to 160 px against the right edge at 800 wide.
+  panel.style.left = '';
 }
 function _wireSkinToggle() {
   if (_skinToggleWired) return;
   const btn = document.getElementById('skin-toggle');
   if (!btn) return;
   _skinToggleWired = true;
+  try { window.addEventListener('resize', _skinPanelPlace); } catch (_) {}   // (v49.42)
   btn.addEventListener('click', (e) => {
     e.stopPropagation();
     const hero = document.getElementById('ship-hero');

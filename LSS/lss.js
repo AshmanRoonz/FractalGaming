@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "49.41";
+const LSS_BUILD = "49.43";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -77387,15 +77387,29 @@ let _skinToggleWired = false;
 function _setSkinPanelOpen(open) {
   const hero = document.getElementById('ship-hero');
   if (!hero) return;
-  hero.classList.toggle('skin-open', !!open);
+  hero.classList.toggle('skin-open', !!open);   // still drives the toggle button's own styling
+  const panel = document.getElementById('ship-preview-skin');
+  if (panel) panel.classList.toggle('open', !!open);   // (v49.42) the panel is no longer inside #ship-hero
   const btn = document.getElementById('skin-toggle');
   if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) _skinPanelPlace();
+}
+function _skinPanelPlace() {
+  const panel = document.getElementById('ship-preview-skin');
+  const hero = document.getElementById('ship-hero');
+  const ss = document.getElementById('ship-select');
+  if (!panel || !hero || !ss || !panel.classList.contains('open')) return;
+  const hr = hero.getBoundingClientRect(), sr = ss.getBoundingClientRect();
+  if (!(hr.width > 0 && hr.height > 0)) return;   // hero not laid out: keep the CSS fallback
+  panel.style.top = Math.round(hr.bottom - sr.top) + 'px';
+  panel.style.left = '';
 }
 function _wireSkinToggle() {
   if (_skinToggleWired) return;
   const btn = document.getElementById('skin-toggle');
   if (!btn) return;
   _skinToggleWired = true;
+  try { window.addEventListener('resize', _skinPanelPlace); } catch (_) {}   // (v49.42)
   btn.addEventListener('click', (e) => {
     e.stopPropagation();
     const hero = document.getElementById('ship-hero');
