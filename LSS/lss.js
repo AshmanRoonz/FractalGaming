@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "49.38";
+const LSS_BUILD = "49.41";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -20791,6 +20791,35 @@ function _swColCeil(x, z, wy, T, out) {
 }
 
 const _swTexWhite = (() => { const t = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1); t.needsUpdate = true; return t; })();
+const _SUNTOP = { on: 1, ok: false, tex: null, data: null, N: 0, sp: 0, x0: 0, z0: 0, src: null,
+                  sx: NaN, sy: NaN, sz: NaN, ms: 0, builds: 0, pct: 0, pars: null };
+try { window.__sunTop = _SUNTOP; } catch (_) {}
+const _SUNTOP_GLSL = `
+uniform sampler2D uSunTop; uniform vec4 uSunTopBox; uniform vec4 uSunTopK;
+vec2 _lssSunTopUV(vec3 wp) { return (wp.xz - uSunTopBox.xy) * uSunTopBox.zw; }
+float _lssSunTopOut(vec2 uv) { return step(uv.x, 0.0) + step(1.0, uv.x) + step(uv.y, 0.0) + step(1.0, uv.y); }
+float _lssSunVisT(vec3 wp) {
+  vec2 uv = _lssSunTopUV(wp);
+  if (_lssSunTopOut(uv) > 0.0) return 1.0;
+  float d = texture2D(uSunTop, uv).r;
+  return 1.0 - smoothstep(uSunTopK.y, uSunTopK.y + uSunTopK.z, d);
+}
+float _lssSunVisW(vec3 wp) {
+  vec2 uv = _lssSunTopUV(wp);
+  if (_lssSunTopOut(uv) > 0.0) return 1.0;
+  float d = texture2D(uSunTop, uv).g - wp.y;
+  return 1.0 - smoothstep(uSunTopK.y, uSunTopK.y + uSunTopK.z, d);
+}
+`;
+function _sunTopPars() {
+  if (_SUNTOP.pars) return _SUNTOP.pars;
+  const c = THREE.ShaderChunk.lights_pars_begin, a = 'light.color = directionalLight.color;';
+  if (c.indexOf(a) < 0) {
+    try { console.warn('[sunTop] lights_pars_begin is not the r165 text - the terrain sun shadow is inert'); } catch (_) {}
+    _SUNTOP.pars = '#include <lights_pars_begin>';
+  } else _SUNTOP.pars = c.replace(a, 'light.color = directionalLight.color * _lssSunVis;');
+  return _SUNTOP.pars;
+}
 const _swU = { uTime:{value:0}, uYMid:{value:0}, uAMP:{value:1}, uSnow:{value:0.7},
                uSnowVary:{value:0.16}, uSnowSlope:{value:0.11},
                uLava:{value:0}, uSnowRough:{value:0.22}, uLavaGlow:{value:1.0},
@@ -20812,6 +20841,7 @@ const _swU = { uTime:{value:0}, uYMid:{value:0}, uAMP:{value:1}, uSnow:{value:0.
                uTexMeanR:{value:new THREE.Vector3(1,1,1)}, uTexMeanGR:{value:new THREE.Vector3(1,1,1)},
                uTexK2:{value:new THREE.Vector4(0,0,0,64)}, uTexK3:{value:new THREE.Vector4(48,600,3000,0)},
                uSunDir:{value:new THREE.Vector3(0.29,0.86,0.43)},   // (v44.45) world sun, kept in step with _WX.sunDir
+               uSunTop:{value:null}, uSunTopBox:{value:new THREE.Vector4(0,0,0,0)}, uSunTopK:{value:new THREE.Vector4(0,2,36,0)},
                uBendFlat:{value:0},
                uWaterY:{value:-1e9}, uWaterOn:{value:0},
                uArch:{value:new THREE.Vector3(0,0,0)}, uArchRamp:{value:2600}, uArchSand:{value:new THREE.Color(0xdccb99)},
@@ -21078,6 +21108,8 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
     sh.uniforms.uSnowRough=_swU.uSnowRough; sh.uniforms.uLavaGlow=_swU.uLavaGlow;
     sh.uniforms.uVolc=_swU.uVolc; sh.uniforms.uVolcH=_swU.uVolcH; sh.uniforms.uVolcN=_swU.uVolcN;
     sh.uniforms.uGrassD=_swU.uGrassD;
+    sh.uniforms.uSunDir=_swU.uSunDir;
+    sh.uniforms.uSunTop=_swU.uSunTop; sh.uniforms.uSunTopBox=_swU.uSunTopBox; sh.uniforms.uSunTopK=_swU.uSunTopK;   // (v49.40)
     sh.uniforms.uTexGrass=_swU.uTexGrass; sh.uniforms.uTexMud=_swU.uTexMud; sh.uniforms.uTexSand=_swU.uTexSand;   // (v49.27)
     sh.uniforms.uTexMeanG=_swU.uTexMeanG; sh.uniforms.uTexMeanM=_swU.uTexMeanM; sh.uniforms.uTexMeanS=_swU.uTexMeanS;
     sh.uniforms.uTexK=_swU.uTexK; sh.uniforms.uTexFade=_swU.uTexFade; sh.uniforms.uTexChroma=_swU.uTexChroma; sh.uniforms.uTexTaps=_swU.uTexTaps; sh.uniforms.uBeachAll=_swU.uBeachAll;
@@ -21125,7 +21157,7 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
     } else {
       sh.vertexShader='attribute float aFlatY;\nuniform float uBendFlat;\nvarying float vWY; varying vec3 vWPos; varying vec3 vSN;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vWY=mix(position.y, aFlatY, uBendFlat); vWPos=position;\n vSN=vec3(0.0,1.0,0.0);');
     }
-    sh.fragmentShader='varying float vWY; varying vec3 vWPos; varying vec3 vSN;\nuniform float uTime,uYMid,uAMP,uSnow,uSnowVary,uSnowSlope,uLava,uSnowRough,uLavaGlow,uSlopeGrass,uSlopeRock,uCeil,uRocky,uGlitch,uGold,uCrystal,uMossy,uSmooth,uDetail,uAerial,uAerialStart,uAerialFar,uAO,uSat,uStrata,uRim,uPatchScale,uWaterY,uWaterOn,uRelief,uGrassD;\nuniform vec3 uColGrass,uColRock,uColSnow,uColMoss,uCam,uAerialColor,uPatchMix,uColDirt,uSunDir;\nuniform vec4 uVolc[4];\nuniform float uVolcH[4];\nuniform float uVolcN;\nuniform vec3 uArch,uArchSand; uniform float uArchRamp;\n'
+    sh.fragmentShader=_SUNTOP_GLSL+'float _lssSunVis=1.0;\nvarying float vWY; varying vec3 vWPos; varying vec3 vSN;\nuniform float uTime,uYMid,uAMP,uSnow,uSnowVary,uSnowSlope,uLava,uSnowRough,uLavaGlow,uSlopeGrass,uSlopeRock,uCeil,uRocky,uGlitch,uGold,uCrystal,uMossy,uSmooth,uDetail,uAerial,uAerialStart,uAerialFar,uAO,uSat,uStrata,uRim,uPatchScale,uWaterY,uWaterOn,uRelief,uGrassD;\nuniform vec3 uColGrass,uColRock,uColSnow,uColMoss,uCam,uAerialColor,uPatchMix,uColDirt,uSunDir;\nuniform vec4 uVolc[4];\nuniform float uVolcH[4];\nuniform float uVolcN;\nuniform vec3 uArch,uArchSand; uniform float uArchRamp;\n'
       +'uniform sampler2D uTexGrass,uTexMud,uTexSand; uniform vec3 uTexMeanG,uTexMeanM,uTexMeanS; uniform vec4 uTexK; uniform vec2 uTexFade; uniform float uTexChroma,uTexTaps,uBeachAll;\n'
       +'uniform sampler2D uTexRock,uTexGRock; uniform vec3 uTexMeanR,uTexMeanGR; uniform vec4 uTexK2,uTexK3;\n'
       +'vec3 _tTri(sampler2D t, vec3 mn, vec3 wp, vec3 n, vec3 gx, vec3 gy, float tile, float k){ if(k<0.001) return vec3(1.0); vec3 w=pow(abs(n),vec3(4.0)); w/=max(w.x+w.y+w.z,1e-4); float s=1.0/tile; vec3 c=vec3(0.0); float ws=0.0; if(w.x>0.03){ c+=w.x*textureGrad(t,wp.zy*s+vec2(0.31,0.17),gx.zy*s,gy.zy*s).rgb; ws+=w.x; } if(w.y>0.03){ c+=w.y*textureGrad(t,wp.xz*s,gx.xz*s,gy.xz*s).rgb; ws+=w.y; } if(w.z>0.03){ c+=w.z*textureGrad(t,wp.xy*s+vec2(0.59,0.43),gx.xy*s,gy.xy*s).rgb; ws+=w.z; } c/=max(ws,1e-4); vec3 W=vec3(0.2126,0.7152,0.0722); float lr=dot(c,W)/max(dot(mn,W),1e-3); vec3 r=c/max(mn,vec3(1e-3)); return mix(vec3(1.0),mix(vec3(lr),r,uTexChroma),k); }\n'
@@ -21135,7 +21167,8 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
       +'float _tpatch(vec2 p){float n=_tvn(p*0.0016+vec2(5.1,-2.3))*0.62+_tvn(p*0.0041+vec2(11.0,7.0))*0.38;return clamp((n+1.0)*0.5,0.0,1.0);}\n'
       +'float _detN(vec2 p){return _tvn(p*0.035)*0.55+_tvn(p*0.09+vec2(11.0,5.0))*0.30+_tvn(p*0.22+vec2(3.0,9.0))*0.15;}float _snowWander(vec2 p){return _tvn(p*0.00085)*0.62+_tvn(p*0.0031+vec2(19.0,7.0))*0.26+_tvn(p*0.0092+vec2(4.0,13.0))*0.12;}\n'
       +sh.fragmentShader;
-    sh.fragmentShader=sh.fragmentShader.replace('void main() {', 'void main() {\n float _swSW=_snowWander(vWPos.xz);');
+    sh.fragmentShader=sh.fragmentShader.replace('void main() {', 'void main() {\n float _swSW=_snowWander(vWPos.xz);\n _lssSunVis=(uSunTopK.x>0.5&&uCeil<0.5)?_lssSunVisT(vWPos):1.0;');
+    sh.fragmentShader=sh.fragmentShader.replace('#include <lights_pars_begin>', _sunTopPars());
     sh.fragmentShader=sh.fragmentShader.replace('#include <color_fragment>',
       '#include <color_fragment>\n if(uCeil<0.5){\n vec3 fn = uSmooth>0.5 ? normalize(vSN) : normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n float fl=clamp((abs(fn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0);\n float pc=_tpatch(vWPos.xz);\n float _mD=length(uCam.xz-vWPos.xz);\n vec3 _tgx3=dFdx(vWPos),_tgy3=dFdy(vWPos); vec2 _tgx=_tgx3.xz,_tgy=_tgy3.xz;\n float _tF2=(1.0-smoothstep(uTexK3.y,uTexK3.z,_mD))*step(0.5,uMossy);\n float _tF=(1.0-smoothstep(uTexFade.x,uTexFade.y,_mD))*step(0.5,uMossy);\n float _tMix=smoothstep(0.30,0.70,0.5+0.5*_tvn(vWPos.xz*0.0021+vec2(3.3,7.7)));\n float _tkG=clamp(uTexK.x*_tF,0.0,1.0);\n float _mW=(1.0-smoothstep(240.0,950.0,_mD))*uGrassD*(1.0-0.6*_tkG);\n float _mN=0.0;\n if(_mW>0.001){ float _ma=_tvn(vWPos.xz*0.009)*3.1416; vec2 _md=vec2(cos(_ma),sin(_ma)); vec2 _mp=vec2(dot(vWPos.xz,_md),dot(vWPos.xz,vec2(-_md.y,_md.x))); _mN=_tvn(vec2(_mp.x*0.055,_mp.y*0.165))*0.46+_tvn(vec2(_mp.x*0.145,_mp.y*0.430)+vec2(11.0,4.0))*0.34+_tvn(vec2(_mp.x*0.360,_mp.y*1.050)+vec2(3.0,19.0))*0.20; _mN*=0.45+0.95*clamp(0.5+0.5*_tvn(vWPos.xz*0.018+vec2(27.0,6.0)),0.0,1.0); }\n vec3 grass=mix(uColMoss,uColGrass,smoothstep(0.32,0.72,pc));\n float moss1=_tvn(vWPos.xz*0.07);\n float moss2=_tvn(vWPos.xz*0.19+vec2(7.0,3.0));\n float mott=clamp(0.5+0.5*(moss1*0.62+moss2*0.38),0.0,1.0);\n grass*=(0.78+0.34*mott);\n grass*=_tDet(uTexGrass,uTexMeanG,vWPos.xz,_tgx,_tgy,_tMix,_tkG);\n grass=mix(grass,uColMoss*(0.7+0.4*mott),(1.0-smoothstep(0.28,0.62,pc))*0.6);\n float rkA=_tvn(vWPos.xz*0.045+vec2(vWPos.y*0.03));\n float rkB=_tvn(vWPos.xz*0.12+vec2(13.0,7.0));\n float rkC=_tvn(vWPos.xz*0.30+vec2(vWPos.y*0.05,0.0));\n float rockMott=clamp(0.5+0.5*(rkA*0.55+rkB*0.3+rkC*0.15),0.0,1.0);\n float strata=0.5+0.5*sin(vWPos.y*0.05+_tvn(vWPos.xz*0.025)*3.0);\n float _tkR=clamp(uTexK2.x*_tF2,0.0,1.0)*step(0.001,1.0-fl);\n vec3 rock=uColRock*(0.70+0.55*mix(rockMott,0.5,_tkR*0.85))*(1.0-uStrata*0.57+uStrata*strata);\n rock*=_tTri(uTexRock,uTexMeanR,vWPos,fn,_tgx3,_tgy3,uTexK2.w,_tkR);\n float _tkGR=clamp(uTexK2.y*_tF2,0.0,1.0)*step(0.001,1.0-fl);\n vec3 _grCol=mix(uColMoss,uColRock,0.40)*1.30*_tTri(uTexGRock,uTexMeanGR,vWPos,fn,_tgx3,_tgy3,uTexK3.x,step(0.001,_tkGR));\n if(uMossy>0.5){ vec2 _mq=mix(vWPos.xz,vec2(vWPos.x+vWPos.z,vWPos.y*1.6),(1.0-abs(fn.y))*step(0.001,_tkGR)); float mc=_tvn(_mq*0.022+vec2(vWPos.y*0.015,0.0))*0.55+_tvn(_mq*0.06+vec2(9.0,4.0))*0.45; float mossSide=smoothstep(0.5,0.82,0.5+0.5*mc)*(1.0-fl); rock=mix(rock,mix(uColMoss*(0.62+0.5*mott),_grCol,_tkGR),mossSide*0.72); }\n rock=mix(rock,_grCol,clamp(fl*(1.0-fl)*4.0*uTexK2.z,0.0,1.0)*_tkGR);\n vec3 terr=mix(rock,grass,fl);\n if(uMossy>0.5 && uSat>0.001){ float _gl=dot(grass,vec3(0.299,0.587,0.114)); vec3 _gd=mix(grass,vec3(_gl),uSat*0.85); float _dry=_tpatch(vWPos.xz*1.7+vec2(31.0,12.0)); float _dirt=clamp(0.5+0.5*_tvn(vWPos.xz*0.011+vec2(4.0,8.0)),0.0,1.0); _gd=mix(_gd,_gd*mix(vec3(1.0),vec3(0.46,0.42,0.20)*2.2,smoothstep(0.62,0.86,_dry)),uSat*0.55); _gd=mix(_gd,_gd*mix(vec3(1.0),vec3(0.27,0.20,0.12)*2.6,1.0-smoothstep(0.18,0.42,_dirt)),uSat*0.45); grass=mix(grass,_gd,clamp(uSat*1.4,0.0,1.0)); terr=mix(rock,grass,fl); }\n'
       +' if(uMossy>0.5){\n float _sA=_tvn(vWPos.xz*0.0030*uPatchScale+vec2(21.0,9.0));\n float _sB=_tvn(vWPos.xz*0.0105*uPatchScale+vec2(3.0,17.0));\n float _sC=_tvn(vWPos.xz*0.0330*uPatchScale+vec2(9.0,2.0));\n float _sN=_sA*0.55+_sB*0.32+_sC*0.13;\n float _rN=_tvn(vWPos.xz*0.0062*uPatchScale+vec2(41.0,-13.0))*0.62+_tvn(vWPos.xz*0.0210*uPatchScale+vec2(7.0,29.0))*0.38;\n float _spk=clamp(0.5+0.5*_tvn(vWPos.xz*1.15),0.0,1.0);\n float _grit=clamp(0.5+0.5*_tvn(vWPos.xz*0.42+vec2(5.0,23.0)),0.0,1.0);\n float _mE=_mN*0.085*_mW;\n float _tkM=clamp(uTexK.y*_tF,0.0,1.0);\n float _dirtM=smoothstep(0.16-0.10*_tkM,0.46,_sN+_mE)*uPatchMix.x;\n float _ovgM=smoothstep(0.14,0.44,-_sN+_mE)*uPatchMix.z;\n float _rubM=smoothstep(0.20,0.52,_rN+_mE)*uPatchMix.y*(0.45+0.55*(1.0-fl));\n vec3 _dirtC=uColDirt*(1.55+1.45*_grit);\n if(_tkM>0.001) _dirtC=mix(_dirtC,uColDirt*2.275*_tDet(uTexMud,uTexMeanM,vWPos.xz,_tgx,_tgy,_tMix,1.0),_tkM);\n vec3 _rubC=uColRock*(0.70+1.05*_spk);\n vec3 _ovgC=mix(uColMoss,uColGrass,0.30)*(0.46+0.32*mott);\n grass=mix(grass,_ovgC,clamp(_ovgM,0.0,0.80));\n grass=mix(grass,_dirtC,clamp(_dirtM,0.0,0.90));\n grass=mix(grass,_rubC,clamp(_rubM,0.0,0.78));\n terr=mix(rock,grass,fl);\n }\n'
@@ -22444,7 +22477,8 @@ function _hzDuskLights() {
   }
   const B = D._base;
   ambientLight.intensity = B.amb  * mul(D.amb);
-  dirLight.intensity     = B.key  * mul(D.key);
+  const _tsK = (typeof _WX !== 'undefined' && _WX.on) ? (1 + (_wxTrueSun().sun - 1) * (1 - cw)) : 1;
+  dirLight.intensity     = B.key  * mul(D.key) * _tsK;
   dirLight2.intensity    = B.fill * mul(D.fill);
   dirLight3.intensity    = B.rim  * mul(D.rim);
   hemiLight.intensity    = B.hemi * mul(D.hemi);
@@ -23118,6 +23152,7 @@ function _swWaterReflectShader() {
         uSnellTint: { value: new THREE.Color(0x9fd0e6) }, uDeepTint: { value: new THREE.Color(0x0a3a44) }, uSubmerge: { value: 0 }, uEye: { value: new THREE.Vector3() }, uUnderMirror: { value: 1.0 }, uUnderDeep: { value: 0.35 }, uUnderThru: { value: 0.0 }, uAboveTex: { value: null }, uAboveWorld: { value: new THREE.Matrix4() }, uAboveOn: { value: 0.0 }, uAboveMix: { value: 0.8 }, uReflLive: { value: 1 }, uFlipFace: { value: 0 },   
         uShallowTint: { value: new THREE.Color(0x2e7a6a) }, uShoreSoft: { value: 0.05 }, uFoamThresh: { value: 0.18 },
         uReflWorld: { value: new THREE.Matrix4() }, uReflWorldOn: { value: 0 },
+        uSunDir: { value: new THREE.Vector3(0.29, 0.86, 0.43) },   // (v49.39) replaced by _swU.uSunDir at build
         uWHorizStr: { value: 0.75 }, uWHorizA: { value: 12000.0 }, uWHorizB: { value: 30000.0 } },
     ]),
     vertexShader: [
@@ -23141,7 +23176,9 @@ function _swWaterReflectShader() {
       'uniform sampler2D uRippleTex;', 'uniform vec2 uRippleCenter;', 'uniform float uRippleBounds;', 'uniform float uRippleScale;',
       'uniform sampler2D uMaskTex; uniform float uFoamGain; uniform float uFoamLit; uniform float uReliefScale; uniform float uReliefShade;',   
       'uniform vec3 uSnellTint; uniform vec3 uDeepTint; uniform float uSubmerge; uniform vec3 uEye; uniform float uUnderMirror; uniform float uUnderDeep; uniform float uUnderThru; uniform sampler2D uAboveTex; uniform float uAboveOn; uniform float uAboveMix; uniform float uReflLive; uniform float uFlipFace;',   
-      'uniform vec3 uShallowTint; uniform float uShoreSoft; uniform float uFoamThresh;',   
+      'uniform vec3 uShallowTint; uniform float uShoreSoft; uniform float uFoamThresh;',
+      'uniform vec3 uSunDir;',   // (v49.39) the real sun (was the literal (0.29, 0.86, 0.43) twice below)
+      _SUNTOP_GLSL,   // (v49.40) the baked mountain shadow   
       'varying vec4 vUv;', 'varying vec3 vWP;', 'varying vec4 vUvAbove;', '#include <fog_pars_fragment>',
       'void main(){',
       '  float t = uTime; vec2 q = vWP.xz;',
@@ -23205,14 +23242,15 @@ function _swWaterReflectShader() {
       '  fres = clamp(_fresFloor + (1.0 - _fresFloor)*fres, 0.0, 1.0);',
       '  vec3 baseTint = mix(uShallowTint, color, smoothstep(0.0, 0.32, shoreDepth));',
       '  vec3 outc = mix(baseTint, refl, fres);',
-      '  float relief = dot(pgrad, normalize(vec3(0.29,0.86,0.43)).xz) * uReliefScale;',   
+      '  float relief = dot(pgrad, normalize(uSunDir).xz) * uReliefScale;',   
       '  outc *= clamp(1.0 + clamp(relief, -1.0, 1.0) * uReliefShade, 0.8, 1.5);',   
       
       
       
-      '  vec3 sunDir = normalize(vec3(0.29, 0.86, 0.43));',
+      '  vec3 sunDir = normalize(uSunDir);',
       '  vec3 H = normalize(sunDir - V);',
-      '  float spec = pow(max(dot(N, H), 0.0), 200.0) * 0.6 * amb;',
+      '  float _wSV = (uSunTopK.x > 0.5) ? _lssSunVisW(vWP) : 1.0;',   // (v49.40) no glint in a mountain's shadow
+      '  float spec = pow(max(dot(N, H), 0.0), 200.0) * 0.6 * amb * _wSV;',
       '  outc += vec3(1.0, 0.98, 0.92) * spec;',
       '  float caustic = 0.66 + 0.13 * (sin(q.x*0.045 + q.y*0.022 + t*1.5) + sin(q.y*0.041 - q.x*0.028 - t*1.05) + sin((q.x + q.y)*0.030 + t*0.8));',
       
@@ -28304,6 +28342,8 @@ function _swBuildHubWaterDispGet(WL) {
       '}',
     ].join('\n'),
     fragmentShader: [
+      'uniform vec3 uSunDir;',   // (v49.39) the real sun - the diffuse, specular and all three foam-light terms below read it
+      _SUNTOP_GLSL,   // (v49.40) the baked mountain shadow (G = the shadow-top height, compared with this surface)
       'uniform vec3 uCam; uniform vec3 color; uniform float uTime; uniform float uSprayBreak; uniform float uMist; uniform float uPeakLo; uniform float uSprayFreq; uniform float uFoamSlope; uniform float uSteepFoam;',
       'uniform float uPeakHi; uniform float uCapLo; uniform float uCapHi; uniform float uCapStr; uniform float uCapSteep; uniform float uCapFreq; uniform float uCapBright;',
       'uniform float uCapFoamLo; uniform float uCapFoamHi; uniform float uFoamMatte;',   // (v41.53/41.54)
@@ -28384,10 +28424,11 @@ function _swBuildHubWaterDispGet(WL) {
       '  float _fmM = smoothstep(uMatteLo, max(uMatteHi, uMatteLo + 0.01), vFoam) * _fAll;',
       '  float _fm = smoothstep(uCapFoamLo, max(uCapFoamHi, uCapFoamLo + 0.01), vFoam) * _fAll;',
       '  fres *= 1.0 - uFoamMatte * _fmM;',            
-      '  vec3 sunDir = normalize(vec3(0.29,0.86,0.43));',
-      '  float diff = 0.4 + 0.6*max(dot(N,sunDir),0.0);',                             
+      '  vec3 sunDir = normalize(uSunDir);',
+      '  float _wSV = (uSunTopK.x > 0.5) ? _lssSunVisW(vWP) : 1.0;',   // (v49.40) in a mountain's shadow: no sun term, no glint
+      '  float diff = 0.4 + 0.6*max(dot(N,sunDir),0.0)*_wSV;',                             
       '  vec3 H = normalize(sunDir + V);',
-      '  float spec = pow(max(dot(N,H),0.0), 200.0);',                                
+      '  float spec = pow(max(dot(N,H),0.0), 200.0) * _wSV;',                                
       '  vec3 base = color * diff;',
       '  base = mix(base, uFoamAlbCol * (0.62 + 0.55 * diff), _fmM * uFoamAlb);',
       '  vec2 fUv = (vWP.xz - uFarCenter) / uFarBounds + 0.5;',
@@ -28598,6 +28639,8 @@ function _swBuildHubWaterDispGet(WL) {
   };
   mesh.onAfterRender = function () { try { const u = mesh.material.uniforms; if (u && u.uRefract) u.uRefract.value = 0.0; } catch (_) {} };
   _hubWaterDisp = mesh;
+  try { mat.uniforms.uSunDir = _swU.uSunDir; } catch (_) {}   // (v49.39) one sun (see the Reflector)
+  try { mat.uniforms.uSunTop = _swU.uSunTop; mat.uniforms.uSunTopBox = _swU.uSunTopBox; mat.uniforms.uSunTopK = _swU.uSunTopK; } catch (_) {}   // (v49.40)
   try { game._hubWaterDispMat = mat; } catch (_) {}
   try {
     if (!game._swFoamTex && THREE.TextureLoader) {
@@ -28638,7 +28681,9 @@ function _swBuildHubWater(T) {
     mesh = new THREE.Reflector(geo, { textureWidth: rw, textureHeight: rh, color: 0x16465c, clipBias: 0.0028, shader: _swWaterReflectShader() });
     try { if (mesh.camera && mesh.camera.layers) mesh.camera.layers.enable(5); } catch (_) {}
     mesh.material.uniforms.uTime = _swU.uTime;   
-    mesh.material.uniforms.uCam = _swU.uCam;      
+    mesh.material.uniforms.uCam = _swU.uCam;
+    mesh.material.uniforms.uSunDir = _swU.uSunDir;   // (v49.39) one sun: _wxFrame writes it from _WX.sunDir
+    mesh.material.uniforms.uSunTop = _swU.uSunTop; mesh.material.uniforms.uSunTopBox = _swU.uSunTopBox; mesh.material.uniforms.uSunTopK = _swU.uSunTopK;   // (v49.40)      
     mesh.material.transparent = true;
     mesh.material.depthWrite = false;
     mesh.material.fog = true;
@@ -36678,6 +36723,8 @@ const _wxBowDir = new THREE.Vector3();
 const _WX = {
   on: false, group: null, dome: null, sunDisc: null, sunHalo: null,
   clouds: null, bow: null, shadowsOn: false,
+  sunElev: 25, sunAzim: 56.31, _aimD: null,
+  iblDay: 0.45, sunMul: 1.6, envLobe: 0, _envLobe: null,
   terrProxy: null, proxyAt: { x: 1e9, z: 1e9 }, dayEnv: null, savedEnv: undefined,
   sunDir: null,
 };
@@ -37040,6 +37087,7 @@ function _wxMakeClouds() {
 
       uFogC: { value: new THREE.Color(0x9fc8e8) }, uFogD: { value: 0.00011 },
       uSunC: { value: new THREE.Color(1.0, 0.94, 0.82) },
+      uSunDir: _swU.uSunDir, uCloudLit: { value: new THREE.Vector4(0.72, 0.80, 0.35, 0.0) },
     },
     vertexShader: `
       attribute vec2 aPrm;
@@ -37078,7 +37126,8 @@ function _wxMakeClouds() {
         gl_Position = projectionMatrix * mv;
       }`,
     fragmentShader: `
-      uniform vec3 uFogC, uSunC;
+      uniform vec3 uFogC, uSunC, uSunDir;
+      uniform vec4 uCloudLit;
       uniform float uFogD;
       varying vec2 vUv; varying float vRnd; varying float vDist; varying float vEdge;
       varying vec3 vRight; varying vec3 vUp;
@@ -37103,6 +37152,16 @@ function _wxMakeClouds() {
         a *= smoothstep(1.0, 0.66, abs(p.x)) * smoothstep(1.0, 0.66, abs(p.y));
         float fogK = 1.0 - exp(-vDist * uFogD);
         vec3 col = mix(vec3(0.98), uSunC, 0.20 + 0.35 * n);
+        // (v49.39) LIT BY THE SUN. dir is this pixel's point on the puff dome in WORLD space, which
+        // is its surface normal: the side facing the sun stays bright, the far side and the belly go
+        // grey, and a thin edge glows when the sun sits behind the cloud (the silver lining).
+        vec3 sL = normalize(uSunDir);
+        float sUp = smoothstep(-0.10, 0.12, sL.y);
+        float cLit = mix(uCloudLit.x, 1.0, smoothstep(-0.55, 0.75, dot(dir, sL)));
+        float cBel = mix(uCloudLit.y, 1.0, smoothstep(-0.65, 0.35, dir.y));
+        col *= mix(1.0, cLit * cBel, sUp);
+        float cFwd = pow(max(0.0, dot(-vwF, sL)), 6.0);
+        col += uSunC * (cFwd * (1.0 - smoothstep(0.15, 0.55, a)) * uCloudLit.z * sUp);
         col = mix(col, uFogC, fogK);
         a *= 0.52 * (1.0 - fogK * 0.85);
         a *= 1.0 - smoothstep(0.74, 0.96, vEdge);
@@ -37202,6 +37261,8 @@ function _wxUpdateTerrProxy() {
   const N = (mesh.userData && mesh.userData.proxyN) || _WX_PROXY_N, R = N + 1;   // (v44.44) the mesh's own grid
   const cell = (2 * _WX_SHADOW_EXT) / N;
   const sx = Math.round(p.x / cell) * cell, sz = Math.round(p.z / cell) * cell;
+  const _hbH = (_HB.ready && _HB.on && _HB.mean && _HB.mean[0]) ? _HB.mean[0] : null;
+  if (mesh.userData.hbSrc !== _hbH) { mesh.userData.hbSrc = _hbH; _WX.proxyAt.x = 1e9; _WX.proxyAt.z = 1e9; }
   if (sx === _WX.proxyAt.x && sz === _WX.proxyAt.z) return;
   const T = game.sandwichTerrain;
   if (!T || !T.ON || typeof _stGroundYCarved !== 'function') return;
@@ -37209,8 +37270,8 @@ function _wxUpdateTerrProxy() {
   const a = pos.array;
   const sample = (i) => {
     const wx = sx + a[i * 3], wz = sz + a[i * 3 + 2];
-    let h = -800;
-    try { h = _stGroundYCarved(wx, wz, T); } catch (_) {}
+    let h = _hbH ? _hbMinAround(wx, wz, cell) : null;   // (v49.40) the lower envelope, see above
+    if (h == null) { h = -800; try { h = _stGroundYCarved(wx, wz, T); } catch (_) {} }
     a[i * 3 + 1] = h - 6;
   };
   const shX = Math.round((sx - _WX.proxyAt.x) / cell), shZ = Math.round((sz - _WX.proxyAt.z) / cell);
@@ -37254,7 +37315,7 @@ function _wxMakeDayEnv() {
           g = 0.83 + (0.42 - 0.83) * t;
           b = 0.92 + (0.80 - 0.92) * t;
           const s = Math.max(0, dxx * sd.x + dy * sd.y + dzz * sd.z);
-          const sun = Math.pow(s, 24) * 6.0 + Math.pow(s, 6) * 0.35;
+          const sun = (Math.pow(s, 24) * 6.0 + Math.pow(s, 6) * 0.35) * _wxTrueSun().lobe;
           r += sun * 1.0; g += sun * 0.9; b += sun * 0.68;
         } else {
           const t = Math.min(1, -dy * 2.2);
@@ -37331,6 +37392,26 @@ window.__shadowProxyN = function (v) {
   if (typeof v === 'number' && v >= 32) { window.__shadowProxyNV = v | 0; try { _wxShadowsOn(); } catch (_) {} }
   return _wxProxyN();
 };
+function _wxTrueSun() {
+  const W = (typeof window !== 'undefined' && window.__trueSun) ? window.__trueSun : null;
+  return {
+    ibl:  (W && W.ibl  != null) ? +W.ibl  : _WX.iblDay,
+    sun:  (W && W.sun  != null) ? +W.sun  : _WX.sunMul,
+    lobe: (W && W.lobe != null) ? +W.lobe : _WX.envLobe,
+  };
+}
+function _wxDuskW() {
+  try { return (typeof _HUB_ZONES !== 'undefined' && _HUB_ZONES.DUSK) ? (_HUB_ZONES.DUSK._cw || 0) : 0; } catch (_) { return 0; }
+}
+function _wxRebakeDayEnv() {
+  try {
+    if (!_WX.on || !_WX.dayEnv || scene.environment !== _WX.dayEnv) return;
+    const env = _wxMakeDayEnv(); if (!env) return;
+    _WX._envLobe = _wxTrueSun().lobe;
+    const old = _WX.dayEnv; scene.environment = env; _WX.dayEnv = env;
+    try { old.dispose(); } catch (_) {}
+  } catch (_) {}
+}
 window.__sunAngle = function (elev, azim) {
   try {
     const d = _WX.sunDir;
@@ -37343,6 +37424,7 @@ window.__sunAngle = function (elev, azim) {
       d.set(Math.cos(e) * Math.cos(a), Math.sin(e), Math.cos(e) * Math.sin(a)).normalize();
       try { if (_WX.dome && _WX.dome.material.uniforms.uSunDir) _WX.dome.material.uniforms.uSunDir.value.copy(d); } catch (_) {}
       _WX.snapR = null; _WX.snapU = null;
+      _wxRebakeDayEnv();   // (v49.39) the sun lobe in the reflection env follows
       return { elev: Math.max(2, Math.min(89, elev)), azim: (typeof azim === 'number') ? azim : curAzim };
     }
     return { elev: +curElev.toFixed(1), azim: +curAzim.toFixed(1) };
@@ -37361,7 +37443,11 @@ function _wxShadowsOff() {
 function _wxInit(T) {
   if (_WX.on) _wxDispose();
   if (typeof THREE === 'undefined' || !scene || !camera) return;
-  _WX.sunDir = new THREE.Vector3(1000, 3000, 1500).normalize();
+  {
+    const _e = _WX.sunElev * Math.PI / 180, _a = _WX.sunAzim * Math.PI / 180;
+    _WX.sunDir = new THREE.Vector3(Math.cos(_e) * Math.cos(_a), Math.sin(_e), Math.cos(_e) * Math.sin(_a)).normalize();
+    _WX.snapR = null; _WX.snapU = null;
+  }
   const group = new THREE.Group();
   group.name = 'hubWeather';
   _WX.dome = _wxMakeDome(); group.add(_WX.dome);
@@ -37378,6 +37464,7 @@ function _wxInit(T) {
     _WX.savedEnv = scene.environment;
     const env = _wxMakeDayEnv();
     if (env) { scene.environment = env; _WX.dayEnv = env; }
+    _WX._envLobe = _wxTrueSun().lobe;   // (v49.41) what the live env was baked with
   } catch (_) {}
   _WX.shadowsOn = _wxShadowsOn();
   _WX.on = true;
@@ -37392,6 +37479,12 @@ function _wxDispose() {
   _WX.on = false;
   game.hubWeather = false;
   if (_WX.shadowsOn) _wxShadowsOff();
+  try {
+    if (_WX._aimD) { dirLight.position.set(1000, 3000, 1500); dirLight.target.position.set(0, 0, 0); _WX._aimD = null; }
+    if (_swU && _swU.uSunDir) _swU.uSunDir.value.set(1000, 3000, 1500).normalize();
+    if (_swU && _swU.uSunTopK) _swU.uSunTopK.value.x = 0;   // (v49.40) the hub's shadow table is off everywhere else
+    if (scene && scene.environmentIntensity !== 1) scene.environmentIntensity = 1;   // (v49.41) the true sun is hub-only
+  } catch (_) {}
   try {
     if (_WX.dayEnv) {
       if (scene.environment === _WX.dayEnv) scene.environment = (_WX.savedEnv !== undefined ? _WX.savedEnv : null);
@@ -37444,6 +37537,17 @@ function _wxFrame(dt) {
   }
   const cu = _WX.clouds.material.uniforms;
   cu.uCam.value.copy(camP);
+  try { _sunTopEnsure(); } catch (_) {}   // (v49.40) the baked mountain shadow follows the sun
+  try {   // (v49.41) the true sun: the sky map is a FILL now
+    const TS = _wxTrueSun(), dw = _wxDuskW();
+    const ei = TS.ibl + (1 - TS.ibl) * dw;
+    if (scene.environmentIntensity !== ei) scene.environmentIntensity = ei;
+    if (_WX._envLobe !== TS.lobe) _wxRebakeDayEnv();
+  } catch (_) {}
+  if (cu.uCloudLit && typeof window !== 'undefined' && window.__cloudLit) {
+    const CL = window.__cloudLit;
+    cu.uCloudLit.value.set(CL.shade != null ? +CL.shade : 0.72, CL.belly != null ? +CL.belly : 0.80, CL.silver != null ? +CL.silver : 0.35, 0);
+  }
   if (cu.uSpread) cu.uSpread.value = 1;
   if (cu.uLift)   cu.uLift.value   = Math.max(1, Math.min(2.3, 1 + (_wxK - 1) * 0.18));
   if (scene.fog && scene.fog.color) {
@@ -37468,6 +37572,13 @@ function _wxFrame(dt) {
     dirLight.position.set(tx + sd.x * 9000, ty + sd.y * 9000, tz + sd.z * 9000);
     dirLight.target.position.set(tx, ty, tz);
     dirLight.target.updateMatrixWorld();
+  } else if (typeof dirLight !== 'undefined' && dirLight) {
+    if (!_WX._aimD || _WX._aimD.x !== sd.x || _WX._aimD.y !== sd.y || _WX._aimD.z !== sd.z) {
+      dirLight.position.set(sd.x * 3500, sd.y * 3500, sd.z * 3500);
+      dirLight.target.position.set(0, 0, 0);
+      dirLight.target.updateMatrixWorld();
+      (_WX._aimD || (_WX._aimD = new THREE.Vector3())).copy(sd);
+    }
   }
 }
 
@@ -37795,6 +37906,93 @@ const _HB = { on: 1, sp: 32, N: 3328, w: 0.7, minLevel: 0, bandFloor: 0, shareMi
               far: null, failed: false, building: false, cached: false, hash: '', workers: 0, evals: 0,
               promise: null, onProg: null, spWanted: 32 };
 try { window.__hbake = _HB; } catch (_) {}
+const _SUNTOP_F = new Float32Array(1), _SUNTOP_I = new Uint32Array(_SUNTOP_F.buffer);
+function _sunTopHalf(v) {
+  _SUNTOP_F[0] = v; const x = _SUNTOP_I[0];
+  const s = (x >>> 16) & 0x8000; let e = ((x >>> 23) & 0xff) - 112, m = x & 0x7fffff;
+  if (e <= 0) return s;
+  m += 0x1000; if (m & 0x800000) { m = 0; e++; }
+  if (e >= 31) return s | 0x7bff;
+  return s | (e << 10) | (m >>> 13);
+}
+function _sunTopBuild(H, sd) {
+  const t0 = performance.now();
+  const N = _HB.dim[0], sp = _HB.sp, K = 0.125, NN = N * N;
+  _SUNTOP.src = H; _SUNTOP.sx = sd.x; _SUNTOP.sy = sd.y; _SUNTOP.sz = sd.z;   // one attempt per state, even a failed one
+  const hl = Math.hypot(sd.x, sd.z);
+  if (!(sd.y > 0.035) || !(hl > 1e-4)) { _SUNTOP.ok = false; return false; }   // below ~2 deg (night) or straight overhead
+  const ux = sd.x / hl, uz = sd.z / hl, tanE = sd.y / hl;
+  let out = _SUNTOP.data;
+  if (!out || out.length !== NN * 2) out = new Uint16Array(NN * 2);
+  const f16 = (typeof Float16Array === 'function') ? new Float16Array(out.buffer) : null;
+  let prev = new Float32Array(N), cur = new Float32Array(N);
+  const alongX = Math.abs(ux) >= Math.abs(uz);
+  const s = alongX ? (ux > 0 ? 1 : -1) : (uz > 0 ? 1 : -1);
+  const r = alongX ? uz / Math.abs(ux) : ux / Math.abs(uz);
+  const drop = (sp / (alongX ? Math.abs(ux) : Math.abs(uz))) * tanE;
+  let shad = 0;
+  for (let L = (s > 0 ? N - 1 : 0), first = true; L >= 0 && L < N; L -= s, first = false) {
+    for (let m = 0; m < N; m++) {
+      const q = alongX ? (m * N + L) : (L * N + m);
+      const h = H[q] * K;
+      let u = h;
+      if (!first) {
+        const mf = m + r, m0 = Math.floor(mf), f = mf - m0;
+        let up;
+        if (m0 >= 0 && m0 + 1 < N) up = prev[m0] + (prev[m0 + 1] - prev[m0]) * f;
+        else if (m0 >= 0 && m0 < N) up = prev[m0];
+        else if (m0 + 1 >= 0 && m0 + 1 < N) up = prev[m0 + 1];
+        else up = -1e9;
+        up -= drop;
+        if (up > u) u = up;
+      }
+      cur[m] = u;
+      const S = u - h;
+      if (S > 4) shad++;
+      if (f16) { f16[q * 2] = S; f16[q * 2 + 1] = u; }
+      else { out[q * 2] = _sunTopHalf(S); out[q * 2 + 1] = _sunTopHalf(u); }
+    }
+    const t = prev; prev = cur; cur = t;
+  }
+  let tex = _SUNTOP.tex;
+  if (!tex || _SUNTOP.N !== N) {
+    try { if (tex) tex.dispose(); } catch (_) {}
+    tex = new THREE.DataTexture(out, N, N, THREE.RGFormat, THREE.HalfFloatType);
+    tex.minFilter = THREE.LinearFilter; tex.magFilter = THREE.LinearFilter;
+    tex.wrapS = THREE.ClampToEdgeWrapping; tex.wrapT = THREE.ClampToEdgeWrapping;
+    tex.generateMipmaps = false; tex.flipY = false;
+  } else tex.image.data = out;
+  tex.needsUpdate = true;
+  _SUNTOP.tex = tex; _SUNTOP.data = out; _SUNTOP.N = N; _SUNTOP.sp = sp; _SUNTOP.x0 = _HB.x0; _SUNTOP.z0 = _HB.z0;
+  _swU.uSunTop.value = tex;
+  _swU.uSunTopBox.value.set(_HB.x0 - sp * 0.5, _HB.z0 - sp * 0.5, 1 / (N * sp), 1 / (N * sp));
+  _SUNTOP.ok = true; _SUNTOP.ms = Math.round(performance.now() - t0); _SUNTOP.builds++; _SUNTOP.pct = +(100 * shad / NN).toFixed(1);
+  try { console.log('[sunTop] ' + N + '^2 @ ' + sp + ' u in ' + _SUNTOP.ms + ' ms - ' + _SUNTOP.pct + '% of the world in mountain shadow'); } catch (_) {}
+  return true;
+}
+function _sunTopEnsure() {
+  const K = _swU.uSunTopK.value;
+  const W = (typeof window !== 'undefined' && window.__sunShadow) ? window.__sunShadow : null;
+  const T = game.sandwichTerrain;
+  const H = (_SUNTOP.on && !(W && W.on === 0) && T && T.HUB && game._clipWantHub && _HB.ready && _HB.on && _HB.mean) ? _HB.mean[0] : null;
+  const sd = _WX.sunDir;
+  if (H && sd && !(_SUNTOP.src === H && _SUNTOP.sx === sd.x && _SUNTOP.sy === sd.y && _SUNTOP.sz === sd.z)) {
+    try { _sunTopBuild(H, sd); } catch (e) { _SUNTOP.ok = false; try { console.warn('[sunTop] build failed', e); } catch (_) {} }
+  }
+  K.x = (H && sd && _SUNTOP.ok && _SUNTOP.src === H) ? 1 : 0;
+  if (W) { if (W.bias != null) K.y = +W.bias; if (W.soft != null) K.z = +W.soft; }
+}
+window.__sunTopRebuild = function () { _SUNTOP.src = null; try { _sunTopEnsure(); } catch (_) {} return _SUNTOP; };
+function _hbMinAround(wx, wz, r) {
+  if (!_HB.ready || !_HB.on || !_HB.mean || !_HB.mean[0]) return null;
+  const H = _HB.mean[0], N = _HB.dim[0], sp = _HB.sp;
+  const i0 = Math.max(0, Math.floor((wx - r - _HB.x0) / sp)), i1 = Math.min(N - 1, Math.ceil((wx + r - _HB.x0) / sp));
+  const j0 = Math.max(0, Math.floor((wz - r - _HB.z0) / sp)), j1 = Math.min(N - 1, Math.ceil((wz + r - _HB.z0) / sp));
+  if (i0 > i1 || j0 > j1) return null;
+  let m = 32767;
+  for (let j = j0; j <= j1; j++) { const row = j * N; for (let i = i0; i <= i1; i++) { const v = H[row + i]; if (v < m) m = v; } }
+  return m * 0.125;
+}
 const _HB_BOX = 53248;        // base half-extent: 45,056 (cities) + 8,192 (L0 half window at N=512, M0=32)
 const _HB_EYE = 45056;        // far tables assume the eye anywhere inside the content box
 const _HB_FAR_MAX = 327680;   // cap on a far table's half-extent (L5 at N=512 wants 307,200)
