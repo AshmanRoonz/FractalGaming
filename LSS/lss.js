@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "48.90";
+const LSS_BUILD = "49.07";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -6331,18 +6331,19 @@ class NetworkPlayer {
     this.velocity.set(s.vx || 0, s.vy || 0, s.vz || 0);
     if (typeof game !== 'undefined' && game && game._hubWater && typeof _swImpact === 'function') {
       const _WL = game._hubWater.userData.WL;
-      const _above = this.position.y - _WL;
+      const _hy = (typeof _swShipHydro === 'function') ? _swShipHydro(this) : null;
+      const _above = this.position.y - (_hy ? _hy.keel : 0) - _WL;
       const _prev = (this._wPrevAbove === undefined) ? _above : this._wPrevAbove;
       if ((_above < 0 && _prev >= 0) || (_above > 0 && _prev <= 0)) {
         try {
-          const _fp = _swPeerFootprint(this);
+          const _fp = _hy ? _hy.fp : _swPeerFootprint(this);
           const _W3 = window.__water || {};
-          _swImpact(this.position.x, this.position.z, _above < 0 ? +1 : -1, _fp, _fp.heft * ((_W3.mass != null) ? _W3.mass : 1.0), this.velocity, _WL, this);
+          _swImpact(this.position.x, this.position.z, _above < 0 ? +1 : -1, _fp, _hy ? _hy.mass : _fp.heft * ((_W3.mass != null) ? _W3.mass : 1.0), this.velocity, _WL, this);
           if (typeof playSpatialSound === 'function') playSpatialSound(_above < 0 ? 'water_bloop' : 'water_bloop_soft', new THREE.Vector3(this.position.x, _WL, this.position.z), { refDistance: 300, maxDistance: 5200 });
         } catch (_) {}
       }
       this._wPrevAbove = _above;
-      try { if (typeof _swWetTick === 'function') _swWetTick(this, this.position.x, this.position.y, this.position.z, this.velocity, _swPeerFootprint(this), _WL, dt); } catch (_) {}
+      try { if (typeof _swWetTick === 'function') _swWetTick(this, this.position.x, this.position.y, this.position.z, this.velocity, _hy ? _hy.fp : _swPeerFootprint(this), _WL, dt, _hy ? _hy.keel : 0); } catch (_) {}   // (v48.93) your footprint too; (v49.07) + the keel
     }
 
     if (this.mesh.userData.shieldMesh) {
@@ -6619,6 +6620,54 @@ function _lssSendLoadoutTo(peerId) {
   } catch (_) {}
 }
 
+const _twF = new THREE.Vector3(), _twQ = new THREE.Quaternion();
+if (typeof window !== 'undefined') window.__peerTwin = {
+  _n: 0,
+  spawn(key, opts) {
+    opts = opts || {};
+    const id = 'twin_' + (++this._n);
+    const side = (opts.side != null) ? +opts.side : 350, ahead = +(opts.ahead || 0), up = +(opts.up || 0);
+    let st;
+    if (opts.follow === false) {
+      const p = player.position;
+      st = { px: p.x + side, py: p.y + up, pz: p.z - ahead, qx: 0, qy: 0, qz: 0, qw: 1, vx: 0, vy: 0, vz: 0, hp: 99999, shield: 0 };
+    } else {
+      const off = () => {
+        _twF.set(0, 0, -1).applyQuaternion(camera.quaternion); _twF.y = 0;
+        if (_twF.lengthSq() < 1e-6) _twF.set(0, 0, -1);
+        _twF.normalize();
+        return { x: -_twF.z * side + _twF.x * ahead, z: _twF.x * side + _twF.z * ahead };
+      };
+      const q = () => _twQ.copy(player.mesh ? player.mesh.quaternion : camera.quaternion).multiply(_npFlipY);
+      st = {
+        hp: 99999, shield: 0,
+        get px() { return player.position.x + off().x; }, get py() { return player.position.y + up; }, get pz() { return player.position.z + off().z; },
+        get vx() { return player.velocity.x; }, get vy() { return player.velocity.y; }, get vz() { return player.velocity.z; },
+        get qx() { return q().x; }, get qy() { return q().y; }, get qz() { return q().z; }, get qw() { return q().w; },
+      };
+    }
+    net.peers.set(id, { state: st, _twin: true });
+    const _latch = game._sawHumanPeer;
+    updateNetworkPlayer(id, { loadoutKey: key || player.loadoutKey || 'VORTEX', team: (opts.team != null) ? opts.team : player.team });
+    game._sawHumanPeer = _latch;
+    const np = net.peers.get(id).networkPlayer;
+    if (np && typeof st.px === 'number') { np.position.set(st.px, st.py, st.pz); if (np.mesh) np.mesh.position.copy(np.position); }
+    return id;
+  },
+  state(id) { const pe = net.peers.get(id); return pe ? pe.state : null; },
+  ship(id) { const pe = net.peers.get(id); return pe ? pe.networkPlayer : null; },
+  remove(id) {
+    const pe = net.peers.get(id); if (!pe || !pe._twin) return false;
+    const np = pe.networkPlayer;
+    if (np) {
+      try { np.destroy(); } catch (_) {}
+      const i = net.networkPlayers.indexOf(np); if (i >= 0) net.networkPlayers.splice(i, 1);
+      const j = game.entities.indexOf(np); if (j >= 0) game.entities.splice(j, 1);
+    }
+    net.peers.delete(id); return true;
+  },
+  removeAll() { const ids = []; for (const [id, pe] of net.peers) if (pe && pe._twin) ids.push(id); ids.forEach((id) => this.remove(id)); return ids.length; },
+};
 function updateNetworkPlayer(peerId, data) {
   const peer = net.peers.get(peerId);
   if (!peer) return;
@@ -6662,6 +6711,7 @@ const _broadcastState = {
   cg: 0,
   co: 0,
 };
+const _bcQ = new THREE.Quaternion();   // (v48.95) scratch: the attitude sent
 function broadcastPlayerState(dt) {
   if (!net.active || !net.sendState) return;
 
@@ -6676,10 +6726,11 @@ function broadcastPlayerState(dt) {
   s.vx = Math.round(player.velocity.x * 10) / 10;
   s.vy = Math.round(player.velocity.y * 10) / 10;
   s.vz = Math.round(player.velocity.z * 10) / 10;
-  s.qx = Math.round(camera.quaternion.x * 1000) / 1000;
-  s.qy = Math.round(camera.quaternion.y * 1000) / 1000;
-  s.qz = Math.round(camera.quaternion.z * 1000) / 1000;
-  s.qw = Math.round(camera.quaternion.w * 1000) / 1000;
+  const _sq = (player.mesh && player.mesh.quaternion) ? _bcQ.copy(player.mesh.quaternion).multiply(_npFlipY) : camera.quaternion;
+  s.qx = Math.round(_sq.x * 1000) / 1000;
+  s.qy = Math.round(_sq.y * 1000) / 1000;
+  s.qz = Math.round(_sq.z * 1000) / 1000;
+  s.qw = Math.round(_sq.w * 1000) / 1000;
   s.hp = player.health;
   s.shield = player.shield;
   s.os = Math.round(player.overShield || 0);
@@ -7752,7 +7803,7 @@ function handleNetEvent(evt, fromPeerId) {
             ((window.__water && window.__water.mainK != null) ? +window.__water.mainK : 0.55)
         : ((typeof _swWpnYield === 'function') ? _swWpnYield(0, 0, 1) : 120);
       _swWpnCross(from.x, from.y, from.z, to.x, to.y, to.z,
-                  _plY, 0, 'peerTracer' + (fromPeerId || ''), 0.06); } catch (_) {} }
+                  _plY, 0, 'peerTracer' + (fromPeerId || ''), 0.06, _swWpnKind(_plW && _plW.name)); } catch (_) {} }
     if (_shooterLoadout === 'PUNCTURE') {
       _spawnRailgunSpiral(from, to, evt.color || 0xeeff66);
     } else if (evt.b === 1) {
@@ -7864,6 +7915,19 @@ function handleNetEvent(evt, fromPeerId) {
       const dir = new THREE.Vector3(evt.dx, evt.dy, evt.dz);
       spawnDashBoosters(np.mesh, dir, evt.color || 0xaaeeff);
     }
+    return;
+  }
+  if (evt.type === 'mine_hit') {
+    try {
+      for (const o of game.worldEffects) {
+        if (!_mineLive(o) || !_mineIsMine(o)) continue;
+        if ((evt.netId != null && o.netId === evt.netId) || (evt.groupId != null && o.groupId === evt.groupId)) { _mineGroupBlow(o); break; }
+      }
+    } catch (_) {}
+    return;
+  }
+  if (evt.type === 'mine_blast' && typeof evt.px === 'number') {
+    try { _mineBlastFx(new THREE.Vector3(evt.px, evt.py, evt.pz), (typeof evt.r === 'number') ? evt.r : 220); } catch (_) {}
     return;
   }
   if (evt.type === 'effect_spawn' && typeof evt.netId === 'number') {
@@ -10146,6 +10210,156 @@ function _tetherHitCone(apex, dir, reach, r0, r1, maxDps, dt) {
   const coneR = r0 + (r1 - r0) * a01 + _tetherShotK().hitR;
   if (perp > coneR) return 0;
   return _tetherTakeShot(eff, maxDps * (1 - a01) * (0.5 + 0.5 * (1 - perp / coneR)) * dt);
+}
+const MINE_BLAST = { hitR: 26, falloff: 0.5, fxScale: 1.0, anyShot: 0 };
+function _mineK() {
+  try { const k = window.__mineBlast; if (k && typeof k === 'object') return Object.assign({}, MINE_BLAST, k); } catch (_) {}
+  return MINE_BLAST;
+}
+function _mineIsMine(eff) {
+  return !(typeof net !== 'undefined' && net && net.active) || !eff.ownerPeerId || eff.ownerPeerId === net.myPeerId;
+}
+function _mineLive(eff) { return !!(eff && eff.type === 'tripwire' && eff.timer > 0 && !eff._blown); }
+function _mineShooterOk(eff, team) {
+  if (_mineK().anyShot) return true;
+  return team != null && team !== eff.team;
+}
+function _mineProjTeam(p) {
+  if (!p) return null;
+  if (p.owner === 'player') return (typeof player !== 'undefined' && player) ? player.team : null;
+  return (p.ownerTeam != null) ? p.ownerTeam : null;
+}
+function _mineShotProbe(origin, dir, maxDist, team) {
+  const W = (typeof game !== 'undefined' && game) ? game.worldEffects : null;
+  if (!W || !W.length || !origin || !dir) return null;
+  const R = _mineK().hitR, R2 = R * R;
+  let best = null, bestP = Infinity;
+  for (let i = 0; i < W.length; i++) {
+    const eff = W[i]; if (!_mineLive(eff) || !eff.mesh || !_mineShooterOk(eff, team)) continue;
+    const ex = eff.position.x - origin.x, ey = eff.position.y - origin.y, ez = eff.position.z - origin.z;
+    const proj = ex * dir.x + ey * dir.y + ez * dir.z;
+    if (proj < 0 || proj > maxDist || proj >= bestP) continue;
+    const cx = ex - dir.x * proj, cy = ey - dir.y * proj, cz = ez - dir.z * proj;
+    if (cx * cx + cy * cy + cz * cz > R2) continue;
+    best = eff; bestP = proj;
+  }
+  if (!best) return null;
+  if (!best._shotProxy) {
+    const eff = best;
+    best._shotProxy = { alive: true, name: 'PlasmaMine', position: eff.position, collisionRadius: R,
+                        takeDamage: (dmg) => _mineShot(eff, dmg) };
+  }
+  return { obj: best._shotProxy, proj: bestP };
+}
+function _mineHitSeg(o, dir, len, team) {
+  const W = (typeof game !== 'undefined' && game) ? game.worldEffects : null;
+  if (!W || !W.length || !o || !dir) return 0;
+  const R = _mineK().hitR; let n = 0;
+  for (let i = 0; i < W.length; i++) {
+    const eff = W[i]; if (!_mineLive(eff) || !eff.mesh || !_mineShooterOk(eff, team)) continue;
+    const ex = eff.position.x - o.x, ey = eff.position.y - o.y, ez = eff.position.z - o.z;
+    const along = ex * dir.x + ey * dir.y + ez * dir.z;
+    if (along < -R || along > len + R) continue;
+    const a = Math.max(0, Math.min(len, along));
+    const cx = ex - dir.x * a, cy = ey - dir.y * a, cz = ez - dir.z * a;
+    if (cx * cx + cy * cy + cz * cz > R * R) continue;
+    if (_mineShot(eff, 1) > 0) n++;
+  }
+  return n;
+}
+function _mineShot(eff, dmg) {
+  if (!_mineLive(eff)) return 0;
+  if (_mineIsMine(eff)) _mineGroupBlow(eff);
+  else if (!eff._hitAsked) {
+    eff._hitAsked = true;   // one ask per orb; the owner's effect_destroy takes the copy away
+    try { if (net.active && net.sendEvent) net.sendEvent({ type: 'mine_hit', netId: eff.netId, groupId: eff.groupId, owner: eff.ownerPeerId }); } catch (_) {}
+  }
+  return Math.max(1, +dmg || 1);
+}
+function _mineGroupBlow(eff) {
+  if (!_mineLive(eff)) return;
+  const W = game.worldEffects, group = [eff];
+  if (eff.groupId !== undefined && eff.groupId !== null) {
+    for (let i = 0; i < W.length; i++) {
+      const o = W[i];
+      if (o !== eff && _mineLive(o) && o.groupId === eff.groupId && _mineIsMine(o)) group.push(o);
+    }
+  }
+  for (const o of group) _mineBlow(o);
+}
+function _mineBlow(o) {
+  o._blown = true; o.timer = 0;   // swept (and effect_destroy'd to the peers) like any expiry
+  if (o._shotProxy) o._shotProxy.alive = false;
+  const K = _mineK(), R = o.radius || 220, D = o.dmg || 350, pos = o.position;
+  const byPlayer = (o.owner === 'player');
+  const credit = (dealt) => { if (dealt > 0 && byPlayer) { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); } return dealt; };
+  const fall = (d) => D * (1 - K.falloff * Math.max(0, Math.min(1, d / R)));
+  let hits = 0;
+  try {
+    for (const e of game.entities) {
+      if (!e || !e.alive || e.team === o.team) continue;
+      const d = _bodyDist(pos, e); if (!(d < R)) continue;
+      if (credit(e.takeDamage(fall(d), o.owner)) > 0) hits++;
+    }
+  } catch (_) {}
+  try {
+    if (o.owner === 'bot' && typeof player !== 'undefined' && player && player.shipState !== 'dead' && player.team !== o.team) {
+      const d = player.position.distanceTo(pos);
+      if (d < R) playerTakeDamage(fall(d), null);
+    }
+  } catch (_) {}
+  try {
+    if (game.monsters) for (const m of game.monsters) {
+      if (!m || !m.alive || !m.mesh) continue;
+      const d = m.position.distanceTo(pos); if (!(d < R)) continue;
+      if (credit(m.takeDamage(fall(d), 'player', pos)) > 0) hits++;
+    }
+  } catch (_) {}
+  try {
+    if (game.dynamicObjects) for (const ob of game.dynamicObjects) {
+      if (!ob || !ob.alive) continue;
+      const d = ob.position.distanceTo(pos); if (!(d < R)) continue;
+      credit(ob.takeDamage(fall(d)));
+    }
+  } catch (_) {}
+  if (byPlayer) { try { _tetherHitSphere(pos, R, D); } catch (_) {} }
+  if (hits > 0 && byPlayer && player.shipState !== 'dead') { try { showHitMarker(); } catch (_) {} }
+  _mineBlastFx(pos, R);
+  try { if (net.active && net.sendEvent) net.sendEvent({ type: 'mine_blast', px: pos.x, py: pos.y, pz: pos.z, r: R }); } catch (_) {}
+}
+function _mineBlastFx(pos, R) {
+  const s = _mineK().fxScale;
+  try {
+    if (typeof spawnFXBurst === 'function') {
+      spawnFXBurst('fireball_purple', pos, R * 0.55 * s, 0.6, { startScale: 0.25, endScale: 1.25 });   // the bloom
+      spawnFXBurst('fireball_purple', pos, R * 0.28 * s, 0.35, { startScale: 1.0, endScale: 0.15 });   // the hot core collapsing
+      const col = new THREE.Color(0x9944ff);
+      for (let i = 0; i < 5; i++) {
+        const p = { x: pos.x + (Math.random() - 0.5) * R * 0.6, y: pos.y + (Math.random() - 0.5) * R * 0.6, z: pos.z + (Math.random() - 0.5) * R * 0.6 };
+        const puff = spawnFXBurst('cloud', p, R * (0.18 + Math.random() * 0.12) * s, 0.7 + Math.random() * 0.4, { startScale: 0.3, endScale: 1.4, segs: 12 });
+        if (puff && puff.material && puff.material.uniforms && puff.material.uniforms.uBaseColor) puff.material.uniforms.uBaseColor.value.copy(col);
+      }
+    }
+    if (game.particles) {
+      for (let i = 0; i < 26; i++) {
+        const u = Math.random() * 2 - 1, th = Math.random() * Math.PI * 2, rr = Math.sqrt(1 - u * u), sp = 220 + Math.random() * 300;
+        const r0 = Math.random();
+        game.particles.push({ position: pos.clone(), velocity: _pVel(rr * Math.cos(th) * sp, u * sp, rr * Math.sin(th) * sp),
+                              life: 0.35 + Math.random() * 0.35, maxLife: 0.7,
+                              color: (r0 < 0.35) ? 0xffffff : ((r0 < 0.7) ? 0xcc88ff : 0x8844ff), size: 2 + Math.random() * 2 });
+      }
+    }
+    if (typeof spawnDynamicLight === 'function') spawnDynamicLight(pos, 0x9944ff, 3.2, R * 3, 0.35);
+  } catch (_) {}
+  try { if (game._hubWater) _swBlast(pos.x, pos.y, pos.z, 20, null); } catch (_) {}
+  try { if (typeof applyExplosionPush === 'function') applyExplosionPush(pos, 90, 440); } catch (_) {}
+  try {
+    if (typeof player !== 'undefined' && player && player.position && typeof triggerScreenShake === 'function') {
+      const d = player.position.distanceTo(pos), reach = 500;
+      if (d < reach) { const f = 1 - d / reach, sh = Math.min(12, 3.6 * f * f); if (sh > 0.05) triggerScreenShake(sh); }
+    }
+  } catch (_) {}
+  try { if (typeof playSpatialSound === 'function') playSpatialSound('tripwire_detonate', pos.clone()); } catch (_) {}
 }
 if (typeof window !== 'undefined') window.__tetherProbe = {
   drop: function (dist) {
@@ -22595,6 +22809,7 @@ const _SW_RIPPLE_FRAG = [
   'uniform float uWaveC2;',   // (v38.15) wave speed squared - was the literal 0.05
   'uniform vec4 uSeeds[8];',         
   'uniform int uSeedCount;',
+  'uniform vec4 uFoamSeeds[4]; uniform int uFoamSeedCount;',   // (v49.03) foam-only deposits - see _swFoamSeed
   'uniform sampler2D uMaskTex;',     
   'uniform vec2 uScroll;',           
   'uniform float uSeedImpulse;',   // (v41.02) 0 = the v41.01 displacement pluck, 1 = a pure velocity impulse
@@ -22608,7 +22823,8 @@ const _SW_RIPPLE_FRAG = [
   'uniform vec2 uHullLid;',   // (v48.88) the hull lid: (on, margin world units)
   'uniform vec4 uArm;',   // (v48.79) the V arms' breaking crests: (tan half-angle, band width u, length u, deposit per step)
   'uniform vec4 uArm2;',  // (v48.80) (side start as a fraction of the silhouette half-width, centre deposit, centre width u, centre length u)
-  'uniform float uDisp; uniform float uDispG; uniform vec4 uGk[43];',   // (v48.83) iWave: on, gravity per step, the 13x13 kernel packed 4 to a vec4
+  'uniform float uDisp; uniform float uDispG; uniform vec4 uGk[43];',
+  'uniform float uTension;',   // (v49.02) the short waves' own speed - see the iWave update   // (v48.83) iWave: on, gravity per step, the 13x13 kernel packed 4 to a vec4
   'uniform sampler2D uHullTex;',
   'uniform vec4 uHullA; uniform vec4 uHullAP;',    // (x, z, fx, fz) now / previous step - window coords, f = the hull frame +z on the ground
   'uniform vec4 uHullB;',                         // (k sim per world unit of immersion, on, rimK, rimR world units)
@@ -22619,11 +22835,13 @@ const _SW_RIPPLE_FRAG = [
   'uniform float uHullFoam; uniform float uHullKick;',
   'uniform sampler2D uHullTopTex; uniform vec4 uHoleAB;',   // (v48.65) the slab's top map; (cap, over) now, (cap, over) previous step
   'uniform float uHClamp;',   // (v46.78) the safety net, see below
-  'uniform sampler2D uEntTex0; uniform sampler2D uEntTex1;',
-  'uniform vec4 uEntA[2]; uniform vec4 uEntAP[2];',
-  'uniform vec4 uEntB[2]; uniform vec4 uEntR[2];',
-  'uniform vec4 uEntY[2]; uniform vec4 uEntU[2]; uniform vec4 uEntUP[2];',
-  'uniform vec4 uEntT[2];',
+  'uniform sampler2D uEntTex0; uniform sampler2D uEntTex1; uniform sampler2D uEntTex2; uniform sampler2D uEntTex3;',
+  'uniform sampler2D uEntTop0; uniform sampler2D uEntTop1; uniform sampler2D uEntTop2; uniform sampler2D uEntTop3;',
+  'uniform vec4 uEntA[4]; uniform vec4 uEntAP[4];',
+  'uniform vec4 uEntB[4]; uniform vec4 uEntR[4];',
+  'uniform vec4 uEntY[4]; uniform vec4 uEntU[4]; uniform vec4 uEntUP[4];',
+  'uniform vec4 uEntT[4];',
+  'uniform vec4 uEntHole[4]; uniform vec4 uEntX[4];',
   'float _hImm(sampler2D tex, sampler2D topTex, vec4 rc, vec4 Y, vec2 lp, vec3 up, float wl, vec2 hab){',
   '  vec2 huv = vec2((lp.x - rc.x) / (rc.y - rc.x), (lp.y - rc.z) / (rc.w - rc.z));',
   '  if (huv.x <= 0.0 || huv.x >= 1.0 || huv.y <= 0.0 || huv.y >= 1.0) return 0.0;',
@@ -22658,6 +22876,18 @@ const _SW_RIPPLE_FRAG = [
   '}',
   'float _bShape(float hh){ float sq = hh * (1.0 + uBrkW.z * abs(hh)); float x = sq * uBrkW.x / max(uBrkW.y, 0.01); return uBrkW.y * (x / (1.0 + abs(x))); }',
   'float _bShapeInv(float D){ float dp = clamp(D / max(uBrkW.y, 0.01), -0.995, 0.995); float x = dp / (1.0 - abs(dp)); float sq = x * uBrkW.y / max(uBrkW.x, 0.01); float a = abs(sq); float hh = (uBrkW.z > 1e-4) ? (-1.0 + sqrt(1.0 + 4.0 * uBrkW.z * a)) / (2.0 * uBrkW.z) : a; return sign(sq) * hh; }',
+  'float _lidMin(float nh, vec2 w, sampler2D tex, sampler2D topTex, vec4 A, vec4 rc, vec4 Y, vec4 U, float margin){',
+  '  vec2 d = w - A.xy;',
+  '  vec2 lp = vec2(d.x * A.w - d.y * A.z, dot(d, A.zw));',
+  '  vec2 uv = vec2((lp.x - rc.x) / (rc.y - rc.x), (lp.y - rc.z) / (rc.w - rc.z));',
+  '  if (!(uv.x > 0.0 && uv.x < 1.0 && uv.y > 0.0 && uv.y < 1.0)) return nh;',
+  '  float b = texture2D(tex, uv).r;',
+  '  if (!(b > 0.002)) return nh;',
+  '  float yU = Y.x + (1.0 - b) * Y.y;',
+  '  float yT = Y.x + Y.y - (1.0 - texture2D(topTex, uv).r) * Y.y;',
+  '  float yW = (Y.z - U.x * lp.x - U.z * lp.y) / max(U.y, 0.5);',
+  '  return (yT > yW) ? min(nh, _bShapeInv(yU - yW - margin)) : nh;',
+  '}',
   'void main(){',
   '  vec2 cellSize = 1.0 / resolution.xy;',
   '  vec2 uv = gl_FragCoord.xy * cellSize;',
@@ -22680,7 +22910,7 @@ const _SW_RIPPLE_FRAG = [
   '        _vd += uGk[_gk / 4][_gk - (_gk / 4) * 4] * texture2D(heightmap, suv + vec2(float(i), float(j)) * cellSize).x;',
   '      }',
   '    }',
-  '    nh = (2.0 * hC - h.y - uDispG * _vd) * viscosity;',
+  '    nh = (2.0 * hC - h.y - uDispG * _vd + uTension * ((n + s + e + w) - 4.0 * hC)) * viscosity;',
   '  } else {',
   '    nh = (2.0 * hC - h.y + uWaveC2 * ((n + s + e + w) - 4.0 * hC)) * viscosity;',
   '  }',
@@ -22711,15 +22941,25 @@ const _SW_RIPPLE_FRAG = [
   '    sAcc += (cos(ph) + 1.0) * sd.w;',
   '    fAcc += (cos(ph) + 1.0) * abs(sd.w);',   
   '  }',
+  '  float fDep = 0.0;',
+  '  for (int i = 0; i < 4; i++){',
+  '    if (i >= uFoamSeedCount) break;',
+  '    vec4 fsd = uFoamSeeds[i];',
+  '    float fph = clamp(length(wpos - fsd.xy) * PI / fsd.z, 0.0, PI);',
+  '    fDep += (cos(fph) + 1.0) * 0.5 * fsd.w;',
+  '  }',
   '  vec2 ed = min(uv, 1.0 - uv);',
   '  float edg = smoothstep(0.0, 0.06, min(ed.x, ed.y));',
   '  float spg = 1.0 - smoothstep(0.0, max(uSpongeW, 0.001), min(ed.x, ed.y));',
   '  float dmp = 1.0 - uSpongeK * spg * spg;',
   '  float _hpk = (uHullB.y > 0.5) ? (_hullP(uHullTex, uHullTopTex, uHullR, uHullY, uHullB, uHullT, wpos, uHullA, uHullU.xyz, uHullY.z, uHullU.w, uHoleAB.xy) - _hullP(uHullTex, uHullTopTex, uHullR, uHullY, uHullB, uHullT, wpos, uHullAP, uHullUP.xyz, uHullY.w, uHullUP.w, uHoleAB.zw)) : 0.0;',   // (v46.78) the hull patch, see the header
   '  float _hpP = _hpk;',   // (v48.77) the player's share, before the entity slots add theirs
-  '  if (uEntB[0].y > 0.5) _hpk += _hullP(uEntTex0, uEntTex0, uEntR[0], uEntY[0], uEntB[0], uEntT[0], wpos, uEntA[0], uEntU[0].xyz, uEntY[0].z, uEntU[0].w, vec2(0.0)) - _hullP(uEntTex0, uEntTex0, uEntR[0], uEntY[0], uEntB[0], uEntT[0], wpos, uEntAP[0], uEntUP[0].xyz, uEntY[0].w, uEntUP[0].w, vec2(0.0));',
-  '  if (uEntB[1].y > 0.5) _hpk += _hullP(uEntTex1, uEntTex1, uEntR[1], uEntY[1], uEntB[1], uEntT[1], wpos, uEntA[1], uEntU[1].xyz, uEntY[1].z, uEntU[1].w, vec2(0.0)) - _hullP(uEntTex1, uEntTex1, uEntR[1], uEntY[1], uEntB[1], uEntT[1], wpos, uEntAP[1], uEntUP[1].xyz, uEntY[1].w, uEntUP[1].w, vec2(0.0));',
-  '  float _rel = uHullFoam * (max(0.0, _hpP) * uHullSpd + max(0.0, _hpk - _hpP));',
+  '  float _eR = 0.0;',   // (v48.92) the slots' release foam, each gated on its own speed (uEntX[i].y)
+  '  if (uEntB[0].y > 0.5) { float _e0 = _hullP(uEntTex0, uEntTop0, uEntR[0], uEntY[0], uEntB[0], uEntT[0], wpos, uEntA[0], uEntU[0].xyz, uEntY[0].z, uEntU[0].w, uEntHole[0].xy) - _hullP(uEntTex0, uEntTop0, uEntR[0], uEntY[0], uEntB[0], uEntT[0], wpos, uEntAP[0], uEntUP[0].xyz, uEntY[0].w, uEntUP[0].w, uEntHole[0].zw); _hpk += _e0; _eR += max(0.0, _e0) * uEntX[0].y; }',
+  '  if (uEntB[1].y > 0.5) { float _e1 = _hullP(uEntTex1, uEntTop1, uEntR[1], uEntY[1], uEntB[1], uEntT[1], wpos, uEntA[1], uEntU[1].xyz, uEntY[1].z, uEntU[1].w, uEntHole[1].xy) - _hullP(uEntTex1, uEntTop1, uEntR[1], uEntY[1], uEntB[1], uEntT[1], wpos, uEntAP[1], uEntUP[1].xyz, uEntY[1].w, uEntUP[1].w, uEntHole[1].zw); _hpk += _e1; _eR += max(0.0, _e1) * uEntX[1].y; }',
+  '  if (uEntB[2].y > 0.5) { float _e2 = _hullP(uEntTex2, uEntTop2, uEntR[2], uEntY[2], uEntB[2], uEntT[2], wpos, uEntA[2], uEntU[2].xyz, uEntY[2].z, uEntU[2].w, uEntHole[2].xy) - _hullP(uEntTex2, uEntTop2, uEntR[2], uEntY[2], uEntB[2], uEntT[2], wpos, uEntAP[2], uEntUP[2].xyz, uEntY[2].w, uEntUP[2].w, uEntHole[2].zw); _hpk += _e2; _eR += max(0.0, _e2) * uEntX[2].y; }',
+  '  if (uEntB[3].y > 0.5) { float _e3 = _hullP(uEntTex3, uEntTop3, uEntR[3], uEntY[3], uEntB[3], uEntT[3], wpos, uEntA[3], uEntU[3].xyz, uEntY[3].z, uEntU[3].w, uEntHole[3].xy) - _hullP(uEntTex3, uEntTop3, uEntR[3], uEntY[3], uEntB[3], uEntT[3], wpos, uEntAP[3], uEntUP[3].xyz, uEntY[3].w, uEntUP[3].w, uEntHole[3].zw); _hpk += _e3; _eR += max(0.0, _e3) * uEntX[3].y; }',
+  '  float _rel = uHullFoam * (max(0.0, _hpP) * uHullSpd + _eR);',   // (v48.92) _eR: each slot gated like yours
   '  float _arm = 0.0;',
   '  if (uHullB.y > 0.5 && (uArm.w > 0.0 || uArm2.y > 0.0)) {',
   '    vec2 _ad = wpos - uHullA.xy;',
@@ -22737,23 +22977,16 @@ const _SW_RIPPLE_FRAG = [
   '  nh += (1.0 - uSeedImpulse) * sA + _hpk;',
   '  h.y = (h.x - uSeedImpulse * sA + _hpk * (1.0 - uHullKick)) * dmp;',   // (v46.77) sponge on the previous height
   '  nh = clamp(nh, -uHClamp, uHClamp);',
-  '  if (uHullB.y > 0.5 && uHullLid.x > 0.5) {',
-  '    vec2 _ld = wpos - uHullA.xy;',
-  '    vec2 _llp = vec2(_ld.x * uHullA.w - _ld.y * uHullA.z, dot(_ld, uHullA.zw));',
-  '    vec2 _luv = vec2((_llp.x - uHullR.x) / (uHullR.y - uHullR.x), (_llp.y - uHullR.z) / (uHullR.w - uHullR.z));',
-  '    if (_luv.x > 0.0 && _luv.x < 1.0 && _luv.y > 0.0 && _luv.y < 1.0) {',
-  '      float _lb = texture2D(uHullTex, _luv).r;',
-  '      if (_lb > 0.002) {',
-  '        float _lyU = uHullY.x + (1.0 - _lb) * uHullY.y;',
-  '        float _lyT = uHullY.x + uHullY.y - (1.0 - texture2D(uHullTopTex, _luv).r) * uHullY.y;',
-  '        float _lyW = (uHullY.z - uHullU.x * _llp.x - uHullU.z * _llp.y) / max(uHullU.y, 0.5);',
-  '        if (_lyT > _lyW) nh = min(nh, _bShapeInv(_lyU - _lyW - uHullLid.y));',
-  '      }',
-  '    }',
+  '  if (uHullLid.x > 0.5) {',   // (v48.92) your hull, then every ship slot (uEntX.x)
+  '    if (uHullB.y > 0.5) nh = _lidMin(nh, wpos, uHullTex, uHullTopTex, uHullA, uHullR, uHullY, uHullU, uHullLid.y);',
+  '    if (uEntB[0].y > 0.5 && uEntX[0].x > 0.5) nh = _lidMin(nh, wpos, uEntTex0, uEntTop0, uEntA[0], uEntR[0], uEntY[0], uEntU[0], uHullLid.y);',
+  '    if (uEntB[1].y > 0.5 && uEntX[1].x > 0.5) nh = _lidMin(nh, wpos, uEntTex1, uEntTop1, uEntA[1], uEntR[1], uEntY[1], uEntU[1], uHullLid.y);',
+  '    if (uEntB[2].y > 0.5 && uEntX[2].x > 0.5) nh = _lidMin(nh, wpos, uEntTex2, uEntTop2, uEntA[2], uEntR[2], uEntY[2], uEntU[2], uHullLid.y);',
+  '    if (uEntB[3].y > 0.5 && uEntX[3].x > 0.5) nh = _lidMin(nh, wpos, uEntTex3, uEntTop3, uEntA[3], uEntR[3], uEntY[3], uEntU[3], uHullLid.y);',
   '  }',
   '  h.x = nh * dmp;',                           // (v46.77) ...and on the new one
   '  float _fz = mix(h.z, _fAv, uFoamDiff);',
-  '  h.z = clamp((_fz * uFoamDecay + fAcc * uSeedFoamK + uBreakK * _brk + _col + _jf + _rel + _arm) * edg, 0.0, 1.0);',   // (v48.79) + the V arms
+  '  h.z = clamp((_fz * uFoamDecay + fAcc * uSeedFoamK + uBreakK * _brk + _col + _jf + _rel + _arm + fDep) * edg, 0.0, 1.0);',   // (v48.79) + the V arms; (v49.03) + fDep
   '  gl_FragColor = h;',
   '}'
 ].join('\n');
@@ -22809,6 +23042,7 @@ function _swRippleInit() {
     try { if (!_swRipple._iw) _swRipple._iw = _swIWaveKernel(0.3); } catch (_) { _swRipple._iw = null; }   // (v48.85) sigma 0.3 - see _swIWaveKernel
     v.material.uniforms.uDisp = { value: 0 };
     v.material.uniforms.uDispG = { value: 0 };
+    v.material.uniforms.uTension = { value: 0 };   // (v49.02) see the iWave update
     v.material.uniforms.uGk = { value: (_swRipple._iw ? _swRipple._iw.vecs : Array.from({ length: 43 }, () => new THREE.Vector4())) };
     v.material.uniforms.uShoreDamp = { value: 0.96 };
     v.material.uniforms.uShoreDampD = { value: 0.28 };
@@ -22835,14 +23069,14 @@ function _swRippleInit() {
     v.material.uniforms.uHullUP = { value: new THREE.Vector4(0, 1, 0, 0) };
     v.material.uniforms.uHullTopTex = { value: null };                                 // (v48.65) the slab's top map
     v.material.uniforms.uHoleAB = { value: new THREE.Vector4(0, 0, 0, 0) };             // (v48.65) cap / over, now + previous
-    v.material.uniforms.uEntTex0 = { value: null };
-    v.material.uniforms.uEntTex1 = { value: null };
-    for (const _k of ['uEntA', 'uEntAP', 'uEntB', 'uEntR', 'uEntY', 'uEntT']) {
-      v.material.uniforms[_k] = { value: [new THREE.Vector4(), new THREE.Vector4()] };
+    for (let _s = 0; _s < 4; _s++) { v.material.uniforms['uEntTex' + _s] = { value: null }; v.material.uniforms['uEntTop' + _s] = { value: null }; }
+    for (const _k of ['uEntA', 'uEntAP', 'uEntB', 'uEntR', 'uEntY', 'uEntT', 'uEntHole']) {
+      v.material.uniforms[_k] = { value: [0, 1, 2, 3].map(() => new THREE.Vector4()) };
     }
     for (const _k of ['uEntU', 'uEntUP']) {
-      v.material.uniforms[_k] = { value: [new THREE.Vector4(0, 1, 0, 0), new THREE.Vector4(0, 1, 0, 0)] };
+      v.material.uniforms[_k] = { value: [0, 1, 2, 3].map(() => new THREE.Vector4(0, 1, 0, 0)) };
     }
+    v.material.uniforms.uEntX = { value: [0, 1, 2, 3].map(() => new THREE.Vector4(0, 1, 0, 0)) };
     v.material.uniforms.uHullT = { value: new THREE.Vector4(0, 1, 1, 0) };
     v.material.uniforms.uHullFoam = { value: 6.0 };    // (v48.77) release gain - see the shader (was abs(dP) x 1.5 x seedFoam); (v48.78) 12 -> 6; (v48.82) back to 6 (v48.80's 2.5 went with the streams)
     v.material.uniforms.uHullKick = { value: 0.15 };
@@ -22851,6 +23085,8 @@ function _swRippleInit() {
     v.material.uniforms.uSeedFoamK = { value: 0.10 };
     v.material.uniforms.uSeeds = { value: seeds };
     v.material.uniforms.uSeedCount = { value: 0 };
+    v.material.uniforms.uFoamSeeds = { value: [0, 1, 2, 3].map(() => new THREE.Vector4(0, 0, 1, 0)) };   // (v49.03)
+    v.material.uniforms.uFoamSeedCount = { value: 0 };
     v.material.uniforms.uScroll = { value: new THREE.Vector2(0, 0) };   
     
     const maskData = new Float32Array(_SW_MASK_RES * _SW_MASK_RES * 4);   
@@ -22880,8 +23116,8 @@ function _swRippleInit() {
 }
 function _swDispWorld(h) {
   const W = window.__water || {};
-  const D = (W.disp != null) ? +W.disp : 100, G = (W.gain != null) ? +W.gain : 100;   // (v42.68) tracks uDispScale
-  const Q = (W.crestQ != null) ? +W.crestQ : 11;
+  const D = (W.disp != null) ? +W.disp : 100, G = (W.gain != null) ? +W.gain : 70;   // (v42.68) tracks uDispScale; (v49.00) 70
+  const Q = (W.crestQ != null) ? +W.crestQ : 5;   // (v49.00) 11 -> 5
   const sq = h * (1 + Q * Math.abs(h));
   const x = sq * G / Math.max(D, 0.01);
   return D * (x / (1 + Math.abs(x)));
@@ -22896,13 +23132,17 @@ const _swSil = { cache: new Map(), empty: new Map(), orphans: new Set(), mat: nu
 function _swSilInUse(rec) {
   const R = _swRipple;
   if (!rec) return false;
-  if (R.hullSil === rec || R.hullSil1 === rec || R.hullSil2 === rec) return true;
+  if (R.hullSil === rec || R.hullSil1 === rec || R.hullSil2 === rec || R.hullSil3 === rec || R.hullSil4 === rec) return true;   // (v48.92) 4 entity slots
   if ((R.hullP && R.hullP.sil === rec) || (R._hullPrev && R._hullPrev.sil === rec)) return true;
   const arr = (a) => { if (a) for (let i = 0; i < a.length; i++) { if (a[i] && a[i].sil === rec) return true; } return false; };
   if (arr(R.entP) || arr(R._entPrev)) return true;
   try {
     const u = R.heightVar && R.heightVar.material && R.heightVar.material.uniforms;
-    if (u && ((u.uHullTex && u.uHullTex.value === rec.tex) || (u.uEntTex0 && u.uEntTex0.value === rec.tex) || (u.uEntTex1 && u.uEntTex1.value === rec.tex))) return true;
+    if (u && ((u.uHullTex && u.uHullTex.value === rec.tex) || (u.uHullTopTex && rec.topTex && u.uHullTopTex.value === rec.topTex))) return true;
+    if (u) for (let _s = 0; _s < 4; _s++) {
+      const _tx = u['uEntTex' + _s], _tp = u['uEntTop' + _s];
+      if ((_tx && _tx.value === rec.tex) || (_tp && rec.topTex && _tp.value === rec.topTex)) return true;
+    }
   } catch (_) {}
   return false;
 }
@@ -22940,7 +23180,7 @@ if (typeof window !== 'undefined') window.__silCache = () => ({ size: _swSil.cac
 function _swHullSilhouette(mesh, slot) {
   const R = _swRipple;
   if (!mesh) return null;
-  const _sn = (slot === 1) ? 'hullSil1' : (slot === 2) ? 'hullSil2' : 'hullSil';
+  const _sn = (slot >= 1 && slot <= 4) ? ('hullSil' + slot) : 'hullSil';   // (v48.92) entity slots 1-4
   let hull = null;
   for (let i = 0; i < mesh.children.length; i++) {
     const c = mesh.children[i];
@@ -23149,29 +23389,62 @@ function _swSlabIn(T, x, y, z) {
   return ly >= S.bot[k] - T.mg && ly <= S.top[k] + T.mg;
 }
 if (typeof window !== 'undefined') window.__hullDropKills = function () { return _swSlabT.kills; };
+const _swSlabShipTs = [];   // pooled frames for the other hulls (yours is _swSlabT)
+const _swSlabList = [];
+function _swSlabFrames() {
+  const L = _swSlabList; L.length = 0;
+  const T0 = _swSlabFrame(); if (T0 && T0.on) L.push(T0);
+  try {
+    const W = window.__water || {};
+    if (W.hullDrops === 0) return L;
+    const EP = (typeof _swRipple !== 'undefined' && _swRipple) ? _swRipple.entP : null;
+    let _k = 0;
+    if (EP) for (let i = 0; i < EP.length; i++) {
+      const E = EP[i];
+      if (!E || !E.ship || !E.ent || !E.sil || !E.sil.slab || !E.ent.mesh || E.ent.alive === false) continue;
+      const T = _swSlabShipTs[_k] || (_swSlabShipTs[_k] = { on: false, px: 0, py: 0, pz: 0, r2: 0, m: new Float32Array(9), rec: null, mg: 1.5, kills: 0 });
+      _k++;
+      const m = E.ent.mesh, rec = E.sil;
+      if (m.parent && m.parent.isScene) { _swSlabP.copy(m.position); _swSlabQ.copy(m.quaternion); }
+      else { m.updateWorldMatrix(true, false); m.matrixWorld.decompose(_swSlabP, _swSlabQ, _swSlabS); }
+      _swSlabM4.makeRotationFromQuaternion(_swSlabQ);
+      const e = _swSlabM4.elements, M = T.m;
+      M[0] = e[0]; M[1] = e[1]; M[2] = e[2]; M[3] = e[4]; M[4] = e[5]; M[5] = e[6]; M[6] = e[8]; M[7] = e[9]; M[8] = e[10];
+      T.px = _swSlabP.x; T.py = _swSlabP.y; T.pz = _swSlabP.z;
+      const ax = Math.max(Math.abs(rec.x0), Math.abs(rec.x1)), az = Math.max(Math.abs(rec.z0), Math.abs(rec.z1));
+      const ay = Math.max(Math.abs(rec.y0), Math.abs(rec.y0 + rec.range));
+      T.r2 = ax * ax + ay * ay + az * az; T.rec = rec;
+      T.mg = (W.hullDropMargin != null) ? +W.hullDropMargin : 1.5; T.on = true;
+      L.push(T);
+    }
+  } catch (_) {}
+  return L;
+}
 
 const _dwQ = new THREE.Quaternion(), _dwP = new THREE.Vector3(), _dwS = new THREE.Vector3(), _dwM = new THREE.Matrix4();
-function _swDeckWash(dt, sil, fx, fz, dirSign, WL, sp, cT, keelA, hullH) {
+function _swDeckWash(dt, sil, fx, fz, dirSign, WL, sp, cT, keelA, hullH, mesh, vel, acc) {   // (v48.93) + another ship's mesh / velocity / accumulator
   if (!game.particles || game._swSubmerged || !sil || !sil.slab) return;
   const W = window.__water || {};
   const K = (W.deckWash != null) ? +W.deckWash : 1;
   if (!(K > 0) || !(cT > 0)) return;
   const R = _swRipple, S = sil.slab, res = sil.res;
+  const A = acc || R;
   const sub = Math.max(0, -keelA) / Math.max(1, hullH);             // 0 = keel on the water .. 1 = a hull's height under
   const fade = 1 - Math.max(0, Math.min(1, (sub - 0.95) / 0.3));
   const rate = K * 140 * cT * fade * Math.min(1.4, sp / 330);      // drops a second
-  R._dwAcc = (R._dwAcc || 0) + rate * Math.min(0.05, Math.max(0, dt || 0));
-  let n = Math.floor(R._dwAcc);
+  A._dwAcc = (A._dwAcc || 0) + rate * Math.min(0.05, Math.max(0, dt || 0));
+  let n = Math.floor(A._dwAcc);
   if (n <= 0) return;
-  R._dwAcc -= n;
+  A._dwAcc -= n;
   n = Math.min(n, 24);
   if (typeof _swFxRoom === 'function' && _swFxRoom() < n) return;
-  const m = player.mesh;
+  const m = mesh || player.mesh;
   m.updateWorldMatrix(true, false);
   m.matrixWorld.decompose(_dwP, _dwQ, _dwS);
   _dwM.makeRotationFromQuaternion(_dwQ);
   const e = _dwM.elements;
-  const vx = player.velocity ? player.velocity.x : 0, vz = player.velocity ? player.velocity.z : 0;
+  const V = vel || player.velocity;
+  const vx = V ? V.x : 0, vz = V ? V.z : 0;
   const zF = (dirSign > 0) ? sil.zMax : sil.zMin, zSpan = Math.max(1, sil.zMax - sil.zMin);
   const latx = -fz, latz = fx, LIFT = 3;
   let made = 0;
@@ -23231,6 +23504,14 @@ function _swCrashSpray(x, wl, z, hx, hz, halfW, tailLen, f, vx, vz) {
       splash: true,
     });
   }
+}
+function _swFoamSeed(wx, wz, r, amt) {
+  const R = _swRipple; if (!R || !R.gpu || !(amt > 0.003)) return;
+  const half = R.bounds * 0.5;
+  if (Math.abs(wx - R.center.x) > half || Math.abs(wz - R.center.y) > half) return;
+  const PF = (R.pendingFoam = R.pendingFoam || []);
+  PF.push({ wx: wx, wz: wz, r: Math.max(20, r), a: Math.min(1, amt) });
+  if (PF.length > 8) PF.shift();
 }
 function _swRippleSeed(wx, wz, radius, amp) {
   const R = _swRipple; if (!R.gpu) return;
@@ -23338,11 +23619,12 @@ function _swDripWTick(dt, WL) {
     }
   }
 }
-function _swWorthingtonJet(px, pz, WL, fp, vEntry, k) {
+function _swWorthingtonJet(px, pz, WL, fp, vEntry, k, opt) {
   if (!game.particles || game._swSubmerged) return 0;
-  const n = Math.max(4, Math.min(46, Math.round((10 + 26 * k) * (fp.BEAM / 72))));
+  const n = Math.max(opt ? 2 : 4, Math.min(46, Math.round((10 + 26 * k) * (fp.BEAM / 72) * ((opt && opt.nK != null) ? opt.nK : 1))));
   if (_swFxRoom() < n) return 0;
-  const base = Math.max(120, vEntry * 0.55) * (0.8 + 0.6 * k);
+  const base = (opt && opt.base > 0) ? opt.base : Math.max(120, vEntry * 0.55) * (0.8 + 0.6 * k);
+  const _jl = (opt && opt.lean) ? opt.lean : 0, _jtx = (opt && opt.tx) || 0, _jtz = (opt && opt.tz) || 0;
   for (let i = 0; i < n; i++) {
     const fat = (i < n * 0.22);
     const ang = Math.random() * 6.2832;
@@ -23350,6 +23632,7 @@ function _swWorthingtonJet(px, pz, WL, fp, vEntry, k) {
     const spd = base * (fat ? (0.35 + Math.random() * 0.35) : (0.85 + Math.random() * 1.5));
     const sc = Math.sin(cone) * spd;
     _swDropV.set(Math.cos(ang) * sc, Math.cos(cone) * spd, Math.sin(ang) * sc);
+    if (_jl) { _swDropV.x += _jtx * _jl * _swDropV.y; _swDropV.z += _jtz * _jl * _swDropV.y; }   // (v49.01) the lean
     game.particles.push({
       position: new THREE.Vector3(px + Math.cos(ang) * fp.BEAM * 0.10 * Math.random(), WL + 6,
                                   pz + Math.sin(ang) * fp.BEAM * 0.10 * Math.random()),
@@ -23362,8 +23645,10 @@ function _swWorthingtonJet(px, pz, WL, fp, vEntry, k) {
       splash: true,
     });
   }
-  const peak = (window.__water && window.__water.impactPeak != null) ? window.__water.impactPeak : 0.135;
-  _swRippleSeed(px, pz, Math.max(24, fp.BEAM * 0.8), 0.55 * k * fp.heft * peak);
+  if (!(opt && opt.noRebound)) {
+    const peak = (window.__water && window.__water.impactPeak != null) ? window.__water.impactPeak : 0.135;
+    _swRippleSeed(px, pz, Math.max(24, fp.BEAM * 0.8), 0.55 * k * fp.heft * peak);
+  }
   return n;
 }
 const _SW_BLASTS = [];
@@ -23403,6 +23688,34 @@ function _swBlast(x, y, z, size, vel) {
   const A = Math.min(2.8, 0.85 * Math.pow((size || 20) / 20, 0.75) * bk) * reach;
   if (A < 0.01) return 0;
   _swFxN('blast');
+  _swFoamSeed(x, z, R * 1.1, ((W3.blastFoam != null) ? +W3.blastFoam : 0.85) * Math.min(1, A * 0.9));
+  if (W3.blastDrop !== 0) {
+    const rb = Math.min((W3.blastRMax != null) ? +W3.blastRMax : 80, R * ((W3.blastR != null) ? +W3.blastR : 0.35));
+    const depthB = Math.min(0.30, 0.10 * reach + 0.08 * A) * ((W3.blastDepth != null) ? +W3.blastDepth : 1);
+    if (d < -Math.min(40, R * 0.15)) {
+      _swRippleSeed(x, z, rb, depthB * 0.45);                // the dome
+      _swRippleSeed(x, z, rb * 0.45, -depthB * 0.5 * 0.6);   // vented through its middle
+    } else {
+      _swRippleSeed(x, z, rb, -depthB * 0.5 * 1.4);          // the crater (x 1.4: the rim overlaps its middle)
+      _swRippleSeed(x, z, rb * 2.1, depthB * 0.5 * 0.42);    // and its rim
+    }
+    const _sp2 = 260 + 520 * Math.min(1, (size || 20) / 60);
+    const _D2 = Math.max(26, Math.min(90, R * 0.5));
+    const _now2 = performance.now();
+    if (_now2 - _swXB.t > 250) { _swXB.t = _now2; _swXB.n = 0; }
+    if (_swXB.n < ((W3.wxCap != null) ? +W3.wxCap : 34) && !game._swSubmerged) {
+      _swXB.n += _swSpawnSplashV(x, WL, z, _swBlastSprayV(vel, _sp2), _D2, 0.5 + 0.8 * reach) || 0;
+    }
+    _swCrestDots(x, WL, z, 0.5 + 0.9 * reach, 0, 0, _swDispWorld(depthB));
+    if (_SW_BLASTS.length < 12) {
+      const _aK = Math.min(1, A);
+      _SW_BLASTS.push({ x: x, z: z, t: 0, R: rb * 1.2, k: Math.min(1, A * 1.4), noJet: (d < R * 0.35) ? 0 : 1,
+        delay: Math.sqrt(rb / 1300) * ((W3.dropT != null) ? +W3.dropT : 1),
+        drop: { r: Math.max(20, rb * 0.34), a: depthB * 0.5 * ((W3.dropSpike != null) ? +W3.dropSpike : 0.8) },
+        jet: { tx: 0, tz: 0, lean: 0, nK: 0.6 + 0.4 * _aK, base: _swDropUpFor(rb * (1.2 + 0.8 * _aK), 420), noRebound: 1 } });
+    }
+    return 1;
+  }
   if (d <= 0) {
     _swRippleSeed(x, z, R * 1.15, A * peak * 2.4);    // the dome
     _swRippleSeed(x, z, R * 0.42, -A * peak * 1.0);   // vented through its middle
@@ -23431,15 +23744,19 @@ function _swBlastTick(dt, WL) {
     b.t += dt;
     if (b.t < b.delay) continue;
     try {
-      _swFxN('blastColumn');
-      _swWorthingtonJet(b.x, b.z, WL, { BEAM: b.R * 0.85, DRAFT: b.R * 0.2, heft: 1, half: b.R },
-                        340 + b.R * 1.6, b.k);
+      if (b.drop) _swRippleSeed(b.x, b.z, b.drop.r, b.drop.a);   // (v49.01) the weapon drop's collapse spike
+      if (b.drop && b.jet) _swFoamSeed(b.x, b.z, b.drop.r * 3.0, 0.25 * (b.k || 0.3));   // (v49.03) and the jet falling back churns it
+      if (!b.noJet) {
+        _swFxN(b.drop ? 'dropJet' : 'blastColumn');
+        _swWorthingtonJet(b.x, b.z, WL, { BEAM: b.R * 0.85, DRAFT: b.R * 0.2, heft: 1, half: b.R },
+                          340 + b.R * 1.6, b.k, b.jet || null);
+      }
     } catch (_) {}
     const last = _SW_BLASTS.length - 1; if (i !== last) _SW_BLASTS[i] = _SW_BLASTS[last];
     _SW_BLASTS.pop();
   }
 }
-function _swWetTick(o, px, py, pz, vel, fp, WL, dt) {
+function _swWetTick(o, px, py, pz, vel, fp, WL, dt, keelH) {   // (v49.07) keelH: the origin's height over the keel
   if (!o || !fp || !game._hubWater) return;
   const W3 = (window.__water = window.__water || {});
   const st = _swWetState(o);
@@ -23482,8 +23799,19 @@ function _swWetTick(o, px, py, pz, vel, fp, WL, dt) {
     cav.t += dt;
     const jk = (W3.jet != null) ? +W3.jet : 1;
     const delay = ((W3.jetDelay != null) ? +W3.jetDelay : 0.30) * Math.sqrt(Math.max(0.2, fp.BEAM / 72));
-    if (cav.t >= delay || above > fp.DRAFT || cav.t > 2.5) {
-      if (jk > 0 && cav.t >= delay && cav.t <= 2.5 && above < 0) { _swFxN('jet'); _swWorthingtonJet(cav.x, cav.z, WL, fp, cav.v, cav.k * jk); }
+    const _aK = above - ((keelH > 0) ? keelH : 0);
+    if (cav.t >= delay || _aK > 0 || cav.t > 2.5) {
+      if (jk > 0 && cav.t >= delay && cav.t <= 2.5 && _aK < 0) {
+        _swFxN('jet');
+        if (cav.lean != null) {   // (v49.05) the hull drop's cavity (_swImpact): a narrow spike, the jet leaning back up the path
+          if (cav.a > 0.02) {
+            _swRippleSeed(cav.x, cav.z, Math.max(20, cav.r * 0.34), cav.a * 0.5 * 0.8);
+            _swFoamSeed(cav.x, cav.z, cav.r * 1.2, 0.3 * cav.k);
+          }
+          _swWorthingtonJet(cav.x, cav.z, WL, fp, cav.v, cav.k * jk, { tx: cav.tx, tz: cav.tz, lean: cav.lean, noRebound: 1,
+                            base: _swDropUpFor(cav.r * (1.5 + 1.5 * cav.k) * ((W3.dropJetH != null) ? +W3.dropJetH : 1), 420) });
+        } else _swWorthingtonJet(cav.x, cav.z, WL, fp, cav.v, cav.k * jk);
+      }
       else if (cav.t >= delay) _swFxN('jetMissed');
       st.cav = null;
     }
@@ -23758,6 +24086,9 @@ function _swWpnYield(dmg, splash, sizeMult) {
   if (splash > 0) return splash * 3;
   return 120 * ((sizeMult > 0) ? sizeMult : 1);
 }
+function _swWpnKind(name) {
+  return (name && /gatling|railgun|cannon|chaingun|minigun|slug|flak/i.test(name)) ? 'body' : 'energy';
+}
 const _swXS = { t: 0, n: 0 };
 const _SW_WPN_T = {};
 function _swWpnWake(o, x, y, z, vx, vz, R) {
@@ -23782,10 +24113,95 @@ function _swWpnWake(o, x, y, z, vx, vz, R) {
   const ih = 1 / sp, hx = vx * ih, hz = vz * ih;
   _swRippleSeed(x, z, Math.max(20, R * 0.9), -a);                                   // pressed down under it
   _swRippleSeed(x - hx * R * 1.7, z - hz * R * 1.7, Math.max(20, R * 1.25), a * 0.5);  // closing in behind
+  _swFoamSeed(x - hx * R * 0.8, z - hz * R * 0.8, Math.max(24, R * 1.1),
+              ((W3.skimFoam != null) ? +W3.skimFoam : 0.35) * prox * Math.sqrt(prox) * Math.min(1, sp / 600));
   _swFxN('wpnWake');
   return 1;
 }
-function _swWpnCross(x0, y0, z0, x1, y1, z1, Y, speed, src, minDt) {
+const _SW_BOIL = {};
+function _swWpnDrop(hx, hz, WL, ux, uy, uz, shotSp, R, Ax, W3, kind, src) {
+  const energy = (kind === 'energy');
+  const s = Math.min(1, Math.abs(uy)), c = Math.sqrt(Math.max(0, 1 - s * s));
+  const hl = Math.hypot(ux, uz), dx = hl > 1e-4 ? ux / hl : 0, dz = hl > 1e-4 ? uz / hl : 0;
+  const rc = energy ? Math.min((W3.boilRMax != null) ? +W3.boilRMax : 70, R * ((W3.boilR != null) ? +W3.boilR : 0.6))
+                    : R * ((W3.dropR != null) ? +W3.dropR : 0.42);
+  const wk0 = (W3.wpn != null) ? +W3.wpn : 1;
+  let fresh = 1;
+  if (energy) {
+    const key = src || 'main', now = performance.now(), B = _SW_BOIL[key];
+    if (B && now - B.t < Math.max(120, 1200 * Math.sqrt(B.r / 1300)))
+      fresh = Math.max(0.15, Math.min(1, Math.hypot(hx - B.x, hz - B.z) / Math.max(1, B.r)));
+    _SW_BOIL[key] = { x: hx, z: hz, t: now, r: rc };
+  }
+  const wk = wk0 * fresh;
+  const depth = energy
+    ? Math.min(0.30, 0.10 + Ax * 1.6) * ((W3.boilDepth != null) ? +W3.boilDepth : 0.6) * wk   // (v49.05) the boil
+    : Math.min(0.26, 0.06 + Ax * 1.2) * ((W3.dropDepth != null) ? +W3.dropDepth : 0.5) * wk;
+  const exiting = uy > 0;
+  _swFxN(exiting ? 'dropExit' : 'drop');
+  const _cv = energy ? { x: ux * shotSp * 0.25, y: -Math.max(Math.abs(uy), 0.6) * shotSp, z: uz * shotSp * 0.25 }
+                     : { x: ux * shotSp, y: -Math.abs(uy) * shotSp, z: uz * shotSp };
+  try { _swSpawnSplashV(hx, WL, hz, _cv, R, exiting ? 0.7 : 1.0,
+                        _swDeadrise({ BEAM: R, DRAFT: R * 0.19 })); } catch (_) {}
+  const _dF = ((W3.dropFoam != null) ? +W3.dropFoam : 0.55) * (0.35 + 0.65 * Math.min(1, depth / Math.max(0.15, fresh) / 0.2));   // (v49.05) / fresh: a held boil stays white
+  if (exiting) {
+    _swFoamSeed(hx, hz, rc * 1.3, _dF * 0.6);
+    _swRippleSeed(hx + dx * rc * 0.6 * c, hz + dz * rc * 0.6 * c, rc * 1.3, depth * 0.35);
+    if (typeof _SW_BLASTS !== 'undefined' && _SW_BLASTS.length < 12)
+      _SW_BLASTS.push({ x: hx, z: hz, t: 0, R: rc, k: 0, delay: 0.14, noJet: 1, drop: { r: rc * 0.8, a: -depth * 0.2 } });
+    return;
+  }
+  const glance = Math.sin(((W3.glanceDeg != null) ? +W3.glanceDeg : 12) * Math.PI / 180);
+  if (energy) {   // (v49.05) the steam off the boil - the crest-dot emitter is exactly a small, bright, slow puff
+    try { _swCrestDots(hx, WL, hz, 0.2 + 0.8 * Math.min(1, depth / Math.max(0.15, fresh) / 0.3), 0, 0, rc * 0.35); } catch (_) {}
+  }
+  if (!energy && s < glance) {
+    _swFxN('dropGlance');
+    const L = rc * (2 + 4 * c);
+    for (let i = 0; i < 4; i++) {
+      const f = i / 3;
+      _swRippleSeed(hx + dx * L * f, hz + dz * L * f, rc * (0.9 - 0.3 * f), -depth * 0.28 * (1 - 0.6 * f));
+    }
+    _swFoamSeed(hx + dx * L * 0.25, hz + dz * L * 0.25, rc * 1.2, _dF * 0.7);   // (v49.03) the furrow churns
+    _swFoamSeed(hx + dx * L * 0.75, hz + dz * L * 0.75, rc * 1.0, _dF * 0.45);
+    return;
+  }
+  const nC = energy ? 1 : 1 + Math.round(2 * c * c);    // straight down 1, 45 deg 2, flat 3; a boil is where it lands
+  const step = energy ? 0 : rc * 0.7 * c;
+  const rimA = depth * 0.5 * 0.42 * (1 + 0.5 * c);      // the displaced water
+  for (let i = 0; i < nC; i++) {
+    _swRippleSeed(hx + dx * step * i, hz + dz * step * i, rc * (1 - 0.15 * i), -(depth * 0.5 * 1.4) * (1 - 0.3 * i) / Math.sqrt(nC));
+  }
+  const rimShift = energy ? 0 : rc * (0.25 + 0.9 * c);   // (v49.05) a boil pushes all round
+  _swRippleSeed(hx + dx * rimShift, hz + dz * rimShift, rc * 2.1, rimA);
+  const _fS = energy ? 0 : rc * 0.4 * c;
+  _swFoamSeed(hx + dx * _fS, hz + dz * _fS, rc * 1.6, _dF);   // (v49.03) the air it punched in
+  if (typeof _SW_BLASTS !== 'undefined' && _SW_BLASTS.length < 12) {
+    const jK = Math.min(1, depth / 0.2);
+    const H = rc * (0.9 + 0.8 * jK) * ((W3.dropJetH != null) ? +W3.dropJetH : 1);   // the jet's apex, world units
+    _SW_BLASTS.push({ x: hx, z: hz, t: 0, R: rc * 1.2, k: 0.10 + 0.8 * jK,
+      delay: Math.sqrt(rc / 1300) * ((W3.dropT != null) ? +W3.dropT : 1),
+      drop: { r: Math.max(20, rc * 0.34), a: depth * 0.5 * ((W3.dropSpike != null) ? +W3.dropSpike : 0.8) },
+      jet: { tx: -dx, tz: -dz, lean: energy ? 0 : ((W3.jetLean != null) ? +W3.jetLean : 0.8) * c,   // (v49.05) a boil's goes straight up
+             nK: (0.35 + 0.65 * jK) * ((W3.dropJet != null) ? +W3.dropJet : 1),
+             base: _swDropUpFor(H, 420), noRebound: 1 } });
+  }
+}
+if (typeof window !== 'undefined') window.__dropTest = function (Y, angleDeg, exit, kind) {   // (v49.05) kind 'energy' | 'body' (default)
+  const w = game && game._hubWater; if (!w) return null;
+  const WL = w.userData.WL;
+  const f = new THREE.Vector3(0, 0, -1).applyEuler(player.euler);
+  const t = (Math.abs(f.y) > 1e-3) ? (WL - player.position.y) / f.y : -1;
+  const ax = (t > 0) ? player.position.x + f.x * t : player.position.x + f.x * 600, az = (t > 0) ? player.position.z + f.z * t : player.position.z + f.z * 600;
+  const hl = Math.hypot(f.x, f.z) || 1, hx = f.x / hl, hz = f.z / hl;
+  const a = ((angleDeg != null) ? +angleDeg : 60) * Math.PI / 180, ca = Math.cos(a), sa = Math.sin(a);
+  const d = 200, sgn = exit ? -1 : 1;
+  const x0 = ax - hx * ca * d, y0 = WL + sgn * sa * d, z0 = az - hz * ca * d;
+  const x1 = ax + hx * ca * d, y1 = WL - sgn * sa * d, z1 = az + hz * ca * d;
+  const r = _swWpnCross(x0, y0, z0, x1, y1, z1, (Y != null) ? +Y : 85, 1800, null, 0, kind || 'body');
+  return { at: [Math.round(ax), Math.round(az)], fired: r, pending: _SW_BLASTS.length };
+};
+function _swWpnCross(x0, y0, z0, x1, y1, z1, Y, speed, src, minDt, kind) {
   const w = game && game._hubWater; if (!w) return 0;
   const _wl0 = w.userData.WL;
   if (y0 < _wl0 && y1 < _wl0) {
@@ -23822,6 +24238,12 @@ function _swWpnCross(x0, y0, z0, x1, y1, z1, Y, speed, src, minDt) {
   const fp2 = { BEAM: R, LEN: R * 1.3, DRAFT: R * 0.19, half: R * 0.65, heft: 1 };
   try { _swSubTrail(x0, y0, z0, x1, y1, z1, R, src || 'p'); } catch (_) {}
   _swFxN('wpnCross');
+  if (W3.wpnDrop !== 0) {   // (v49.01) the drop - see _swWpnDrop
+    const _kind = kind || ((src && (/^p\d/.test(src) || src === 'pellet')) ? 'body' : 'energy');
+    _swWpnDrop(hx2, hz2, wl2, ux, uy, uz, shotSp, R, Ax, W3, _kind, src);
+    if (uy > 0) { try { _swExitPlume(hx2, wl2, hz2, ux, uy, uz, shotSp, R, 0.25 + 0.75 * Math.min(1, Ax * 6)); } catch (_) {} }
+    return 1;
+  }
   _swImpact(hx2, hz2, (uy > 0) ? -1 : 1, fp2, 1,
             { x: ux * shotSp, y: uy * shotSp, z: uz * shotSp }, wl2, null,
             0.55 * wk * (Ax / Math.max(1e-4, A)) * ((uy > 0) ? 1.61 : 1),
@@ -23997,7 +24419,7 @@ window.__waterFX = function (reset) {
 };
 window.__seedLog = function () { const l = _swRipple._sl || []; _swRipple._sl = []; return { seeds: l, fx: Object.assign({}, _SW_FXN) }; };
 window.__hullSilDump = function (cols, slot) {
-  const S = _swRipple[(slot === 1) ? 'hullSil1' : (slot === 2) ? 'hullSil2' : 'hullSil'];   // (v46.80) 1/2 = the entity slots
+  const S = _swRipple[(slot >= 1 && slot <= 4) ? ('hullSil' + slot) : 'hullSil'];   // (v46.80) 1/2 = the entity slots; (v48.92) 1-4
   if (!S || !S.rt) return 'no silhouette';
   const res = S.res, px = new Uint8Array(res * res * 4);
   renderer.readRenderTargetPixels(S.rt, 0, 0, res, res, px);
@@ -24419,6 +24841,49 @@ function _swImpact(px, pz, sign, fp, mass, vel, WL, actor, ampK, wakeK) {
   const _peakI = (_cw.impactPeak != null) ? +_cw.impactPeak : 0.135;
   const _sd = ((_cw.crater != null) ? +_cw.crater : 1) ? ((sign > 0) ? -1 : 1) : 1;
   _swFxN(sign > 0 ? 'entry' : 'exit');
+  if (_cw.hullDrop !== 0 && wakeK == null) {
+    const vx = vel ? vel.x : 0, vz = vel ? vel.z : 0;
+    const spd = Math.max(1e-3, Math.hypot(vx, vy, vz));
+    const s = Math.min(1, vy / spd), c = Math.sqrt(Math.max(0, 1 - s * s));
+    const hl = Math.hypot(vx, vz), dx = hl > 1e-3 ? vx / hl : 0, dz = hl > 1e-3 ? vz / hl : 0;
+    const rs = Math.min((_cw.hullDropRMax != null) ? +_cw.hullDropRMax : 50,
+                        Math.max(24, fp.BEAM * ((_cw.hullDropR != null) ? +_cw.hullDropR : 0.55)));
+    const heftK = Math.max(0.7, Math.min(1.3, Math.sqrt(Math.max(0.1, fp.heft || 1))));
+    const depth = Math.min((_cw.hullDropCap != null) ? +_cw.hullDropCap : 0.18, (0.02 + 0.06 * p) * heftK * ((ampK != null) ? ampK : 1)) *
+                  ((_cw.hullDropDepth != null) ? +_cw.hullDropDepth : 1);
+    const dF = ((_cw.hullDropFoam != null) ? +_cw.hullDropFoam : 0.6) * Math.min(1, depth / 0.15);
+    try { _swSpawnSplashV(px, WL, pz, { x: vx, y: -vy, z: vz }, fp.BEAM, sign > 0 ? 1.0 : 0.7, _swDeadrise(fp)); } catch (_) {}
+    if (sign > 0) {
+      if (depth > 0.02) {
+        const nC = 1 + Math.round(2 * c * c), step = rs * 0.7 * c;
+        for (let i = 0; i < nC; i++) {
+          _swRippleSeed(px + dx * step * i, pz + dz * step * i, rs * (1 - 0.15 * i), -(depth * 0.5 * 1.4) * (1 - 0.3 * i) / Math.sqrt(nC));
+        }
+        const rimShift = rs * (0.25 + 0.9 * c);
+        _swRippleSeed(px + dx * rimShift, pz + dz * rimShift, rs * 2.1, depth * 0.5 * 0.42 * (1 + 0.5 * c));
+        _swFoamSeed(px + dx * rs * 0.4 * c, pz + dz * rs * 0.4 * c, rs * 1.6, dF);
+      }
+      if (actor) {
+        const _st = _swWetState(actor);
+        const _jk = Math.min(1, Math.max(0, (vy - 40) / 420));
+        if (_jk > 0.02) _st.cav = { x: px, z: pz, t: 0, v: vy, k: _jk,
+                                    tx: -dx, tz: -dz, lean: ((_cw.jetLean != null) ? +_cw.jetLean : 0.8) * c, r: rs, a: depth };
+      }
+    } else {
+      if (depth > 0.02) {
+        _swRippleSeed(px + dx * rs * 0.6 * c, pz + dz * rs * 0.6 * c, rs * 1.3, depth * 0.35);   // the mound it lifts
+        _swFoamSeed(px, pz, rs * 1.3, dF * 0.6);
+        if (typeof _SW_BLASTS !== 'undefined' && _SW_BLASTS.length < 12)
+          _SW_BLASTS.push({ x: px, z: pz, t: 0, R: rs, k: 0, delay: 0.14 + 0.1 * Math.sqrt(rs / 100), noJet: 1, drop: { r: rs * 0.8, a: -depth * 0.2 } });
+      }
+      const _shed = (_cw.shed != null) ? +_cw.shed : 1;
+      if (_shed > 0) {
+        _swFxN('exitSheet');
+        _swShedDrops(px, WL + fp.DRAFT * 0.6, pz, vel, fp, Math.min(26, Math.round((8 + 16 * fp.heft) * _shed)), 0.92, 1.0, 1.15, 1.15);
+      }
+    }
+    return;
+  }
   const _cR = baseR + 50 * p;
   _swRippleSeed(px, pz, _cR, _sd * baseA * _peakI);   
   if (_sd < 0 || ((_cw.crater != null) ? +_cw.crater : 1)) _swRippleSeed(px, pz, _cR * 2.1, -_sd * baseA * _peakI * 0.45);
@@ -24490,6 +24955,208 @@ function _swHullMetrics() {
     return v;
   } catch (_) { return null; }
 }
+const _swMM = new WeakMap();
+function _swMeshMetrics(M) {
+  try {
+    if (!M) return null;
+    let hull = null;
+    for (let i = 0; i < M.children.length; i++) {
+      const c = M.children[i];
+      if (c && c.userData && c.userData.bboxSize) { hull = c; break; }
+    }
+    if (!hull) return null;
+    const c0 = _swMM.get(M); if (c0 && c0.hull === hull) return c0.v;
+    M.updateWorldMatrix(true, true);
+    _swHMInv.copy(M.matrixWorld).invert();
+    _swHMBox.makeEmpty();
+    hull.traverse(function (o) {
+      if (!o || !o.isMesh || !o.geometry) return;
+      if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+      _swHMBB.copy(o.geometry.boundingBox);
+      _swHMMat.multiplyMatrices(_swHMInv, o.matrixWorld);
+      _swHMBB.applyMatrix4(_swHMMat);
+      _swHMBox.union(_swHMBB);
+    });
+    if (_swHMBox.isEmpty()) return null;
+    const sc = M.getWorldScale(_swHMV1);
+    const sz = _swHMBox.getSize(_swHMV2);
+    const v = { halfW: Math.abs(sz.x * sc.x) * 0.5, halfH: Math.abs(sz.y * sc.y) * 0.5, halfL: Math.abs(sz.z * sc.z) * 0.5,
+                keel: Math.abs(_swHMBox.min.y * sc.y) };
+    if (!isFinite(v.halfH) || v.halfH <= 0 || !isFinite(v.halfW) || v.halfW <= 0) return null;
+    _swMM.set(M, { hull, v });
+    return v;
+  } catch (_) { return null; }
+}
+function _swIsShip(e) {
+  return !!(e && e.chassis && e.chassis.hullLength && !e.isWild && !e.isOwBoss && !e.isHubTraffic && !e.isEarthLife && !e.hoardModelKey);
+}
+function _swWooshK(keelA, DR, skH) {
+  if (keelA <= 0) return (keelA > -DR * 5) ? 1 : 0;   // in the water (the old lower bound: a hull five drafts down is gone)
+  const W = window.__water || {};
+  const a = (W.wooshAir != null) ? +W.wooshAir : 0.55, end = (W.wooshEnd != null) ? +W.wooshEnd : 0.65;
+  const air = (h) => { const f = 1 - (h / Math.max(1, skH)) / Math.max(0.01, end); return f > 0 ? a * f * Math.sqrt(f) : 0; };
+  const band = DR * 0.5;
+  if (keelA < band) return 1 + (air(band) - 1) * (keelA / band);
+  return air(keelA);
+}
+function _swWooshWing(deep, DR) { return (deep > 0) ? 0.6 + 0.4 * Math.min(1, Math.max(0.30, deep / Math.max(6, DR))) : 0; }
+function _swShipHydro(e) {
+  const mm = _swMeshMetrics(e && e.mesh); if (!mm) return null;
+  const K = window.__water || {};
+  const fp0 = _swPeerFootprint(e);
+  const bF = (K.beamF != null) ? +K.beamF : 1;
+  const fp = { LEN: fp0.LEN + (mm.halfL * 2 - fp0.LEN) * bF, BEAM: fp0.BEAM + (mm.halfW * 2 - fp0.BEAM) * bF,
+               DRAFT: fp0.DRAFT, half: fp0.half + (mm.halfL - fp0.half) * bF, heft: fp0.heft };
+  const DR = Math.max(6, mm.halfH * 2 * ((K.draftF != null) ? +K.draftF : 0.45));
+  const bc = (K.beamComp != null) ? +K.beamComp : 1;
+  const ampK = (fp.BEAM > 1e-3) ? Math.pow(Math.max(0.05, Math.min(1, fp0.BEAM / fp.BEAM)), bc) : 1;
+  return { mm, fp0, fp, DR, keel: mm.keel, mass: fp.heft * ((K.mass != null) ? +K.mass : 1) * ampK };
+}
+function _swPeerHullFx(e, st, dt, WL, vel, K, bud, bot) {
+  const hy = _swShipHydro(e); if (!hy) return false;
+  const _rk = bot ? ((K.entSpray != null) ? +K.entSpray : ((K.entRooster != null) ? +K.entRooster : 0.6)) : 1;
+  const _rm10 = bot ? 40 : 10, _rm12 = bot ? 40 : 12;
+  const R = _swRipple;
+  const fp = hy.fp, fp0 = hy.fp0, DR = hy.DR, mass = hy.mass, mm = hy.mm;
+  const px = e.position.x, pz = e.position.z;
+  const keelA = (e.position.y - hy.keel) - WL;
+  const sp = Math.hypot(vel.x, vel.z);
+  const spInv = sp > 1e-3 ? 1 / sp : 0, hx = vel.x * spInv, hz = vel.z * spInv;
+  const touching = keelA < DR * 0.5 && keelA > -DR * 5;
+  const wake = (K.wake != null) ? +K.wake : 0.05;
+  const spdTail = (K.spdTail != null) ? +K.spdTail : 0.30;
+  const room = _swFxRoom();
+  let _wingW = 0;   // (v48.98) the woosh from a tip in the water - set in the wing test below
+  if ((keelA > -DR * 4 && keelA < 200 && sp > 8) && (touching || sp > 35)) {
+    const _nowS = performance.now();
+    if (!(R._entSpT && (_nowS - R._entSpT) < 1000) || sp >= (R._entSp || 0) * 0.9) { R._entSp = sp; R._entSpT = _nowS; }
+  }
+  const id = e.id || e.uuid;
+  let E = null;   // this ship's patch record, if it holds a wake slot this frame
+  if (R.entP) for (let i = 0; i < R.entP.length; i++) { const r = R.entP[i]; if (r && r.ship && r.id === id) { E = r; break; } }
+  const spacing = Math.max(22, fp.LEN * 0.35);
+  if (keelA > -DR * 4 && keelA < 200 && sp > 8) {
+    const moved = (st.wkX === undefined) ? 1e9 : ((px - st.wkX) * (px - st.wkX) + (pz - st.wkZ) * (pz - st.wkZ));
+    if (moved > spacing * spacing && (touching || sp > 35)) {
+      const prox = 1.0 - Math.min(1, Math.abs(keelA) / 200);
+      const amp = 0.16 * (fp.DRAFT / 13.5) * fp.heft * mass * (touching ? 1.0 : 0.35) * _swSpdCurve(sp, 420, spdTail) * (0.45 + 0.55 * prox) * wake;
+      const lpx = -hz, lpz = hx;
+      const wG = (K.waveG != null) ? +K.waveG : 1300, Frc = (K.waveFrc != null) ? +K.waveFrc : 0.5;
+      const Fr = sp / Math.sqrt(Math.max(1, wG * fp.LEN));
+      const aK = 0.33998, alpha = (Fr <= Frc) ? aK : aK * (Frc / Fr);
+      const shoulder = fp.half * 1.1 + Math.min(sp * 0.12, fp.LEN * 1.1);
+      const off = shoulder * Math.tan(alpha) * ((K.kelvin != null) ? +K.kelvin : 1) + fp.BEAM * 0.5;
+      const spd = _swSpdCurve(sp, 350, spdTail);
+      const crestD = fp.half + fp.BEAM * 0.45 + Math.min(sp * 0.10, fp.LEN);
+      const sx = px - hx * shoulder, sz = pz - hz * shoulder;
+      const nSeed = E ? 3 : 5;
+      if (bud.n >= nSeed) {
+        if (!E) {   // unpatched: the round bow / stern pair yours lays when it has no hull patch
+          _swRippleSeed(px + hx * fp.half * 0.8, pz + hz * fp.half * 0.8, Math.max(20, fp.BEAM * 0.9), amp * 0.6);
+          _swRippleSeed(px - hx * fp.half * 0.9, pz - hz * fp.half * 0.9, Math.max(20, fp.BEAM * 0.85), -amp * 0.85);
+        }
+        _swRippleSeed(px - hx * crestD, pz - hz * crestD, Math.max(20, fp.BEAM * 0.8), amp * (0.45 + 0.95 * spd) * (E ? ((K.hullCrest != null) ? +K.hullCrest : 0.6) : 1));
+        _swRippleSeed(sx + lpx * off, sz + lpz * off, Math.max(20, fp.BEAM * 0.7), amp * 0.42);
+        _swRippleSeed(sx - lpx * off, sz - lpz * off, Math.max(20, fp.BEAM * 0.7), amp * 0.42);
+        bud.n -= nSeed;
+        _swFxN('pWake');
+      }
+      if (E && touching && window.__waterDisp && (!bot || room > _rm10)) {   // _swCrashSpray checks the pool itself, as for yours
+        const imF = Math.max(0, Math.min(1, -keelA / Math.max(1, DR))) * _swSpdCurve(sp, 350, spdTail);
+        if (imF > 0.05) { _swCrashSpray(px - hx * crestD, WL, pz - hz * crestD, hx, hz, fp.BEAM * 0.5, E.tailLen, imF, vel.x, vel.z); _swFxN('pCrash'); }
+      }
+      if (window.__waterDisp && !K.crestBreak) _swCrestSpray(px - hx * crestD, WL, pz - hz * crestD, amp * (0.45 + 0.95 * spd), vel.x, vel.z);
+      st.wkDot = (st.wkDot | 0) + 1;
+      if ((st.wkDot & 1) === 0 && (!bot || room > _rm10)) {
+        const dk = amp * (0.45 + 0.95 * spd) * 3.4;
+        const cY = _swDispWorld(amp * (0.45 + 0.95 * spd) * 2 * ((K.seedScale != null) ? +K.seedScale : 1));
+        _swCrestDots(px - hx * crestD, WL, pz - hz * crestD, dk, vel.x, vel.z, cY);
+        _swCrestDots(sx + lpx * off, WL, sz + lpz * off, dk * 0.55, vel.x, vel.z, cY * 0.6);
+        _swCrestDots(sx - lpx * off, WL, sz - lpz * off, dk * 0.55, vel.x, vel.z, cY * 0.6);
+      }
+      st.wkX = px; st.wkZ = pz;
+    }
+  }
+  const pl = (K.plane != null) ? +K.plane : 1;
+  const wet01 = Math.max(0, Math.min(1, (DR * ((K.kiss != null) ? +K.kiss : 0.5) - keelA) / DR));
+  if (pl > 0 && wet01 > 0.02 && sp > 55 && !game._swSubmerged) {
+    st.plT2 = (st.plT2 || 0) + dt;
+    const rate = (3 + 11 * wet01 * Math.min(1, sp / 300)) * pl * _rk;
+    if (st.plT2 > 1 / Math.max(0.5, rate)) {
+      st.plT2 = 0;
+      if (room > _rm12) {
+        _swFxN('pPlane');
+        _swSpawnSplashV(px + hx * fp.half * 0.55, WL, pz + hz * fp.half * 0.55,
+                        { x: vel.x, y: -Math.max(14, sp * 0.10 * wet01), z: vel.z },
+                        fp.BEAM, 0.55 + 0.55 * wet01, _swDeadrise(fp), _swSurfDip(-keelA, fp));
+      }
+    }
+  } else if (st.plT2) st.plT2 = 0;
+  if (pl > 0 && wet01 > 0.04 && sp > 90 && !game._swSubmerged) {
+    st.rsT2 = (st.rsT2 || 0) + dt;
+    const rr = (7 + 15 * wet01 * Math.min(1, sp / 320)) * pl * _rk;
+    if (st.rsT2 > 1 / Math.max(0.5, rr)) {
+      st.rsT2 = 0;
+      const rAt = E ? ((K.roosterAt != null) ? +K.roosterAt : 1.0) : 0;   // at the wake's apex, as yours (v46.78)
+      const rD = fp.half * 1.15 + rAt * ((fp.half + fp.BEAM * 0.45 + Math.min(sp * 0.10, fp.LEN)) - fp.half * 1.15);
+      const rDip = _swSurfDip(-keelA, fp) * (1 - 0.75 * rAt);
+      if (room > _rm10) { _swRooster(px - hx * rD, WL, pz - hz * rD, vel, fp, wet01, rDip); _swFxN('pRoos'); }
+    }
+  } else if (st.rsT2) st.rsT2 = 0;
+  const wg = (K.wing != null) ? +K.wing : 1;
+  if (wg > 0 && e.mesh && sp > 20 && !game._swSubmerged && keelA < mm.halfW) {
+    _swEntRight.set(1, 0, 0).applyQuaternion(e.mesh.quaternion);
+    const wr = mm.halfW * 0.90;
+    const tipBase = e.position.y - hy.keel;
+    const sc = _swSpdCurve(sp, 350, spdTail);
+    const kW = DR * ((K.wingKiss != null) ? +K.wingKiss : 0.22);
+    let deep = 0;
+    for (let s = -1; s <= 1; s += 2) { const d = WL + kW - (tipBase + _swEntRight.y * wr * s); if (d > deep) deep = d; }
+    _wingW = _swWooshWing(deep, DR);   // (v48.98)
+    if (deep > 0) {
+      const seedR = Math.max(18, fp.BEAM * 0.22);
+      const wStep = Math.max(10, seedR * ((K.wingStep != null) ? +K.wingStep : 0.45));
+      const wMoved = (st.wgX === undefined) ? 1e9 : ((px - st.wgX) * (px - st.wgX) + (pz - st.wgZ) * (pz - st.wgZ));
+      st.wgT = (st.wgT || 0) + dt;
+      if (wMoved > wStep * wStep || st.wgT > 0.30) {
+        st.wgT = 0; st.wgX = px; st.wgZ = pz;
+        st.wgS = (st.wgS | 0) + 1;
+        const wSpray = (st.wgS & 1) === 0;
+        for (let s = -1; s <= 1; s += 2) {
+          const d = WL + kW - (tipBase + _swEntRight.y * wr * s);
+          if (d <= 0) continue;
+          const wk = Math.min(1, Math.max(0.30, d / Math.max(6, DR)));
+          const tx = px + _swEntRight.x * wr * s, tz = pz + _swEntRight.z * wr * s;
+          const wa = 0.16 * (fp0.DRAFT / 13.5) * fp0.heft * mass * sc * wk * wake * 0.55 * ((K.wingAmp != null) ? +K.wingAmp : 1);
+          if (bud.n > 0) { _swRippleSeed(tx, tz, seedR, wa); bud.n--; _swFxN('pWingCut'); }
+          if (wSpray && room > _rm10 && (!bot || Math.random() < _rk)) {
+            _swSpawnSplashV(tx, WL, tz, { x: vel.x, y: -Math.max(12, sp * 0.09 * wk), z: vel.z },
+                            fp.BEAM * 0.34, 0.35 + 0.65 * wk, _swDeadrise(fp0), _swSurfDip(d - kW, fp0));
+          }
+          if (wSpray && window.__waterDisp && !K.crestBreak) _swCrestSpray(tx, WL, tz, wa, vel.x, vel.z);
+        }
+      }
+    } else if (st.wgT) st.wgT = 0;
+  } else if (st.wgT) st.wgT = 0;
+  if (!bot) {
+    const _wv = Math.max(_swWooshK(keelA, DR, _swSkimCeil(fp, DR)), _wingW);
+    _swPeerHiss(e, sp > 20 && _wv > 0.01, sp, px, e.position.y - hy.keel, pz, _wv);
+  }
+  if (touching && sp <= 8) {
+    st.bbT = (st.bbT || 0) + dt;
+    if (st.bbT > 0.33) {
+      st.bbT = 0;
+      if (bud.n > 0) { _swRippleSeed(px, pz, Math.max(60, (fp.LEN + fp.BEAM) * 0.55), 0.018 * (fp.DRAFT / 13.5) * fp.heft * mass); bud.n--; }
+    }
+  }
+  if (E && E.sil && E.sil.slab && sp > 60 && (!bot || room > _rm10)) {   // _swDeckWash checks the pool itself
+    const H = mm.halfH * 2, kd = Math.max(0, -keelA);
+    const hK = H * ((K.holeH != null) ? +K.holeH : 0.22), cK = Math.max(hK + 1, H * ((K.closeH != null) ? +K.closeH : 0.65));
+    const cT = (K.holeClose !== 0) ? Math.max(0, Math.min(1, (kd - hK) / (cK - hK))) : 0;
+    if (cT > 0) { try { _swDeckWash(dt, E.sil, E.fx, E.fz, E.dirSign, WL, sp, cT, keelA, H, e.mesh, vel, st); } catch (_) {} }
+  }
+  return true;
+}
 function _swHullSpan() {
   try {
     const m = (typeof player !== 'undefined' && player) ? player.mesh : null;
@@ -24536,6 +25203,38 @@ function _swEntPatch(e, slot, WL, dt, pressK) {
     _swEPqi.copy(_swEPq).invert();
     _swEPu.set(0, 1, 0).applyQuaternion(_swEPqi);
     const keelA = (_swEPv.y + sil.y0) - WL;
+    if (_swIsShip(e)) {   // (v48.97) players and bots only - see _swIsShip
+      const H = Math.max(8, sil.range - 2);
+      const DR = Math.max(6, H * ((K.draftF != null) ? +K.draftF : 0.45));
+      const kA = keelA + 1;
+      const fpS = { BEAM: (sil.beam > 0) ? sil.beam : 40, LEN: (sil.len > 0) ? sil.len : 80 };
+      const skH = _swSkimCeil(fpS, DR);
+      if (!(kA < skH && kA > -DR * 6)) return null;
+      const deep = 1 - Math.max(0, Math.min(1, (-kA - DR * 3) / (DR * 3)));
+      const skD = DR * 0.55 * ((K.skimDepth != null) ? +K.skimDepth : 1);
+      const skF = 1 - Math.max(0, Math.min(1, kA / Math.max(1, skH)));
+      const skim = Math.max(0, kA) + skD * skF * Math.sqrt(skF);
+      const stS = _swEntState(e);
+      const idtS = dt > 1e-4 ? (1 / dt) : 0;
+      const vxS = (e.position.x - stS.px) * idtS, vzS = (e.position.z - stS.pz) * idtS;
+      const spS = Math.hypot(vxS, vzS), mvS = spS > 8;
+      let dsS = (e._swPatchDS) || 1;
+      if (mvS) dsS = (fx * (vxS / spS) + fz * (vzS / spS)) >= 0 ? 1 : -1;
+      e._swPatchDS = dsS;
+      const hcOn = (K.holeClose !== 0);
+      return {
+        id: e.id || e.uuid || ('e' + slot),
+        x: _swEPv.x, z: _swEPv.z, fx, fz, ux: _swEPu.x, uy: _swEPu.y, uz: _swEPu.z,
+        wl: WL - _swEPv.y + skim,
+        k: ((K.hullPress != null) ? +K.hullPress : 1.25) * ((K.mass != null) ? +K.mass : 1) * deep / 170,
+        holeCap: hcOn ? H * ((K.holeCap != null) ? +K.holeCap : 0.30) : 0, holeOver: H * ((K.holeOver != null) ? +K.holeOver : 0.12),
+        lid: 1, relG: Math.max(0, Math.min(1, (spS - 40) / 120)),
+        rimK: (K.hullRim != null) ? +K.hullRim : 0.5, rimR: sil.rimR,
+        tailLen: mvS ? ((K.hullTail != null) ? +K.hullTail : 1.0) * (fpS.BEAM * 0.45 + Math.min(spS * 0.10, fpS.LEN)) : 0,
+        tailK: (K.hullTailK != null) ? +K.hullTailK : 0.8, dirSign: dsS,
+        sRear: dsS > 0 ? sil.zMin : sil.zMax, LEN: sil.zMax - sil.zMin, sil, t: performance.now(), ship: 1, peer: e.peerId ? 1 : 0, ent: e,
+      };
+    }
     if (keelA >= 0) return null;                        // dry: every texel would read zero immersion
     const H = Math.max(8, sil.range);
     const deepFall = H * 0.6 * ((K.entDeep != null) ? +K.entDeep : 1);
@@ -24563,6 +25262,7 @@ function _swEntPatch(e, slot, WL, dt, pressK) {
   } catch (_) { return null; }
 }
 function _swEntityWaterTick(dt, WL) {
+  try { _swPeerHissSweep(250); } catch (_) {}   // (v48.95) before any return: a voice nobody refreshed goes quiet
   const R = _swRipple; if (!R || !R.gpu) return;
   const K = (window.__water = window.__water || {});
   if (K.entWake === 0) return;                      // live kill switch for A/B
@@ -24593,15 +25293,17 @@ function _swEntityWaterTick(dt, WL) {
   const far2 = far * far;
   const cam = (typeof camera !== 'undefined' && camera) ? camera.position : null;
   let budget = Math.max(0, 8 - (R.pending ? R.pending.length : 0) - 2);
-  if (budget <= 0) return;
   const _spN = (K.entSprayMax != null) ? +K.entSprayMax : 2;
   let _capRoos = _spN, _capSheet = _spN, _capCrest = _spN, _capWing = Math.max(1, _spN >> 1);
 
   const _epK = (K.entPress != null) ? +K.entPress : 1.0;
-  R.entP = R.entP || [null, null];
-  R._entPrev = R._entPrev || [null, null];
+  const _NSL = 4;   // (v48.92) entity patch slots (was 2)
+  if (!R.entP || R.entP.length < _NSL) R.entP = [null, null, null, null];
+  if (!R._entPrev || R._entPrev.length < _NSL) R._entPrev = [null, null, null, null];
   if (_epK > 0 && cam && typeof _swHullSilhouette === 'function') {
-    let _b0 = null, _b1 = null, _s0 = 0, _s1 = 0;
+    const _best = [];   // the top _NSL by score, highest first
+    const _take = (e, sc) => { _best.push({ e, sc }); _best.sort((p, q) => q.sc - p.sc); if (_best.length > _NSL) _best.length = _NSL; };
+    const _farS2 = (far > 2000) ? Math.pow(Math.max(far, (R.bounds || 8000) * 0.45), 2) : far2;
     for (let i = 0; i < L.length; i++) {
       const e = L[i];
       if (!e.mesh || e.mesh.visible === false) continue;
@@ -24609,16 +25311,31 @@ function _swEntityWaterTick(dt, WL) {
       const _ko = (typeof e.footOff === 'number' && e.footOff > 0) ? e.footOff : _fpS.DRAFT;
       const _bodyH = Math.max(8, _ko * 2);
       const _kA = (e.position.y - _ko) - WL;
+      if (_swIsShip(e)) {   // (v48.97) players and bots only - see _swIsShip
+        const _mm = _swMeshMetrics(e.mesh);
+        const _kS = _mm ? ((e.position.y - _mm.keel) - WL) : _kA;
+        const _DRs = _mm ? Math.max(6, _mm.halfH * 2 * ((K.draftF != null) ? +K.draftF : 0.45)) : _fpS.DRAFT;
+        const _ceil = _swSkimCeil(_mm ? { BEAM: _mm.halfW * 2 } : _fpS, _DRs);
+        if (!(_kS < _ceil + _DRs && _kS > -_DRs * 7)) continue;   // a draft of slack: the exact gate is _swEntPatch's
+        const dxS = e.position.x - cam.x, dyS = e.position.y - cam.y, dzS = e.position.z - cam.z;
+        const d2S = dxS * dxS + dyS * dyS + dzS * dzS;
+        if (d2S > _farS2) continue;
+        _take(e, ((_mm ? _mm.halfW * 2 : _fpS.BEAM) / Math.max(200, Math.sqrt(d2S))) * (e.peerId ? 8 : 2));
+        continue;
+      }
       if (!(_kA < _bodyH * 0.5 && _kA > -_bodyH * 1.5)) continue;
       const dx = e.position.x - cam.x, dy = e.position.y - cam.y, dz = e.position.z - cam.z;
       const d2 = dx * dx + dy * dy + dz * dz;
       if (d2 > far2) continue;
-      const sc = _fpS.BEAM / Math.max(200, Math.sqrt(d2));
-      if (sc > _s0) { _b1 = _b0; _s1 = _s0; _b0 = e; _s0 = sc; }
-      else if (sc > _s1) { _b1 = e; _s1 = sc; }
+      _take(e, _fpS.BEAM / Math.max(200, Math.sqrt(d2)));
     }
-    const _pick = [_b0, _b1];
-    for (let sl = 0; sl < 2; sl++) {
+    const _pick = [null, null, null, null], _left = [];
+    for (let j = 0; j < _best.length; j++) {
+      const e = _best[j].e, ps = (e._swPatchSlot | 0) - 1;
+      if (ps >= 0 && ps < _NSL && !_pick[ps] && R.entP[ps] && R.entP[ps].id === (e.id || e.uuid)) _pick[ps] = e; else _left.push(e);
+    }
+    for (let sl = 0; sl < _NSL && _left.length; sl++) if (!_pick[sl]) _pick[sl] = _left.shift();
+    for (let sl = 0; sl < _NSL; sl++) {
       const e = _pick[sl];
       const rec = e ? _swEntPatch(e, sl + 1, WL, dt, _epK) : null;
       if (e) e._swPatchSlot = rec ? (sl + 1) : 0;
@@ -24627,7 +25344,7 @@ function _swEntityWaterTick(dt, WL) {
     }
     try { window.__entP = R.entP; } catch (_) {}
   } else {
-    R.entP[0] = R.entP[1] = null;
+    for (let sl = 0; sl < R.entP.length; sl++) R.entP[sl] = null;
   }
 
   const n = L.length;
@@ -24654,6 +25371,18 @@ function _swEntityWaterTick(dt, WL) {
       if (!(R._entSpT && (_nowE - R._entSpT) < 1000) || sp >= (R._entSp || 0) * 0.9) { R._entSp = sp; R._entSpT = _nowE; }
     }
 
+    let _slotBot = false;
+    if (!e.peerId && K.botFx !== 0 && R.entP) {
+      const _eid = e.id || e.uuid;
+      for (let _q = 0; _q < R.entP.length; _q++) { const _r = R.entP[_q]; if (_r && _r.ship && _r.id === _eid) { _slotBot = true; break; } }
+    }
+    if ((e.peerId && K.peerFx !== 0) || _slotBot) {
+      const _bb = { n: budget };
+      let _done = false;
+      try { _done = _swPeerHullFx(e, st, dt, WL, _swEntVel, K, _bb, !e.peerId || K.peerAsBot === 1); } catch (_) {}   // (v48.97) peerAsBot: test the bot path on a __peerTwin
+      budget = _bb.n;
+      if (_done) continue;
+    }
     const _selfImpacts = !!e.peerId;
     if (budget > 0 && !_selfImpacts && keelA < 0 && prevKeel >= 0) {
       try { _swImpact(e.position.x, e.position.z, +1, fp, 1.0, _swEntVel, WL, e, 0.8 * K.entWake); } catch (_) {}
@@ -24815,6 +25544,10 @@ function _swRippleTick(dt) {
           const _gW = (_W3.dispG != null) ? +_W3.dispG : 1300;
           const _cell = R.bounds / _SW_RIPPLE_RES;
           _u.uDispG.value = _gW * R.step * R.step / (Math.max(0.1, R._iw.slope) * _cell);
+          if (_u.uTension) {
+            const _ct = (_W3.tension != null) ? +_W3.tension : 150;
+            _u.uTension.value = Math.min(0.2, Math.pow(Math.max(0, _ct) * R.step / _cell, 2));
+          }
         }
       }
       if (_W3.seedImpulse != null && _u.uSeedImpulse) _u.uSeedImpulse.value = _W3.seedImpulse;   // (v41.02)
@@ -24951,13 +25684,13 @@ function _swRippleTick(dt) {
     if (W3.waveFrc === undefined) W3.waveFrc = 0.5;    // Rabaud-Moisy Kelvin -> Mach crossover
     if (W3.jet === undefined) W3.jet = 1.0;            // Worthington jet after cavity pinch-off
     if (W3.jetDelay === undefined) W3.jetDelay = 0.30; // pinch-off delay, scaled by sqrt(beam)
-    if (W3.skip === undefined) W3.skip = 1.0;          // ricochet off a shallow fast entry (0 = never skip)
+    if (W3.skip === undefined) W3.skip = 0;            // ricochet off a shallow fast entry (0 = never skip). (v49.05) OFF - owner: "nothing ever skipped, we don't need to add it" (v49.05 set only the in-place default, which this line pre-empts; v49.07 fixed it here)
     if (W3.skipAngle === undefined) W3.skipAngle = 20; // the magic angle, degrees
     if (W3.skipSpeed === undefined) W3.skipSpeed = 190;
     
     if (W3.disp === undefined) W3.disp = 100;      // soft-clip ceiling, world units
-    if (W3.gain === undefined) W3.gain = 100;      // slope as h -> 0 : this is CALM water
-    if (W3.crestQ === undefined) W3.crestQ = 11;   // crest-only expander : this is CREST HEIGHT
+    if (W3.gain === undefined) W3.gain = 70;       // slope as h -> 0 : this is CALM water
+    if (W3.crestQ === undefined) W3.crestQ = 5;    // crest-only expander : this is CREST HEIGHT
     if (W3.foamSlope === undefined) W3.foamSlope = 0.50;    // (v41.18) slope at which a crest whitecaps
     if (W3.steepFoam === undefined) W3.steepFoam = 0.55;    // (v41.18) how white a steep crest goes
     if (W3.normK === undefined) W3.normK = 1.0;             // (v41.17) crest normal strength
@@ -25125,6 +25858,7 @@ function _swRippleTick(dt) {
       W3.wHalfW = _hm ? Math.round(_hm.halfW) : -1;
       W3.wGate = (_wg > 0 ? 1 : 0) | (_hm ? 2 : 0) | (_wm ? 4 : 0) | (sp > 20 ? 8 : 0) |
                  (!game._swSubmerged ? 16 : 0) | ((_hm && keelA < _hm.halfW) ? 32 : 0);
+      R._wingWoosh = 0;   // (v48.98) the woosh from a tip in the water - set below, read by the drag hiss
       if (_wg > 0 && _hm && _wm && sp > 20 && !game._swSubmerged && keelA < _hm.halfW) {
         _swWingR.set(1, 0, 0).applyQuaternion(_wm.quaternion);
         const _wr = _hm.halfW * 0.90;                  // just inboard of the tip
@@ -25138,6 +25872,7 @@ function _swRippleTick(dt) {
         }
         W3.wRightY = +_swWingR.y.toFixed(3);
         W3.wDeep = Math.round(_deep);
+        R._wingWoosh = _swWooshWing(_deep, DR);   // (v48.98) every frame, not on the cut's distance step
         W3.wR = Math.round(_wr);
         const _seedR = Math.max(18, fp.BEAM * 0.22);
         if (_deep > 0) {
@@ -25177,10 +25912,12 @@ function _swRippleTick(dt) {
       R.bobT = (R.bobT || 0) + dt;
       if (R.bobT > 0.33) { R.bobT = 0; _swFxN('rest'); _swRippleSeed(px, pz, Math.max(60, (fp.LEN + fp.BEAM) * 0.55), 0.018 * (fp.DRAFT / 13.5) * fp.heft * mass); }
     }
-    const _wantHiss = touching && sp > 20;
+    const _wooshV = Math.max(_swWooshK(keelA, DR, _skHOf(fp, DR)), R._wingWoosh || 0);
+    try { W3.woosh = +_wooshV.toFixed(3); } catch (_) {}   // live readout
+    const _wantHiss = sp > 20 && _wooshV > 0.01;   // (no underwater gate: the old `touching` rule had none either)
     if (_wantHiss && !game._dragHiss) { try { game._dragHiss = _swStartDragHiss(); } catch (_) {} }
     else if (!_wantHiss && game._dragHiss) { try { _swStopDragHiss(game._dragHiss); } catch (_) {} game._dragHiss = null; }
-    if (game._dragHiss && game._dragHiss.set) { try { game._dragHiss.set(sp); } catch (_) {} }
+    if (game._dragHiss && game._dragHiss.set) { try { game._dragHiss.set(sp, _wooshV); } catch (_) {} }
     if (keelA < 0 && prevKeelA >= 0)      { _swImpact(px, pz, +1, fp, mass, player.velocity, WL, R); try { if (typeof playSpatialSound === 'function') playSpatialSound('water_bloop', new THREE.Vector3(px, WL, pz), { refDistance: 300, maxDistance: 5200 }); } catch (_) {} }
     else if (keelA > 0 && prevKeelA <= 0) { _swImpact(px, pz, -1, fp, mass, player.velocity, WL, R); try { if (typeof playSpatialSound === 'function') playSpatialSound('water_bloop_soft', new THREE.Vector3(px, WL, pz), { refDistance: 260, maxDistance: 4200 }); } catch (_) {} }
     try { const _wx = (window.__water = window.__water || {});
@@ -25189,7 +25926,7 @@ function _swRippleTick(dt) {
       if (keelA < 0 && prevKeelA >= 0) _wx.xEnter = (_wx.xEnter | 0) + 1;
       else if (keelA > 0 && prevKeelA <= 0) _wx.xExit = (_wx.xExit | 0) + 1; } catch (_) {}
     if (keelA < 0 && prevKeelA >= 0 && player.velocity) {
-      const _sk = (W3.skip != null) ? +W3.skip : 1;
+      const _sk = (W3.skip != null) ? +W3.skip : 0;   // (v49.05) OFF - owner: "nothing ever skipped, we don't need to add it" (__water.skip = 1 = the v41.04 bounce)
       const _vyIn = -player.velocity.y;
       const _inc = Math.atan2(Math.max(0, _vyIn), Math.max(1e-4, sp)) * 57.29578;
       const _skA = (W3.skipAngle != null) ? +W3.skipAngle : 20;
@@ -25202,7 +25939,7 @@ function _swRippleTick(dt) {
     }
     R.prevAbove = above;
     R.prevKeel = keelA;   // (v42.63)
-    try { _swWetTick(R, px, player.position.y, pz, player.velocity, fp, WL, dt); } catch (_) {}
+    try { _swWetTick(R, px, player.position.y, pz, player.velocity, fp, WL, dt, _keelH); } catch (_) {}   // (v49.07) + the keel
     try { _swDripWTick(dt, WL); } catch (_) {}
     try { _swBlastTick(dt, WL); } catch (_) {}   // (v41.19) deferred blast columns
     try { _swEntityWaterTick(dt, WL); } catch (_) {}
@@ -25228,6 +25965,19 @@ function _swRippleTick(dt) {
     }
     u.uSeedCount.value = n;
     R.pending.length = 0;
+    if (u.uFoamSeeds) {
+      const PF = R.pendingFoam || [];
+      let nf = 0, took = 0;
+      for (; took < PF.length && nf < 4; took++) {
+        const fs = PF[took];
+        const lx = fs.wx - _cx, lz = fs.wz - _cz;
+        if (Math.abs(lx) > _half || Math.abs(lz) > _half) continue;
+        u.uFoamSeeds.value[nf].set(lx, lz, fs.r, fs.a);
+        nf++;
+      }
+      u.uFoamSeedCount.value = nf;
+      if (took) PF.splice(0, took);
+    }
     if (u.uHullB) {
       const H = R.hullP;
       if (H && H.sil && H.sil.tex && (performance.now() - H.t) < 300) {
@@ -25263,16 +26013,20 @@ function _swRippleTick(dt) {
       } else { u.uHullB.value.y = 0; R._hullPrev = null; }
     }
     if (u.uEntB) {
-      const EP = R.entP || [null, null];
-      const PV = (R._entPrev = R._entPrev || [null, null]);
-      for (let sl = 0; sl < 2; sl++) {
+      const NS = u.uEntB.value.length;
+      const EP = R.entP || [];
+      const PV = (R._entPrev = R._entPrev || []);
+      for (let sl = 0; sl < NS; sl++) {
         const E = EP[sl];
         const A = u.uEntA.value[sl], AP = u.uEntAP.value[sl], B = u.uEntB.value[sl];
         const RC = u.uEntR.value[sl], Y = u.uEntY.value[sl];
         const U = u.uEntU.value[sl], UP = u.uEntUP.value[sl], T = u.uEntT.value[sl];
+        const HO = u.uEntHole ? u.uEntHole.value[sl] : null, X = u.uEntX ? u.uEntX.value[sl] : null;
+        const TX = u['uEntTex' + sl], TP = u['uEntTop' + sl];
         if (E && E.sil && E.sil.tex && (performance.now() - E.t) < 300) {
           const P0 = (PV[sl] && PV[sl].id === E.id) ? PV[sl] : E;
-          if (sl === 0) u.uEntTex0.value = E.sil.tex; else u.uEntTex1.value = E.sil.tex;
+          if (TX) TX.value = E.sil.tex;
+          if (TP) TP.value = E.sil.topTex || E.sil.tex;
           A.set(E.x - _cx, E.z - _cz, E.fx, E.fz);
           AP.set(P0.x - _cx, P0.z - _cz, P0.fx, P0.fz);
           B.set(E.k, 1, E.rimK, E.rimR);
@@ -25281,10 +26035,14 @@ function _swRippleTick(dt) {
           U.set(E.ux, E.uy, E.uz, E.tailLen);
           UP.set(P0.ux, P0.uy, P0.uz, P0.tailLen);
           T.set(E.sRear, E.dirSign, E.LEN, E.tailK);
+          if (HO) HO.set(E.sil.topTex ? (E.holeCap || 0) : 0, E.holeOver || 0,
+                         (P0.sil && P0.sil.topTex) ? (P0.holeCap || 0) : 0, (P0.holeOver != null) ? P0.holeOver : (E.holeOver || 0));
+          if (X) X.set(E.lid ? 1 : 0, (E.relG != null) ? E.relG : 1, 0, 0);
           PV[sl] = E;
         } else if (PV[sl] && PV[sl].sil && PV[sl].sil.tex) {
           const P0 = PV[sl];
-          if (sl === 0) u.uEntTex0.value = P0.sil.tex; else u.uEntTex1.value = P0.sil.tex;
+          if (TX) TX.value = P0.sil.tex;
+          if (TP) TP.value = P0.sil.topTex || P0.sil.tex;
           A.set(P0.x - _cx, P0.z - _cz, P0.fx, P0.fz);
           AP.set(P0.x - _cx, P0.z - _cz, P0.fx, P0.fz);
           B.set(P0.k, 1, P0.rimK, P0.rimR);
@@ -25293,11 +26051,16 @@ function _swRippleTick(dt) {
           U.set(P0.ux, P0.uy, P0.uz, 0);
           UP.set(P0.ux, P0.uy, P0.uz, P0.tailLen);
           T.set(P0.sRear, P0.dirSign, P0.LEN, P0.tailK);
+          if (HO) { const _c0 = P0.sil.topTex ? (P0.holeCap || 0) : 0; HO.set(_c0, P0.holeOver || 0, _c0, P0.holeOver || 0); }
+          if (X) X.set(0, (P0.relG != null) ? P0.relG : 1, 0, 0);   // the carry-out step: no lid, the shape only lifts out
           PV[sl] = null;
-        } else { B.y = 0; PV[sl] = null; }
+        } else { B.y = 0; PV[sl] = null; if (X) X.set(0, 1, 0, 0); }
       }
-      if (!u.uEntTex0.value) u.uEntTex0.value = u.uHullTex.value;
-      if (!u.uEntTex1.value) u.uEntTex1.value = u.uEntTex0.value;
+      for (let sl = 0; sl < NS; sl++) {
+        const TX = u['uEntTex' + sl], TP = u['uEntTop' + sl];
+        if (TX && !TX.value) TX.value = (sl === 0) ? u.uHullTex.value : u['uEntTex' + (sl - 1)].value;
+        if (TP && !TP.value) TP.value = TX ? TX.value : u.uHullTex.value;
+      }
       if (u.uHullTopTex && !u.uHullTopTex.value) u.uHullTopTex.value = u.uHullTex.value || u.uEntTex0.value;   // (v48.65) same rule
     }
     const _xrPrevRT = (renderer && renderer.getRenderTarget) ? renderer.getRenderTarget() : null;
@@ -25369,7 +26132,7 @@ function _swRippleTick(dt) {
             _Wc.crCost = Math.round(_c * 10) / 10; }
         }
         if (!R._crErr && _scanNow) {
-          const dispS = (_Wc.disp != null) ? _Wc.disp : 100, gainS = (_Wc.gain != null) ? _Wc.gain : 100;
+          const dispS = (_Wc.disp != null) ? _Wc.disp : 100, gainS = (_Wc.gain != null) ? _Wc.gain : 70;   // (v49.00) 70
           const g2d = gainS / Math.max(dispS, 0.01);
           const _bH = (_Wc.breakHeight != null) ? +_Wc.breakHeight : 30;
           const bPeak = (_Wc.breakPeak != null) ? +_Wc.breakPeak
@@ -25385,11 +26148,11 @@ function _swRippleTick(dt) {
           const _bR2 = _bR * _bR;
           const _spx = (player && player.position) ? player.position.x : cx;
           const _spz = (player && player.position) ? player.position.z : cz;
+          const _bcx = [_spx], _bcz = [_spz];
+          if (R.entP) for (let _q = 0; _q < R.entP.length; _q++) { const _E = R.entP[_q]; if (_E && _E.peer) { _bcx.push(_E.x); _bcz.push(_E.z); } }
           const svx = player.velocity ? player.velocity.x : 0, svz = player.velocity ? player.velocity.z : 0;
           const sc = function (hh, wf) { const x = hh * g2d; return (x / (1 + Math.abs(x))) * wf; };  
-          const _HP = R.hullP, _uKeel = R.prevKeel;
-          if (_HP && _HP.sil && (_Wc.underSlap == null || +_Wc.underSlap > 0) && !game._swSubmerged &&
-              _uKeel != null) {
+          const _slapAt = function (_HP, _uKeel, _spx, _spz, _S, svx, svz) {
             const _pr = Math.max(20, Math.max(_HP.sil.beam, _HP.sil.len) * 0.5);
             const _toI = function (w0, c0) { return ((w0 - c0) / B + 0.5) * RES - CO - 0.5; };
             const _i0 = Math.max(1, Math.floor(_toI(_spx - _pr, cx))), _i1 = Math.min(CRS - 2, Math.ceil(_toI(_spx + _pr, cx)));
@@ -25408,13 +26171,13 @@ function _swRippleTick(dt) {
               }
             }
             const _nowU = performance.now();
-            const _dtU = (R._usT2 != null) ? Math.max(0.004, Math.min(0.5, (_nowU - R._usT2) / 1000)) : 0;
-            const _rise = (_dtU > 0 && R._usOver != null) ? (_best - R._usOver) / _dtU : 0;
-            R._usOver = +_best.toFixed(2); R._usT2 = _nowU; R._usRise = Math.round(_rise);
+            const _dtU = (_S._usT2 != null) ? Math.max(0.004, Math.min(0.5, (_nowU - _S._usT2) / 1000)) : 0;
+            const _rise = (_dtU > 0 && _S._usOver != null) ? (_best - _S._usOver) / _dtU : 0;
+            _S._usOver = +_best.toFixed(2); _S._usT2 = _nowU; _S._usRise = Math.round(_rise);
             const _rate = 1000 / Math.max(1, (_Wc.slapRate != null) ? +_Wc.slapRate : 14);
             const _riseMin = (_Wc.slapRise != null) ? +_Wc.slapRise : 30;
-            if (_best > -1.0 && _rise > _riseMin && (_nowU - (R._usT || 0)) > _rate) {
-              R._usT = _nowU;
+            if (_best > -1.0 && _rise > _riseMin && (_nowU - (_S._usT || 0)) > _rate) {
+              _S._usT = _nowU;
               const _dl = Math.hypot(_bx - _spx, _bz - _spz) || 1;
               const _ox = (_bx - _spx) / _dl, _oz = (_bz - _spz) / _dl;
               const _sq = Math.min(1, _rise / 260);
@@ -25427,6 +26190,15 @@ function _swRippleTick(dt) {
                             -_ox * _sv * 0.8 + svx * 0.3, -_oz * _sv * 0.8 + svz * 0.3, _uKeel);
               try { _swCrestDots(_bx, WLc, _bz, _sAmp * 3.0, _ox * _sv * 0.2, _oz * _sv * 0.2, _uKeel); } catch (_) {}
             }
+          };
+          const _slapOn = (_Wc.underSlap == null || +_Wc.underSlap > 0) && !game._swSubmerged;
+          if (_slapOn && R.hullP && R.hullP.sil && R.prevKeel != null) _slapAt(R.hullP, R.prevKeel, _spx, _spz, R, svx, svz);
+          if (_slapOn && R.entP) for (let _q = 0; _q < R.entP.length; _q++) {
+            const _E = R.entP[_q];
+            if (!_E || !_E.peer || !_E.ent || !_E.sil || _E.ent.alive === false) continue;
+            const _hy = _swShipHydro(_E.ent); if (!_hy) continue;
+            const _ev = _E.ent.velocity;
+            _slapAt(_E, (_E.ent.position.y - _hy.keel) - WLc, _E.x, _E.z, _swEntState(_E.ent), _ev ? _ev.x : 0, _ev ? _ev.z : 0);
           }
           let emitted = 0, nBreak = 0, maxV = 0;
           R._crScan = (((R._crScan || 0) + 7) % (CRS - 2));                    
@@ -25436,14 +26208,18 @@ function _swRippleTick(dt) {
             const j = 1 + ((jj + R._crScan) % (CRS - 2));
             const rvY = (CO + j + 0.5) * invR, edY = Math.min(rvY, 1 - rvY);
             const rowB = j * CRS;
-            const _dzr = (cz + (rvY - 0.5) * B) - _spz, _dz2 = _dzr * _dzr;
-            if (_dz2 > _bR2) continue;
+            const _wzr = cz + (rvY - 0.5) * B;
+            let _rowIn = false;
+            for (let _q = 0; _q < _bcz.length; _q++) { const _d = _wzr - _bcz[_q]; if (_d * _d <= _bR2) { _rowIn = true; break; } }
+            if (!_rowIn) continue;
             for (let i = 1; i < CRS - 1; i++) {
               const h = buf[(rowB + i) * 4];
               if (h < 0.12) continue;                                          
               const rvX = (CO + i + 0.5) * invR, ed = Math.min(Math.min(rvX, 1 - rvX), edY);
-              const _dxr = (cx + (rvX - 0.5) * B) - _spx;
-              if (_dxr * _dxr + _dz2 > _bR2) continue;
+              const _wxr = cx + (rvX - 0.5) * B;
+              let _near = false;
+              for (let _q = 0; _q < _bcx.length; _q++) { const _dx = _wxr - _bcx[_q], _dz = _wzr - _bcz[_q]; if (_dx * _dx + _dz * _dz <= _bR2) { _near = true; break; } }
+              if (!_near) continue;
               const t = ed <= 0 ? 0 : (ed >= 0.12 ? 1 : ed / 0.12), wf = t * t * (3 - 2 * t);   
               const vD = sc(h, wf);
               if (vD < bPeak) continue;
@@ -25637,6 +26413,7 @@ function _swRippleTick(dt) {
 }
 const _SW_UP_FRAG = [
   'uniform sampler2D uSrc; uniform float uRes; uniform vec2 uOut; uniform float uGainK; uniform float uB; uniform float uC;',
+  'uniform float uBroadK; uniform float uBroadR;',   // (v48.99) 1 - broadKeep; the blur radius in uv
   'float _mn(float x){ x = abs(x); float x2 = x * x; float x3 = x2 * x;',
   '  if (x < 1.0) return ((12.0 - 9.0 * uB - 6.0 * uC) * x3 + (-18.0 + 12.0 * uB + 6.0 * uC) * x2 + (6.0 - 2.0 * uB)) / 6.0;',
   '  if (x < 2.0) return ((-uB - 6.0 * uC) * x3 + (6.0 * uB + 30.0 * uC) * x2 + (-12.0 * uB - 48.0 * uC) * x + (8.0 * uB + 24.0 * uC)) / 6.0;',
@@ -25654,6 +26431,15 @@ const _SW_UP_FRAG = [
   '    }',
   '  }',
   '  acc /= max(ws, 1e-6);',
+  '  if (uBroadK > 0.0) {',   // (v48.99) the raised broad swell, turned down - see the header
+  '    vec2 bs = texture2D(uSrc, uv).xy; float bw = 1.0;',
+  '    for (int k = 0; k < 8; k++) {',
+  '      float a = float(k) * 0.7853982; vec2 d = vec2(cos(a), sin(a)) * uBroadR;',
+  '      bs += texture2D(uSrc, clamp(uv + d * 0.55, 0.0, 1.0)).xy * 0.85; bw += 0.85;',
+  '      bs += texture2D(uSrc, clamp(uv + d, 0.0, 1.0)).xy * 0.45; bw += 0.45;',
+  '    }',
+  '    acc.xy -= uBroadK * max(bs / bw, vec2(0.0));',
+  '  }',
   '  acc.x *= uGainK; acc.y *= uGainK;',   // height and previous height; foam (z) is not a height
   '  gl_FragColor = acc;',
   '}'
@@ -25676,7 +26462,8 @@ function _swRippleUpsample() {
   if (!R.upMat) {
     R.upMat = new THREE.ShaderMaterial({
       uniforms: { uSrc: { value: null }, uRes: { value: _SW_RIPPLE_RES }, uOut: { value: new THREE.Vector2(res, res) },
-                  uGainK: { value: 1.05 }, uB: { value: 1.0 }, uC: { value: 0.0 } },
+                  uGainK: { value: 1.05 }, uB: { value: 1.0 }, uC: { value: 0.0 },
+                  uBroadK: { value: 0.0 }, uBroadR: { value: 180 / _SW_RIPPLE_BOUNDS } },   // (v48.99)
       vertexShader: 'void main(){ gl_Position = vec4(position, 1.0); }',
       fragmentShader: _SW_UP_FRAG,
       depthTest: false, depthWrite: false, toneMapped: false });
@@ -25688,6 +26475,11 @@ function _swRippleUpsample() {
   u.uGainK.value = (W.upGain != null) ? +W.upGain : 1.05;
   u.uB.value = (W.upB != null) ? +W.upB : 1.0;
   u.uC.value = (W.upC != null) ? +W.upC : 0.0;
+  if (u.uBroadK) {   // (v48.99) see _SW_UP_FRAG's header
+    const _bk = (W.broadKeep != null) ? +W.broadKeep : 1;
+    u.uBroadK.value = Math.max(0, Math.min(1, 1 - _bk));
+    u.uBroadR.value = ((W.broadR != null) ? +W.broadR : 180) / Math.max(1, R.bounds || _SW_RIPPLE_BOUNDS);
+  }
   R.gpu.doRenderTarget(R.upMat, R.upRT);
   R.upTex = R.upRT.texture;
 }
@@ -25747,12 +26539,12 @@ function _swRippleDispose() {
   try { if (R.upRT && R.upRT.dispose) R.upRT.dispose(); } catch (_) {}   // (v44.21)
   R.upRT = null; R.upTex = null;
   try {
-    const _all = new Set([R.hullSil, R.hullSil1, R.hullSil2, ..._swSil.cache.values(), ..._swSil.orphans]);
+    const _all = new Set([R.hullSil, R.hullSil1, R.hullSil2, R.hullSil3, R.hullSil4, ..._swSil.cache.values(), ..._swSil.orphans]);   // (v48.92) 3/4
     for (const _r of _all) { if (_r && _r.rt) { try { _r.rt.dispose(); } catch (_) {} } }
     _swSil.cache.clear(); _swSil.empty.clear(); _swSil.orphans.clear();
   } catch (_) {}
   R.hullSil = null; R.hullP = null; R._hullPrev = null;
-  R.hullSil1 = null; R.hullSil2 = null; R.entP = null; R._entPrev = null;
+  R.hullSil1 = null; R.hullSil2 = null; R.hullSil3 = null; R.hullSil4 = null; R.entP = null; R._entPrev = null;
   try { if (R.gpu && R.gpu.dispose) R.gpu.dispose(); } catch (_) {}
   try { if (R.maskTex && R.maskTex.dispose) R.maskTex.dispose(); } catch (_) {}   
   try { if (R.farTex && R.farTex.dispose) R.farTex.dispose(); } catch (_) {}      
@@ -26755,7 +27547,7 @@ function _swBuildHubWaterDispGet(WL) {
       THREE.UniformsLib.fog,
       { uRippleTex: { value: null }, uRippleCenter: { value: new THREE.Vector2() }, uRippleBounds: { value: _SW_RIPPLE_BOUNDS },   // (v41.45) the constant, not a literal
         uTime: { value: 0 }, uCam: { value: new THREE.Vector3() },
-        uDispScale: { value: 100.0 }, uGain: { value: 100.0 }, uCrestQ: { value: 11.0 },
+        uDispScale: { value: 100.0 }, uGain: { value: 70.0 }, uCrestQ: { value: 5.0 },   // (v49.00) see the W3.gain seed
         uFoamSlope: { value: 0.50 }, uSteepFoam: { value: 0.55 }, uNormK: { value: 1.0 },
         color: { value: new THREE.Color(0x16465c) },
         uWHorizStr: { value: 0.75 }, uWHorizA: { value: 12000.0 }, uWHorizB: { value: 30000.0 },
@@ -27425,6 +28217,19 @@ function _swBuildHubWater(T) {
       if (_ghostWas) { try { _ghostHullRestore(ship); } catch (_) {} }
       _reflPassId++;                                    // (v38.59) new pass = every material liftable again
       if (_showShip) ship.traverse(_shipReflOverride);
+      const _reflPeerMs = [];   // restored in the finally below, with yours
+      try {
+        if (!(window.__water && window.__water.reflPeers === 0) && typeof net !== 'undefined' && net && net.networkPlayers) {
+          const _rpR = (window.__water && window.__water.reflPeerR != null) ? +window.__water.reflPeerR : 2000;
+          for (let _i = 0; _i < net.networkPlayers.length; _i++) {
+            const _np = net.networkPlayers[_i];
+            const _nm = _np && _np.alive !== false && _np.mesh;
+            if (!_nm || !_nm.visible || _nm === ship || !_nm.parent) continue;
+            if (_nm.position.distanceToSquared(camera.position) > _rpR * _rpR) continue;
+            _reflPeerMs.push(_nm); _nm.traverse(_shipReflOverride);
+          }
+        }
+      } catch (_) {}
       try { _reflFxBoost(); } catch (_) {}   // (v38.74) the weapons, brighter for the mirror only
       const _cp = (typeof _SHIPL !== 'undefined' && _SHIPL) ? _SHIPL.coneP : null;
       const _cpWas = !!(_cp && _cp.visible);
@@ -27471,7 +28276,7 @@ function _swBuildHubWater(T) {
         if (_wUv) _wU.visible = true;
         if (_cp) { _cp.visible = _cpWas; if (_cp.material) { _cp.material.opacity = _cpOp; if (_cpCol) _cp.material.color.copy(_cpCol); } }   // (v38.50/51/57) back to the direct-view rule, brightness and colour
         try { _reflFxRestore(); } catch (_) {}   // (v38.74)
-        if (_showShip) ship.traverse(_shipReflRestore); for (let _i = 0; _i < _reflLift.length; _i++) { const _e = _reflLift[_i]; if (_e.u != null) _e.m.uniforms.uBrightness.value = _e.u; else if (_e.env != null) _e.m.envMapIntensity = _e.env; else if (_e.c) _e.m.color.copy(_e.c); else { _e.m.emissive.copy(_e.e); _e.m.emissiveIntensity = _e.i; if (_e.sw) { _e.m.emissiveMap = _e.em || null; _e.m.needsUpdate = true; } } } _reflLift.length = 0; for (let _i = 0; _i < _shields.length; _i++) _shields[_i].visible = _shieldsWas[_i]; for (let _i = 0; _i < _shDim.length; _i++) _shDim[_i][0].opacity = _shDim[_i][1];   /* (v40.02) */ _reflSkipSet = null; if (ship) ship.visible = wasVis;
+        if (_showShip) ship.traverse(_shipReflRestore); for (let _i = 0; _i < _reflPeerMs.length; _i++) _reflPeerMs[_i].traverse(_shipReflRestore); for (let _i = 0; _i < _reflLift.length; _i++) { const _e = _reflLift[_i]; if (_e.u != null) _e.m.uniforms.uBrightness.value = _e.u; else if (_e.env != null) _e.m.envMapIntensity = _e.env; else if (_e.c) _e.m.color.copy(_e.c); else { _e.m.emissive.copy(_e.e); _e.m.emissiveIntensity = _e.i; if (_e.sw) { _e.m.emissiveMap = _e.em || null; _e.m.needsUpdate = true; } } } _reflLift.length = 0; for (let _i = 0; _i < _shields.length; _i++) _shields[_i].visible = _shieldsWas[_i]; for (let _i = 0; _i < _shDim.length; _i++) _shDim[_i][0].opacity = _shDim[_i][1];   /* (v40.02) */ _reflSkipSet = null; if (ship) ship.visible = wasVis;
         if (_ghostWas) { try { _ghostHullApply(ship); } catch (_) {} }
       }
       _reflNrm.set(0, 0, 1).applyMatrix4(_reflRot.extractRotation(this.matrixWorld));
@@ -27957,7 +28762,7 @@ function _swSubmergedAudio(on) {
   } catch (_) {}
 }
 const _swNoseV = new THREE.Vector3();   // (v41.34) camera forward, reused each tick
-const _SW_FSRC = new Float32Array(11 * 4);
+const _SW_FSRC = new Float32Array(11 * 7);   // (v48.95) 4 -> 7: + up to 3 other players' hulls
 const _swBub = { pts: null, n: 240, pos: null, spd: null, ph: null, sz: null, box: 520, geo: null, mat: null, tex: null };
 function _swBubblesEnsure() {
   const B = _swBub; if (B.pts) return B.pts;
@@ -28013,10 +28818,33 @@ function _swBubblesTick(dt, WL) {
       nSrc = 1;
     }
   }
+  const _hullSrc = nSrc > 0;   // (v48.95) slot 0 is YOUR hull when this is true (the nose geometry reads it)
+  if (flowK > 0 && typeof net !== 'undefined' && net && net.networkPlayers && net.networkPlayers.length) {
+    const reachP = B.box * 0.75;
+    let nPeer = 0;
+    for (let qi = 0; qi < net.networkPlayers.length && nPeer < 3; qi++) {
+      const np = net.networkPlayers[qi];
+      if (!np || np.alive === false || !np.position || !np.velocity || !np.chassis) continue;
+      const qfp = _swPeerFootprint(np);
+      if (np.position.y - qfp.DRAFT > WL) continue;                  // not in the water
+      const qdx = np.position.x - c.x, qdy = np.position.y - c.y, qdz = np.position.z - c.z;
+      if (qdx * qdx + qdy * qdy + qdz * qdz > reachP * reachP) continue;
+      const qv = np.velocity, qsp = Math.hypot(qv.x, qv.y, qv.z);
+      if (qsp <= 4) continue;
+      const o = nSrc * 11;
+      F[o] = np.position.x; F[o + 1] = np.position.y; F[o + 2] = np.position.z;
+      F[o + 3] = qv.x; F[o + 4] = qv.y; F[o + 5] = qv.z;
+      F[o + 6] = (qfp.BEAM || 72) * 0.70;
+      F[o + 7] = qsp;
+      F[o + 8] = qv.x / qsp; F[o + 9] = qv.y / qsp; F[o + 10] = qv.z / qsp;
+      nSrc++; nPeer++;
+    }
+  }
+  const _pBase = nSrc;
   if (flowK > 0 && game.projectiles && game.projectiles.length) {
     const wl0 = WL, cx0 = c.x, cy0 = c.y, cz0 = c.z, reach = B.box * 0.75;
     const maxP = Math.max(0, Math.min(3, (W3f.flowProj != null) ? (+W3f.flowProj | 0) : 3));
-    for (let pi = 0; pi < game.projectiles.length && nSrc < 1 + maxP; pi++) {
+    for (let pi = 0; pi < game.projectiles.length && nSrc < _pBase + maxP; pi++) {   // (v48.95) after the hulls
       const pr = game.projectiles[pi];
       if (!pr || !pr.position || !pr.velocity) continue;
       if (pr.position.y > wl0) continue;                       // only what is actually in the water
@@ -28034,7 +28862,7 @@ function _swBubblesTick(dt, WL) {
     }
   }
   const useFlow = (nSrc > 0);
-  const aR = nSrc > 0 ? F[6] : 0;   // the hull's radius, still used by the nose-birth geometry
+  const aR = _hullSrc ? F[6] : 0;   // the hull's radius, still used by the nose-birth geometry - (v48.95) YOUR hull's only
   let nfx = 0, nfy = 0, nfz = 0, haveNose = false;
   try {
     if (player && player.euler) _swNoseV.set(0, 0, -1).applyEuler(player.euler);
@@ -28172,6 +29000,7 @@ function _swDisposeHubWater() {
   try { _fishSchoolDispose(); } catch (_) {}   
   try { _wxDispose(); } catch (_) {}
   try { if (game._dragHiss) { _swStopDragHiss(game._dragHiss); game._dragHiss = null; } } catch (_) {}
+  try { _swPeerHissSweep(-1); } catch (_) {}   // (v48.95) every other ship's hiss too
   game._hubWaterWL = undefined; game._hubWaterT = null;
   try { if (typeof _swU !== 'undefined' && _swU) { if (_swU.uWaterY) _swU.uWaterY.value = -1e9; if (_swU.uWaterOn) _swU.uWaterOn.value = 0; } } catch (_) {}
   if (game && game._hubWater) {
@@ -35899,13 +36728,60 @@ function _swStartDragHiss() {
   src.start(now);
   return {
     src, bp, g,
-    set(sp) {
+    set(sp, vol) {   // (v48.98) vol 0..1 = _swWooshK / _swWooshWing (1 = the in-water level it always had)
       const t = ctx.currentTime;
       const k = Math.min(1, Math.max(0, (sp - 18) / 320));
-      try { this.g.gain.setTargetAtTime((0.05 + 0.30 * k) * 0.25, t, 0.08); } catch (_) {}
+      const v = (vol != null) ? Math.max(0, Math.min(1, vol)) : 1;   // (v48.98) the WHOLE level scales, so no foam = silence
+      try { this.g.gain.setTargetAtTime((0.05 + 0.30 * k) * 0.25 * v, t, 0.08); } catch (_) {}
       try { this.bp.frequency.setTargetAtTime(1800 + 2200 * k, t, 0.15); } catch (_) {}
     },
   };
+}
+const _SW_PHISS = new Map();
+function _swPeerHiss(e, want, sp, x, y, z, vol) {   // (v48.98) vol = _swWooshK / _swWooshWing, as yours
+  let h = _SW_PHISS.get(e);
+  const K = window.__water || {};
+  if (!want || K.peerHiss === 0) { if (h) { _swStopDragHiss(h); _SW_PHISS.delete(e); } return; }
+  if (!h) {
+    if (_SW_PHISS.size >= 4 || typeof audio === 'undefined' || !audio || !audio.initialized || !audio.ctx) return;
+    try {
+      const ctx = audio.ctx, now = ctx.currentTime;
+      const src = ctx.createBufferSource();
+      src.buffer = _audioSharedNoiseBuffer(ctx, 1.0);
+      src.loop = true;
+      const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 2400; bp.Q.value = 0.35;
+      const g = ctx.createGain(); g.gain.setValueAtTime(0.0001, now);
+      const pan = _audioKRatePanner(ctx.createPanner());   // (v48.39) k-rate - see _audioKRateSet
+      pan.panningModel = (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) ? 'equalpower' : 'HRTF';
+      pan.distanceModel = 'inverse'; pan.refDistance = 300; pan.maxDistance = 5200; pan.rolloffFactor = 1;
+      if (pan.positionX) { pan.positionX.value = x; pan.positionY.value = y; pan.positionZ.value = z; }
+      else if (pan.setPosition) pan.setPosition(x, y, z);
+      src.connect(bp); bp.connect(g); g.connect(pan);
+      pan.connect(audio.sfxBus || audio.masterGain || ctx.destination);
+      src.start(now, Math.random() * 0.9);
+      h = { src, bp, g, pan, t: 0 };
+      _SW_PHISS.set(e, h);
+    } catch (_) { return; }
+  }
+  h.t = performance.now();
+  try {
+    const t = audio.ctx.currentTime;
+    if (h.pan.positionX) { h.pan.positionX.setValueAtTime(x, t); h.pan.positionY.setValueAtTime(y, t); h.pan.positionZ.setValueAtTime(z, t); }
+    else if (h.pan.setPosition) h.pan.setPosition(x, y, z);
+    const k = Math.min(1, Math.max(0, (sp - 18) / 320));
+    const v = (vol != null) ? Math.max(0, Math.min(1, vol)) : 1;   // (v48.98) the whole level scales, as yours
+    h.g.gain.setTargetAtTime((0.05 + 0.30 * k) * 0.25 * v, t, 0.08);   // your curve (_swStartDragHiss.set)
+    h.bp.frequency.setTargetAtTime(1800 + 2200 * k, t, 0.15);
+  } catch (_) {}
+}
+if (typeof window !== 'undefined') window.__peerHiss = () => Array.from(_SW_PHISS.values()).map((h) => ({   // (v48.96) probe
+  x: Math.round(h.pan.positionX ? h.pan.positionX.value : 0), z: Math.round(h.pan.positionZ ? h.pan.positionZ.value : 0),
+  gain: +h.g.gain.value.toFixed(4), ageMs: Math.round(performance.now() - h.t) }));
+function _swPeerHissSweep(staleMs) {
+  const now = performance.now();
+  for (const [e, h] of _SW_PHISS) {
+    if (!(now - h.t <= staleMs) || e.alive === false) { try { _swStopDragHiss(h); } catch (_) {} _SW_PHISS.delete(e); }
+  }
 }
 function _swStopDragHiss(h) {
   if (!h || !audio || !audio.ctx) return;
@@ -42366,6 +43242,7 @@ class Bot {
         spawnIncendiaryGas(dropPos, 'bot', this.team, null, ++net.effectIdCounter, false);
       }
     } else if (ability.name === 'Plasma Mines') {
+      const _botMineGroup = ++net.effectIdCounter;   // (v48.91)
       for (let i = 0; i < 3; i++) {
         const orb = this.position.clone().addScaledVector(aim, 220 + i * 110);
         game.worldEffects.push({
@@ -42373,6 +43250,7 @@ class Bot {
           timer: 12, owner: 'bot', team: this.team,
           triggered: false, dmg: 600, slowFactor: 0.4, slowTimer: 1.5,
           arcTimer: 0, mesh: null,
+          groupId: _botMineGroup,   // (v48.91) the three go up together (_mineGroupBlow)
         });
       }
     } else if (ability.name === 'Plasma Shield') {
@@ -43650,7 +44528,7 @@ if (game._hubWater) {
     if (_bd < _bmax) {
       _swWpnCross(fireOrigin.x, fireOrigin.y, fireOrigin.z,
                   target.position.x, target.position.y, target.position.z,
-                  _swWpnYield(weapon.damage * 0.6, weapon.splash, 1), 0, 'bot' + this.id, 0.20);
+                  _swWpnYield(weapon.damage * 0.6, weapon.splash, 1), 0, 'bot' + this.id, 0.20, _swWpnKind(weapon && weapon.name));
     }
   } catch (_) {}
 }
@@ -58677,7 +59555,7 @@ function updateParticles(dt) {
   let _w = 0;
   let _ws = 0;
   const _W6 = window.__water || {};
-  const _HS = (typeof _swSlabFrame === 'function') ? _swSlabFrame() : null;   // (v48.63) the hull the drops may not enter
+  const _HS = (typeof _swSlabFrames === 'function') ? _swSlabFrames() : null;   // (v48.63) the hulls the drops may not enter - (v48.95) every ship's
   const _pkLegacy = Math.pow(0.95, dt * 60);
   const _pkDrop = Math.pow((_W6.dropDrag != null) ? Math.max(0.001, +_W6.dropDrag) : 0.25, dt);
   const _dropG = (_W6.dropGrav != null) ? +_W6.dropGrav : 1.0;
@@ -58697,10 +59575,15 @@ function updateParticles(dt) {
     pos.x += _pv.x * dt;
     pos.y += _pv.y * dt;
     pos.z += _pv.z * dt;
-    if (p.splash && _HS && _HS.on) {
-      if (_swSlabIn(_HS, pos.x, pos.y, pos.z) || _swSlabIn(_HS, pos.x - _pv.x * dt * 0.5, pos.y - _pv.y * dt * 0.5, pos.z - _pv.z * dt * 0.5)) {
+    if (p.splash && _HS && _HS.length) {
+      let _inH = false;
+      for (let _q = 0; _q < _HS.length && !_inH; _q++) {
+        const _T = _HS[_q];
+        _inH = _swSlabIn(_T, pos.x, pos.y, pos.z) || _swSlabIn(_T, pos.x - _pv.x * dt * 0.5, pos.y - _pv.y * dt * 0.5, pos.z - _pv.z * dt * 0.5);
+      }
+      if (_inH) {
         if (p._hOut) {
-          _HS.kills++;
+          _swSlabT.kills++;
           const _lastP = game.particles.length - 1;
           if (i !== _lastP) game.particles[i] = game.particles[_lastP];
           game.particles.pop();
@@ -64691,7 +65574,7 @@ function fireHitscan(origin, dir, w) {
   if (game._hubWater) { try { _swWpnCross(origin.x, origin.y, origin.z, end.x, end.y, end.z,
                                           _swWpnYield(w.damage, w.splash, 1) *
                                             ((window.__water && window.__water.mainK != null) ? +window.__water.mainK : 0.55),
-                                          0, null, 0); } catch (_) {} }
+                                          0, null, 0, _swWpnKind(w && w.name)); } catch (_) {} }   // (v49.05) kind
   if (levelDist < w.range) {
     const _hsCol = (typeof chassisFlashColor === 'function')
       ? chassisFlashColor(player.loadoutKey) : 0x66ccff;
@@ -64781,6 +65664,10 @@ function fireHitscan(origin, dir, w) {
   {
     const _tq = _tetherShotProbe(origin, aimDir, Math.min(w.range, levelDist));
     if (_tq && _tq.proj < bestObstDist) { bestObstacle = _tq.obj; bestObstDist = _tq.proj; }
+  }
+  {
+    const _mq = _mineShotProbe(origin, aimDir, Math.min(w.range, levelDist), player.team);
+    if (_mq && _mq.proj < bestObstDist) { bestObstacle = _mq.obj; bestObstDist = _mq.proj; }
   }
 
   const isPiercing = (player.loadoutKey === 'PUNCTURE') ||
@@ -65150,6 +66037,10 @@ function fireSpread(origin, dir, w) {
     {
       const _tq = _tetherShotProbe(origin, spreadDir, Math.min(_slRange, levelDist));
       if (_tq && _tq.proj < bestObstDist) { bestObst = _tq.obj; bestObstDist = _tq.proj; }
+    }
+    {   // (v48.91) an enemy's Plasma Mine orb takes pellets too (_mineShotProbe)
+      const _mq = _mineShotProbe(origin, spreadDir, Math.min(_slRange, levelDist), player.team);
+      if (_mq && _mq.proj < bestObstDist) { bestObst = _mq.obj; bestObstDist = _mq.proj; }
     }
 
     let hitBot = false;
@@ -65643,6 +66534,7 @@ function executeAbility(slot, ability) {
         }
       }
       try { if (_tetherHitSeg(player.position, forward, range, null, _vlDmg) > 0) showHitMarker(); } catch (_) {}
+      try { if (_mineHitSeg(player.position, forward, range, player.team) > 0) showHitMarker(); } catch (_) {}   // (v48.91)
       try { playSound('laser_shot'); } catch (_) {}
     }
     else if (ability.name === 'Flame Chain') {
@@ -65851,6 +66743,10 @@ function executeAbility(slot, ability) {
                 spawnSiphonHelix(_so, _tq.obj.position, LSS.CLASS_COLORS.SYPHON, 1.0); } catch (_) {}
           bestMon = null; bestBot = null;
         }
+      } catch (_) {}
+      try {
+        const _mq = _mineShotProbe(player.position, forward, Math.min(1500, bestDist), player.team);
+        if (_mq) { if (_mq.obj.takeDamage(800) > 0) showHitMarker(); bestMon = null; bestBot = null; }
       } catch (_) {}
       if (bestMon) {
         const _md = bestMon.takeDamage(800, 'player', bestMon.position);
@@ -66399,6 +67295,7 @@ function firePowerShot() {
         }
       }
       try { if (_tetherHitSeg(player.position, pelletDir, _pelletWallDist, null, 270 * _execDmg) > 0) showHitMarker(); } catch (_) {}
+      try { if (_mineHitSeg(player.position, pelletDir, _pelletWallDist, player.team) > 0) showHitMarker(); } catch (_) {}   // (v48.91)
     }
     if (_recoilK('shake') > 0) triggerScreenShake(5 * _recoilK('shake'));   // (v48.21) the firing jolt is recoil: off by default
   } else {
@@ -66482,6 +67379,7 @@ function firePowerShot() {
       }
     }
     try { if (_tetherHitSeg(player.position, forward, _csWallDist, null, 3200) > 0) showHitMarker(); } catch (_) {}
+    try { if (_mineHitSeg(player.position, forward, _csWallDist, player.team) > 0) showHitMarker(); } catch (_) {}   // (v48.91)
     if (_recoilK('shake') > 0) triggerScreenShake(3 * _recoilK('shake'));   // (v48.21) the firing jolt is recoil: off by default
   }
   try { playSound('power_shot_release'); } catch (_) {}
@@ -67681,82 +68579,38 @@ function updateWorldEffects(dt) {
     else if (eff.type === 'tripwire') {
       const isMyWire = !net.active || !eff.ownerPeerId || eff.ownerPeerId === net.myPeerId;
       if (eff.armTimer > 0) { eff.armTimer -= dt; }
-      else if (isMyWire) {
+      else if (isMyWire && _mineLive(eff)) {
         eff.armed = true;
+        let _trip = false;
         for (const bot of game.entities) {
           if (!bot.alive || bot.team === eff.team) continue;
-          if (_bodyDist(eff.position, bot) < eff.radius) {
-            const dealt = bot.takeDamage(eff.dmg, eff.owner);
-            if (dealt > 0 && eff.owner === 'player') { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); if (player.shipState !== 'dead') showHitMarker(); }
-            spawnExplosion(eff.position, 20);
-            if (game.dynamicObjects && game.dynamicObjects.length) {
-              for (const obst of game.dynamicObjects) {
-                if (!obst.alive) continue;
-                if (obst.position.distanceTo(eff.position) < eff.radius) {
-                  const _dealt = obst.takeDamage(eff.dmg);
-                  if (_dealt > 0 && eff.owner === 'player') { player.damageDealt += _dealt; player.coreMeter = Math.min(100, player.coreMeter + _dealt / 100); }
-                }
-              }
-            }
-            if (game.monsters) {
-              for (const _mon of game.monsters) {
-                if (!_mon.alive || !_mon.mesh) continue;
-                if (_mon.position.distanceTo(eff.position) < eff.radius) {
-                  const _md = _mon.takeDamage(eff.dmg, 'player', eff.position);
-                  if (_md > 0 && eff.owner === 'player') { player.damageDealt += _md; player.coreMeter = Math.min(100, player.coreMeter + _md / 100); }
-                }
-              }
-            }
-            try {
-              if (typeof playSpatialSound === 'function') playSpatialSound('tripwire_detonate', eff.position.clone());
-              else playSound('tripwire_detonate');
-            } catch (_) {}
-            eff.timer = 0; 
-            break;
-          }
+          if (_bodyDist(eff.position, bot) < eff.radius) { _trip = true; break; }
         }
-        if (eff.timer > 0 && game.monsters) {
+        if (!_trip && game.monsters) {
           for (const _mon of game.monsters) {
             if (!_mon.alive || !_mon.mesh) continue;
-            if (_mon.position.distanceTo(eff.position) < eff.radius) {
-              const _md = _mon.takeDamage(eff.dmg, 'player', eff.position);
-              if (_md > 0 && eff.owner === 'player') { player.damageDealt += _md; player.coreMeter = Math.min(100, player.coreMeter + _md / 100); if (player.shipState !== 'dead') showHitMarker(); }
-              spawnExplosion(eff.position, 20);
-              if (game.dynamicObjects) {
-                for (const obst of game.dynamicObjects) {
-                  if (!obst.alive) continue;
-                  if (obst.position.distanceTo(eff.position) < eff.radius) {
-                    const _od = obst.takeDamage(eff.dmg);
-                    if (_od > 0 && eff.owner === 'player') { player.damageDealt += _od; player.coreMeter = Math.min(100, player.coreMeter + _od / 100); }
-                  }
-                }
-              }
-              for (const _m2 of game.monsters) {
-                if (_m2 === _mon || !_m2.alive || !_m2.mesh) continue;
-                if (_m2.position.distanceTo(eff.position) < eff.radius) {
-                  const _s = _m2.takeDamage(eff.dmg, 'player', eff.position);
-                  if (_s > 0 && eff.owner === 'player') { player.damageDealt += _s; player.coreMeter = Math.min(100, player.coreMeter + _s / 100); }
-                }
-              }
-              try {
-                if (typeof playSpatialSound === 'function') playSpatialSound('tripwire_detonate', eff.position.clone());
-                else playSound('tripwire_detonate');
-              } catch (_) {}
-              eff.timer = 0;
-              break;
-            }
+            if (_mon.position.distanceTo(eff.position) < eff.radius) { _trip = true; break; }
           }
         }
+        if (!_trip && eff.owner === 'bot' && player && player.shipState !== 'dead' && player.team !== eff.team &&
+            player.position.distanceTo(eff.position) < eff.radius) _trip = true;
+        if (_trip) _mineGroupBlow(eff);
       }
-      if (eff.armed && eff.timer > 0 && eff.owner === 'player') {
-        try {
-          if (_tetherHitSphere(eff.position, eff.radius, eff.dmg) > 0) {
-            spawnExplosion(eff.position, 20);
-            if (typeof playSpatialSound === 'function') playSpatialSound('tripwire_detonate', eff.position.clone());
-            if (player.shipState !== 'dead') showHitMarker();
-            eff.timer = 0;
-          }
-        } catch (_) {}
+      if (eff.armed && _mineLive(eff) && eff.owner === 'player') {
+        try { const _th = _tetherHeld(); if (_th && _th.position.distanceTo(eff.position) < eff.radius + _tetherShotK().hitR) _mineGroupBlow(eff); } catch (_) {}
+      }
+      if (_mineLive(eff) && eff.mesh && game.projectiles && game.projectiles.length) {
+        const _MR = _mineK().hitR, _MR2 = _MR * _MR;
+        for (let _pi = 0; _pi < game.projectiles.length; _pi++) {
+          const _p = game.projectiles[_pi];
+          if (!_p || !_p.alive || !(_p.damage > 0) || !_p.position) continue;
+          if (!isMyWire && _p.owner === 'network') continue;
+          if (!_mineShooterOk(eff, _mineProjTeam(_p))) continue;
+          if (_p.position.distanceToSquared(eff.position) > _MR2) continue;
+          try { _despawnProjectileSilent(_p); } catch (_) { _p.alive = false; }
+          _mineShot(eff, _p.damage);
+          break;
+        }
       }
       if (eff.armed && eff.groupId !== undefined) {
         eff.arcTimer -= dt;
