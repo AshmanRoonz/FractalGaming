@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "49.11";
+const LSS_BUILD = "49.16";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -11442,6 +11442,7 @@ class BillboardCloudSystem {
         'varying float vAlpha;',
         'varying float vSeed;',
         'varying vec3  vSpritePos;',
+        'varying float vWY;',   // (v49.14) the fragment's world height - the waterline fade
         'uniform vec3  uLightPos[8];',
         'uniform vec3  uLightColor[8];',
         'uniform float uLightStrength[8];',
@@ -11473,6 +11474,7 @@ class BillboardCloudSystem {
         '  vec3 cameraRight = vec3(viewMatrix[0][0], viewMatrix[1][0], viewMatrix[2][0]);',
         '  vec3 cameraUp    = vec3(viewMatrix[0][1], viewMatrix[1][1], viewMatrix[2][1]);',
         '  vec3 worldPos = _spritePos + (position.x * cameraRight + position.y * cameraUp) * iScale;',
+        '  vWY = worldPos.y;',
         '  gl_Position = projectionMatrix * viewMatrix * vec4(worldPos, 1.0);',
         '}',
       ].join('\n'),
@@ -11483,6 +11485,7 @@ class BillboardCloudSystem {
         'varying float vAlpha;',
         'varying float vSeed;',
         'varying vec3  vSpritePos;',
+        'varying float vWY;',   // (v49.14) the fragment's world height - the waterline fade
         'flat varying vec3 vLit;',   // (v48.44) see the vertex shader
         'uniform vec3  uLightPos[8];',
         'uniform vec3  uLightColor[8];',
@@ -11494,6 +11497,8 @@ class BillboardCloudSystem {
         'uniform float uFogD;',
         'uniform float uFarIn;',
         'uniform float uFarOut;',
+        'uniform float uWaterY;',
+        'uniform float uWaterFade;',
         'uniform float uBlendMode;',
         'uniform highp sampler2DArray uMask;',
         'uniform float uMaskOn;',
@@ -11528,6 +11533,7 @@ class BillboardCloudSystem {
         '    float _af = _ad * uFogD;',
         '    lit = mix(lit, uFogColor, clamp(1.0 - exp(-_af * _af), 0.0, 1.0));',
         '    a *= 1.0 - smoothstep(uFarIn, uFarOut, _ad);',
+        '    a *= smoothstep(uWaterY - 6.0, uWaterY + uWaterFade, vWY);',
         '    if (a < 0.005) discard;',
         '  }',
         '  float aOut = a * uBrightness;',
@@ -11560,6 +11566,8 @@ class BillboardCloudSystem {
         uFogD:          { value: 0.00014 },
         uFarIn:         { value: 12000.0 },
         uFarOut:        { value: 17000.0 },
+        uWaterY:        { value: -1e9 },   // (v49.14) the waterline fade - the hub deck sets it
+        uWaterFade:     { value: 90.0 },
         uMask:          { value: (() => {
           const _ph = new THREE.DataArrayTexture(new Uint8Array(1), 1, 1, 1);
           _ph.format = THREE.RedFormat;
@@ -19903,6 +19911,24 @@ function _stGroundY(x,z,T,sp){
     let _exS=Math.max(0,Math.min(1,(Math.sqrt(x*x+z*z)-5200)/3200));
     _exC=_exC*_exC*(3-2*_exC); _exS=_exS*_exS*(3-2*_exS);
     const _excl=Math.min(_exC,_exS);
+    // (v49.12) THE ARCHIPELAGO REGION WEIGHT - the islands themselves are the LAST term of this branch (see THE
+    // ARCHIPELAGO). Computed here so the karst province stands down inside the region: towers are the vertical
+    // landform, and the owner asked for the islands to be horizontal. Irregular edge (a slow noise on the distance),
+    // gone at the city and spawn keepouts like every other landform here. Knobs on game._hubTerra: arOn, arX, arZ,
+    // arR, arRamp. Default site: due west of HUB_CITY, 23.5k out on the 180-degree ray between the crystal and snow
+    // sectors - clear of the rift portals (21.5k ON the sector rays) and of every sector city's 20 candidate sites
+    // (27.5-36.5k, +-0.14 rad about the rays), so no city moves; inside the fine bake box.
+    const _arOn=_HT&&_HT.arOn!=null?_HT.arOn:1;
+    const _arX=_HT&&_HT.arX!=null?_HT.arX:-12500, _arZ=_HT&&_HT.arZ!=null?_HT.arZ:-11000;
+    const _arR=_HT&&_HT.arR!=null?_HT.arR:8500, _arRamp=_HT&&_HT.arRamp!=null?_HT.arRamp:2600;
+    let _arW=0;
+    if(_arOn>0){
+      const _ard=Math.sqrt((x-_arX)*(x-_arX)+(z-_arZ)*(z-_arZ));
+      if(_ard<_arR+1100){
+        const _ardw=_ard+1000*_stFbm(x,z,2,0.00016,151.0);
+        _arW=Math.max(0,Math.min(1,(_arR-_ardw)/_arRamp)); _arW=_arW*_arW*(3-2*_arW)*_excl*Math.min(1,_arOn);
+      }
+    }
 
     // VOLCANOES. A stratovolcano is the one landform that is POINT-symmetric: a
     // cone, a crater at the top, and gullies running radially all the way down.
@@ -19944,7 +19970,7 @@ function _stGroundY(x,z,T,sp){
       let _kA=Math.max(0,Math.min(1,(_kP-0.64)/0.13)); _kA=_kA*_kA*(3-2*_kA);
       // towers rise from LOW ground; on a mountainside they would just be lumps
       const _kLo=Math.max(0,Math.min(1,(620-(h-_WLh))/520));
-      _kA*=_kLo*_kAmt*_excl;
+      _kA*=_kLo*_kAmt*_excl*(1-_arW);   // (v49.12) no towers in the archipelago
       if(_kA>0.002){
         const _kC=760;
         const _ki=Math.floor(x/_kC), _kj=Math.floor(z/_kC);
@@ -19968,6 +19994,84 @@ function _stGroundY(x,z,T,sp){
     const ch=Math.max(Math.max(0,1-Math.abs(r1)/0.11),Math.max(0,1-Math.abs(r2)/0.085),Math.max(0,1-Math.abs(r3)/0.06));
     const river=ch*ch*(3-2*ch);
     h-=river*300*(1-m)*(1+(_erN-0.5)*0.60*_erAmt)*_bl(900); if (typeof game !== 'undefined' && game._clipExtraOctaveAmp) h += game._clipExtraOctaveAmp * _stFbm(wx, wz, 3, (game._clipExtraOctaveFreq || 0.01), 77.0);   /* (S6 play) extra fractal octave for crank-up detail (hub only, collision-consistent) */
+    // (v49.12) THE ARCHIPELAGO. Owner: "water and islands - area with mostly water, lots of small uniquely shaped
+    // islands close together forming canals and bays". Blended in LAST, so nothing after it can re-flood or re-raise
+    // it: inside the region this term alone decides land and water, and at its edge it melts into the old coast.
+    // The shape, prototyped top-down on these same noise functions before it went in: a warped Worley grid of island
+    // CELLS whose EDGES are the canals (so the canal network is connected by construction), each island a lobed
+    // blob round its own feature point clipped by the canal field, its character drawn from its cell hash - open
+    // water (more of it where a slow noise opens a sound), a low sandbar, jungle hills, a cliff plateau, an atoll
+    // ring round a lagoon - a cove bitten out of most hills and plateaus, a ragged coast at two scales, and reef
+    // islets clustered in shoals. CONTINUOUS BY CONSTRUCTION: land is the UNION (max) of every nearby island's own
+    // field and the canal width is a smooth field, so there is no per-cell switch for a seam, a cliff or a collision
+    // step to hide in. Heights are above the waterline (hills to ~450, plateaus ~480), the water 250-320 deep in
+    // the canals and sounds (deep enough for the fish). Islands >= ~150 across, canals >= ~200: the desktop render
+    // lattice is 32 and collision reads this function at full detail. The pattern's seed is a constant - the
+    // overworld is one world for everyone. Knobs (game._hubTerra, then __hbakeBuild() to re-bake the render):
+    // arCell (1350), arCanal (150), arDepth (320).
+    if(_arW>0.002){
+      const _aC=_HT&&_HT.arCell!=null?_HT.arCell:1350, _aS=7;
+      const _aH=(i,j,s)=>_stHash2i(i*7+s*131,j*13-s*71);
+      const _awx=x+520*_stFbm(x,z,2,1/4200,11+_aS)+190*_stFbm(x,z,3,1/1300,13+_aS);
+      const _awz=z+520*_stFbm(x,z,2,1/4200,23+_aS)+190*_stFbm(x,z,3,1/1300,29+_aS);
+      const _agx=_awx/_aC, _agz=_awz/_aC, _aix=Math.floor(_agx), _aiz=Math.floor(_agz);
+      let _af1=1e9, _af2=1e9;
+      for(let _dj=-1;_dj<=1;_dj++)for(let _di=-1;_di<=1;_di++){
+        const _ci=_aix+_di, _cj=_aiz+_dj;
+        const _px=_ci+0.1+0.8*_aH(_ci,_cj,_aS), _pz=_cj+0.1+0.8*_aH(_ci,_cj,_aS+5);
+        const _d=Math.sqrt((_agx-_px)*(_agx-_px)+(_agz-_pz)*(_agz-_pz));
+        if(_d<_af1){_af2=_af1;_af1=_d;}else if(_d<_af2)_af2=_d;
+      }
+      const _aCanal=(_HT&&_HT.arCanal!=null?_HT.arCanal:150)*(1+_stFbm(x,z,2,1/3600,31+_aS));
+      const _aCn=(_af2-_af1)*0.5*_aC-_aCanal;
+      const _acst=130*_stFbm(x,z,3,1/800,43+_aS)+45*_stNoise2(x/240,z/240)*_bl(240);
+      let _abest=-1e9, _ahB=-1e9;
+      for(let _dj=-1;_dj<=1;_dj++)for(let _di=-1;_di<=1;_di++){
+        const _ci=_aix+_di, _cj=_aiz+_dj;
+        const _px=_ci+0.1+0.8*_aH(_ci,_cj,_aS), _pz=_cj+0.1+0.8*_aH(_ci,_cj,_aS+5);
+        const _aop=_stFbm(_px*_aC,_pz*_aC,2,1/6500,37+_aS);
+        const _apw=0.08+Math.max(0,_aop-0.16)*2.2, _akr=_aH(_ci,_cj,_aS+9);
+        const _ak=_akr<_apw?0:(_akr<_apw+0.17?1:(_akr<0.74?2:(_akr<0.89?3:4)));
+        if(_ak===0) continue;
+        const _d=Math.sqrt((_agx-_px)*(_agx-_px)+(_agz-_pz)*(_agz-_pz));
+        const _ahv=_aH(_ci,_cj,_aS+17), _aan=Math.atan2(_agz-_pz,_agx-_px);
+        const _aR=_aC*(0.30+0.40*_ahv)*(1+0.22*Math.sin(3*_aan+6.28*_aH(_ci,_cj,_aS+3))+0.13*Math.sin(5*_aan+6.28*_aH(_ci,_cj,_aS+4)));
+        let _amk=Math.min(_aR-_d*_aC,_aCn)+_acst;
+        if((_ak===2||_ak===3)&&_aH(_ci,_cj,_aS+55)<0.6){
+          const _ca=6.28*_aH(_ci,_cj,_aS+51), _cr=_aR*(0.26+0.26*_aH(_ci,_cj,_aS+53));
+          const _cvx=_px+Math.cos(_ca)*_aR*0.80/_aC, _cvz=_pz+Math.sin(_ca)*_aR*0.80/_aC;
+          _amk=Math.min(_amk,Math.sqrt((_agx-_cvx)*(_agx-_cvx)+(_agz-_cvz)*(_agz-_cvz))*_aC-_cr);
+        }
+        if(_ak===4){ const _rr=_aR*0.42, _rw=60+55*_aH(_ci,_cj,_aS+21); _amk=Math.min(_amk,_rw-Math.abs(_amk-_rr)); }
+        if(_amk>_abest) _abest=_amk;
+        if(_amk>=0){
+          const _ash=Math.min(1,_amk/80);
+          let _atop;
+          if(_ak===1) _atop=18+36*_ahv;
+          else if(_ak===2) _atop=(100+340*_ahv)*Math.min(1,Math.pow(_amk/(300+330*_ahv),0.8))*(0.6+0.4*_stFbm(x,z,4,1/540,61+_aS));
+          else if(_ak===3) _atop=(170+300*_ahv)*Math.min(1,_amk/55)+40*_stFbm(x,z,3,1/320,67+_aS);
+          else _atop=14+22*_ahv;
+          const _ahk=(_ak===3?Math.max(4,_atop):Math.max(3,_atop)*_ash)+4;
+          if(_ahk>_ahB) _ahB=_ahk;
+        }
+      }
+      const _aDep=_HT&&_HT.arDepth!=null?_HT.arDepth:320;
+      let _aHt=(_abest>=0&&_ahB>-1e8)?_ahB:(-_aDep*Math.min(1,-Math.max(_abest,-1e4)/260)-22*_stNoise2(x/420,z/420));
+      const _arf=_stFbm(x,z,2,1/3000,71+_aS);
+      if(_arf>0.05){
+        const _aic=480, _g2x=_awx/_aic, _g2z=_awz/_aic, _jx=Math.floor(_g2x), _jz=Math.floor(_g2z);
+        for(let _dj=-1;_dj<=1;_dj++)for(let _di=-1;_di<=1;_di++){
+          const _ii=_jx+_di, _jj=_jz+_dj;
+          if(_aH(_ii,_jj,_aS+77)>(_arf-0.05)*2.2) continue;
+          const _qx=_ii+0.2+0.6*_aH(_ii,_jj,_aS+81), _qz=_jj+0.2+0.6*_aH(_ii,_jj,_aS+83);
+          const _ir=120*(0.6+0.9*_aH(_ii,_jj,_aS+85));
+          const _idd=Math.sqrt((_g2x-_qx)*(_g2x-_qx)+(_g2z-_qz)*(_g2z-_qz))*_aic+40*_stNoise2(x/110,z/110)*_bl(220);
+          const _ih=-18+80*(_ir-_idd)/_ir;
+          if(_ih>_aHt) _aHt=_ih;
+        }
+      }
+      h+=(_WLh+_aHt-h)*_arW;
+    }
     return h;
   }
   return T.YFLOOR+T.GROUND_AMP*_stRidged(wx,wz,1.7,T);
@@ -20177,6 +20281,17 @@ function _stGroundY(x,z,T,sp){
     let _exS=Math.max(0,Math.min(1,(Math.sqrt(x*x+z*z)-5200)/3200));
     _exC=_exC*_exC*(3-2*_exC); _exS=_exS*_exS*(3-2*_exS);
     const _excl=Math.min(_exC,_exS);
+    const _arOn=_HT&&_HT.arOn!=null?_HT.arOn:1;
+    const _arX=_HT&&_HT.arX!=null?_HT.arX:-12500, _arZ=_HT&&_HT.arZ!=null?_HT.arZ:-11000;
+    const _arR=_HT&&_HT.arR!=null?_HT.arR:8500, _arRamp=_HT&&_HT.arRamp!=null?_HT.arRamp:2600;
+    let _arW=0;
+    if(_arOn>0){
+      const _ard=Math.sqrt((x-_arX)*(x-_arX)+(z-_arZ)*(z-_arZ));
+      if(_ard<_arR+1100){
+        const _ardw=_ard+1000*_stFbm(x,z,2,0.00016,151.0);
+        _arW=Math.max(0,Math.min(1,(_arR-_ardw)/_arRamp)); _arW=_arW*_arW*(3-2*_arW)*_excl*Math.min(1,_arOn);
+      }
+    }
 
     const _vcA=(_HT&&_HT.volcAmp!=null?_HT.volcAmp:1.0)*_excl;
     if(_vcA>0.002){
@@ -20207,7 +20322,7 @@ function _stGroundY(x,z,T,sp){
       const _kP=_stFbm(wx,wz,2,0.000030,137.0)*0.5+0.5;
       let _kA=Math.max(0,Math.min(1,(_kP-0.64)/0.13)); _kA=_kA*_kA*(3-2*_kA);
       const _kLo=Math.max(0,Math.min(1,(620-(h-_WLh))/520));
-      _kA*=_kLo*_kAmt*_excl;
+      _kA*=_kLo*_kAmt*_excl*(1-_arW);   // (v49.12) no towers in the archipelago
       if(_kA>0.002){
         const _kC=760;
         const _ki=Math.floor(x/_kC), _kj=Math.floor(z/_kC);
@@ -20229,6 +20344,69 @@ function _stGroundY(x,z,T,sp){
     const ch=Math.max(Math.max(0,1-Math.abs(r1)/0.11),Math.max(0,1-Math.abs(r2)/0.085),Math.max(0,1-Math.abs(r3)/0.06));
     const river=ch*ch*(3-2*ch);
     h-=river*300*(1-m)*(1+(_erN-0.5)*0.60*_erAmt)*_bl(900); if (typeof game !== 'undefined' && game._clipExtraOctaveAmp) h += game._clipExtraOctaveAmp * _stFbm(wx, wz, 3, (game._clipExtraOctaveFreq || 0.01), 77.0);   
+    if(_arW>0.002){
+      const _aC=_HT&&_HT.arCell!=null?_HT.arCell:1350, _aS=7;
+      const _aH=(i,j,s)=>_stHash2i(i*7+s*131,j*13-s*71);
+      const _awx=x+520*_stFbm(x,z,2,1/4200,11+_aS)+190*_stFbm(x,z,3,1/1300,13+_aS);
+      const _awz=z+520*_stFbm(x,z,2,1/4200,23+_aS)+190*_stFbm(x,z,3,1/1300,29+_aS);
+      const _agx=_awx/_aC, _agz=_awz/_aC, _aix=Math.floor(_agx), _aiz=Math.floor(_agz);
+      let _af1=1e9, _af2=1e9;
+      for(let _dj=-1;_dj<=1;_dj++)for(let _di=-1;_di<=1;_di++){
+        const _ci=_aix+_di, _cj=_aiz+_dj;
+        const _px=_ci+0.1+0.8*_aH(_ci,_cj,_aS), _pz=_cj+0.1+0.8*_aH(_ci,_cj,_aS+5);
+        const _d=Math.sqrt((_agx-_px)*(_agx-_px)+(_agz-_pz)*(_agz-_pz));
+        if(_d<_af1){_af2=_af1;_af1=_d;}else if(_d<_af2)_af2=_d;
+      }
+      const _aCanal=(_HT&&_HT.arCanal!=null?_HT.arCanal:150)*(1+_stFbm(x,z,2,1/3600,31+_aS));
+      const _aCn=(_af2-_af1)*0.5*_aC-_aCanal;
+      const _acst=130*_stFbm(x,z,3,1/800,43+_aS)+45*_stNoise2(x/240,z/240)*_bl(240);
+      let _abest=-1e9, _ahB=-1e9;
+      for(let _dj=-1;_dj<=1;_dj++)for(let _di=-1;_di<=1;_di++){
+        const _ci=_aix+_di, _cj=_aiz+_dj;
+        const _px=_ci+0.1+0.8*_aH(_ci,_cj,_aS), _pz=_cj+0.1+0.8*_aH(_ci,_cj,_aS+5);
+        const _aop=_stFbm(_px*_aC,_pz*_aC,2,1/6500,37+_aS);
+        const _apw=0.08+Math.max(0,_aop-0.16)*2.2, _akr=_aH(_ci,_cj,_aS+9);
+        const _ak=_akr<_apw?0:(_akr<_apw+0.17?1:(_akr<0.74?2:(_akr<0.89?3:4)));
+        if(_ak===0) continue;
+        const _d=Math.sqrt((_agx-_px)*(_agx-_px)+(_agz-_pz)*(_agz-_pz));
+        const _ahv=_aH(_ci,_cj,_aS+17), _aan=Math.atan2(_agz-_pz,_agx-_px);
+        const _aR=_aC*(0.30+0.40*_ahv)*(1+0.22*Math.sin(3*_aan+6.28*_aH(_ci,_cj,_aS+3))+0.13*Math.sin(5*_aan+6.28*_aH(_ci,_cj,_aS+4)));
+        let _amk=Math.min(_aR-_d*_aC,_aCn)+_acst;
+        if((_ak===2||_ak===3)&&_aH(_ci,_cj,_aS+55)<0.6){
+          const _ca=6.28*_aH(_ci,_cj,_aS+51), _cr=_aR*(0.26+0.26*_aH(_ci,_cj,_aS+53));
+          const _cvx=_px+Math.cos(_ca)*_aR*0.80/_aC, _cvz=_pz+Math.sin(_ca)*_aR*0.80/_aC;
+          _amk=Math.min(_amk,Math.sqrt((_agx-_cvx)*(_agx-_cvx)+(_agz-_cvz)*(_agz-_cvz))*_aC-_cr);
+        }
+        if(_ak===4){ const _rr=_aR*0.42, _rw=60+55*_aH(_ci,_cj,_aS+21); _amk=Math.min(_amk,_rw-Math.abs(_amk-_rr)); }
+        if(_amk>_abest) _abest=_amk;
+        if(_amk>=0){
+          const _ash=Math.min(1,_amk/80);
+          let _atop;
+          if(_ak===1) _atop=18+36*_ahv;
+          else if(_ak===2) _atop=(100+340*_ahv)*Math.min(1,Math.pow(_amk/(300+330*_ahv),0.8))*(0.6+0.4*_stFbm(x,z,4,1/540,61+_aS));
+          else if(_ak===3) _atop=(170+300*_ahv)*Math.min(1,_amk/55)+40*_stFbm(x,z,3,1/320,67+_aS);
+          else _atop=14+22*_ahv;
+          const _ahk=(_ak===3?Math.max(4,_atop):Math.max(3,_atop)*_ash)+4;
+          if(_ahk>_ahB) _ahB=_ahk;
+        }
+      }
+      const _aDep=_HT&&_HT.arDepth!=null?_HT.arDepth:320;
+      let _aHt=(_abest>=0&&_ahB>-1e8)?_ahB:(-_aDep*Math.min(1,-Math.max(_abest,-1e4)/260)-22*_stNoise2(x/420,z/420));
+      const _arf=_stFbm(x,z,2,1/3000,71+_aS);
+      if(_arf>0.05){
+        const _aic=480, _g2x=_awx/_aic, _g2z=_awz/_aic, _jx=Math.floor(_g2x), _jz=Math.floor(_g2z);
+        for(let _dj=-1;_dj<=1;_dj++)for(let _di=-1;_di<=1;_di++){
+          const _ii=_jx+_di, _jj=_jz+_dj;
+          if(_aH(_ii,_jj,_aS+77)>(_arf-0.05)*2.2) continue;
+          const _qx=_ii+0.2+0.6*_aH(_ii,_jj,_aS+81), _qz=_jj+0.2+0.6*_aH(_ii,_jj,_aS+83);
+          const _ir=120*(0.6+0.9*_aH(_ii,_jj,_aS+85));
+          const _idd=Math.sqrt((_g2x-_qx)*(_g2x-_qx)+(_g2z-_qz)*(_g2z-_qz))*_aic+40*_stNoise2(x/110,z/110)*_bl(220);
+          const _ih=-18+80*(_ir-_idd)/_ir;
+          if(_ih>_aHt) _aHt=_ih;
+        }
+      }
+      h+=(_WLh+_aHt-h)*_arW;
+    }
     return h;
   }
   return T.YFLOOR+T.GROUND_AMP*_stRidged(wx,wz,1.7,T);
@@ -20526,6 +20704,7 @@ const _swU = { uTime:{value:0}, uYMid:{value:0}, uAMP:{value:1}, uSnow:{value:0.
                uSunDir:{value:new THREE.Vector3(0.29,0.86,0.43)},   // (v44.45) world sun, kept in step with _WX.sunDir
                uBendFlat:{value:0},
                uWaterY:{value:-1e9}, uWaterOn:{value:0},
+               uArch:{value:new THREE.Vector3(0,0,0)}, uArchRamp:{value:2600}, uArchSand:{value:new THREE.Color(0xdccb99)},
                uPatchMix:{value:new THREE.Vector3(0.85, 0.55, 0.70)}, uPatchScale:{value:1.0},
                uSway:{value:0.075},
                uColDirt:{value:new THREE.Color(0x54371f)} };
@@ -20720,7 +20899,7 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
     sh.uniforms.uAerial=_swU.uAerial; sh.uniforms.uAerialStart=_swU.uAerialStart; sh.uniforms.uAerialFar=_swU.uAerialFar; sh.uniforms.uAerialColor=_swU.uAerialColor;
     sh.uniforms.uStrata=_swU.uStrata; sh.uniforms.uRim=_swU.uRim;
     sh.uniforms.uBendFlat=_swU.uBendFlat;
-    sh.uniforms.uWaterY=_swU.uWaterY; sh.uniforms.uWaterOn=_swU.uWaterOn;   // (v39.73) caustics
+    sh.uniforms.uWaterY=_swU.uWaterY; sh.uniforms.uWaterOn=_swU.uWaterOn; sh.uniforms.uArch=_swU.uArch; sh.uniforms.uArchRamp=_swU.uArchRamp; sh.uniforms.uArchSand=_swU.uArchSand;   // (v39.73) caustics
     sh.uniforms.uPatchMix=_swU.uPatchMix; sh.uniforms.uPatchScale=_swU.uPatchScale;
     sh.uniforms.uColDirt=_swU.uColDirt;
     if (!window.__terrainAOU) { var _aoDef=0.55, _satDef=0.40;
@@ -20749,7 +20928,7 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
     } else {
       sh.vertexShader='attribute float aFlatY;\nuniform float uBendFlat;\nvarying float vWY; varying vec3 vWPos; varying vec3 vSN;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vWY=mix(position.y, aFlatY, uBendFlat); vWPos=position;\n vSN=vec3(0.0,1.0,0.0);');
     }
-    sh.fragmentShader='varying float vWY; varying vec3 vWPos; varying vec3 vSN;\nuniform float uTime,uYMid,uAMP,uSnow,uSnowVary,uSnowSlope,uLava,uSnowRough,uLavaGlow,uSlopeGrass,uSlopeRock,uCeil,uRocky,uGlitch,uGold,uCrystal,uMossy,uSmooth,uDetail,uAerial,uAerialStart,uAerialFar,uAO,uSat,uStrata,uRim,uPatchScale,uWaterY,uWaterOn,uRelief,uGrassD;\nuniform vec3 uColGrass,uColRock,uColSnow,uColMoss,uCam,uAerialColor,uPatchMix,uColDirt,uSunDir;\nuniform vec4 uVolc[4];\nuniform float uVolcH[4];\nuniform float uVolcN;\n'
+    sh.fragmentShader='varying float vWY; varying vec3 vWPos; varying vec3 vSN;\nuniform float uTime,uYMid,uAMP,uSnow,uSnowVary,uSnowSlope,uLava,uSnowRough,uLavaGlow,uSlopeGrass,uSlopeRock,uCeil,uRocky,uGlitch,uGold,uCrystal,uMossy,uSmooth,uDetail,uAerial,uAerialStart,uAerialFar,uAO,uSat,uStrata,uRim,uPatchScale,uWaterY,uWaterOn,uRelief,uGrassD;\nuniform vec3 uColGrass,uColRock,uColSnow,uColMoss,uCam,uAerialColor,uPatchMix,uColDirt,uSunDir;\nuniform vec4 uVolc[4];\nuniform float uVolcH[4];\nuniform float uVolcN;\nuniform vec3 uArch,uArchSand; uniform float uArchRamp;\n'
       +'float _thsh(vec2 p){return fract(sin(p.x*127.1+p.y*311.7)*43758.5453);}\n'
       +'float _tvn(vec2 p){vec2 i=floor(p),f=fract(p);vec2 u=f*f*(3.0-2.0*f);float a=_thsh(i),b=_thsh(i+vec2(1.0,0.0)),c=_thsh(i+vec2(0.0,1.0)),d=_thsh(i+vec2(1.0,1.0));return mix(mix(a,b,u.x),mix(c,d,u.x),u.y)*2.0-1.0;}\n'
       +'float _tpatch(vec2 p){float n=_tvn(p*0.0016+vec2(5.1,-2.3))*0.62+_tvn(p*0.0041+vec2(11.0,7.0))*0.38;return clamp((n+1.0)*0.5,0.0,1.0);}\n'
@@ -20759,7 +20938,7 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
     sh.fragmentShader=sh.fragmentShader.replace('#include <color_fragment>',
       '#include <color_fragment>\n if(uCeil<0.5){\n vec3 fn = uSmooth>0.5 ? normalize(vSN) : normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n float fl=clamp((abs(fn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0);\n float pc=_tpatch(vWPos.xz);\n float _mD=length(uCam.xz-vWPos.xz);\n float _mW=(1.0-smoothstep(240.0,950.0,_mD))*uGrassD;\n float _mN=0.0;\n if(_mW>0.001){ float _ma=_tvn(vWPos.xz*0.009)*3.1416; vec2 _md=vec2(cos(_ma),sin(_ma)); vec2 _mp=vec2(dot(vWPos.xz,_md),dot(vWPos.xz,vec2(-_md.y,_md.x))); _mN=_tvn(vec2(_mp.x*0.055,_mp.y*0.165))*0.46+_tvn(vec2(_mp.x*0.145,_mp.y*0.430)+vec2(11.0,4.0))*0.34+_tvn(vec2(_mp.x*0.360,_mp.y*1.050)+vec2(3.0,19.0))*0.20; _mN*=0.45+0.95*clamp(0.5+0.5*_tvn(vWPos.xz*0.018+vec2(27.0,6.0)),0.0,1.0); }\n vec3 grass=mix(uColMoss,uColGrass,smoothstep(0.32,0.72,pc));\n float moss1=_tvn(vWPos.xz*0.07);\n float moss2=_tvn(vWPos.xz*0.19+vec2(7.0,3.0));\n float mott=clamp(0.5+0.5*(moss1*0.62+moss2*0.38),0.0,1.0);\n grass*=(0.78+0.34*mott);\n grass=mix(grass,uColMoss*(0.7+0.4*mott),(1.0-smoothstep(0.28,0.62,pc))*0.6);\n float rkA=_tvn(vWPos.xz*0.045+vec2(vWPos.y*0.03));\n float rkB=_tvn(vWPos.xz*0.12+vec2(13.0,7.0));\n float rkC=_tvn(vWPos.xz*0.30+vec2(vWPos.y*0.05,0.0));\n float rockMott=clamp(0.5+0.5*(rkA*0.55+rkB*0.3+rkC*0.15),0.0,1.0);\n float strata=0.5+0.5*sin(vWPos.y*0.05+_tvn(vWPos.xz*0.025)*3.0);\n vec3 rock=uColRock*(0.70+0.55*rockMott)*(1.0-uStrata*0.57+uStrata*strata);\n if(uMossy>0.5){ float mc=_tvn(vWPos.xz*0.022+vec2(vWPos.y*0.015,0.0))*0.55+_tvn(vWPos.xz*0.06+vec2(9.0,4.0))*0.45; float mossSide=smoothstep(0.5,0.82,0.5+0.5*mc)*(1.0-fl); rock=mix(rock,uColMoss*(0.62+0.5*mott),mossSide*0.72); }\n vec3 terr=mix(rock,grass,fl);\n if(uMossy>0.5 && uSat>0.001){ float _gl=dot(grass,vec3(0.299,0.587,0.114)); vec3 _gd=mix(grass,vec3(_gl),uSat*0.85); float _dry=_tpatch(vWPos.xz*1.7+vec2(31.0,12.0)); float _dirt=clamp(0.5+0.5*_tvn(vWPos.xz*0.011+vec2(4.0,8.0)),0.0,1.0); _gd=mix(_gd,_gd*mix(vec3(1.0),vec3(0.46,0.42,0.20)*2.2,smoothstep(0.62,0.86,_dry)),uSat*0.55); _gd=mix(_gd,_gd*mix(vec3(1.0),vec3(0.27,0.20,0.12)*2.6,1.0-smoothstep(0.18,0.42,_dirt)),uSat*0.45); grass=mix(grass,_gd,clamp(uSat*1.4,0.0,1.0)); terr=mix(rock,grass,fl); }\n'
       +' if(uMossy>0.5){\n float _sA=_tvn(vWPos.xz*0.0030*uPatchScale+vec2(21.0,9.0));\n float _sB=_tvn(vWPos.xz*0.0105*uPatchScale+vec2(3.0,17.0));\n float _sC=_tvn(vWPos.xz*0.0330*uPatchScale+vec2(9.0,2.0));\n float _sN=_sA*0.55+_sB*0.32+_sC*0.13;\n float _rN=_tvn(vWPos.xz*0.0062*uPatchScale+vec2(41.0,-13.0))*0.62+_tvn(vWPos.xz*0.0210*uPatchScale+vec2(7.0,29.0))*0.38;\n float _spk=clamp(0.5+0.5*_tvn(vWPos.xz*1.15),0.0,1.0);\n float _grit=clamp(0.5+0.5*_tvn(vWPos.xz*0.42+vec2(5.0,23.0)),0.0,1.0);\n float _mE=_mN*0.085*_mW;\n float _dirtM=smoothstep(0.16,0.46,_sN+_mE)*uPatchMix.x;\n float _ovgM=smoothstep(0.14,0.44,-_sN+_mE)*uPatchMix.z;\n float _rubM=smoothstep(0.20,0.52,_rN+_mE)*uPatchMix.y*(0.45+0.55*(1.0-fl));\n vec3 _dirtC=uColDirt*(1.55+1.45*_grit);\n vec3 _rubC=uColRock*(0.70+1.05*_spk);\n vec3 _ovgC=mix(uColMoss,uColGrass,0.30)*(0.46+0.32*mott);\n grass=mix(grass,_ovgC,clamp(_ovgM,0.0,0.80));\n grass=mix(grass,_dirtC,clamp(_dirtM,0.0,0.90));\n grass=mix(grass,_rubC,clamp(_rubM,0.0,0.78));\n terr=mix(rock,grass,fl);\n }\n'
-      +' if(_mW>0.001){\n  terr*=1.0+_mN*0.33*_mW;\n  terr*=1.0-clamp(-_mN,0.0,1.0)*0.26*_mW;\n  vec3 _mh=mix(vec3(0.84,0.95,0.88),vec3(1.16,1.05,0.66),clamp(0.5+0.5*_mN,0.0,1.0));\n  terr=mix(terr,terr*_mh,fl*_mW*0.75);\n }\n float th=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _sl=uSnow+_swSW*uSnowVary+(1.0-fl)*uSnowSlope;\n float snow=smoothstep(_sl,_sl+0.10+0.07*(1.0-fl),th);\n terr=mix(terr,uColSnow,snow*max(fl,0.30));\n if(uAO>0.001 && _mD<2200.0){ float _aoCav=mix(0.62,1.0,smoothstep(uSlopeRock,1.0,clamp(fn.y,0.0,1.0))); float _aoDet=mix(0.74,1.06,clamp(0.5+0.5*_detN(vWPos.xz),0.0,1.0)); float _aoVal=mix(0.80,1.0,th); float _aoBlob=mix(0.86,1.04,_tpatch(vWPos.xz*0.6+vec2(17.0,5.0))); float _aoRaw=clamp(_aoCav*_aoDet*_aoVal*_aoBlob,0.45,1.08); float _aoFade=1.0-smoothstep(900.0,2200.0,length(uCam.xz-vWPos.xz)); float _ao=mix(1.0,_aoRaw,uAO*_aoFade*(1.0-snow*0.6)); terr*=_ao; }\n if(uRelief>0.001 && uCeil<0.5){ float _rD=length(uCam.xz-vWPos.xz); float _rW=(1.0-smoothstep(700.0,2400.0,_rD))*uRelief; if(_rW>0.001){ float _e2=9.0; float _c0=_detN(vWPos.xz); float _cx=_detN(vWPos.xz+vec2(_e2,0.0))+_detN(vWPos.xz-vec2(_e2,0.0)); float _cz=_detN(vWPos.xz+vec2(0.0,_e2))+_detN(vWPos.xz-vec2(0.0,_e2)); float _curv=(_cx+_cz)*0.25-_c0; float _cav=clamp(-_curv*9.0,0.0,1.0); float _ridge=clamp(_curv*7.0,0.0,1.0); vec2 _sg=vec2(_detN(vWPos.xz+vec2(_e2,0.0))-_c0,_detN(vWPos.xz+vec2(0.0,_e2))-_c0); float _sunFace=clamp(0.5-dot(normalize(_sg+vec2(1e-5)),normalize(uSunDir.xz+vec2(1e-5)))*0.5,0.0,1.0); float _shade=1.0-(_cav*(0.30+0.22*_sunFace))*_rW+_ridge*0.10*_rW; terr*=clamp(_shade,0.45,1.15); } }\n if(uAerial>0.001){ float _camD=length(uCam.xz-vWPos.xz); float _ap=smoothstep(uAerialStart,uAerialFar,_camD)*uAerial; _ap*=(1.0-clamp((vWY-(uYMid-uAMP*0.2))/(uAMP*1.4),0.0,1.0)*0.55); terr=mix(terr,uAerialColor,clamp(_ap,0.0,0.85)); }\n  if(uWaterOn>0.001 && vWPos.y<uWaterY){ float _cdp=uWaterY-vWPos.y; float _cf=(1.0-smoothstep(80.0,1100.0,_cdp))*smoothstep(0.0,30.0,_cdp)*uWaterOn; vec2 _cq=vWPos.xz*0.021; float _c1=sin(_cq.x*2.3+_cq.y*1.1+uTime*1.35)*sin(_cq.y*1.9-_cq.x*1.3-uTime*1.05); float _c2=sin((_cq.x+_cq.y)*1.45+uTime*0.85)*sin((_cq.x-_cq.y*0.7)*1.7-uTime*0.65); float _cc=pow(clamp(0.5+0.5*(_c1*0.6+_c2*0.4),0.0,1.0),3.5); terr*=1.0+_cf*_cc*1.15*clamp(fn.y,0.0,1.0); }\n diffuseColor.rgb=terr;\n }\n if(uCeil>0.5){ float _cm1=_tvn(vWPos.xz*0.045+vec2(vWPos.y*0.03));\n float _cm2=_tvn(vWPos.xz*0.12+vec2(13.0,7.0));\n float _cmott=clamp(0.5+0.5*(_cm1*0.6+_cm2*0.4),0.0,1.0);\n float _cstr=0.5+0.5*sin(vWPos.y*0.05+_tvn(vWPos.xz*0.025)*3.0);\n diffuseColor.rgb*=(0.80+0.36*_cmott)*(1.0-uStrata*0.57+uStrata*_cstr);\n if(uAO>0.001){ vec3 _cn2=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n float _cao=mix(0.68,1.0,smoothstep(0.0,0.85,abs(_cn2.y)));\n float _caoD=mix(0.80,1.05,clamp(0.5+0.5*_detN(vWPos.xz),0.0,1.0));\n diffuseColor.rgb*=mix(1.0,clamp(_cao*_caoD,0.5,1.05),uAO); }\n if(uAerial>0.001){ float _cad=length(uCam.xz-vWPos.xz);\n float _cap=smoothstep(uAerialStart,uAerialFar,_cad)*uAerial;\n diffuseColor.rgb=mix(diffuseColor.rgb,uAerialColor,clamp(_cap,0.0,0.85)); }\n }\n if(uRim>0.001){ vec3 _rn=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n vec3 _rv=normalize(uCam-vWPos);\n float _rf=pow(1.0-abs(dot(_rn,_rv)),3.0);\n diffuseColor.rgb=mix(diffuseColor.rgb,uAerialColor*1.25,_rf*uRim); }\n if(uGlitch>0.5 && uCeil>0.5){ float zone=_tpatch(vWPos.xz+vec2(uTime*2.5,0.0)); vec2 gid=floor(vWPos.xz/240.0); float r=_thsh(gid+floor(uTime*0.8)); float r2=_thsh(gid*1.93+floor(uTime*1.5)); if(zone>0.62 && r>0.45) discard; if(zone>0.5){ if(r2>0.55) diffuseColor.rgb=diffuseColor.rgb.gbr; diffuseColor.rgb*=mix(0.75,1.25,r2); } }');
+      +' if(_mW>0.001){\n  terr*=1.0+_mN*0.33*_mW;\n  terr*=1.0-clamp(-_mN,0.0,1.0)*0.26*_mW;\n  vec3 _mh=mix(vec3(0.84,0.95,0.88),vec3(1.16,1.05,0.66),clamp(0.5+0.5*_mN,0.0,1.0));\n  terr=mix(terr,terr*_mh,fl*_mW*0.75);\n }\n float th=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _sl=uSnow+_swSW*uSnowVary+(1.0-fl)*uSnowSlope;\n float snow=smoothstep(_sl,_sl+0.10+0.07*(1.0-fl),th);\n terr=mix(terr,uColSnow,snow*max(fl,0.30));\n if(uAO>0.001 && _mD<2200.0){ float _aoCav=mix(0.62,1.0,smoothstep(uSlopeRock,1.0,clamp(fn.y,0.0,1.0))); float _aoDet=mix(0.74,1.06,clamp(0.5+0.5*_detN(vWPos.xz),0.0,1.0)); float _aoVal=mix(0.80,1.0,th); float _aoBlob=mix(0.86,1.04,_tpatch(vWPos.xz*0.6+vec2(17.0,5.0))); float _aoRaw=clamp(_aoCav*_aoDet*_aoVal*_aoBlob,0.45,1.08); float _aoFade=1.0-smoothstep(900.0,2200.0,length(uCam.xz-vWPos.xz)); float _ao=mix(1.0,_aoRaw,uAO*_aoFade*(1.0-snow*0.6)); terr*=_ao; }\n if(uRelief>0.001 && uCeil<0.5){ float _rD=length(uCam.xz-vWPos.xz); float _rW=(1.0-smoothstep(700.0,2400.0,_rD))*uRelief; if(_rW>0.001){ float _e2=9.0; float _c0=_detN(vWPos.xz); float _cx=_detN(vWPos.xz+vec2(_e2,0.0))+_detN(vWPos.xz-vec2(_e2,0.0)); float _cz=_detN(vWPos.xz+vec2(0.0,_e2))+_detN(vWPos.xz-vec2(0.0,_e2)); float _curv=(_cx+_cz)*0.25-_c0; float _cav=clamp(-_curv*9.0,0.0,1.0); float _ridge=clamp(_curv*7.0,0.0,1.0); vec2 _sg=vec2(_detN(vWPos.xz+vec2(_e2,0.0))-_c0,_detN(vWPos.xz+vec2(0.0,_e2))-_c0); float _sunFace=clamp(0.5-dot(normalize(_sg+vec2(1e-5)),normalize(uSunDir.xz+vec2(1e-5)))*0.5,0.0,1.0); float _shade=1.0-(_cav*(0.30+0.22*_sunFace))*_rW+_ridge*0.10*_rW; terr*=clamp(_shade,0.45,1.15); } }\n if(uMossy>0.5 && uArch.z>1.0 && uWaterY>-1e8){ float _aD=length(vWPos.xz-uArch.xy); float _aw=1.0-smoothstep(uArch.z-uArchRamp,uArch.z+600.0,_aD); if(_aw>0.001){ float _bh=vWPos.y-uWaterY; float _bn=_tvn(vWPos.xz*0.031)*7.0; float _beach=(1.0-smoothstep(12.0+_bn,38.0+_bn,_bh))*smoothstep(-60.0,-4.0,_bh); vec3 _sand=uArchSand*(0.84+0.28*clamp(0.5+0.5*_tvn(vWPos.xz*0.085),0.0,1.0)); terr=mix(terr,_sand,_beach*_aw*max(fl,0.35)); } }\n if(uAerial>0.001){ float _camD=length(uCam.xz-vWPos.xz); float _ap=smoothstep(uAerialStart,uAerialFar,_camD)*uAerial; _ap*=(1.0-clamp((vWY-(uYMid-uAMP*0.2))/(uAMP*1.4),0.0,1.0)*0.55); terr=mix(terr,uAerialColor,clamp(_ap,0.0,0.85)); }\n  if(uWaterOn>0.001 && vWPos.y<uWaterY){ float _cdp=uWaterY-vWPos.y; float _cf=(1.0-smoothstep(80.0,1100.0,_cdp))*smoothstep(0.0,30.0,_cdp)*uWaterOn; vec2 _cq=vWPos.xz*0.021; float _c1=sin(_cq.x*2.3+_cq.y*1.1+uTime*1.35)*sin(_cq.y*1.9-_cq.x*1.3-uTime*1.05); float _c2=sin((_cq.x+_cq.y)*1.45+uTime*0.85)*sin((_cq.x-_cq.y*0.7)*1.7-uTime*0.65); float _cc=pow(clamp(0.5+0.5*(_c1*0.6+_c2*0.4),0.0,1.0),3.5); terr*=1.0+_cf*_cc*1.15*clamp(fn.y,0.0,1.0); }\n diffuseColor.rgb=terr;\n }\n if(uCeil>0.5){ float _cm1=_tvn(vWPos.xz*0.045+vec2(vWPos.y*0.03));\n float _cm2=_tvn(vWPos.xz*0.12+vec2(13.0,7.0));\n float _cmott=clamp(0.5+0.5*(_cm1*0.6+_cm2*0.4),0.0,1.0);\n float _cstr=0.5+0.5*sin(vWPos.y*0.05+_tvn(vWPos.xz*0.025)*3.0);\n diffuseColor.rgb*=(0.80+0.36*_cmott)*(1.0-uStrata*0.57+uStrata*_cstr);\n if(uAO>0.001){ vec3 _cn2=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n float _cao=mix(0.68,1.0,smoothstep(0.0,0.85,abs(_cn2.y)));\n float _caoD=mix(0.80,1.05,clamp(0.5+0.5*_detN(vWPos.xz),0.0,1.0));\n diffuseColor.rgb*=mix(1.0,clamp(_cao*_caoD,0.5,1.05),uAO); }\n if(uAerial>0.001){ float _cad=length(uCam.xz-vWPos.xz);\n float _cap=smoothstep(uAerialStart,uAerialFar,_cad)*uAerial;\n diffuseColor.rgb=mix(diffuseColor.rgb,uAerialColor,clamp(_cap,0.0,0.85)); }\n }\n if(uRim>0.001){ vec3 _rn=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n vec3 _rv=normalize(uCam-vWPos);\n float _rf=pow(1.0-abs(dot(_rn,_rv)),3.0);\n diffuseColor.rgb=mix(diffuseColor.rgb,uAerialColor*1.25,_rf*uRim); }\n if(uGlitch>0.5 && uCeil>0.5){ float zone=_tpatch(vWPos.xz+vec2(uTime*2.5,0.0)); vec2 gid=floor(vWPos.xz/240.0); float r=_thsh(gid+floor(uTime*0.8)); float r2=_thsh(gid*1.93+floor(uTime*1.5)); if(zone>0.62 && r>0.45) discard; if(zone>0.5){ if(r2>0.55) diffuseColor.rgb=diffuseColor.rgb.gbr; diffuseColor.rgb*=mix(0.75,1.25,r2); } }');
     sh.fragmentShader=sh.fragmentShader.replace('#include <roughnessmap_fragment>',
       '#include <roughnessmap_fragment>\n float _tr=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _rsl=uSnow+_swSW*uSnowVary;\n float _snow=smoothstep(_rsl,_rsl+0.12,_tr);\n roughnessFactor=mix(roughnessFactor,uSnowRough,_snow);');
     sh.fragmentShader=sh.fragmentShader.replace('#include <emissivemap_fragment>',
@@ -21039,6 +21218,21 @@ function _swTreeGeoGet(){
       _swGenMushroom({seed:506,h:19,r:7.8,capH:8.4,sr:1.3}),
     ],
   };
+  {
+    const _all = full.concat(lite, extra);
+    const _geoOf = (sd) => {
+      const bi = base.findIndex(p => p.seed === sd);
+      if (bi >= 0) return _swTreeGeos.std[bi];
+      const p = _all.find(q => q.seed === sd);
+      return p ? _swGenTree(p) : null;
+    };
+    const want = { palm: 1212, fern: 1515, oak: 1011, baobab: 1414 };
+    if (_full) { want.mangrove = 1818; want.willow = 4044; }
+    const geos = [], idx = {};
+    for (const k in want) { const g = _geoOf(want[k]); if (g) { idx[k] = geos.length; geos.push(g); } }
+    _swTreeGeos.trop = geos;
+    _swTreeGeos.tropIdx = idx;
+  }
   return _swTreeGeos;
 }
 function _swFoliageMat(glow){
@@ -21057,6 +21251,24 @@ function _swForestAt(x, z) {
   const n = (_stNoise2(x * 0.00035 + 11.0, z * 0.00035 - 7.0) + 1) * 0.5;
   return Math.max(0, Math.min(1, (n - 0.5) / 0.28));
 }
+function _archW(x, z, lead) {
+  const HT = (typeof game !== 'undefined' && game._hubTerra) ? game._hubTerra : null;
+  const on = (HT && HT.arOn != null) ? +HT.arOn : 1;
+  if (!(on > 0)) return 0;
+  const ax = (HT && HT.arX != null) ? +HT.arX : -12500, az = (HT && HT.arZ != null) ? +HT.arZ : -11000;
+  const L = lead || 0;
+  const R = ((HT && HT.arR != null) ? +HT.arR : 8500) + L;
+  const ramp = ((HT && HT.arRamp != null) ? +HT.arRamp : 2600) + L * 0.5;
+  const d = Math.hypot(x - ax, z - az);
+  if (d > R + 1100) return 0;
+  const dw = d + 1000 * _stFbm(x, z, 2, 0.00016, 151.0);
+  let w = Math.max(0, Math.min(1, (R - dw) / ramp)); w = w * w * (3 - 2 * w);
+  let c = Math.max(0, Math.min(1, (Math.hypot(x - 11000, z + 11000) - 9200) / 4200));
+  let s = Math.max(0, Math.min(1, (Math.hypot(x, z) - 5200) / 3200));
+  c = c * c * (3 - 2 * c); s = s * s * (3 - 2 * s);
+  return w * Math.min(c, s) * Math.min(1, on);
+}
+if (typeof window !== 'undefined') window.__archW = _archW;
 function _hzZoneForFoliage(x, z) {
   const Z = (typeof _HUB_ZONES !== 'undefined') ? _HUB_ZONES : null;
   if (!Z || !Z.ON || typeof HUB_CITY === 'undefined') return null;
@@ -21124,10 +21336,13 @@ const _SW_FAM=[
 function _swBuildTrees(x0,z0,T){
   if(game.sandwichTrees===false || T.biome!=='mossy') return null;
   const _full = !((typeof isStandaloneQuest==='function' && isStandaloneQuest()) || (typeof _LSS_IS_MOBILE!=='undefined' && _LSS_IS_MOBILE));
-  const spacing=_full?155:175, N=Math.max(2,Math.round(_SW_CHUNK/spacing)), step=_SW_CHUNK/N;
+  const _awChunk=(T.HUB && typeof _archW==='function')?_archW(x0+_SW_CHUNK*0.5,z0+_SW_CHUNK*0.5,900):0;
+  const _sp0=_full?155:175;
+  const spacing=(_awChunk>0.2)?(_full?92:120):_sp0, N=Math.max(2,Math.round(_SW_CHUNK/spacing)), step=_SW_CHUNK/N;
+  const _dScale=(spacing*spacing)/(_sp0*_sp0);
   const eps=6, SR=_swU.uSlopeRock.value, SG=_swU.uSlopeGrass.value;
   const sets=_swTreeGeoGet();
-  const buckets={ std:sets.std.map(()=>[]), snow:sets.snow.map(()=>[]), shroom:sets.shroom.map(()=>[]) };
+  const buckets={ std:sets.std.map(()=>[]), snow:sets.snow.map(()=>[]), shroom:sets.shroom.map(()=>[]), trop:(sets.trop||[]).map(()=>[]) };
   const _shroomVi=Math.floor(_stHash2(Math.floor(x0*0.013)+7, Math.floor(z0*0.017)-3)*sets.shroom.length)%sets.shroom.length;
   const _rx=Math.floor(x0/(_SW_CHUNK*6)), _rz=Math.floor(z0/(_SW_CHUNK*6));
   const _palOf=(n,salt)=>{
@@ -21139,13 +21354,18 @@ function _swBuildTrees(x0,z0,T){
   };
   const _stdPal=_palOf(sets.std.length,0);
   const _snowPal=_palOf(sets.snow.length,37);
+  const _TI=sets.tropIdx||{};
+  const _tInL=[_TI.oak,_TI.baobab,_TI.willow,_TI.fern].filter(v=>v!=null);
+  const _tropPal=[(_TI.mangrove!=null)?_TI.mangrove:_TI.fern, _TI.palm,
+                  _tInL.length?_tInL[Math.floor(_stHash2(_rx*2.7+3,_rz*1.9-8)*_tInL.length)%_tInL.length]:_TI.palm];
   for(let j=0;j<N;j++)for(let i=0;i<N;i++){
     const x=x0+(i+Math.random())*step, z=z0+(j+Math.random())*step, y=_stGroundYGrid(x,z,T);
     if(T.HUB && _hubCityExcludes(x,z)) continue;
     if(T.HUB && typeof _owExcludes === 'function' && _owExcludes(x,z)) continue;   // (v38.78)
-    if(T.WL!=null && y<T.WL+20) continue;
+    const _aw=(_awChunk>0.001)?_archW(x,z,0):0;   // (v49.13) in the archipelago?
+    if(T.WL!=null && y<T.WL+((_aw>0.5)?5:20)) continue;   // (v49.13) mangroves stand at the waterline
     const zn=T.HUB?_hzZoneForFoliage(x,z):null;
-    const kind=zn?((zn.key==='snow')?'snow':((zn.key==='crystalcave'||zn.key==='rocky')?'shroom':'std')):'std';
+    const kind=(_aw>0.5 && sets.trop && sets.trop.length)?'trop':(zn?((zn.key==='snow')?'snow':((zn.key==='crystalcave'||zn.key==='rocky')?'shroom':'std')):'std');
     const t=(y-(T.YMID-T.AMP*0.5))/(T.AMP*1.15);
     if(t>((T.snowLine||0.7)+(kind==='snow'?0.16:0))) continue;
     const yx=_stGroundYCarved(x+eps,z,T)-_stGroundYCarved(x-eps,z,T);
@@ -21158,13 +21378,16 @@ function _swBuildTrees(x0,z0,T){
     if(kind==='shroom'){
       const fung=_hzFungusAt(x,z);
       if(fung<0.56) continue;
-      dens=(0.10+ (fung-0.56)*0.9 )*_td;
+      dens=(0.10+ (fung-0.56)*0.9 )*_td*_dScale;   // (v49.13) _dScale: see the spacing note
+    } else if(kind==='trop'){
+      dens=(0.50+0.40*_swForestAt(x,z))*_td;
     } else {
       if(_stPatch(x,z)<0.45) continue;
       const forest=_swForestAt(x,z);
       dens=((forest>0.28)?(0.16+forest*(_full?0.36:0.24)):0.012)*_td;
       if(kind==='snow') dens*=0.65;   // sparser treeline
       else if(zn) dens*=Math.max(0.06, 1-zn.zs*0.85);
+      dens*=_dScale;   // (v49.13) a tight-grid chunk keeps the ordinary country's density
     }
     let _eco = 1;
     if (kind !== 'shroom') {
@@ -21181,6 +21404,12 @@ function _swBuildTrees(x0,z0,T){
     let vi;
     const _pal=(kind==='snow')?_snowPal:_stdPal;
     if(kind==='shroom') vi=_shroomVi;
+    else if(kind==='trop'){
+      const _nA=Math.max(0,Math.min(0.999,(y-(T.WL||0)-6)/110));
+      const _jt=_stHash2(Math.floor(x*0.7),Math.floor(z*0.7));
+      vi=_tropPal[Math.floor(Math.max(0,Math.min(0.999,_nA*0.75+_jt*0.25))*3)];
+      if(vi==null) vi=(_TI.palm!=null)?_TI.palm:0;
+    }
     else if(_pal){
       const _niche=Math.max(0,Math.min(0.999,(1-_moist)*0.72+_expo*0.28));
       const _jit=_stHash2(Math.floor(x*0.7),Math.floor(z*0.7));
@@ -21218,6 +21447,7 @@ function _swBuildTrees(x0,z0,T){
   };
   for(let v=0;v<sets.std.length;v++)   emit(sets.std[v],   _swTreeMatGet(),   buckets.std[v],   -6,   2.6,1.4, 0,false, _tint);
   for(let v=0;v<sets.snow.length;v++)  emit(sets.snow[v],  _swTreeMatGet(),   buckets.snow[v],  -6,   2.4,1.3, 0,false, _tintSnow);
+  if(sets.trop) for(let v=0;v<sets.trop.length;v++) emit(sets.trop[v], _swTreeMatGet(), buckets.trop[v], -6, 2.3,1.4, 0,false, _SW_FAM[3]);
   for(let v=0;v<sets.shroom.length;v++)emit(sets.shroom[v],_swShroomMatGet(), buckets.shroom[v],-1.5, 1.6,2.0, 12, true);
   return meshes.length?meshes:null;
 }
@@ -21737,6 +21967,16 @@ const _HUB_ZONES = {
   sky: { mossy: 'sky', volcanic: 'diablo', goldmine: 'clouds', crystalcave: 'purple',
          snow: 'ice', rocky: 'blue', brokensim: 'cyberpunk' },
   _cur: 'sky', _skyT: 0, _mossyFog: null,
+  ARCH: {
+    ON: true,
+    LEAD: 3500,        // the look starts turning this far before the islands do
+    grass: 0x4c9a3a, rock: 0x8a7f66, moss: 0x357a2a, dirt: 0xc9b487,
+    water: 0x0f7488, shallow: 0x3cbcb0,
+    fog: 0xbfe2ec, zen: 0x2a74d8, hor: 0xd6eef4,
+    fogMul: 0.80, strata: 0.06,
+    sand: 0xdccb99,    // the beach band (terrain shader, uArchSand)
+    _aw: 0, _c: null, _shallow0: null, _shc: null,
+  },
   DUSK: {
     ON: true,
     R0: 9000,          // full dusk at or inside this radius from the city centre
@@ -21861,6 +22101,34 @@ function _hubZoneTick(px, pz, dt) {
     fogMul += L.fogMul * w; strata += L.strata * w; rim += L.rim * w;
     gold += L.gold * w; crystal += L.crystal * w;
   }
+  {
+    const A = Z.ARCH;
+    try {
+      const HT = game._hubTerra || null;
+      const on = (HT && HT.arOn != null) ? +HT.arOn : 1;
+      _swU.uArch.value.set((HT && HT.arX != null) ? +HT.arX : -12500, (HT && HT.arZ != null) ? +HT.arZ : -11000,
+                           (on > 0) ? ((HT && HT.arR != null) ? +HT.arR : 8500) : 0);
+      _swU.uArchRamp.value = (HT && HT.arRamp != null) ? +HT.arRamp : 2600;
+      if (A && A.sand != null) _swU.uArchSand.value.setHex(A.sand);
+    } catch (_) {}
+    let aw = 0;
+    if (A && A.ON) {
+      aw = _archW(px, pz, A.LEAD || 0);
+      if (aw > 0) {
+        if (!A._c) A._c = { grass: new THREE.Color(), rock: new THREE.Color(), moss: new THREE.Color(), dirt: new THREE.Color(),
+                            water: new THREE.Color(), fog: new THREE.Color(), zen: new THREE.Color(), hor: new THREE.Color() };
+        const K = A._c;
+        K.grass.setHex(A.grass); K.rock.setHex(A.rock); K.moss.setHex(A.moss); K.dirt.setHex(A.dirt);
+        K.water.setHex(A.water); K.fog.setHex(A.fog); K.zen.setHex(A.zen); K.hor.setHex(A.hor);
+        _hzGrass.lerp(K.grass, aw); _hzRock.lerp(K.rock, aw); _hzMoss.lerp(K.moss, aw); _hzDirt.lerp(K.dirt, aw);
+        _hzWater.lerp(K.water, aw); _hzSky.lerp(K.fog, aw); _hzZen.lerp(K.zen, aw); _hzHor.lerp(K.hor, aw);
+        fogMul += ((A.fogMul != null ? A.fogMul : 1) - fogMul) * aw;
+        strata += ((A.strata != null ? A.strata : strata) - strata) * aw;
+        rim *= (1 - aw); gold *= (1 - aw); crystal *= (1 - aw);
+      }
+    }
+    if (A) A._aw = aw;
+  }
   let cw = 0;
   {
     const D = Z.DUSK;
@@ -21894,6 +22162,15 @@ function _hubZoneTick(px, pz, dt) {
     if (_hd && _hd.material && _hd.material.uniforms && _hd.material.uniforms.color) {
       _hd.material.uniforms.color.value.copy(_hzWater);
     }
+    const A = Z.ARCH;
+    for (const _wm of [_hw, _hd]) {
+      const U = _wm && _wm.material && _wm.material.uniforms;
+      if (!U || !U.uShallowTint || !A) continue;
+      const st = U.uShallowTint.value;
+      if (!A._shallow0) A._shallow0 = st.clone();
+      st.copy(A._shallow0);
+      if (A._aw > 0) { (A._shc || (A._shc = new THREE.Color())).setHex(A.shallow); st.lerp(A._shc, A._aw); }
+    }
   } catch (_) {}
   _swU.uStrata.value = strata; _swU.uRim.value = rim;
   _swU.uGold.value = gold; _swU.uCrystal.value = crystal;
@@ -21923,7 +22200,8 @@ function _hubZoneTick(px, pz, dt) {
     Z._skyT = 0;
     const dk = keys[domK];
     const want = (cw > 0.55) ? 'cyberpunk'
-      : ((domW > 0.6 && Z.sky[dk]) ? Z.sky[dk] : (zs < 0.5 ? Z.sky.mossy : null));
+      : ((Z.ARCH && Z.ARCH._aw > 0.55) ? Z.sky.mossy   // (v49.13) the archipelago is daytime
+      : ((domW > 0.6 && Z.sky[dk]) ? Z.sky[dk] : (zs < 0.5 ? Z.sky.mossy : null)));
     if (want && want !== Z._cur) {
       Z._cur = want;
       try { setSky(want); } catch (_) {}
@@ -27018,7 +27296,9 @@ function _birdRehome(cx, cz) {
     F.gpu.renderTexture(F.posSeed, F.gpu.getCurrentRenderTarget(F.posVar));
     F.gpu.renderTexture(F.velSeed, F.gpu.getCurrentRenderTarget(F.velVar));
     F.fadeT = 0;   
-    F.liveCount = Math.max(2, Math.round(F.count * Math.pow(Math.random(), 2.2)));
+    let _bu = Math.random();
+    try { if (typeof _archW === 'function' && _archW(cx, cz, 2500) > 0.4) _bu = 0.65 + 0.35 * _bu; } catch (_) {}
+    F.liveCount = Math.max(2, Math.round(F.count * Math.pow(_bu, 2.2)));
     if (F.geo) F.geo.setDrawRange(0, F.liveCount * 9);
   } catch (_) {}
 }
@@ -27248,7 +27528,9 @@ function _fishNearWater(WL, T) {
 }
 function _fishFillSeed(F, cx, cz, WL, T) {
   const data = F.seedTex.image.data, count = F.count;
-  F.liveCount = Math.max(2, Math.round(count * Math.pow(Math.random(), 2.2)));
+  let _fu = Math.random();
+  try { if (typeof _archW === 'function' && _archW(cx, cz, 2500) > 0.4) _fu = 0.65 + 0.35 * _fu; } catch (_) {}   // (v49.14) teeming
+  F.liveCount = Math.max(2, Math.round(count * Math.pow(_fu, 2.2)));
   const B = (typeof window !== 'undefined' && window.__fish) ? window.__fish : {};
   const _spread = Math.max(400, ((B.boundsR != null) ? B.boundsR : 1000) * 0.7);
   for (let i = 0; i < count; i++) {
@@ -33410,6 +33692,7 @@ const SKY_I = {
   flora: 1,            // trees / mushrooms on the top surfaces
   fungal: 0.30,        // fraction of islands that grow glowing caps instead of trees
   deckBias: 0.45,
+  arch: { on: true, cell: 4200, chance: 0.62, nMin: 2, nMax: 5, rMin: 280, rMax: 640, yMin: 260, yMax: 720, clear: 320, wAt: 0.55 },
   _ms: 0,
 };
 try { window.__sky = SKY_I; } catch (_) {}
@@ -33503,6 +33786,47 @@ function _skClusterAt(ii, jj) {
   _skCache.set(key, out);
   return out;
 }
+function _skArchClusterAt(ii, jj) {
+  const key = 'a' + ii + ':' + jj;
+  let v = _skCache.get(key);
+  if (v !== undefined) return v;
+  const A = SKY_I.arch;
+  const H = (o) => _stHash2(ii * 5.17 + o * 3.1 + 71.0, jj * 7.43 + o * 2.3 - 13.0);
+  const cx = (ii + 0.2 + H(1) * 0.6) * A.cell, cz = (jj + 0.2 + H(2) * 0.6) * A.cell;
+  if (!A.on || H(0) > A.chance || typeof _archW !== 'function' || _archW(cx, cz, 0) < A.wAt) { _skCache.set(key, _SK_EMPTY); return _SK_EMPTY; }
+  const T = game.sandwichTerrain;
+  const WL = (T && T.WL != null) ? T.WL : ((typeof game._hubWaterWL === 'number') ? game._hubWaterWL : -720);
+  const n = A.nMin + Math.floor(H(3) * (A.nMax - A.nMin + 1));
+  const baseA = H(4) * 6.283;
+  const pts = [];
+  let px = cx, pz = cz;
+  for (let k = 0; k < n; k++) {
+    const h1 = _stHash2(ii * 13.1 + k * 2.9, jj * 4.7 + k * 6.3), h2 = _stHash2(ii * 3.3 + k * 7.7, jj * 8.9 + k * 1.7);
+    const R = A.rMin + (A.rMax - A.rMin) * (0.35 + 0.65 * h1);
+    if (k > 0) { const a = baseA + (h2 - 0.5) * 1.8, st = (pts[k - 1].R + R) * 0.55; px += Math.cos(a) * st; pz += Math.sin(a) * st; }
+    pts.push({ x: px, z: pz, R, h1, h2 });
+  }
+  let gMax = WL;
+  try {
+    if (T && T.HUB && typeof _stGroundYCarved === 'function') {
+      for (const q of pts) {
+        const s = q.R * 0.7;
+        for (const o of [[0, 0], [s, 0], [-s, 0], [0, s], [0, -s]]) { const gy = _stGroundYCarved(q.x + o[0], q.z + o[1], T); if (gy > gMax) gMax = gy; }
+      }
+    }
+  } catch (_) {}
+  const rootY = Math.max(WL + A.yMin + H(5) * (A.yMax - A.yMin), gMax + A.clear);
+  const out = [];
+  for (let k = 0; k < n; k++) {
+    const q = pts[k];
+    const up = 0.18 + q.h1 * 0.10;      // a flat top
+    const dn = 0.32 + q.h2 * 0.20;      // a shallow root
+    out.push({ id: key + ':' + k, x: q.x, z: q.z, y: rootY + q.R * dn + (q.h2 - 0.5) * 50, R: q.R, up, dn,
+               grp: null, nb: null, noBld: true, trop: true });
+  }
+  _skCache.set(key, out);
+  return out;
+}
 function _skNear(x, z, rad) {
   const out = [];
   const i0 = Math.floor((x - rad) / SKY_I.cell), i1 = Math.floor((x + rad) / SKY_I.cell);
@@ -33512,6 +33836,20 @@ function _skNear(x, z, rad) {
     for (let k = 0; k < cl.length; k++) {
       const I = cl[k];
       if (Math.hypot(I.x - x, I.z - z) < rad + I.R * 2) out.push(I);
+    }
+  }
+  const A = SKY_I.arch;
+  if (A && A.on) {
+    const HT = (typeof game !== 'undefined' && game._hubTerra) ? game._hubTerra : null;
+    const ax = (HT && HT.arX != null) ? +HT.arX : -12500, az = (HT && HT.arZ != null) ? +HT.arZ : -11000;
+    const aR = (HT && HT.arR != null) ? +HT.arR : 8500;
+    if (Math.hypot(x - ax, z - az) < rad + aR + A.cell) {
+      const a0 = Math.floor(Math.max(x - rad, ax - aR - A.cell) / A.cell), a1 = Math.floor(Math.min(x + rad, ax + aR + A.cell) / A.cell);
+      const b0 = Math.floor(Math.max(z - rad, az - aR - A.cell) / A.cell), b1 = Math.floor(Math.min(z + rad, az + aR + A.cell) / A.cell);
+      for (let i = a0; i <= a1; i++) for (let j = b0; j <= b1; j++) {
+        const cl = _skArchClusterAt(i, j);
+        for (let k = 0; k < cl.length; k++) { const I = cl[k]; if (Math.hypot(I.x - x, I.z - z) < rad + I.R * 2) out.push(I); }
+      }
     }
   }
   return out;
@@ -33825,7 +34163,7 @@ function* _skBuildG(I) {
 
   const keepOut = [];
 
-  if (SKY_I.bld && I.R > 430) {
+  if (SKY_I.bld && I.R > 430 && !I.noBld) {   // (v49.14) the archipelago's shelves carry no towers or pad
     const boxes = [], glows = [];
     const nT = 2 + Math.floor(rnd() * (I.R > 800 ? 7 : 4));
     for (let k = 0; k < nT; k++) {
@@ -33901,8 +34239,8 @@ function* _skBuildG(I) {
   if (SKY_I.flora) {
     let sets = null;
     try { sets = _swTreeGeoGet(); } catch (_) {}
-    const fungal = rnd() < SKY_I.fungal;
-    const pool = sets && (fungal ? sets.shroom : sets.std);
+    const fungal = !I.trop && rnd() < SKY_I.fungal;   // (v49.14) no glowing caps on the archipelago's shelves
+    const pool = sets && ((I.trop && sets.trop && sets.trop.length) ? sets.trop : (fungal ? sets.shroom : sets.std));   // (v49.14)
     if (pool && pool.length) {
       const mat = fungal ? _swShroomMatGet() : _swTreeMatGet();
       const nSp = Math.min(pool.length, fungal ? 2 : 3);
@@ -33911,9 +34249,9 @@ function* _skBuildG(I) {
         const v = Math.floor(rnd() * pool.length) % pool.length;
         if (pal.indexOf(v) < 0) pal.push(v);
       }
-      const tint = _SW_FAM[Math.floor(rnd() * _SW_FAM.length) % _SW_FAM.length];
+      const tint = I.trop ? _SW_FAM[3] : _SW_FAM[Math.floor(rnd() * _SW_FAM.length) % _SW_FAM.length];   // (v49.14) jungle
       const buckets = pal.map(() => []);
-      const want = Math.round((fungal ? 30 : 20) * (0.55 + rnd() * 0.9) * (I.R / 620));
+      const want = Math.round((fungal ? 30 : 20) * (0.55 + rnd() * 0.9) * (I.R / 620) * (I.trop ? 1.8 : 1));   // (v49.14) lush
       const e2 = 20;
       for (let k = 0, tries = 0; k < want && tries < want * 8; tries++) {
         if ((tries & 7) === 7 && _skDue()) yield;   // (v48.33) every 8 candidates (1-5 _skTop walks each)
@@ -51050,10 +51388,35 @@ function spawnDynamicObjects(rooms) {
       }
       HUB_WX.n = _hbN;
       try {
+        const L = HUB_WX.low;
+        let _lowN = (L && L.ON) ? (_hbUltra ? 64 : (_hbHi ? 48 : 30)) : 0;
+        if (typeof window !== 'undefined' && window.__hubLowN != null) { _lowN = Math.max(0, +window.__hubLowN); L.ON = _lowN > 0; }   // (v49.16) the opt-in turns the placer on too
+        if (typeof _detachedGasPocketLimit === 'function') {
+          const _lim = _detachedGasPocketLimit();
+          if (Number.isFinite(_lim)) _lowN = Math.min(_lowN, Math.max(0, Math.floor(_lim * (L.share || 0.92)) - _hbN));
+        }
+        let _made = 0;
+        for (let i = 0; i < _lowN; i++) {
+          const sz = (L.size0 + Math.random() * L.size1) * _hbS;
+          const gc = new GasCloud(billboardCloudSystem, new THREE.Vector3(0, _hbWL + L.yMax, 0), {
+            boundsRadius: sz, spriteScale: sz * 0.95, spriteScaleVar: 0.45,
+            alpha: L.alpha, color: _hbCol, baseColor: _hbSeed, colorJitter: 0.10, segments: _hbSeg,
+          });
+          if (!gc.slots.length) { try { gc.dispose(); } catch (_) {} break; }
+          for (const s of gc.slots) { s.off.x *= L.flatXZ; s.off.z *= L.flatXZ; s.off.y *= L.flatY; }
+          _pushDetachedGasPocket({ gasCloud: gc, velocity: new THREE.Vector3(), _wxLow: true,
+                                   _wxG: 0.50 + Math.random() * 0.30, _wxP: Math.random() * 6.283 });
+          _made++;
+        }
+        L.n = _made; L._primed = false;
+        console.log('[hub-wx] low banks ' + _made + ' (archipelago)');
+      } catch (e) { console.warn('[hub-wx] low banks failed', e); }
+      try {
         const _u = billboardCloudSystem.material && billboardCloudSystem.material.uniforms;
         if (_u && _u.uAerial) {
           _u.uAerial.value = 1;
           _u.uFarIn.value = HUB_WX.R * 0.72; _u.uFarOut.value = HUB_WX.R * 1.02;
+          if (_u.uWaterY) _u.uWaterY.value = _hbWL;   // (v49.14) the waterline fade (the low banks lie on it)
         }
       } catch (_) {}
       console.log('[hub-wx] deck ' + _hbN + ' clouds, x' + _hbS + ' scale, base ' + Math.round(HUB_WX.baseY)
@@ -51065,6 +51428,8 @@ function spawnDynamicObjects(rooms) {
       const _u = billboardCloudSystem.material && billboardCloudSystem.material.uniforms;
       if (_u && _u.uAerial) _u.uAerial.value = 0;
       HUB_WX.n = 0; HUB_WX._primed = false;
+      if (HUB_WX.low) { HUB_WX.low.n = 0; HUB_WX.low._primed = false; }   // (v49.14)
+      if (_u && _u.uWaterY) _u.uWaterY.value = -1e9;
     } catch (_) {}
   }
   if (typeof game.voxelRoomsEnabled !== 'boolean') game.voxelRoomsEnabled = true;
@@ -51376,6 +51741,8 @@ const HUB_WX = {
   veer: 0.30,          // +-17 deg of slow veer about the seeded mean bearing
   veerHz: 0.013,
   _dir: null, _bear: null, _thr: 0.5, _primed: false,
+  low: { ON: false, n: 0, R: 9000, yMin: 70, yMax: 190, size0: 300, size1: 260, alpha: 0.66, flatY: 0.28, flatXZ: 1.8,
+         share: 0.92, _primed: false },
 };
 if (typeof window !== 'undefined') window.__hubWx = HUB_WX;
 
@@ -51470,6 +51837,68 @@ function _hwxFrame(dt) {
   W._primed = true;
 }
 
+function _hwxLowPlace(p, ref, fwd, t, anywhere) {
+  const W = HUB_WX, L = W.low, R = L.R;
+  const WL = (typeof game._hubWaterWL === 'number') ? game._hubWaterWL : -720;
+  const T = game.sandwichTerrain;
+  let bx = null, bz = null;
+  for (let k = 0; k < 10; k++) {
+    let a, r;
+    if (anywhere) { a = Math.random() * 6.283; r = Math.sqrt(Math.random()) * R * 0.95; }
+    else { a = Math.atan2(fwd.z, fwd.x) + (Math.random() - 0.5) * 3.6; r = R * (0.55 + Math.random() * 0.42); }
+    const x = ref.x + Math.cos(a) * r, z = ref.z + Math.sin(a) * r;
+    if (_archW(x, z, 0) < 0.35) continue;
+    if (_stFbm(x, z, 2, 1 / 3400, 88.8) < -0.12) continue;
+    let gy = WL - 100;
+    try { if (T) gy = _stGroundYCarved(x, z, T); } catch (_) {}
+    if (!(gy < WL - 40)) continue;
+    bx = x; bz = z; break;
+  }
+  if (bx === null) {
+    const HT = game._hubTerra || null;
+    const ax = (HT && HT.arX != null) ? +HT.arX : -12500, az = (HT && HT.arZ != null) ? +HT.arZ : -11000;
+    const aR = (HT && HT.arR != null) ? +HT.arR : 8500;
+    const a = Math.random() * 6.283, r = Math.sqrt(Math.random()) * aR * 0.7;
+    bx = ax + Math.cos(a) * r; bz = az + Math.sin(a) * r;
+  }
+  const y = WL + L.yMin + Math.random() * (L.yMax - L.yMin);
+  const gc = p.gasCloud;
+  if (!gc || !gc.slots || !gc.slots.length) return;
+  p.velocity.set(0, 0, 0); p._splatTimer = undefined;
+  for (let i = 0; i < gc.slots.length; i++) gc.slots[i].wakeOff.set(0, 0, 0);
+  gc._wakeUntil = 0; gc._writeFlip = false;
+  gc.setPosition(bx, y, bz);
+  gc._writeFlip = Math.random() < 0.5;
+  p._wxFade = 0;
+  try { gc.setOpacity(0); } catch (_) {}
+}
+function _hwxLowFrame(dt) {
+  const W = HUB_WX, L = W.low;
+  if (!L || !L.ON || !L.n || typeof _archW !== 'function') return;
+  const ref = (typeof player !== 'undefined' && player && player.position) ? player.position : null;
+  if (!ref) return;
+  const t = (typeof game !== 'undefined' && game) ? (game.time || 0) : 0;
+  const near = _archW(ref.x, ref.z, L.R);
+  const gp = game.detachedGasPockets, R2 = L.R * L.R;
+  let moves = 0;
+  for (let i = 0; i < gp.length; i++) {
+    const p = gp[i];
+    if (!p || !p._wxLow || !p.gasCloud) continue;
+    if (p._wxFade != null) {
+      p._wxFade += dt / _HWX_FADE_S;
+      if (p._wxFade >= 1) { p._wxFade = null; try { p.gasCloud.setOpacity(1); } catch (_) {} }
+      else { const f = p._wxFade; try { p.gasCloud.setOpacity(f * f * (3 - 2 * f)); } catch (_) {} }
+    }
+    if (L._primed && near <= 0) continue;                 // far from the islands: leave the banks parked
+    const c = p.gasCloud.position, dx = c.x - ref.x, dz = c.z - ref.z, d2 = dx * dx + dz * dz;
+    const lost = d2 > R2 || _archW(c.x, c.z, 0) < 0.2;
+    if (L._primed && !lost) continue;
+    if (L._primed && moves >= 6) continue;                 // a few re-placements a frame (each probes the ground)
+    moves++;
+    _hwxLowPlace(p, ref, _hwxV, t, !L._primed || d2 > R2 * 2.25);
+  }
+  L._primed = true;
+}
 function _pushDetachedGasPocket(p) {
   if (!game || !game.detachedGasPockets) {
     _disposeDetachedGasPocket(p);
@@ -51495,6 +51924,7 @@ function updateDetachedGasPockets(dt) {
     updateDetachedGasPockets._dt = 0;
   }
   if (typeof _hwxFrame === 'function') { try { _hwxFrame(dt); } catch (_) {} }
+  if (typeof _hwxLowFrame === 'function') { try { _hwxLowFrame(dt); } catch (_) {} }   // (v49.14) the low banks
   for (let i = game.detachedGasPockets.length - 1; i >= 0; i--) {
     const p = game.detachedGasPockets[i];
     if (!p) continue;
@@ -51520,7 +51950,7 @@ function updateDetachedGasPockets(dt) {
     const center = p.gasCloud ? p.gasCloud.position : (p.mesh && p.mesh.position);
     if (!center) continue;
     let _wxx = 0, _wxy = 0, _wxz = 0, _dk = 1;
-    if (p._wx && HUB_WX.ON && HUB_WX._dir) {
+    if ((p._wx || p._wxLow) && HUB_WX.ON && HUB_WX._dir) {   // (v49.14) + the low banks
       const _sp = HUB_WX.speed * (p._wxG || 1);
       _wxx = HUB_WX._dir.x * _sp; _wxz = HUB_WX._dir.z * _sp;
       _wxy = Math.sin((game.time || 0) * 0.13 + (p._wxP || 0)) * 1.8;   // bounded lift, not a random walk
@@ -51533,7 +51963,7 @@ function updateDetachedGasPockets(dt) {
 
     if (game._hubWater) {
       const _wl = game._hubWater.userData.WL;
-      const _minY = _wl + (p.gasCloud ? (p.gasCloud.boundsRadius || 0) : 0) * 0.5;
+      const _minY = _wl + (p._wxLow ? 40 : (p.gasCloud ? (p.gasCloud.boundsRadius || 0) : 0) * 0.5);
       if (center.y < _minY) {
         center.y = _minY;
         if (p.velocity.y < 0) p.velocity.y = 0;
