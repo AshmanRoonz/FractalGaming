@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "48.58";
+const LSS_BUILD = "48.90";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -11115,6 +11115,47 @@ scene.onBeforeRender = function (r, s, cam) {
 };
 scene.onAfterRender = function () { try { _esGateAfter(); } catch (_) {} };
 
+const _BCS_MASK_N = 512;
+const _BCS_NOISE_GLSL = [
+  'float bcsHash(vec2 p) {',
+  '  p = fract(p * vec2(123.34, 456.21));',
+  '  p += dot(p, p + 45.32);',
+  '  return fract(p.x * p.y);',
+  '}',
+  'float bcsNoise(vec2 p) {',
+  '  vec2 i = floor(p);',
+  '  vec2 f = fract(p);',
+  '  f = f * f * (3.0 - 2.0 * f);',
+  '  float a = bcsHash(i);',
+  '  float b = bcsHash(i + vec2(1.0, 0.0));',
+  '  float c = bcsHash(i + vec2(0.0, 1.0));',
+  '  float d = bcsHash(i + vec2(1.0, 1.0));',
+  '  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);',
+  '}',
+  'float bcsFbm(vec2 p) {',
+  '  float v = 0.0; float a = 0.5;',
+  '  for (int k = 0; k < 4; k++) {',
+  '    v += a * bcsNoise(p);',
+  '    p *= 2.0;',
+  '    a *= 0.5;',
+  '  }',
+  '  return v;',
+  '}',
+];
+const _BCS_MASK_GLSL = [
+  '  vec2 centered = vUv - vec2(0.5);',
+  '  vec2 seedOff = vec2(vSeed * 47.3, vSeed * 19.7);',
+  '  vec2 warpP = centered * 2.2 + seedOff;',
+  '  float wx = (bcsNoise(warpP) - 0.5) * 0.20;',
+  '  float wy = (bcsNoise(warpP + vec2(5.2, 1.3)) - 0.5) * 0.20;',
+  '  vec2 warped = centered + vec2(wx, wy);',
+  '  vec2 noisePos = warped * 3.5 + seedOff;',
+  '  float n = bcsFbm(noisePos);',
+  '  float maskedNoise = clamp((n - 0.26) * 1.8, 0.0, 1.0);',
+  '  float warpedR = length(warped);',
+  '  float warpedRadial = smoothstep(0.55, 0.0, warpedR);',
+];
+
 class BillboardCloudSystem {
   constructor(scn, options) {
     options = options || {};
@@ -11239,30 +11280,9 @@ class BillboardCloudSystem {
         'uniform float uFarIn;',
         'uniform float uFarOut;',
         'uniform float uBlendMode;',
-        'float bcsHash(vec2 p) {',
-        '  p = fract(p * vec2(123.34, 456.21));',
-        '  p += dot(p, p + 45.32);',
-        '  return fract(p.x * p.y);',
-        '}',
-        'float bcsNoise(vec2 p) {',
-        '  vec2 i = floor(p);',
-        '  vec2 f = fract(p);',
-        '  f = f * f * (3.0 - 2.0 * f);',
-        '  float a = bcsHash(i);',
-        '  float b = bcsHash(i + vec2(1.0, 0.0));',
-        '  float c = bcsHash(i + vec2(0.0, 1.0));',
-        '  float d = bcsHash(i + vec2(1.0, 1.0));',
-        '  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);',
-        '}',
-        'float bcsFbm(vec2 p) {',
-        '  float v = 0.0; float a = 0.5;',
-        '  for (int k = 0; k < 4; k++) {',
-        '    v += a * bcsNoise(p);',
-        '    p *= 2.0;',
-        '    a *= 0.5;',
-        '  }',
-        '  return v;',
-        '}',
+        'uniform highp sampler2DArray uMask;',
+        'uniform float uMaskOn;',
+        ..._BCS_NOISE_GLSL,
         'void main() {',
         '  float r = distance(vUv, vec2(0.5)) * 2.0;',
         '  float radial = 1.0 - smoothstep(0.0, 1.0, r);',
@@ -11278,18 +11298,14 @@ class BillboardCloudSystem {
         '    }',
         '    return;',
         '  }',
-        '  vec2 centered = vUv - vec2(0.5);',
-        '  vec2 seedOff = vec2(vSeed * 47.3, vSeed * 19.7);',
-        '  vec2 warpP = centered * 2.2 + seedOff;',
-        '  float wx = (bcsNoise(warpP) - 0.5) * 0.20;',
-        '  float wy = (bcsNoise(warpP + vec2(5.2, 1.3)) - 0.5) * 0.20;',
-        '  vec2 warped = centered + vec2(wx, wy);',
-        '  vec2 noisePos = warped * 3.5 + seedOff;',
-        '  float n = bcsFbm(noisePos);',
-        '  float maskedNoise = clamp((n - 0.26) * 1.8, 0.0, 1.0);',
-        '  float warpedR = length(warped);',
-        '  float warpedRadial = smoothstep(0.55, 0.0, warpedR);',
-        '  float a = maskedNoise * warpedRadial * vAlpha;',
+        '  float mask;',
+        '  if (uMaskOn > 0.5) {',
+        '    mask = texture(uMask, vec3(vUv, floor(vSeed * ' + _BCS_MASK_N.toFixed(1) + '))).r;',
+        '  } else {',
+        ..._BCS_MASK_GLSL,
+        '    mask = maskedNoise * warpedRadial;',
+        '  }',
+        '  float a = mask * vAlpha;',
         '  if (a < 0.005) discard;',
         '  vec3 lit = vLit;',   // (v48.44) computed per vertex - see the vertex shader
         '  if (uAerial > 0.5) {',
@@ -11329,12 +11345,20 @@ class BillboardCloudSystem {
         uFogD:          { value: 0.00014 },
         uFarIn:         { value: 12000.0 },
         uFarOut:        { value: 17000.0 },
+        uMask:          { value: (() => {
+          const _ph = new THREE.DataArrayTexture(new Uint8Array(1), 1, 1, 1);
+          _ph.format = THREE.RedFormat;
+          _ph.needsUpdate = true;
+          return _ph;
+        })() },
+        uMaskOn:        { value: 0.0 },
       },
       transparent: true,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
       side: THREE.DoubleSide,
     });
+    this._maskReady = false;   // (v48.59) see bakeMask
 
     this.mesh = new THREE.Mesh(geo, this.material);
     this.mesh.frustumCulled = false; 
@@ -11345,9 +11369,98 @@ class BillboardCloudSystem {
   claimSlot() {
     if (this._free.length === 0) return -1;
     const idx = this._free.pop();
-    this._seeds[idx] = Math.random();
+    this._seeds[idx] = (Math.floor(Math.random() * _BCS_MASK_N) + 0.5) / _BCS_MASK_N;
     this._iSeed.needsUpdate = true;
     return idx;
+  }
+
+  bakeMask(r, res) {
+    if (this._maskReady || this._maskBusy || !r) return false;
+    if (typeof THREE.WebGLArrayRenderTarget !== 'function' || typeof r.compileAsync !== 'function') return false;
+    this._maskBusy = true;
+    const self = this, N = _BCS_MASK_N, R = Math.max(8, res | 0);
+    const t0 = performance.now();
+    const rt = new THREE.WebGLArrayRenderTarget(R, R, N, { depthBuffer: false, stencilBuffer: false });
+    const tx = rt.texture;
+    tx.format = THREE.RedFormat; tx.type = THREE.UnsignedByteType;
+    tx.minFilter = THREE.LinearMipmapLinearFilter; tx.magFilter = THREE.LinearFilter;
+    tx.wrapS = tx.wrapT = THREE.ClampToEdgeWrapping;
+    tx.generateMipmaps = false;
+    const mat = new THREE.ShaderMaterial({
+      uniforms: { uSeed: { value: 0 }, uRes: { value: R } },
+      vertexShader: 'void main() { gl_Position = vec4(position.xy, 0.0, 1.0); }',
+      fragmentShader: [
+        'precision highp float;',
+        'uniform float uSeed;',
+        'uniform float uRes;',
+        ..._BCS_NOISE_GLSL,
+        'void main() {',
+        '  vec2 vUv = gl_FragCoord.xy / uRes;',
+        '  float vSeed = uSeed;',
+        ..._BCS_MASK_GLSL,
+        '  gl_FragColor = vec4(maskedNoise * warpedRadial, 0.0, 0.0, 1.0);',
+        '}',
+      ].join('\n'),
+      depthTest: false, depthWrite: false, blending: THREE.NoBlending, toneMapped: false,
+    });
+    const geo = new THREE.PlaneGeometry(2, 2);
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.frustumCulled = false;
+    const scn = new THREE.Scene();
+    scn.add(mesh);
+    const cam = new THREE.Camera();
+    const info = { res: R, layers: N, ok: false, compileMs: 0, drawMs: 0, err: 0 };
+    try { window.__bcsMaskInfo = info; } catch (_) {}
+    const finish = () => { try { mat.dispose(); geo.dispose(); } catch (_) {} self._maskBusy = false; };
+    const draw = () => {
+      if (self._maskReady) { finish(); return; }
+      try { if (r.xr && r.xr.isPresenting) { setTimeout(draw, 2000); return; } } catch (_) {}
+      const t1 = performance.now();
+      info.compileMs = Math.round(t1 - t0);
+      const gl = r.getContext();
+      try { gl.getError(); } catch (_) {}   // drop anything already pending - only this bake's errors count
+      const pRT = r.getRenderTarget(), pF = r.getActiveCubeFace(), pM = r.getActiveMipmapLevel();
+      try {
+        for (let l = 0; l < N; l++) {
+          mat.uniforms.uSeed.value = (l + 0.5) / N;   // the exact seed claimSlot hands a sprite on layer l
+          r.setRenderTarget(rt, l);
+          r.render(scn, cam);
+        }
+      } finally { r.setRenderTarget(pRT, pF, pM); }
+      try {
+        const tp = r.properties.get(tx);
+        if (tp && tp.__webglTexture) {
+          r.state.bindTexture(gl.TEXTURE_2D_ARRAY, tp.__webglTexture);
+          gl.generateMipmap(gl.TEXTURE_2D_ARRAY);
+          r.state.unbindTexture();
+        } else info.err = -1;
+      } catch (_) { info.err = -2; }
+      try { if (!info.err) info.err = gl.getError(); } catch (_) {}
+      info.drawMs = Math.round(performance.now() - t1);
+      if (!info.err) {
+        self.material.uniforms.uMask.value = tx;
+        self._maskRT = rt;
+        self._maskReady = true;
+        info.ok = true;
+      } else {
+        try { rt.dispose(); } catch (_) {}
+        console.warn('[bcs] mask bake failed - clouds stay live-evaluated', info);
+      }
+      finish();
+    };
+    const pRT = r.getRenderTarget(), pF = r.getActiveCubeFace(), pM = r.getActiveMipmapLevel();
+    let job = null;
+    try {
+      r.setRenderTarget(rt, 0);
+      job = r.compileAsync(scn, cam);
+    } catch (e) {
+      job = null;
+      console.warn('[bcs] mask bake compile failed', e);
+    } finally { try { r.setRenderTarget(pRT, pF, pM); } catch (_) {} }
+    if (!job) { try { rt.dispose(); } catch (_) {} finish(); return false; }
+    job.then(() => { try { draw(); } catch (e) { console.warn('[bcs] mask bake failed', e); finish(); } },
+             () => { try { rt.dispose(); } catch (_) {} finish(); });
+    return true;
   }
 
   releaseSlot(idx) {
@@ -12278,6 +12391,16 @@ try {
 
 const _LSS_IS_MOBILE = (navigator.maxTouchPoints > 0) &&
   (window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+
+setTimeout(() => {
+  try {
+    let _small = _LSS_IS_MOBILE;
+    try { if (!_small && typeof isStandaloneQuest === 'function' && isStandaloneQuest()) _small = true; } catch (_) {}
+    if (billboardCloudSystem && typeof billboardCloudSystem.bakeMask === 'function') {
+      billboardCloudSystem.bakeMask(renderer, _small ? 64 : 128);
+    }
+  } catch (e) { console.warn('[bcs] mask bake not started', e); }
+}, 0);
 
 (function () {
   const _isMobileGPU = (navigator.maxTouchPoints > 0) &&
@@ -15389,16 +15512,18 @@ postFX.quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
 postFX.brightMat = new THREE.ShaderMaterial({
   uniforms: { tDiffuse: { value: null }, threshold: { value: 0.4 }, softKnee: { value: 0.9 },   // (v34.63) bloom threshold 0.1->0.4 (user-tuned): only genuinely bright things bloom, kills the white-ship/building halo. Live: tunePostFX({threshold})
-              uSceneScale: { value: new THREE.Vector2(1, 1) }, uSceneMax: { value: new THREE.Vector2(1, 1) } },   // (v39.49) the used sub-rectangle of rtScene
+              uSceneScale: { value: new THREE.Vector2(1, 1) }, uSceneMax: { value: new THREE.Vector2(1, 1) },   // (v39.49) the used sub-rectangle of rtScene
+              uTaps4: { value: 1.0 } },   // (v48.59) 4 taps, knee per tap - see below; window.__bloomTaps = 1 for the old single tap
   vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position, 1.0); }`,
   fragmentShader: `
     uniform sampler2D tDiffuse;
     uniform float threshold;
     uniform float softKnee;
     uniform vec2 uSceneScale, uSceneMax;
+    uniform float uTaps4;
     varying vec2 vUv;
-    void main() {
-      vec4 c = texture2D(tDiffuse, min(vUv * uSceneScale, uSceneMax));
+    vec3 bpTap(vec2 uv) {
+      vec4 c = texture2D(tDiffuse, min(uv, uSceneMax));
       float brightness = max(c.r, max(c.g, c.b));
       // Soft-knee: smooth ramp around threshold instead of hard cutoff
       float knee = threshold * softKnee + 1e-5;
@@ -15406,7 +15531,17 @@ postFX.brightMat = new THREE.ShaderMaterial({
       soft = (soft * soft) / (4.0 * knee + 1e-5);
       float contribution = max(soft, brightness - threshold);
       contribution /= max(brightness, 1e-5);
-      gl_FragColor = vec4(c.rgb * contribution, 1.0);
+      return c.rgb * contribution;
+    }
+    void main() {
+      vec2 uv = vUv * uSceneScale;
+      vec2 hx = dFdx(uv) * 0.25, hy = dFdy(uv) * 0.25;   // a quarter bloom texel, in scene uv
+      if (uTaps4 > 0.5) {
+        vec3 s = bpTap(uv - hx - hy) + bpTap(uv + hx - hy) + bpTap(uv - hx + hy) + bpTap(uv + hx + hy);
+        gl_FragColor = vec4(s * 0.25, 1.0);
+      } else {
+        gl_FragColor = vec4(bpTap(uv), 1.0);
+      }
     }
   `
 });
@@ -15991,6 +16126,112 @@ if (typeof window !== 'undefined') {
   };
 }
 
+const _PAN_MASK = (() => {
+  const N = 48;                                   // columns per lens; x = 0 is a vertex (the |x| kink)
+  const pos = [], idx = [];
+  for (const side of [1, -1]) {
+    const base = pos.length / 3;
+    for (let i = 0; i <= N; i++) {
+      const x = -1 + 2 * i / N;
+      pos.push(x, 0, side, x, 1, side);            // y: 0 = on the boundary, 1 = past the frame edge
+    }
+    for (let i = 0; i < N; i++) {
+      const a = base + i * 2;
+      idx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setIndex(idx);
+  const mat = new THREE.RawShaderMaterial({
+    uniforms: { uPan: postFX.compositeMat.uniforms.uPan, uGuard: { value: new THREE.Vector2(0.03, 0.03) } },
+    vertexShader: [
+      'precision highp float;',
+      'attribute vec3 position;',
+      'uniform vec4 uPan;',
+      'uniform vec2 uGuard;',
+      'void main() {',
+      '  float d = uPan.x, T = 1.0 / uPan.z;',
+      '  float s = min(1.0, abs(position.x) + uGuard.x);',
+      '  float ye = uPan.w * (1.0 + d * sqrt(1.0 + T * T * s * s)) / (d + 1.0) + uGuard.y;',
+      '  float y = mix(min(ye, 1.02), 1.02, position.y);',
+      '  gl_Position = vec4(position.x, position.z * y, -0.99999, 1.0);',
+      '}',
+    ].join('\n'),
+    fragmentShader: 'precision mediump float;\nvoid main() { gl_FragColor = vec4(0.0); }',
+    depthTest: true, depthWrite: true, colorWrite: false, side: THREE.DoubleSide,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.frustumCulled = false; mesh.matrixAutoUpdate = false;
+  mesh.castShadow = false; mesh.receiveShadow = false;
+  mesh.layers.set(8);
+  mesh.renderOrder = -1e9;
+  const grp = new THREE.Group();                  // groupOrder sorts before renderOrder: first, whatever else is grouped
+  grp.renderOrder = -1e9; grp.matrixAutoUpdate = false;
+  grp.add(mesh);
+  return { grp, mesh, mat, g: mat.uniforms.uGuard.value, on: false, frames: 0, D: 0 };
+})();
+function _panMaskGuard() {
+  const M = _PAN_MASK;
+  let bw = 960, bh = 540, spread = 0.9;
+  try { const v = postFX.rtBright.viewport; if (v.z > 0 && v.w > 0) { bw = v.z; bh = v.w; } } catch (_) {}
+  try { spread = postFX.blurMat.uniforms.spread.value; } catch (_) {}
+  const G = 4 * spread + 2;                       // bloom texels a shown pixel's bloom can reach
+  let D = 0;                                      // the composite's live uv displacements (uv units)
+  try {
+    const u = postFX.compositeMat.uniforms;
+    if (u.shockIntensity.value > 0.001 && u.shockAge.value < 1.0) {
+      const c = u.shockCenter.value;
+      const over = Math.max(0, -c.x, c.x - 1, -c.y, c.y - 1);
+      D += 0.035 * u.shockIntensity.value + 0.3 * over;
+    }
+    if (u.warpAmount.value > 0.001 || u.doomedWarp.value > 0.001) D += 0.012 * u.warpAmount.value + 0.022 * u.doomedWarp.value;
+    if (u.chromAb.value > 0.001) D += 0.0125 * u.chromAb.value + 0.0004;
+  } catch (_) { D = 0.08; }
+  M.D = D;
+  M.g.set(G * 2 / bw + 0.016 + 2 * D, G * 2 / bh + 0.016 + 2 * D);
+}
+function _panMaskBegin() {
+  const M = _PAN_MASK;
+  M.on = false;
+  try {
+    const K = window.__panMask;
+    if (K === 0 || K === false) return false;
+    if (!(_LSSPAN.d > 0)) return false;           // correction off: everything is shown
+    if (renderer.xr && renderer.xr.isPresenting) return false;
+    _panMaskGuard();
+    scene.add(M.grp);
+    camera.layers.enable(8);
+    M.on = true; M.frames++;
+  } catch (_) { M.on = false; }
+  return M.on;
+}
+function _panMaskEnd() {
+  try { scene.remove(_PAN_MASK.grp); } catch (_) {}
+  try { camera.layers.disable(8); } catch (_) {}
+  _PAN_MASK.on = false;
+}
+if (typeof window !== 'undefined') {
+  window.__panMaskObj = _PAN_MASK;                // (test harnesses: the group + its begin/end)
+  window.__panMaskBegin = _panMaskBegin; window.__panMaskEnd = _panMaskEnd;
+  window.__panMaskInfo = function () {
+    const P = _lssPaniniSync(), M = _PAN_MASK;
+    _panMaskGuard();
+    const d = P.d, T = 1 / P.U, V = P.V, gx = M.g.x, gy = M.g.y;
+    let lens = 0, masked = 0; const n = 4000;
+    for (let i = 0; i < n; i++) {
+      const x = -1 + (i + 0.5) * 2 / n;
+      if (!(d > 0)) break;
+      const ye = (s) => V * (1 + d * Math.sqrt(1 + T * T * s * s)) / (d + 1);
+      lens += Math.max(0, 1 - ye(Math.abs(x)));
+      masked += Math.max(0, 1 - Math.min(1, ye(Math.min(1, Math.abs(x) + gx)) + gy));
+    }
+    return { on: window.__panMask !== 0 && window.__panMask !== false && d > 0, strength: d, fov: camera.fov,
+             centreZoom: +(1 / V).toFixed(3), guardNdc: [+gx.toFixed(4), +gy.toFixed(4)], displacementUv: +M.D.toFixed(4),
+             unshownShare: +(lens / n).toFixed(4), maskedShare: +(masked / n).toFixed(4), framesMasked: M.frames };
+  };
+}
+
 function renderPostFX() {
   _lssPaniniSync();   // (v42.91) keep the Panini uniform matched to the live FOV/aspect
   const cinematicActive =
@@ -16081,7 +16322,10 @@ function renderPostFX() {
   }
   if (window.__f8seg) window.__f8seg('scene');   // (v40.59) shadow map + world + mirror + water live in here
   renderer.setRenderTarget(postFX.rtScene);
-  renderer.render(scene, camera);   // (v39.79) the water is back inside this pass; it binds its own refraction source
+  const _pmOn = _panMaskBegin();   // (v48.60) the Panini lens mask - see _PAN_MASK
+  try {
+    renderer.render(scene, camera);   // (v39.79) the water is back inside this pass; it binds its own refraction source
+  } finally { if (_pmOn) _panMaskEnd(); }
   if (window.__f8seg) window.__f8seg('ads');
   if (typeof game !== 'undefined' && game && game._adsOvOn && typeof _adsOverlayRender === 'function') _adsOverlayRender();
   if (typeof _gooRender === 'function') _gooRender(postFX.rtScene);
@@ -16099,6 +16343,7 @@ function renderPostFX() {
 
   if (window.__f8seg) window.__f8seg('bloom');   // (v40.59) bright extract + both blur passes
   postFX.brightMat.uniforms.tDiffuse.value = postFX.rtScene.texture;
+  postFX.brightMat.uniforms.uTaps4.value = (window.__bloomTaps === 1) ? 0.0 : 1.0;   // (v48.59) A/B knob
   postFX.brightQuad.visible = true;
   postFX.blurQuad.visible = false;
   postFX.compositeQuad.visible = false;
@@ -18830,6 +19075,7 @@ if (typeof window !== 'undefined') window.__replay = {
 };
 function renderFrame() {
   _lssCameraDepthForFov();
+  try { _rockBatchScan(); } catch (_) {}   // (v48.61) cluster rocks into the batch - see _ROCKB (try: TDZ-safe)
   try { if (_XR_COVER.preview && _xrCoverPreviewFrame()) return; } catch (_) {}
   try { _lssHubDirectTonemap(); } catch (_) {}
   try { if (typeof _shipLightsFrame === 'function') _shipLightsFrame(); } catch (_) {}
@@ -22356,6 +22602,13 @@ const _SW_RIPPLE_FRAG = [
   'uniform float uShoreDamp; uniform float uShoreDampD;',   // (v41.72) shallow-water absorption
   'uniform float uSpongeW; uniform float uSpongeK;',        // (v46.77) the absorbing rim - see below
   'uniform float uBreakK; uniform float uBreakThr;',        // (v46.77) whitecaps - foam born where a crest is steep, see below
+  'uniform vec4 uBrkW; uniform vec4 uBrkS; uniform float uFoamDiff;',   // (v48.73) the display's shape + cell size, the breaking ramp, spreading
+  'uniform vec4 uCollS;',   // (v48.76) water smashing into itself: excess rise ramp lo / hi (world u/s), deposit per step, -
+  'uniform vec4 uJac; uniform float uHullSpd;',   // (v48.77) Crest's foam: (lambda world u, strength, coverage, -); the player's speed gate
+  'uniform vec2 uHullLid;',   // (v48.88) the hull lid: (on, margin world units)
+  'uniform vec4 uArm;',   // (v48.79) the V arms' breaking crests: (tan half-angle, band width u, length u, deposit per step)
+  'uniform vec4 uArm2;',  // (v48.80) (side start as a fraction of the silhouette half-width, centre deposit, centre width u, centre length u)
+  'uniform float uDisp; uniform float uDispG; uniform vec4 uGk[43];',   // (v48.83) iWave: on, gravity per step, the 13x13 kernel packed 4 to a vec4
   'uniform sampler2D uHullTex;',
   'uniform vec4 uHullA; uniform vec4 uHullAP;',    // (x, z, fx, fz) now / previous step - window coords, f = the hull frame +z on the ground
   'uniform vec4 uHullB;',                         // (k sim per world unit of immersion, on, rimK, rimR world units)
@@ -22364,39 +22617,47 @@ const _SW_RIPPLE_FRAG = [
   'uniform vec4 uHullU; uniform vec4 uHullUP;',    // (up.x, up.y, up.z, tailLen) now / previous
   'uniform vec4 uHullT;',                         // (rear end s, dirSign, section length, tailK)
   'uniform float uHullFoam; uniform float uHullKick;',
+  'uniform sampler2D uHullTopTex; uniform vec4 uHoleAB;',   // (v48.65) the slab's top map; (cap, over) now, (cap, over) previous step
   'uniform float uHClamp;',   // (v46.78) the safety net, see below
   'uniform sampler2D uEntTex0; uniform sampler2D uEntTex1;',
   'uniform vec4 uEntA[2]; uniform vec4 uEntAP[2];',
   'uniform vec4 uEntB[2]; uniform vec4 uEntR[2];',
   'uniform vec4 uEntY[2]; uniform vec4 uEntU[2]; uniform vec4 uEntUP[2];',
   'uniform vec4 uEntT[2];',
-  'float _hImm(sampler2D tex, vec4 rc, vec4 Y, vec2 lp, vec3 up, float wl){',
+  'float _hImm(sampler2D tex, sampler2D topTex, vec4 rc, vec4 Y, vec2 lp, vec3 up, float wl, vec2 hab){',
   '  vec2 huv = vec2((lp.x - rc.x) / (rc.y - rc.x), (lp.y - rc.z) / (rc.w - rc.z));',
   '  if (huv.x <= 0.0 || huv.x >= 1.0 || huv.y <= 0.0 || huv.y >= 1.0) return 0.0;',
   '  float d = texture2D(tex, huv).r;',
   '  if (d < 0.002) return 0.0;',
   '  float yU = Y.x + (1.0 - d) * Y.y;',
   '  float yW = (wl - up.x * lp.x - up.z * lp.y) / max(up.y, 0.5);',
-  '  return clamp(yW - yU, 0.0, Y.y);',
+  '  float im = clamp(yW - yU, 0.0, Y.y);',
+  '  if (hab.x > 0.0) {',
+  '    float yT = Y.x + Y.y - (1.0 - texture2D(topTex, huv).r) * Y.y;',
+  '    im = min(im, hab.x) * (1.0 - smoothstep(0.0, max(hab.y, 0.5), yW - yT));',
+  '  }',
+  '  return im;',
   '}',
-  'float _hullP(sampler2D tex, vec4 rc, vec4 Y, vec4 B, vec4 T, vec2 w, vec4 A, vec3 up, float wl, float tl){',
+  'float _hullP(sampler2D tex, sampler2D topTex, vec4 rc, vec4 Y, vec4 B, vec4 T, vec2 w, vec4 A, vec3 up, float wl, float tl, vec2 hab){',
   '  vec2 d = w - A.xy;',
   '  vec2 lp = vec2(d.x * A.w - d.y * A.z, dot(d, A.zw));',
   '  float r = B.w;',
   '  if (lp.y < rc.z - tl - r || lp.y > rc.w + tl + r || lp.x < rc.x - r || lp.x > rc.y + r) return 0.0;',
-  '  float im = _hImm(tex, rc, Y, lp, up, wl);',
-  '  float ar = max(max(_hImm(tex, rc, Y, lp + vec2(r, 0.0), up, wl), _hImm(tex, rc, Y, lp - vec2(r, 0.0), up, wl)), max(_hImm(tex, rc, Y, lp + vec2(0.0, r), up, wl), _hImm(tex, rc, Y, lp - vec2(0.0, r), up, wl)));',
+  '  float im = _hImm(tex, topTex, rc, Y, lp, up, wl, hab);',
+  '  float ar = max(max(_hImm(tex, topTex, rc, Y, lp + vec2(r, 0.0), up, wl, hab), _hImm(tex, topTex, rc, Y, lp - vec2(r, 0.0), up, wl, hab)), max(_hImm(tex, topTex, rc, Y, lp + vec2(0.0, r), up, wl, hab), _hImm(tex, topTex, rc, Y, lp - vec2(0.0, r), up, wl, hab)));',
   '  float P = (-im + max(0.0, ar - im) * B.z) * B.x;',
   '  float u = (T.x - lp.y) * T.y;',
   '  if (tl > 0.0 && u > 0.0 && u < tl) {',
   '    float f = 1.0 - u / tl;',
   '    vec2 sp = vec2(lp.x / max(f, 0.05), 0.0);',
   '    float tm = 0.0;',
-  '    for (int i = 0; i < 4; i++) { sp.y = T.x + T.y * (0.03 + 0.06 * float(i)) * T.z; tm = max(tm, _hImm(tex, rc, Y, sp, up, wl)); }',
+  '    for (int i = 0; i < 4; i++) { sp.y = T.x + T.y * (0.03 + 0.06 * float(i)) * T.z; tm = max(tm, _hImm(tex, topTex, rc, Y, sp, up, wl, hab)); }',
   '    P -= tm * f * f * B.x * T.w;',
   '  }',
   '  return P;',
   '}',
+  'float _bShape(float hh){ float sq = hh * (1.0 + uBrkW.z * abs(hh)); float x = sq * uBrkW.x / max(uBrkW.y, 0.01); return uBrkW.y * (x / (1.0 + abs(x))); }',
+  'float _bShapeInv(float D){ float dp = clamp(D / max(uBrkW.y, 0.01), -0.995, 0.995); float x = dp / (1.0 - abs(dp)); float sq = x * uBrkW.y / max(uBrkW.x, 0.01); float a = abs(sq); float hh = (uBrkW.z > 1e-4) ? (-1.0 + sqrt(1.0 + 4.0 * uBrkW.z * a)) / (2.0 * uBrkW.z) : a; return sign(sq) * hh; }',
   'void main(){',
   '  vec2 cellSize = 1.0 / resolution.xy;',
   '  vec2 uv = gl_FragCoord.xy * cellSize;',
@@ -22404,12 +22665,40 @@ const _SW_RIPPLE_FRAG = [
   '  vec4 h = texture2D(heightmap, suv);',
   '  if (texture2D(uMaskTex, uv).x < 0.5) { gl_FragColor = vec4(0.0); return; }',
   '  float hC = h.x;',
-  '  float n = (texture2D(uMaskTex, uv + vec2(0.0,  cellSize.y)).x < 0.5) ? hC : texture2D(heightmap, suv + vec2(0.0,  cellSize.y)).x;',
-  '  float s = (texture2D(uMaskTex, uv + vec2(0.0, -cellSize.y)).x < 0.5) ? hC : texture2D(heightmap, suv + vec2(0.0, -cellSize.y)).x;',
-  '  float e = (texture2D(uMaskTex, uv + vec2( cellSize.x, 0.0)).x < 0.5) ? hC : texture2D(heightmap, suv + vec2( cellSize.x, 0.0)).x;',
-  '  float w = (texture2D(uMaskTex, uv + vec2(-cellSize.x, 0.0)).x < 0.5) ? hC : texture2D(heightmap, suv + vec2(-cellSize.x, 0.0)).x;',
-  '  float nh = (2.0 * hC - h.y + uWaveC2 * ((n + s + e + w) - 4.0 * hC)) * viscosity;',
-  '  float _slp = 0.5 * length(vec2(e - w, n - s));',
+  '  vec4 tN = texture2D(heightmap, suv + vec2(0.0,  cellSize.y)); bool lN = texture2D(uMaskTex, uv + vec2(0.0,  cellSize.y)).x < 0.5;',
+  '  vec4 tS = texture2D(heightmap, suv + vec2(0.0, -cellSize.y)); bool lS = texture2D(uMaskTex, uv + vec2(0.0, -cellSize.y)).x < 0.5;',
+  '  vec4 tE = texture2D(heightmap, suv + vec2( cellSize.x, 0.0)); bool lE = texture2D(uMaskTex, uv + vec2( cellSize.x, 0.0)).x < 0.5;',
+  '  vec4 tW = texture2D(heightmap, suv + vec2(-cellSize.x, 0.0)); bool lW = texture2D(uMaskTex, uv + vec2(-cellSize.x, 0.0)).x < 0.5;',
+  '  float n = lN ? hC : tN.x; float s = lS ? hC : tS.x; float e = lE ? hC : tE.x; float w = lW ? hC : tW.x;',
+  '  float _fAv = 0.25 * ((lN ? h.z : tN.z) + (lS ? h.z : tS.z) + (lE ? h.z : tE.z) + (lW ? h.z : tW.z));',
+  '  float nh;',
+  '  if (uDisp > 0.5) {',
+  '    float _vd = 0.0;',
+  '    for (int j = -6; j <= 6; j++) {',
+  '      for (int i = -6; i <= 6; i++) {',
+  '        int _gk = (j + 6) * 13 + (i + 6);',
+  '        _vd += uGk[_gk / 4][_gk - (_gk / 4) * 4] * texture2D(heightmap, suv + vec2(float(i), float(j)) * cellSize).x;',
+  '      }',
+  '    }',
+  '    nh = (2.0 * hC - h.y - uDispG * _vd) * viscosity;',
+  '  } else {',
+  '    nh = (2.0 * hC - h.y + uWaveC2 * ((n + s + e + w) - 4.0 * hC)) * viscosity;',
+  '  }',
+  '  float _dC = _bShape(hC), _dN = _bShape(n), _dS = _bShape(s), _dE = _bShape(e), _dW = _bShape(w);',
+  '  float _wsl = 0.5 * length(vec2(_dE - _dW, _dN - _dS)) / uBrkW.w;',
+  '  float _crs = (_dC - 0.25 * (_dN + _dS + _dE + _dW)) / uBrkW.w;',
+  '  float _brk = smoothstep(uBrkS.x, max(uBrkS.y, uBrkS.x + 0.01), _wsl) * smoothstep(0.0, max(uBrkS.z, 1e-4), _crs);',
+  '  float _cex = ((hC - h.y) - sqrt(max(uWaveC2, 0.0)) * 0.5 * length(vec2(e - w, n - s))) * uBrkW.x * 60.0;',
+  '  float _col = uCollS.z * smoothstep(uCollS.x, max(uCollS.y, uCollS.x + 0.01), _cex);',
+  '  float hNE = texture2D(heightmap, suv + cellSize).x, hSW = texture2D(heightmap, suv - cellSize).x;',
+  '  float hNW = texture2D(heightmap, suv + vec2(-cellSize.x, cellSize.y)).x, hSE = texture2D(heightmap, suv + vec2(cellSize.x, -cellSize.y)).x;',
+  '  if (texture2D(uMaskTex, uv + cellSize).x < 0.5) hNE = hC; if (texture2D(uMaskTex, uv - cellSize).x < 0.5) hSW = hC;',
+  '  if (texture2D(uMaskTex, uv + vec2(-cellSize.x, cellSize.y)).x < 0.5) hNW = hC; if (texture2D(uMaskTex, uv + vec2(cellSize.x, -cellSize.y)).x < 0.5) hSE = hC;',
+  '  float _c2w = uBrkW.w * uBrkW.w;',
+  '  float _hxx = (_dE - 2.0 * _dC + _dW) / _c2w, _hzz = (_dN - 2.0 * _dC + _dS) / _c2w;',
+  '  float _hxz = (_bShape(hNE) - _bShape(hSE) - _bShape(hNW) + _bShape(hSW)) / (4.0 * _c2w);',
+  '  float _det = (1.0 + uJac.x * _hxx) * (1.0 + uJac.x * _hzz) - (uJac.x * _hxz) * (uJac.x * _hxz);',
+  '  float _jf = (5.0 / 60.0) * uJac.y * clamp(uJac.z - _det, 0.0, 1.0);',
   '  float _shDep = texture2D(uMaskTex, uv).g;',
   '  nh *= mix(uShoreDamp, 1.0, smoothstep(0.0, max(uShoreDampD, 0.001), _shDep));',
   '  vec2 wpos = (uv - 0.5) * BOUNDS;',
@@ -22426,19 +22715,76 @@ const _SW_RIPPLE_FRAG = [
   '  float edg = smoothstep(0.0, 0.06, min(ed.x, ed.y));',
   '  float spg = 1.0 - smoothstep(0.0, max(uSpongeW, 0.001), min(ed.x, ed.y));',
   '  float dmp = 1.0 - uSpongeK * spg * spg;',
-  '  float _hpk = (uHullB.y > 0.5) ? (_hullP(uHullTex, uHullR, uHullY, uHullB, uHullT, wpos, uHullA, uHullU.xyz, uHullY.z, uHullU.w) - _hullP(uHullTex, uHullR, uHullY, uHullB, uHullT, wpos, uHullAP, uHullUP.xyz, uHullY.w, uHullUP.w)) : 0.0;',   // (v46.78) the hull patch, see the header
-  '  if (uEntB[0].y > 0.5) _hpk += _hullP(uEntTex0, uEntR[0], uEntY[0], uEntB[0], uEntT[0], wpos, uEntA[0], uEntU[0].xyz, uEntY[0].z, uEntU[0].w) - _hullP(uEntTex0, uEntR[0], uEntY[0], uEntB[0], uEntT[0], wpos, uEntAP[0], uEntUP[0].xyz, uEntY[0].w, uEntUP[0].w);',
-  '  if (uEntB[1].y > 0.5) _hpk += _hullP(uEntTex1, uEntR[1], uEntY[1], uEntB[1], uEntT[1], wpos, uEntA[1], uEntU[1].xyz, uEntY[1].z, uEntU[1].w) - _hullP(uEntTex1, uEntR[1], uEntY[1], uEntB[1], uEntT[1], wpos, uEntAP[1], uEntUP[1].xyz, uEntY[1].w, uEntUP[1].w);',
-  '  fAcc += abs(_hpk) * uHullFoam;',
+  '  float _hpk = (uHullB.y > 0.5) ? (_hullP(uHullTex, uHullTopTex, uHullR, uHullY, uHullB, uHullT, wpos, uHullA, uHullU.xyz, uHullY.z, uHullU.w, uHoleAB.xy) - _hullP(uHullTex, uHullTopTex, uHullR, uHullY, uHullB, uHullT, wpos, uHullAP, uHullUP.xyz, uHullY.w, uHullUP.w, uHoleAB.zw)) : 0.0;',   // (v46.78) the hull patch, see the header
+  '  float _hpP = _hpk;',   // (v48.77) the player's share, before the entity slots add theirs
+  '  if (uEntB[0].y > 0.5) _hpk += _hullP(uEntTex0, uEntTex0, uEntR[0], uEntY[0], uEntB[0], uEntT[0], wpos, uEntA[0], uEntU[0].xyz, uEntY[0].z, uEntU[0].w, vec2(0.0)) - _hullP(uEntTex0, uEntTex0, uEntR[0], uEntY[0], uEntB[0], uEntT[0], wpos, uEntAP[0], uEntUP[0].xyz, uEntY[0].w, uEntUP[0].w, vec2(0.0));',
+  '  if (uEntB[1].y > 0.5) _hpk += _hullP(uEntTex1, uEntTex1, uEntR[1], uEntY[1], uEntB[1], uEntT[1], wpos, uEntA[1], uEntU[1].xyz, uEntY[1].z, uEntU[1].w, vec2(0.0)) - _hullP(uEntTex1, uEntTex1, uEntR[1], uEntY[1], uEntB[1], uEntT[1], wpos, uEntAP[1], uEntUP[1].xyz, uEntY[1].w, uEntUP[1].w, vec2(0.0));',
+  '  float _rel = uHullFoam * (max(0.0, _hpP) * uHullSpd + max(0.0, _hpk - _hpP));',
+  '  float _arm = 0.0;',
+  '  if (uHullB.y > 0.5 && (uArm.w > 0.0 || uArm2.y > 0.0)) {',
+  '    vec2 _ad = wpos - uHullA.xy;',
+  '    vec2 _alp = vec2(_ad.x * uHullA.w - _ad.y * uHullA.z, dot(_ad, uHullA.zw));',
+  '    float _aft = (uHullT.x - _alp.y) * uHullT.y;',                     // distance behind the rear end (< 0 = over the hull)
+  '    float _keel = clamp((uHullY.z - uHullY.x) / 6.0, 0.0, 1.0) * uHullSpd;',
+  '    float _bs = _aft + 0.75 * uHullT.z;',                               // distance behind the bow shoulders
+  '    float _w0 = uArm2.x * 0.5 * (uHullR.y - uHullR.x);',
+  '    float _pd = (abs(_alp.x) - _w0 - max(_bs, 0.0) * uArm.x) * inversesqrt(1.0 + uArm.x * uArm.x);',
+  '    float _side = exp(-(_pd * _pd) / max(uArm.y * uArm.y, 1.0)) * smoothstep(0.0, 25.0, _bs) * exp(-max(_bs, 0.0) / max(uArm.z, 1.0));',
+  '    float _mid = exp(-(_alp.x * _alp.x) / max(uArm2.z * uArm2.z, 1.0)) * smoothstep(0.0, 15.0, _aft) * exp(-max(_aft, 0.0) / max(uArm2.w, 1.0));',
+  '    _arm = _keel * (uArm.w * _side * mix(0.4, 1.0, smoothstep(0.0, max(uBrkS.z, 1e-4), _crs)) + uArm2.y * _mid);',
+  '  }',
   '  float sA = sAcc * edg;',
   '  nh += (1.0 - uSeedImpulse) * sA + _hpk;',
   '  h.y = (h.x - uSeedImpulse * sA + _hpk * (1.0 - uHullKick)) * dmp;',   // (v46.77) sponge on the previous height
   '  nh = clamp(nh, -uHClamp, uHClamp);',
+  '  if (uHullB.y > 0.5 && uHullLid.x > 0.5) {',
+  '    vec2 _ld = wpos - uHullA.xy;',
+  '    vec2 _llp = vec2(_ld.x * uHullA.w - _ld.y * uHullA.z, dot(_ld, uHullA.zw));',
+  '    vec2 _luv = vec2((_llp.x - uHullR.x) / (uHullR.y - uHullR.x), (_llp.y - uHullR.z) / (uHullR.w - uHullR.z));',
+  '    if (_luv.x > 0.0 && _luv.x < 1.0 && _luv.y > 0.0 && _luv.y < 1.0) {',
+  '      float _lb = texture2D(uHullTex, _luv).r;',
+  '      if (_lb > 0.002) {',
+  '        float _lyU = uHullY.x + (1.0 - _lb) * uHullY.y;',
+  '        float _lyT = uHullY.x + uHullY.y - (1.0 - texture2D(uHullTopTex, _luv).r) * uHullY.y;',
+  '        float _lyW = (uHullY.z - uHullU.x * _llp.x - uHullU.z * _llp.y) / max(uHullU.y, 0.5);',
+  '        if (_lyT > _lyW) nh = min(nh, _bShapeInv(_lyU - _lyW - uHullLid.y));',
+  '      }',
+  '    }',
+  '  }',
   '  h.x = nh * dmp;',                           // (v46.77) ...and on the new one
-  '  h.z = min(1.6, (h.z * uFoamDecay + fAcc * uSeedFoamK + uBreakK * max(0.0, _slp - uBreakThr)) * edg);',
+  '  float _fz = mix(h.z, _fAv, uFoamDiff);',
+  '  h.z = clamp((_fz * uFoamDecay + fAcc * uSeedFoamK + uBreakK * _brk + _col + _jf + _rel + _arm) * edg, 0.0, 1.0);',   // (v48.79) + the V arms
   '  gl_FragColor = h;',
   '}'
 ].join('\n');
+function _swBesselJ0(x) {
+  const ax = Math.abs(x);
+  if (ax < 8.0) {
+    const y = x * x;
+    const a1 = 57568490574.0 + y * (-13362590354.0 + y * (651619640.7 + y * (-11214424.18 + y * (77392.33017 + y * (-184.9052456)))));
+    const a2 = 57568490411.0 + y * (1029532985.0 + y * (9494680.718 + y * (59272.64853 + y * (267.8532712 + y * 1.0))));
+    return a1 / a2;
+  }
+  const z = 8.0 / ax, y = z * z, xx = ax - 0.785398164;
+  const b1 = 1.0 + y * (-0.1098628627e-2 + y * (0.2734510407e-4 + y * (-0.2073370639e-5 + y * 0.2093887211e-6)));
+  const b2 = -0.1562499995e-1 + y * (0.1430488765e-3 + y * (-0.6911147651e-5 + y * (0.7621095161e-6 - y * 0.934935152e-7)));
+  return Math.sqrt(0.636619772 / ax) * (Math.cos(xx) * b1 - z * Math.sin(xx) * b2);
+}
+function _swIWaveKernel(sigma) {
+  const Pk = 6, W = 2 * Pk + 1, K = new Float32Array(172);
+  let norm = 0;
+  for (let q = 0; q < 10; q += 0.01) norm += q * q * Math.exp(-sigma * q * q);
+  for (let j = -Pk; j <= Pk; j++) for (let i = -Pk; i <= Pk; i++) {
+    const r = Math.sqrt(i * i + j * j); let kern = 0;
+    for (let q = 0; q < 10; q += 0.01) kern += q * q * Math.exp(-sigma * q * q) * _swBesselJ0(r * q);
+    K[(j + Pk) * W + (i + Pk)] = kern / norm;
+  }
+  const k0 = 0.15; let F = 0;
+  for (let j = -Pk; j <= Pk; j++) for (let i = -Pk; i <= Pk; i++) F += K[(j + Pk) * W + (i + Pk)] * Math.cos(k0 * i);
+  const vecs = [];
+  for (let n = 0; n < 43; n++) vecs.push(new THREE.Vector4(K[n * 4], K[n * 4 + 1], K[n * 4 + 2], K[n * 4 + 3]));
+  return { vecs, slope: F / k0, sigma };
+}
 function _swRippleInit() {
   _swRipple.gpu = null; _swRipple.heightVar = null; _swRipple.scale = 0;
   try {
@@ -22460,12 +22806,25 @@ function _swRippleInit() {
     v.material.uniforms.viscosity = { value: 0.9940 };
     v.material.uniforms.uWaveC2 = { value: 0.26 };
     v.material.uniforms.uSeedImpulse = { value: 0.25 };
+    try { if (!_swRipple._iw) _swRipple._iw = _swIWaveKernel(0.3); } catch (_) { _swRipple._iw = null; }   // (v48.85) sigma 0.3 - see _swIWaveKernel
+    v.material.uniforms.uDisp = { value: 0 };
+    v.material.uniforms.uDispG = { value: 0 };
+    v.material.uniforms.uGk = { value: (_swRipple._iw ? _swRipple._iw.vecs : Array.from({ length: 43 }, () => new THREE.Vector4())) };
     v.material.uniforms.uShoreDamp = { value: 0.96 };
     v.material.uniforms.uShoreDampD = { value: 0.28 };
     v.material.uniforms.uSpongeW = { value: 0.18 };   // (v46.77) absorbing rim width, fraction of the window
     v.material.uniforms.uSpongeK = { value: 0.12 };   // (v46.77) per-step damping at the very edge
-    v.material.uniforms.uBreakK = { value: 0.20 };     // (v46.77) whitecap foam per step per unit of excess slope
-    v.material.uniforms.uBreakThr = { value: 0.010 };  // (v46.77) crest slope (sim height per cell) that starts breaking
+    v.material.uniforms.uBreakK = { value: 0.0 };      // (v46.77) whitecap foam; (v48.73) per step at FULL breaking; (v48.77) OFF - Crest's Jacobian replaces it
+    v.material.uniforms.uBreakThr = { value: 0.010 };  // (v46.77) retired in v48.73 (the shader no longer reads it)
+    v.material.uniforms.uBrkW = { value: new THREE.Vector4(100, 100, 11, 15.625) };   // (v48.73) set every frame
+    v.material.uniforms.uBrkS = { value: new THREE.Vector4(0.55, 1.05, 0.08, 0) };    // (v48.73) slope ramp (world), crest
+    v.material.uniforms.uFoamDiff = { value: 0.0 };                                   // (v48.73) spreading per step; (v48.77) off
+    v.material.uniforms.uCollS = { value: new THREE.Vector4(4, 40, 0.0, 0) };         // (v48.76) collisions - see the shader; (v48.77) off
+    v.material.uniforms.uJac = { value: new THREE.Vector4(7.5, 0.0, 0.30, 0) };   // (v48.88) strength 0 - see the knob       // (v48.77) Crest's foam - see the shader; (v48.78) coverage 0.57 -> 0.30
+    v.material.uniforms.uHullSpd = { value: 0.0 };                                    // (v48.77) the player's speed gate
+    v.material.uniforms.uHullLid = { value: new THREE.Vector2(1, 1.5) };               // (v48.88) the hull lid - see the shader
+    v.material.uniforms.uArm = { value: new THREE.Vector4(Math.tan(7 * Math.PI / 180), 16, 900, 0.0) };     // (v48.79) the V arms; (v48.80) the bow streams; (v48.82) OFF - owner: "no that looks bad" / "the foam isn't following the wake"
+    v.material.uniforms.uArm2 = { value: new THREE.Vector4(0.30, 0.0, 14, 600) };                            // (v48.80) side start, the stern stream; (v48.82) OFF
     v.material.uniforms.uHullTex = { value: null };
     v.material.uniforms.uHullA = { value: new THREE.Vector4(0, 0, 0, 1) };
     v.material.uniforms.uHullAP = { value: new THREE.Vector4(0, 0, 0, 1) };
@@ -22474,6 +22833,8 @@ function _swRippleInit() {
     v.material.uniforms.uHullY = { value: new THREE.Vector4(0, 1, 0, 0) };
     v.material.uniforms.uHullU = { value: new THREE.Vector4(0, 1, 0, 0) };
     v.material.uniforms.uHullUP = { value: new THREE.Vector4(0, 1, 0, 0) };
+    v.material.uniforms.uHullTopTex = { value: null };                                 // (v48.65) the slab's top map
+    v.material.uniforms.uHoleAB = { value: new THREE.Vector4(0, 0, 0, 0) };             // (v48.65) cap / over, now + previous
     v.material.uniforms.uEntTex0 = { value: null };
     v.material.uniforms.uEntTex1 = { value: null };
     for (const _k of ['uEntA', 'uEntAP', 'uEntB', 'uEntR', 'uEntY', 'uEntT']) {
@@ -22483,10 +22844,10 @@ function _swRippleInit() {
       v.material.uniforms[_k] = { value: [new THREE.Vector4(0, 1, 0, 0), new THREE.Vector4(0, 1, 0, 0)] };
     }
     v.material.uniforms.uHullT = { value: new THREE.Vector4(0, 1, 1, 0) };
-    v.material.uniforms.uHullFoam = { value: 1.5 };
+    v.material.uniforms.uHullFoam = { value: 6.0 };    // (v48.77) release gain - see the shader (was abs(dP) x 1.5 x seedFoam); (v48.78) 12 -> 6; (v48.82) back to 6 (v48.80's 2.5 went with the streams)
     v.material.uniforms.uHullKick = { value: 0.15 };
     v.material.uniforms.uHClamp = { value: 1.2 };
-    v.material.uniforms.uFoamDecay = { value: 0.9930 };   // (v41.56) ~1.6 s half-life, was ~3 s
+    v.material.uniforms.uFoamDecay = { value: 0.98833 };  // (v48.88) 0.95 -> 0.98 (a fade of 1.2 a second): the churn down the middle lasts like the photos' glowing band; (v48.90) owner: "make the foam last a little longer" -> 0.7 a second, half gone in ~1 s   // (v41.56) ~1.6 s half-life, was ~3 s; (v48.77) 0.98; (v48.78) 0.95 = a fade of 3 a second, half gone in ~0.23 s - foam only while it churns (owner: "looks good")
     v.material.uniforms.uSeedFoamK = { value: 0.10 };
     v.material.uniforms.uSeeds = { value: seeds };
     v.material.uniforms.uSeedCount = { value: 0 };
@@ -22668,10 +23029,11 @@ function _swHullSilhouette(mesh, slot) {
     }
     sc.overrideMaterial = null;
     _swSil.builds++;
-    let _fill = 1;
+    let _fill = 1, _pbK = null;   // (v48.63) _pbK: the underside readback, kept for the slab below
     try {
       const _pb = new Uint8Array(res * res * 4);
       renderer.readRenderTargetPixels(rt, 0, 0, res, res, _pb);
+      _pbK = _pb;
       let _on = 0;
       for (let i = 0; i < res * res; i++) if (_pb[i * 4] > 1) _on++;
       _fill = _on / (res * res);
@@ -22684,7 +23046,61 @@ function _swHullSilhouette(mesh, slot) {
       if (!R._silWarned) { R._silWarned = 1; console.warn('[water] silhouette came back empty (fill ' + _fill + ') - body keeps its round seed'); }
       return null;
     }
-    const rec = { key, rt, tex: rt.texture, x0, x1, z0, z1, zMin: all.min.z, zMax: all.max.z, y0, range, beam, len, rimR, res, cnt, fill: +_fill.toFixed(4), _cached: true };
+    let slab = null;
+    if (_pbK) {
+      let _rtT = null;
+      try {
+        const camT = new THREE.OrthographicCamera(-x1, -x0, z1, z0, 0, range);
+        camT.position.set(0, y0 + range, 0); camT.up.set(0, 0, 1); camT.lookAt(0, y0 + range - 1, 0);
+        camT.updateMatrix();
+        camT.matrixAutoUpdate = false;
+        camT.matrixWorld.multiplyMatrices(frame, camT.matrix);
+        camT.matrixWorldNeedsUpdate = false;
+        camT.matrixWorldInverse.copy(camT.matrixWorld).invert();
+        _rtT = new THREE.WebGLRenderTarget(res, res, { minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+          format: THREE.RGBAFormat, type: THREE.UnsignedByteType, depthBuffer: true, stencilBuffer: false, generateMipmaps: false });
+        const _pRT = renderer.getRenderTarget();
+        const _pC = new THREE.Color(); renderer.getClearColor(_pC); const _pA = renderer.getClearAlpha();
+        const _pAu = renderer.autoClear;
+        const _xr2 = !!(renderer.xr && renderer.xr.enabled);
+        const _sh2 = renderer.shadowMap ? renderer.shadowMap.autoUpdate : undefined;
+        sc.overrideMaterial = _swSil.mat;
+        try {
+          if (_xr2) renderer.xr.enabled = false;
+          if (renderer.shadowMap) renderer.shadowMap.autoUpdate = false;
+          renderer.setRenderTarget(_rtT); renderer.setClearColor(0x000000, 1); renderer.autoClear = true;
+          renderer.render(sc, camT);
+        } finally {
+          if (_xr2) renderer.xr.enabled = true;
+          if (renderer.shadowMap && _sh2 !== undefined) renderer.shadowMap.autoUpdate = _sh2;
+          renderer.setRenderTarget(_pRT); renderer.setClearColor(_pC, _pA); renderer.autoClear = _pAu;
+          sc.overrideMaterial = null;
+        }
+        const _pt = new Uint8Array(res * res * 4);
+        renderer.readRenderTargetPixels(_rtT, 0, 0, res, res, _pt);
+        const bot = new Float32Array(res * res), top = new Float32Array(res * res);
+        let _nIn = 0;
+        for (let j = 0; j < res; j++) for (let i = 0; i < res; i++) {
+          const k = j * res + i, rb = _pbK[k * 4];
+          if (rb < 1) { bot[k] = Infinity; top[k] = -Infinity; continue; }
+          const rt8 = _pt[(j * res + (res - 1 - i)) * 4];
+          bot[k] = y0 + (1 - rb / 255) * range;
+          top[k] = (rt8 >= 1) ? (y0 + range - (1 - rt8 / 255) * range) : bot[k] + 1;
+          _nIn++;
+        }
+        const _tb = new Uint8Array(res * res * 4);
+        for (let j = 0; j < res; j++) for (let i = 0; i < res; i++) {
+          const v = _pt[(j * res + (res - 1 - i)) * 4], k4 = (j * res + i) * 4;
+          _tb[k4] = v; _tb[k4 + 1] = v; _tb[k4 + 2] = v; _tb[k4 + 3] = 255;
+        }
+        const _tt = new THREE.DataTexture(_tb, res, res, THREE.RGBAFormat, THREE.UnsignedByteType);
+        _tt.minFilter = _tt.magFilter = THREE.LinearFilter; _tt.wrapS = _tt.wrapT = THREE.ClampToEdgeWrapping;
+        _tt.generateMipmaps = false; _tt.needsUpdate = true;
+        slab = { bot, top, n: _nIn, topTex: _tt };
+      } catch (_) { slab = null; } finally { if (_rtT) { try { _rtT.dispose(); } catch (_) {} } }
+    }
+    const rec = { key, rt, tex: rt.texture, x0, x1, z0, z1, zMin: all.min.z, zMax: all.max.z, y0, range, beam, len, rimR, res, cnt, fill: +_fill.toFixed(4), _cached: true, slab,
+                  topTex: slab ? slab.topTex : null };   // (v48.65)
     _swSil.empty.delete(key);
     _swSil.cache.set(key, rec);
     _swSilAssign(_sn, rec, slot);
@@ -22692,6 +23108,100 @@ function _swHullSilhouette(mesh, slot) {
     return rec;
   } catch (e) { console.warn('[water] hull silhouette failed:', e); return null; }
 }
+const _swSlabT = { on: false, px: 0, py: 0, pz: 0, r2: 0, m: new Float32Array(9), rec: null, mg: 1.5, kills: 0 };
+const _swSlabQ = new THREE.Quaternion(), _swSlabP = new THREE.Vector3(), _swSlabS = new THREE.Vector3(), _swSlabM4 = new THREE.Matrix4();
+function _swSlabFrame() {
+  const T = _swSlabT;
+  T.on = false;
+  try {
+    const W = window.__water || {};
+    if (W.hullDrops === 0) return T;
+    const rec = (typeof _swRipple !== 'undefined' && _swRipple) ? _swRipple.hullSil : null;
+    if (!rec || !rec.slab || typeof player === 'undefined' || !player || !player.mesh || player.shipState === 'dead') return T;
+    const m = player.mesh;
+    if (m.parent && m.parent.isScene) { _swSlabP.copy(m.position); _swSlabQ.copy(m.quaternion); }
+    else { m.updateWorldMatrix(true, false); m.matrixWorld.decompose(_swSlabP, _swSlabQ, _swSlabS); }
+    _swSlabM4.makeRotationFromQuaternion(_swSlabQ);
+    const e = _swSlabM4.elements, M = T.m;
+    M[0] = e[0]; M[1] = e[1]; M[2] = e[2];     // local = R^T d: the rows of R^T are R's columns
+    M[3] = e[4]; M[4] = e[5]; M[5] = e[6];
+    M[6] = e[8]; M[7] = e[9]; M[8] = e[10];
+    T.px = _swSlabP.x; T.py = _swSlabP.y; T.pz = _swSlabP.z;
+    const ax = Math.max(Math.abs(rec.x0), Math.abs(rec.x1)), az = Math.max(Math.abs(rec.z0), Math.abs(rec.z1));
+    const ay = Math.max(Math.abs(rec.y0), Math.abs(rec.y0 + rec.range));
+    T.r2 = ax * ax + ay * ay + az * az;
+    T.rec = rec;
+    T.mg = (W.hullDropMargin != null) ? +W.hullDropMargin : 1.5;
+    T.on = true;
+  } catch (_) { T.on = false; }
+  return T;
+}
+function _swSlabIn(T, x, y, z) {
+  const dx = x - T.px, dy = y - T.py, dz = z - T.pz;
+  if (dx * dx + dy * dy + dz * dz > T.r2) return false;
+  const M = T.m, rec = T.rec, S = rec.slab, res = rec.res;
+  const lx = M[0] * dx + M[1] * dy + M[2] * dz;
+  const ly = M[3] * dx + M[4] * dy + M[5] * dz;
+  const lz = M[6] * dx + M[7] * dy + M[8] * dz;
+  const i = Math.floor((lx - rec.x0) / (rec.x1 - rec.x0) * res), j = Math.floor((lz - rec.z0) / (rec.z1 - rec.z0) * res);
+  if (i < 0 || j < 0 || i >= res || j >= res) return false;
+  const k = j * res + i;
+  return ly >= S.bot[k] - T.mg && ly <= S.top[k] + T.mg;
+}
+if (typeof window !== 'undefined') window.__hullDropKills = function () { return _swSlabT.kills; };
+
+const _dwQ = new THREE.Quaternion(), _dwP = new THREE.Vector3(), _dwS = new THREE.Vector3(), _dwM = new THREE.Matrix4();
+function _swDeckWash(dt, sil, fx, fz, dirSign, WL, sp, cT, keelA, hullH) {
+  if (!game.particles || game._swSubmerged || !sil || !sil.slab) return;
+  const W = window.__water || {};
+  const K = (W.deckWash != null) ? +W.deckWash : 1;
+  if (!(K > 0) || !(cT > 0)) return;
+  const R = _swRipple, S = sil.slab, res = sil.res;
+  const sub = Math.max(0, -keelA) / Math.max(1, hullH);             // 0 = keel on the water .. 1 = a hull's height under
+  const fade = 1 - Math.max(0, Math.min(1, (sub - 0.95) / 0.3));
+  const rate = K * 140 * cT * fade * Math.min(1.4, sp / 330);      // drops a second
+  R._dwAcc = (R._dwAcc || 0) + rate * Math.min(0.05, Math.max(0, dt || 0));
+  let n = Math.floor(R._dwAcc);
+  if (n <= 0) return;
+  R._dwAcc -= n;
+  n = Math.min(n, 24);
+  if (typeof _swFxRoom === 'function' && _swFxRoom() < n) return;
+  const m = player.mesh;
+  m.updateWorldMatrix(true, false);
+  m.matrixWorld.decompose(_dwP, _dwQ, _dwS);
+  _dwM.makeRotationFromQuaternion(_dwQ);
+  const e = _dwM.elements;
+  const vx = player.velocity ? player.velocity.x : 0, vz = player.velocity ? player.velocity.z : 0;
+  const zF = (dirSign > 0) ? sil.zMax : sil.zMin, zSpan = Math.max(1, sil.zMax - sil.zMin);
+  const latx = -fz, latz = fx, LIFT = 3;
+  let made = 0;
+  for (let t = 0; t < n * 4 && made < n; t++) {
+    const lz = zF - dirSign * Math.random() * zSpan * 0.45;        // the front 45 % of the hull
+    const lx = sil.x0 + (sil.x1 - sil.x0) * (0.12 + 0.76 * Math.random());
+    const i = Math.floor((lx - sil.x0) / (sil.x1 - sil.x0) * res), j = Math.floor((lz - sil.z0) / (sil.z1 - sil.z0) * res);
+    if (i < 0 || j < 0 || i >= res || j >= res) continue;
+    const ty = S.top[j * res + i];
+    if (!(ty > -Infinity)) continue;                                // no hull in this column
+    const wx = _dwP.x + e[0] * lx + e[4] * ty + e[8] * lz;
+    const wy = _dwP.y + e[1] * lx + e[5] * ty + e[9] * lz;
+    const wz = _dwP.z + e[2] * lx + e[6] * ty + e[10] * lz;
+    if (wy > WL + LIFT) continue;                                   // this bit of deck is still dry
+    const c = 0.12 + Math.random() * 0.22;                          // how much of the ship's velocity the water keeps
+    const side = (Math.random() - 0.5) * 2;
+    game.particles.push({
+      position: new THREE.Vector3(wx, Math.max(wy, WL) + LIFT + Math.random() * 3, wz),
+      velocity: new THREE.Vector3(vx * c + latx * side * 55, 45 + Math.random() * 105, vz * c + latz * side * 55),
+      life: 0.45 + Math.random() * 0.5, maxLife: 1.2,
+      color: (Math.random() < 0.5) ? 0x9fc0d8 : 0xc8dcea,
+      size: 0.8 + Math.random() * 1.4,
+      grav: 380 + Math.random() * 160,
+      splash: true, _hOut: 1,   // born just above the plating: coming down on it ends it
+    });
+    made++;
+  }
+  if (made) _swFxN('deckWash');
+}
+
 function _swCrashSpray(x, wl, z, hx, hz, halfW, tailLen, f, vx, vz) {
   if (!game.particles || game._swSubmerged) return;
   const knob = (window.__water && window.__water.crashSpray != null) ? +window.__water.crashSpray : 1.0;
@@ -22946,7 +23456,8 @@ function _swWetTick(o, px, py, pz, vel, fp, WL, dt) {
       st.entT = 0;
       const peak = (W3.impactPeak != null) ? W3.impactPeak : 0.135;
       _swFxN('entrain');
-      _swRippleSeed(px, pz, Math.max(24, fp.BEAM * 1.25), -0.30 * pull * fp.heft * ent * peak);
+      if (((W3.entrainDip != null) ? +W3.entrainDip : 0) > 0)
+        _swRippleSeed(px, pz, Math.max(24, fp.BEAM * 1.25), -0.30 * pull * fp.heft * ent * peak * +W3.entrainDip);
       if (!game._swSubmerged && _swFxRoom() > 4) {
         const n = 1 + ((Math.random() * 2 * pull * ent) | 0);
         for (let i = 0; i < n; i++) {
@@ -24294,6 +24805,18 @@ function _swRippleTick(dt) {
         _u.uWaveC2.value = R._c2Cur;
       }
       if (_W3.visc != null && _u.viscosity) _u.viscosity.value = _W3.visc;
+      if (_u.uDisp) {   // (v48.83) iWave: on/off, and gravity -> g dt^2 in the kernel's units (w^2 = g k, world units)
+        const _dSmall = (typeof _fxSmallDevice === 'function' && _fxSmallDevice()) || (typeof _swVrLite === 'function' && _swVrLite());
+        const _on = (_W3.disperse != null) ? +_W3.disperse : (_dSmall ? 0 : 1);
+        _u.uDisp.value = (_on > 0 && R._iw) ? 1 : 0;
+        if (_u.uDisp.value > 0) {
+          const _sg = (_W3.dispSigma != null) ? +_W3.dispSigma : 0.3;   // (v48.85) rebuild the kernel if the knob moves
+          if (R._iw && Math.abs(R._iw.sigma - _sg) > 1e-6) { try { const _nk = _swIWaveKernel(_sg); R._iw = _nk; if (_u.uGk) _u.uGk.value = _nk.vecs; } catch (_) {} }
+          const _gW = (_W3.dispG != null) ? +_W3.dispG : 1300;
+          const _cell = R.bounds / _SW_RIPPLE_RES;
+          _u.uDispG.value = _gW * R.step * R.step / (Math.max(0.1, R._iw.slope) * _cell);
+        }
+      }
       if (_W3.seedImpulse != null && _u.uSeedImpulse) _u.uSeedImpulse.value = _W3.seedImpulse;   // (v41.02)
       if (_W3.foamDecay != null && _u.uFoamDecay) _u.uFoamDecay.value = _W3.foamDecay;           // (v41.53)
       if (_W3.seedFoam != null && _u.uSeedFoamK) _u.uSeedFoamK.value = _W3.seedFoam;             // (v41.53)
@@ -24301,8 +24824,29 @@ function _swRippleTick(dt) {
       if (_W3.shoreDampD != null && _u.uShoreDampD) _u.uShoreDampD.value = _W3.shoreDampD;       // (v41.72)
       if (_W3.spongeW != null && _u.uSpongeW) _u.uSpongeW.value = _W3.spongeW;                   // (v46.77)
       if (_W3.spongeK != null && _u.uSpongeK) _u.uSpongeK.value = _W3.spongeK;                   // (v46.77)
-      if (_W3.breakK != null && _u.uBreakK) _u.uBreakK.value = _W3.breakK;                       // (v46.77)
-      if (_W3.breakThr != null && _u.uBreakThr) _u.uBreakThr.value = _W3.breakThr;               // (v46.77)
+      if (_u.uBreakK) _u.uBreakK.value = (_W3.breakK != null) ? +_W3.breakK : 0.0;               // (v46.77; v48.73 always synced; v48.77 off by default)
+      if (_u.uBrkW) {   // (v48.73) the sheet's shape constants + the cell size, so the whitecap test sees the slope on screen
+        let _bg = 100, _bd = 100, _bq = 11;
+        try { const _dm = game._hubWaterDispMat; if (_dm && _dm.uniforms && _dm.uniforms.uGain) { _bg = +_dm.uniforms.uGain.value; _bd = +_dm.uniforms.uDispScale.value; _bq = +_dm.uniforms.uCrestQ.value; } } catch (_) {}
+        _u.uBrkW.value.set(_bg, _bd, _bq, R.bounds / _SW_RIPPLE_RES);
+        _u.uBrkS.value.set((_W3.breakS0 != null) ? +_W3.breakS0 : 0.55, (_W3.breakS1 != null) ? +_W3.breakS1 : 1.05,
+                           (_W3.breakCrest != null) ? +_W3.breakCrest : 0.08, 0);
+        _u.uFoamDiff.value = (_W3.foamDiff != null) ? +_W3.foamDiff : 0.0;   // (v48.77) 0.10 -> 0: Crest does not spread foam, and ours crept
+      }
+      if (_u.uCollS) _u.uCollS.value.set((_W3.collLo != null) ? +_W3.collLo : 4, (_W3.collHi != null) ? +_W3.collHi : 40,
+                                         (_W3.collK != null) ? +_W3.collK : 0.0, 0);   // (v48.76; v48.77 off - it lit every shore reflection)
+      if (_u.uJac) _u.uJac.value.set((_W3.jacLam != null) ? +_W3.jacLam : 7.5, (_W3.jacK != null) ? +_W3.jacK : 0.0,   // (v48.88) sim-side squeeze off: the crests' whitecaps are drawn per frame now
+                                     (_W3.jacCover != null) ? +_W3.jacCover : 0.30, 0);   // (v48.77) Crest's foam; (v48.78) 0.30 - our wake is far steeper than a Crest boat's, 0.57 pinched the whole V
+      if (_u.uHullLid) _u.uHullLid.value.set((_W3.hullLid != null) ? +_W3.hullLid : 1, (_W3.hullLidMargin != null) ? +_W3.hullLidMargin : 1.5);   // (v48.88)
+      if (_u.uHullSpd) {   // (v48.77) the player's hull foam only while it is moving through the water
+        let _hs = 0; try { _hs = Math.hypot(player.velocity.x, player.velocity.z); } catch (_) {}
+        _u.uHullSpd.value = Math.max(0, Math.min(1, (_hs - 40) / 120));
+      }
+      if (_W3.foamFade != null && _u.uFoamDecay) _u.uFoamDecay.value = Math.max(0, 1 - (+_W3.foamFade) / 60);   // (v48.77) per second
+      if (_u.uArm) _u.uArm.value.set(Math.tan(((_W3.armAngle != null) ? +_W3.armAngle : 7) * Math.PI / 180), (_W3.armWidth != null) ? +_W3.armWidth : 16,
+                                     (_W3.armLen != null) ? +_W3.armLen : 900, (_W3.armFoam != null) ? +_W3.armFoam : 0.0);   // (v48.79/80) the bow streams; (v48.82) off - painted foam does not follow the sim's waves
+      if (_u.uArm2) _u.uArm2.value.set((_W3.armStart != null) ? +_W3.armStart : 0.30, (_W3.centreFoam != null) ? +_W3.centreFoam : 0.0,
+                                       (_W3.centreWidth != null) ? +_W3.centreWidth : 14, (_W3.centreLen != null) ? +_W3.centreLen : 600);   // (v48.80) the stern stream
     }
   } catch (_) {}   
   
@@ -24391,7 +24935,7 @@ function _swRippleTick(dt) {
     if (W3.sheetBend === undefined) W3.sheetBend = 1.0;   // curvature of the film across the spray root
     if (W3.sheetWarp === undefined) W3.sheetWarp = 1.0;   // the flapping instability
     if (W3.sheetFrac === undefined) W3.sheetFrac = 1.0;   // ligament -> droplet breakup cascade
-    if (W3.rooster === undefined) W3.rooster = 8.0;       // transom rooster-tail HEIGHT (the 'higher' dial) - (v48.19) a true height multiplier now
+    if (W3.rooster === undefined) W3.rooster = 2.67;      // transom rooster-tail HEIGHT (the 'higher' dial) - (v48.19) a true height multiplier now
     if (W3.roosterH === undefined) W3.roosterH = 0.23;    // (v48.19) apex per u/s of speed, per dial unit: 8 x 0.23 = 1.84 u of tail per u/s
     if (W3.roosterN === undefined) W3.roosterN = 0.6;     // (v48.19) drops per burst (the drops now outlive their apex)
     if (W3.dots === undefined) W3.dots = 1.4;             // bright specks off wave/wake peaks (coarse layer)
@@ -24475,14 +25019,25 @@ function _swRippleTick(dt) {
             const _skT = Math.max(0, Math.min(1, keelA / Math.max(1, _skH)));
             const _skFall = 1 - _skT;
             const _skim = Math.max(0, keelA) + _skD * _skFall * Math.sqrt(_skFall);
+            const _hullH = _hm ? _hm.halfH * 2 : DR / 0.45;
+            const _kd = Math.max(0, -keelA);             // keel depth below the flat waterline
+            const _hK = _hullH * ((W3.holeH != null) ? +W3.holeH : 0.22);
+            const _cK = Math.max(_hK + 1, _hullH * ((W3.closeH != null) ? +W3.closeH : 0.65));
+            const _hcOn = (W3.holeClose !== 0);
+            const _cT = _hcOn ? Math.max(0, Math.min(1, (_kd - _hK) / (_cK - _hK))) : 0;
+            const _hCap = _hcOn ? _hullH * ((W3.holeCap != null) ? +W3.holeCap : 0.30) : 0;
+            const _hOver = _hullH * ((W3.holeOver != null) ? +W3.holeOver : 0.12);
             R.hullP = {
               x: _swHPv.x, z: _swHPv.z, fx, fz, ux: _swHPu.x, uy: _swHPu.y, uz: _swHPu.z,
               wl: WL - _swHPv.y + _skim, k: _hp * W3.mass * _deep / 170,
+              holeCap: _hCap, holeOver: _hOver,   // (v48.65) the per-texel carve rule - see _hImm
               rimK: (W3.hullRim != null) ? +W3.hullRim : 0.5, rimR: sil.rimR,
               tailLen: _tail, tailK: (W3.hullTailK != null) ? +W3.hullTailK : 0.8, dirSign: _ds,
               sRear: _ds > 0 ? sil.zMin : sil.zMax, LEN: sil.zMax - sil.zMin, sil, t: performance.now(),
+              hole: { cap: +_hCap.toFixed(1), over: +_hOver.toFixed(1), wash: +_cT.toFixed(2), keelDepth: +(-keelA).toFixed(1), hullH: +_hullH.toFixed(1) },   // (v48.65) readout
             };
             _ok = true;
+            if (_cT > 0 && sp > 60) { try { _swDeckWash(dt, sil, fx, fz, _ds, WL, sp, _cT, keelA, _hm ? _hm.halfH * 2 : 40); } catch (_) {} }
           }
         }
       }
@@ -24686,7 +25241,9 @@ function _swRippleTick(dt) {
         u.uHullU.value.set(H.ux, H.uy, H.uz, H.tailLen);
         u.uHullUP.value.set(P0.ux, P0.uy, P0.uz, P0.tailLen);
         u.uHullT.value.set(H.sRear, H.dirSign, H.LEN, H.tailK);
-        if (u.uHullFoam) u.uHullFoam.value = (window.__water && window.__water.hullFoam != null) ? +window.__water.hullFoam : 1.5;
+        if (u.uHullTopTex) u.uHullTopTex.value = H.sil.topTex || H.sil.tex;
+        if (u.uHoleAB) u.uHoleAB.value.set(H.sil.topTex ? H.holeCap : 0, H.holeOver, (P0.sil && P0.sil.topTex) ? P0.holeCap : 0, P0.holeOver != null ? P0.holeOver : H.holeOver);
+        if (u.uHullFoam) u.uHullFoam.value = (window.__water && window.__water.hullFoam != null) ? +window.__water.hullFoam : 6.0;   // (v48.77; v48.78 12 -> 6; v48.82 6 again)
         if (u.uHullKick) u.uHullKick.value = (window.__water && window.__water.hullKick != null) ? +window.__water.hullKick : 0.15;
         R._hullPrev = H;
       } else if (R._hullPrev && R._hullPrev.sil && R._hullPrev.sil.tex) {
@@ -24700,6 +25257,8 @@ function _swRippleTick(dt) {
         u.uHullU.value.set(P0.ux, P0.uy, P0.uz, 0);
         u.uHullUP.value.set(P0.ux, P0.uy, P0.uz, P0.tailLen);
         u.uHullT.value.set(P0.sRear, P0.dirSign, P0.LEN, P0.tailK);
+        if (u.uHullTopTex) u.uHullTopTex.value = P0.sil.topTex || P0.sil.tex;   // (v48.65)
+        if (u.uHoleAB) { const _c0 = P0.sil.topTex ? P0.holeCap : 0; u.uHoleAB.value.set(_c0, P0.holeOver, _c0, P0.holeOver); }
         R._hullPrev = null;
       } else { u.uHullB.value.y = 0; R._hullPrev = null; }
     }
@@ -24739,6 +25298,7 @@ function _swRippleTick(dt) {
       }
       if (!u.uEntTex0.value) u.uEntTex0.value = u.uHullTex.value;
       if (!u.uEntTex1.value) u.uEntTex1.value = u.uEntTex0.value;
+      if (u.uHullTopTex && !u.uHullTopTex.value) u.uHullTopTex.value = u.uHullTex.value || u.uEntTex0.value;   // (v48.65) same rule
     }
     const _xrPrevRT = (renderer && renderer.getRenderTarget) ? renderer.getRenderTarget() : null;
     R.gpu.compute();
@@ -24971,6 +25531,38 @@ function _swRippleTick(dt) {
       if (W2.matteHi !== undefined && du.uMatteHi) du.uMatteHi.value = W2.matteHi;           // (v41.55)
       if (du.uFoamGate) du.uFoamGate.value = (W2.foamGate != null) ? +W2.foamGate : 1.0;     // (v41.75)
       if (du.uFoamAll) du.uFoamAll.value = (W2.foamAll != null) ? +W2.foamAll : 0.0;         // (v41.76)
+      if (du.uFoam2) {   // (v48.67) the second foam look - see the fragment note
+        du.uFoam2.value = (W2.foam != null) ? +W2.foam : 1.0;
+        du.uFoam2Lo.value = (W2.foamLo != null) ? +W2.foamLo : 0.04;
+        du.uFoam2Hi.value = (W2.foamHi != null) ? +W2.foamHi : 1.20;   // (v48.68) 0.5 was solid white in the pane (the wake runs past it)
+        du.uFoam2S1.value = 1 / Math.max(0.5, (W2.foamCell != null) ? +W2.foamCell : 9.5);   // (v48.73) 45 -> 9.5 (a 60 u tile)
+        const _fSmall = (typeof _fxSmallDevice === 'function' && _fxSmallDevice());
+        const _fG = (W2.foamGrain != null) ? +W2.foamGrain : (_fSmall ? 0 : 3.8);   // (v48.73) 28 -> 3.8 (a 24 u tile)
+        du.uFoam2S2.value = (_fG > 0) ? 1 / _fG : 0;
+        du.uFoam2Bright.value = (W2.foamBright != null) ? +W2.foamBright : 1.05;   // (v48.72) was 0.90
+        du.uFoam2Lace.value = (W2.foamLace != null) ? +W2.foamLace : 1.0;
+        du.uFoam2Churn.value = (W2.foamChurn != null) ? +W2.foamChurn : 0.35;
+        if (du.uFoam2Thr) du.uFoam2Thr.value.set((W2.foamThrLo != null) ? +W2.foamThrLo : 0.30, (W2.foamThrHi != null) ? +W2.foamThrHi : 0.012,
+                                                 (W2.foamBody != null) ? +W2.foamBody : 0.80, (W2.foamEdgeBub != null) ? +W2.foamEdgeBub : 0.06);
+        if (du.uFoam3) du.uFoam3.value.set((W2.foamFlow != null) ? +W2.foamFlow : 0.06, (W2.foamSoft != null) ? +W2.foamSoft : 0.05,
+                                           (W2.foamGrainK != null) ? +W2.foamGrainK : 0.22, 0);   // (v48.73)
+        if (du.uFoam4) du.uFoam4.value.set((W2.foamRandScale != null) ? +W2.foamRandScale : 45, (W2.foamRandPhase != null) ? +W2.foamRandPhase : 2.5,
+                                           (W2.foamRandWarp != null) ? +W2.foamRandWarp : 1.5, (W2.foamPatch != null) ? +W2.foamPatch : 1.0);   // (v48.75) phase 0 + warp 0 + patch 0 = v48.74's tiled web
+        if (du.uCF) du.uCF.value.set((W2.foamTile != null) ? +W2.foamTile : 45, (W2.foamFeather != null) ? +W2.foamFeather : 0.4,
+                                     (W2.foamWhiteA != null) ? +W2.foamWhiteA : 0.85, (W2.foamLook != null) ? +W2.foamLook : 1);   // (v48.77) foamLook 0 = v48.75's lace
+        if (du.uCB) du.uCB.value.set((W2.bubbleCover != null) ? +W2.bubbleCover : 1.68, (W2.bubbleK != null) ? +W2.bubbleK : 0.9,
+                                     (W2.bubblePar != null) ? +W2.bubblePar : 0.10, (W2.foamTile2 != null) ? +W2.foamTile2 : 2.03);   // (v48.77)
+        if (du.uCBCol && Array.isArray(W2.bubbleCol)) du.uCBCol.value.setRGB(+W2.bubbleCol[0], +W2.bubbleCol[1], +W2.bubbleCol[2]);   // (v48.77)
+        if (du.uFoamTex && !du.uFoamTex.value && game._swFoamTex) du.uFoamTex.value = game._swFoamTex;
+        if (du.uCW) du.uCW.value.set((W2.crestFoam != null) ? +W2.crestFoam : 1.0, (W2.crestTap != null) ? +W2.crestTap : 15.625,
+                                     (W2.crestLam != null) ? +W2.crestLam : 7.5, (W2.crestMin != null) ? +W2.crestMin : 2.0);   // (v48.86)
+        if (du.uCW2) du.uCW2.value.set((W2.crestCover != null) ? +W2.crestCover : 0.6, (W2.crestGain != null) ? +W2.crestGain : 2.0,
+                                       (W2.crestPatch != null) ? +W2.crestPatch : 70, (W2.crestShare != null) ? +W2.crestShare : 0.35);   // (v48.87)
+        if (du.uFoam2Op) du.uFoam2Op.value = (W2.foamOp != null) ? +W2.foamOp : 0.85;   // (v48.70/72)
+        if (du.uFoam2Bub) du.uFoam2Bub.value.set((W2.bubbleSize != null) ? +W2.bubbleSize : 1.2,
+          (W2.bubbleSmall != null) ? +W2.bubbleSmall : (_fSmall ? 0 : 0.55),
+          (W2.bubbleDensity != null) ? +W2.bubbleDensity : 1.0, (W2.bubbleRim != null) ? +W2.bubbleRim : 0.95);   // (v48.71)
+      }
       try {
         const _hAlt = (typeof player !== 'undefined' && player && player.position) ? (player.position.y - WL2) : 1e6;
         const _hSpan = Math.max(_swHullSpan(), (_swShipFootprint().half || 0));   // (v41.57) the real hull
@@ -26176,6 +26768,20 @@ function _swBuildHubWaterDispGet(WL) {
         uMatteLo: { value: 0.06 }, uMatteHi: { value: 0.35 },   // (v41.56) re-based on the measured field
         uFoamGate: { value: 1.0 },   // (v41.75) whitening only where the foam field says the water was churned
         uFoamAll: { value: 0.0 },
+        uFoam2: { value: 1.0 }, uFoam2Lo: { value: 0.04 }, uFoam2Hi: { value: 1.20 },
+        uFoam2S1: { value: 1 / 9.5 }, uFoam2S2: { value: 1 / 3.8 }, uFoam2Bright: { value: 1.05 },   // (v48.68) web frequencies; (v48.72) bright 0.90 -> 1.05; (v48.73) tiles 60 / 24 u
+        uFoam2Lace: { value: 1.0 }, uFoam2Churn: { value: 0.35 },
+        uFoam2Thr: { value: new THREE.Vector4(0.30, 0.012, 0.80, 0.06) },   // (v48.69) see the fragment; (v48.73) re-based on the fixed web
+        uFoam2Op: { value: 0.85 },   // (v48.70) opacity; (v48.72) 0.5 -> 0.85, "they are grey"
+        uFoam2Bub: { value: new THREE.Vector4(1.2, 0.55, 1.0, 0.95) },   // (v48.71) bubbles; (v48.73) a packed grain, 3.5/1.6 -> 1.2/0.55
+        uFoam3: { value: new THREE.Vector4(0.06, 0.05, 0.22, 0) },       // (v48.73) see the fragment
+        uFoam4: { value: new THREE.Vector4(45, 2.5, 1.5, 1.0) },         // (v48.75) no tile - see the fragment
+        uFoamTex: { value: null },
+        uCF: { value: new THREE.Vector4(45, 0.4, 0.85, 1) },
+        uCB: { value: new THREE.Vector4(1.68, 0.9, 0.10, 2.03) },
+        uCBCol: { value: new THREE.Color(0.10, 0.42, 0.40) },
+        uCW: { value: new THREE.Vector4(1.0, 15.625, 7.5, 2.0) },   // (v48.86) whitecaps - see the fragment
+        uCW2: { value: new THREE.Vector4(0.6, 2.0, 70, 0.35) },   // (v48.87) + the breaking patches (scale u, share)
         uFoamAlb: { value: 0.45 }, uFoamAlbCol: { value: new THREE.Color(0.58, 0.74, 0.78) },   // (v41.56) 0.75 was a whitewash
         tDiffuse: { value: null }, uReflMatrix: { value: new THREE.Matrix4() }, uReflMix: { value: 1.0 }, uReflLive: { value: 0.0 }, uReflPerturb: { value: 4.0 }, uReflBright: { value: 1.6 },
         uReflFar: { value: 9000.0 },
@@ -26253,6 +26859,14 @@ function _swBuildHubWaterDispGet(WL) {
       'uniform float uPeakHi; uniform float uCapLo; uniform float uCapHi; uniform float uCapStr; uniform float uCapSteep; uniform float uCapFreq; uniform float uCapBright;',
       'uniform float uCapFoamLo; uniform float uCapFoamHi; uniform float uFoamMatte;',   // (v41.53/41.54)
       'uniform float uMatteLo; uniform float uMatteHi; uniform float uFoamAlb; uniform vec3 uFoamAlbCol; uniform float uFoamGate; uniform float uFoamAll;',   // (v41.55/75/76)
+      'uniform float uFoam2; uniform float uFoam2Lo; uniform float uFoam2Hi; uniform float uFoam2S1; uniform float uFoam2S2; uniform float uFoam2Bright; uniform float uFoam2Lace; uniform float uFoam2Churn;',   // (v48.67)
+      'uniform vec4 uFoam2Thr;',   // (v48.69) web threshold at thin / at thick foam, the body haze, the edge softness
+      'uniform float uFoam2Op;',   // (v48.70) foam opacity
+      'uniform vec4 uFoam2Bub;',   // (v48.71) big bubble cell, small bubble cell (world units); (v48.73) z, w unused
+      'uniform vec4 uFoam3;',   // (v48.73) lace drift speed, lace edge softness, grain strength, -
+      'uniform vec4 uFoam4;',   // (v48.75) randomness: noise scale (world units), phase, warp (radians), patchiness
+      'uniform sampler2D uFoamTex; uniform vec4 uCF; uniform vec4 uCB; uniform vec3 uCBCol;',   // (v48.77) Crest's foam look - see the fragment
+      'uniform vec4 uCW; uniform vec4 uCW2;',   // (v48.86) whitecaps on the crests: (strength, tap u, lambda u, crest min u), (coverage, gain, -, -)
       'uniform float uReflWave; uniform float uReflChop; uniform float uReflChopFreq;',   // (v41.50/41.51)
       'uniform float uReflDevD; uniform float uReflDevN; uniform float uReflOut;',   // (v41.56/41.74)
       'uniform float uWHorizStr; uniform float uWHorizA; uniform float uWHorizB;',
@@ -26269,6 +26883,36 @@ function _swBuildHubWaterDispGet(WL) {
       '#include <fog_pars_fragment>',
       'float _h2(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }',
       'float _vn(vec2 p){ vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f); float a=_h2(i), b=_h2(i+vec2(1.0,0.0)), cc=_h2(i+vec2(0.0,1.0)), dd=_h2(i+vec2(1.0,1.0)); return mix(mix(a,b,f.x), mix(cc,dd,f.x), f.y); }',
+      'float _fmCaus(vec2 p, float t){',
+      '  p -= 250.0;',   // (v48.71) the reference caustic's offset - without it the web saturates to solid white everywhere
+      '  vec2 i = p; float c = 1.0;',
+      '  for (int n = 0; n < 4; n++) {',
+      '    float tt = t * (1.0 - (3.5 / float(n + 1)));',
+      '    i = p + vec2(cos(tt - i.x) + sin(tt + i.y), sin(tt - i.y) + cos(tt + i.x));',
+      '    c += 1.0 / length(vec2(p.x / (sin(i.x + tt) / 0.005), p.y / (cos(i.y + tt) / 0.005)));',
+      '  }',
+      '  c /= 4.0;',
+      '  c = 1.17 - pow(c, 1.4);',
+      '  return clamp(pow(abs(c), 8.0), 0.0, 1.0);',
+      '}',
+      'vec2 _fmH2(vec2 p){ vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973)); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.xx + p3.yz) * p3.zy); }',
+      'vec2 _fmVN2(vec2 p){ vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);',
+      '  return mix(mix(_fmH2(i), _fmH2(i + vec2(1.0, 0.0)), f.x), mix(_fmH2(i + vec2(0.0, 1.0)), _fmH2(i + vec2(1.0, 1.0)), f.x), f.y); }',
+      'vec3 _fmBub(vec2 p, float dens, vec2 L2, float aa){',
+      '  vec2 i = floor(p), f = fract(p); float rim = 0.0, fill = 0.0, spot = 0.0;',
+      '  for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {',
+      '    vec2 g = vec2(float(x), float(y)); vec2 h = _fmH2(i + g);',
+      '    if (fract(h.x * 17.13 + h.y * 3.71) > dens) continue;',
+      '    vec2 cc = g + 0.2 + 0.6 * h - f;',
+      '    float r = 0.26 + 0.28 * fract(h.y * 7.31 + h.x * 1.93);',
+      '    float d = length(cc);',
+      '    float w = max(0.05, aa * 1.5);',
+      '    rim = max(rim, smoothstep(r - w * 2.2, r - w * 0.4, d) * (1.0 - smoothstep(r - w * 0.4, r + w * 0.6, d)));',
+      '    fill = max(fill, 1.0 - smoothstep(r - w, r, d));',
+      '    spot = max(spot, 1.0 - smoothstep(0.0, max(0.12 * r, w), length(cc + L2 * r * 0.42)));',
+      '  }',
+      '  return vec3(rim, fill, spot);',
+      '}',
       'float _swShapeF(float hh){ float sq = hh * (1.0 + uCrestQ * abs(hh)); float x = sq * uGain / max(uDispScale, 0.01); return uDispScale * (x / (1.0 + abs(x))); }',
       'void main(){',
       '  vec3 _dbgSeen = vec3(0.0); float _dbgCap = 0.0;',
@@ -26382,14 +27026,104 @@ function _swBuildHubWaterDispGet(WL) {
       '    vec3 dc = base;',
       '    if (uDebugTerm < 1.5) dc = refl * fres;',
       '    else if (uDebugTerm < 2.5) dc = vec3(fres);',
-      '    else if (uDebugTerm < 3.5) dc = vec3(vFoam);',
+      '    else if (uDebugTerm < 3.5) dc = vec3(texture2D(uRippleTex, clamp(vRipUv, 0.001, 0.999)).z * vWinFade);',   // (v48.73) per pixel, as the foam reads it
       '    else if (uDebugTerm < 4.5) dc = vec3(abs(vDisp) * 2.5);',
       '    else if (uDebugTerm < 5.5) dc = vec3(1.0 - N.y);',
       '    else if (uDebugTerm < 6.5) dc = _dbgSeen;',
       '    else if (uDebugTerm < 7.5) dc = vec3(_dbgCap);',
       '    gl_FragColor = vec4(dc, 1.0); return;',
       '  }',
+      '  float _fk = 0.0;',
+      '  if (uFoam2 > 0.5 && uCF.w > 0.5) {',
+      '    vec4 _hsc = texture2D(uRippleTex, clamp(vRipUv, 0.001, 0.999));',
+      '    float _Fc = clamp(_hsc.z * vWinFade, 0.0, 1.0);',
+      '    if (uCW.x > 0.0 && vWinFade > 0.0) {',
+      '      float _dCc = _swShapeF(_hsc.x);',
+      '      if (_dCc > uCW.w) {',
+      '        float _tp = uCW.y / uRippleBounds;',
+      '        float _d1 = _swShapeF(texture2D(uRippleTex, clamp(vRipUv - vec2(_tp, 0.0), 0.001, 0.999)).x);',
+      '        float _d2 = _swShapeF(texture2D(uRippleTex, clamp(vRipUv + vec2(_tp, 0.0), 0.001, 0.999)).x);',
+      '        float _d3 = _swShapeF(texture2D(uRippleTex, clamp(vRipUv - vec2(0.0, _tp), 0.001, 0.999)).x);',
+      '        float _d4 = _swShapeF(texture2D(uRippleTex, clamp(vRipUv + vec2(0.0, _tp), 0.001, 0.999)).x);',
+      '        float _d5 = _swShapeF(texture2D(uRippleTex, clamp(vRipUv + vec2(_tp, _tp), 0.001, 0.999)).x);',
+      '        float _d6 = _swShapeF(texture2D(uRippleTex, clamp(vRipUv + vec2(-_tp, _tp), 0.001, 0.999)).x);',
+      '        float _d7 = _swShapeF(texture2D(uRippleTex, clamp(vRipUv + vec2(_tp, -_tp), 0.001, 0.999)).x);',
+      '        float _d8 = _swShapeF(texture2D(uRippleTex, clamp(vRipUv - vec2(_tp, _tp), 0.001, 0.999)).x);',
+      '        float _tt = uCW.y * uCW.y;',
+      '        float _cxx = (_d1 - 2.0 * _dCc + _d2) / _tt, _czz = (_d3 - 2.0 * _dCc + _d4) / _tt, _cxz = (_d5 - _d6 - _d7 + _d8) / (4.0 * _tt);',
+      '        float _cdet = (1.0 + uCW.z * _cxx) * (1.0 + uCW.z * _czz) - (uCW.z * _cxz) * (uCW.z * _cxz);',
+      '        vec2 _cwn = _fmVN2(vWP.xz / max(uCW2.z, 1.0) + uTime * 0.07);',
+      '        float _cwm = smoothstep(1.0 - uCW2.w - 0.12, 1.0 - uCW2.w + 0.12, _cwn.x * 0.7 + _cwn.y * 0.3);',
+      '        _Fc = max(_Fc, clamp((uCW2.x - _cdet) * uCW2.y, 0.0, 1.0) * uCW.x * _cwm * vWinFade);',
+      '      }',
+      '    }',
+      '    if (_Fc > 0.003) {',
+      '      vec2 _q = vWP.xz;',
+      '      vec2 _nw = (_fmVN2(_q / (uCF.x * 2.2)) - 0.5) * 0.6;',
+      '      vec2 _u0 = _q / uCF.x + _nw;',
+      '      vec2 _u1 = _q / (uCF.x * uCB.w) + vec2(0.37, 0.61) - _nw.yx * 0.7;',
+      '      float _lodv = smoothstep(1.0, 3.0, length(fwidth(_u0)) * 450.0);',
+      '      float _ft = mix(0.5 * (texture2D(uFoamTex, _u0).r + texture2D(uFoamTex, _u1).r), texture2D(uFoamTex, _u1).r, _lodv);',
+      '      float _thc = 1.0 - _Fc;',
+      '      float _wf = smoothstep(_thc, _thc + uCF.y, _ft);',
+      '      vec3 _Vv = normalize(cameraPosition - vWP);',
+      '      vec2 _par = -uCB.z * _Vv.xz / max(dot(N, _Vv), 0.25);',
+      '      float _bt = texture2D(uFoamTex, (_q + uTime * vec2(4.3, 2.5)) / (uCF.x * 1.35) + _par - _nw, 3.0).r;',
+      '      float _bc = clamp(_Fc * uCB.x, 0.0, 1.0);',
+      '      c += _bt * uCBCol * _bc * uCB.y;',
+      '      vec3 _Nf = normalize(mix(N, vec3(0.0, 1.0, 0.0), 0.6));',
+      '      float _fl = 0.80 + 0.20 * max(dot(_Nf, sunDir), 0.0);',
+      '      float _fa = clamp(_wf * uCF.z, 0.0, 0.97);',
+      '      c = mix(c, vec3(1.0, 0.996, 0.972) * _fl * uFoam2Bright, _fa);',
+      '      _fk = max(_fa, _bc * 0.35 * uCB.y);',
+      '    }',
+      '  } else {',
+      '  float _F = (uFoam2 > 0.5) ? texture2D(uRippleTex, clamp(vRipUv, 0.001, 0.999)).z * vWinFade : 0.0;',
+      '  if (_F > uFoam2Lo * 0.5) {',
+      '    float _fcov = smoothstep(uFoam2Lo, max(uFoam2Hi, uFoam2Lo + 0.01), _F);',
+      '    vec2 _q = vWP.xz;',
+      '    vec2 _nq = _q / max(uFoam4.x, 1.0);',
+      '    vec2 _n1 = _fmVN2(_nq), _n2 = _fmVN2(_nq * 2.03 + 7.1);',
+      '    vec2 _wq = (vec2(_n1.y, _n2.y) - 0.5) * uFoam4.z;',
+      '    float _fw = length(fwidth(_q * uFoam2S1));',
+      '    float _web = _fmCaus(mod(_q * uFoam2S1 + _wq, 6.2831853), uTime * uFoam3.x + (_n1.x + 0.5 * _n2.x) * uFoam4.y);',
+      '    float _oct = 1.0;',
+      '    if (uFoam2S2 > 0.0) {',
+      '      vec2 _q2 = vec2(0.866 * _q.x - 0.5 * _q.y, 0.5 * _q.x + 0.866 * _q.y) * uFoam2S2;',
+      '      float _v2 = 1.0 - smoothstep(0.35, 0.9, length(fwidth(_q2)));',
+      '      if (_v2 > 0.0) _web = max(_web, 0.85 * _v2 * _fmCaus(mod(_q2 + vec2(_wq.y, -_wq.x), 6.2831853), uTime * uFoam3.x * 0.8 + 1.7 + (_n2.y + 0.5 * _n1.x) * uFoam4.y));',
+      '      _oct = 1.0 + _v2;',
+      '    }',
+      '    vec2 _n3 = _fmVN2(_q / max(uFoam4.x * 2.4, 1.0) + 41.0);',
+      '    float _pv = (_n3.x * 0.65 + _n1.y * 0.35 - 0.5) * 2.0 * uFoam4.w;',
+      '    vec2 _L2 = normalize(sunDir.xz + vec2(1e-4));',
+      '    vec2 _pb = _q / max(uFoam2Bub.x, 0.05);',
+      '    float _bw = length(fwidth(_pb));',
+      '    float _near = 1.0 - smoothstep(0.30, 0.70, _bw);',
+      '    vec3 _b = vec3(0.0);',
+      '    if (_near > 0.0) {',
+      '      _b = _fmBub(_pb, 1.0, _L2, _bw);',
+      '      if (uFoam2Bub.y > 0.0) { vec2 _ps = _q / uFoam2Bub.y + 17.3; float _bw2 = length(fwidth(_ps)); float _ns = 1.0 - smoothstep(0.30, 0.70, _bw2); if (_ns > 0.0) _b = max(_b, _fmBub(_ps, 1.0, _L2, _bw2) * _ns); }',
+      '      _b *= _near;',
+      '    }',
+      '    float _thr = mix(uFoam2Thr.x, uFoam2Thr.y, pow(_fcov, 0.7)) * exp(_pv) / max(uFoam2Lace, 0.05);',
+      '    float _lace = smoothstep(_thr - 0.5 * uFoam3.y, _thr + 0.5 * uFoam3.y, _web + (_b.x - 0.35 * _b.y) * uFoam2Thr.w);',
+      '    float _body = smoothstep(uFoam2Thr.z, 1.0, _fcov);',
+      '    float _lod = smoothstep(0.35, 0.9, _fw);',
+      '    float _farM = 1.0 - pow(1.0 - exp(-8.0 * _thr), _oct);',
+      '    float _m = max(mix(_lace, _farM, _lod), _body);',
+      '    _m *= smoothstep(0.0, 0.08, _fcov);',
+      '    float _tex = 1.0 - uFoam3.z * _b.y * (1.0 - _b.x);',
+      '    c = mix(c, c + vec3(0.05, 0.08, 0.09), _fcov * uFoam2Churn);',
+      '    vec3 _Nf = normalize(mix(N, vec3(0.0, 1.0, 0.0), 0.6));',
+      '    float _fl = 0.80 + 0.20 * max(dot(_Nf, sunDir), 0.0);',   // (v48.72) was 0.60 + 0.40
+      '    float _fa = clamp(_m * _tex * uFoam2Op, 0.0, 0.97);',
+      '    c = mix(c, vec3(0.93, 0.96, 0.99) * _fl * (1.0 + 0.10 * _b.z) * uFoam2Bright, _fa);',
+      '    _fk = _fa;',
+      '  }',
+      '  }',   // (v48.77) end of the v48.75 lace (foamLook 0)
       '  float _aOut = aGraze * mix(1.0, shoreA, uShoreFade) * edgeFade;',
+      '  _aOut = max(_aOut, clamp(_fk, 0.0, 0.95) * edgeFade);',   // (v48.67) foam is opaque where the water is see-through
       '  if (_aOut < 0.01) discard;',
       '  gl_FragColor = vec4(c, _aOut);',
       '  #include <fog_fragment>',
@@ -26416,6 +27150,16 @@ function _swBuildHubWaterDispGet(WL) {
   mesh.onAfterRender = function () { try { const u = mesh.material.uniforms; if (u && u.uRefract) u.uRefract.value = 0.0; } catch (_) {} };
   _hubWaterDisp = mesh;
   try { game._hubWaterDispMat = mat; } catch (_) {}
+  try {
+    if (!game._swFoamTex && THREE.TextureLoader) {
+      game._swFoamTex = new THREE.TextureLoader().load('effects/foam/foam.png', (t) => { t.needsUpdate = true; }, undefined,
+        (e) => { try { console.warn('[foam] effects/foam/foam.png failed', e); } catch (_) {} });
+      game._swFoamTex.wrapS = game._swFoamTex.wrapT = THREE.RepeatWrapping;
+      game._swFoamTex.minFilter = THREE.LinearMipmapLinearFilter; game._swFoamTex.magFilter = THREE.LinearFilter;
+      try { game._swFoamTex.anisotropy = Math.min(4, renderer.capabilities.getMaxAnisotropy()); } catch (_) {}
+    }
+    if (mat.uniforms.uFoamTex) mat.uniforms.uFoamTex.value = game._swFoamTex || null;
+  } catch (_) {}
   return mesh;
 }
 function _swBuildHubWater(T) {
@@ -35227,6 +35971,8 @@ const _clipmap = { levels: null, solidGeo: null, ringGeo: null, on: false, raf: 
 
 
 const _CLIP_SKIRT = 220;
+const _CLIP_W = 16;       // (v48.62) angular wedges per level - see _clipGeo
+const _CLIP_WCORE = 64;   // (v48.62) half-size in cells of the solid level's always-drawn core (+-2048 u at 32 u)
 function _clipGeo(hole) {
   const N = _CLIP_N, R = N + 1;
   
@@ -35239,12 +35985,19 @@ function _clipGeo(hole) {
     pos[k * 3] = i - N * 0.5; pos[k * 3 + 1] = 0; pos[k * 3 + 2] = j - N * 0.5;
     uv[k * 2] = i / N; uv[k * 2 + 1] = j / N;   
   }
-  const idx = [];
-  const h0 = (N - hole) * 0.5, h1 = (N + hole) * 0.5;
-  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
-    if (hole > 0 && i >= h0 && i < h1 && j >= h0 && j < h1) continue;   
-    const a = j * R + i, b = a + 1, c = a + R, d = c + 1;
-    idx.push(a, c, b, b, c, d);
+  const W = _CLIP_W, bucket = [], core = [];
+  for (let w = 0; w < W; w++) bucket.push([]);
+  const wOf = (x, z) => { let w = Math.floor((Math.atan2(z, x) + Math.PI) / (2 * Math.PI) * W); if (w >= W) w = W - 1; if (w < 0) w = 0; return w; };
+  const h0 = (N - hole) * 0.5, h1 = (N + hole) * 0.5, TL = 8;
+  for (let tj = 0; tj < N; tj += TL) for (let ti = 0; ti < N; ti += TL) {
+    const je = Math.min(tj + TL, N), ie = Math.min(ti + TL, N);
+    for (let j = tj; j < je; j++) for (let i = ti; i < ie; i++) {
+      if (hole > 0 && i >= h0 && i < h1 && j >= h0 && j < h1) continue;
+      const xc = i + 0.5 - N * 0.5, zc = j + 0.5 - N * 0.5;
+      const B = (hole === 0 && Math.max(Math.abs(xc), Math.abs(zc)) < _CLIP_WCORE) ? core : bucket[wOf(xc, zc)];
+      const a = j * R + i, b = a + 1, c = a + R, d = c + 1;
+      B.push(a, c, b, b, c, d);
+    }
   }
   const perim = [];
   for (let i = 0; i < N; i++) perim.push(i);              
@@ -35257,10 +36010,11 @@ function _clipGeo(hole) {
     pos[sk * 3] = pos[gv * 3]; pos[sk * 3 + 1] = 0; pos[sk * 3 + 2] = pos[gv * 3 + 2];
     uv[sk * 2] = uv[gv * 2]; uv[sk * 2 + 1] = uv[gv * 2 + 1]; skirt[sk] = _CLIP_SKIRT;
   }
-  for (let p = 0; p < P; p++) {                            
+  for (let p = 0; p < P; p++) {
     const gv = perim[p], gvN = perim[(p + 1) % P], sk = gridV + p, skN = gridV + ((p + 1) % P);
-    idx.push(gv, sk, gvN, gvN, sk, skN);
-    idx.push(gv, gvN, sk, gvN, skN, sk);
+    const B = bucket[wOf((pos[gv * 3] + pos[gvN * 3]) * 0.5, (pos[gv * 3 + 2] + pos[gvN * 3 + 2]) * 0.5)];   // (v48.62)
+    B.push(gv, sk, gvN, gvN, sk, skN);
+    B.push(gv, gvN, sk, gvN, skN, sk);
   }
   if (hole > 0) {
     const inner = [];
@@ -35276,15 +36030,37 @@ function _clipGeo(hole) {
     }
     for (let p = 0; p < IP; p++) {
       const gv = inner[p], gvN = inner[(p + 1) % IP], sk = ib + p, skN = ib + ((p + 1) % IP);
-      idx.push(gv, sk, gvN, gvN, sk, skN);
-      idx.push(gv, gvN, sk, gvN, skN, sk);
+      const B = bucket[wOf((pos[gv * 3] + pos[gvN * 3]) * 0.5, (pos[gv * 3 + 2] + pos[gvN * 3 + 2]) * 0.5)];   // (v48.62)
+      B.push(gv, sk, gvN, gvN, sk, skN);
+      B.push(gv, gvN, sk, gvN, skN, sk);
     }
+  }
+  let total = core.length;
+  for (let w = 0; w < W; w++) total += 2 * bucket[w].length;
+  const index = new Uint32Array(total);
+  let o = 0;
+  index.set(core, o); o += core.length;
+  const start = new Int32Array(2 * W + 1), aabb = new Float32Array(W * 4);
+  for (let rep = 0; rep < 2; rep++) for (let w = 0; w < W; w++) {
+    start[rep * W + w] = o; index.set(bucket[w], o); o += bucket[w].length;
+  }
+  start[2 * W] = o;
+  for (let w = 0; w < W; w++) {
+    let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+    const Bw = bucket[w];
+    for (let t = 0; t < Bw.length; t++) {
+      const v = Bw[t], x = pos[v * 3], z = pos[v * 3 + 2];
+      if (x < x0) x0 = x; if (x > x1) x1 = x; if (z < z0) z0 = z; if (z > z1) z1 = z;
+    }
+    aabb[w * 4] = x0; aabb[w * 4 + 1] = x1; aabb[w * 4 + 2] = z0; aabb[w * 4 + 3] = z1;
   }
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
   g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
   g.setAttribute('aSkirt', new THREE.BufferAttribute(skirt, 1));
-  g.setIndex(idx);
+  g.setIndex(new THREE.BufferAttribute(index, 1));
+  g.userData.clipW = { W, coreCount: core.length, start, aabb, lens: bucket.map(b => b.length) };
+  g.setDrawRange(core.length, start[W] - core.length);   // everything except the core, once (the core has its own mesh)
   return g;
 }
 
@@ -35665,8 +36441,10 @@ function _clipBakeLevel(L) {
   const N = _CLIP_N, R = N + 1, sp = L.spacing;
   L.gIx = Math.round(L.cx / sp) - N / 2; L.gIz = Math.round(L.cz / sp) - N / 2;
   const d = L.data;
+  let _mn = L.hMin, _mx = L.hMax;   // (v48.62) grow-only height range for the wedge boxes
   for (let jj = 0; jj <= N; jj++) { const gz = L.gIz + jj, trow = (((gz % R) + R) % R) * R, wz = gz * sp;
-    for (let ii = 0; ii <= N; ii++) { const gx = L.gIx + ii; d[trow + (((gx % R) + R) % R)] = _clipCellH(gx * sp, wz, sp, T, L.k); } }
+    for (let ii = 0; ii <= N; ii++) { const gx = L.gIx + ii; const _h = _clipCellH(gx * sp, wz, sp, T, L.k); d[trow + (((gx % R) + R) % R)] = _h; if (_h < _mn) _mn = _h; if (_h > _mx) _mx = _h; } }
+  L.hMin = _mn; L.hMax = _mx;
   if (!L.tex) {
     L.tex = new THREE.DataTexture(d, R, R, THREE.RedFormat, THREE.FloatType);
     L.tex.minFilter = L.tex.magFilter = THREE.NearestFilter;   
@@ -35699,12 +36477,14 @@ function _clipBakeEdge(L, ogx, ogz) {
   const T = game.sandwichTerrain; if (!T) return;
   const _cbT = performance.now();
   const N = _CLIP_N, R = N + 1, sp = L.spacing, d = L.data, ngx = L.gIx, ngz = L.gIz;
+  let _mn = L.hMin, _mx = L.hMax;   // (v48.62) grow-only height range - see _clipBakeLevel
   for (let gx = ngx; gx <= ngx + N; gx++) { if (gx >= ogx && gx <= ogx + N) continue;
     const tcol = ((gx % R) + R) % R, wx = gx * sp;
-    for (let jj = 0; jj <= N; jj++) { const gz = ngz + jj; d[(((gz % R) + R) % R) * R + tcol] = _clipCellH(wx, gz * sp, sp, T, L.k); } }
+    for (let jj = 0; jj <= N; jj++) { const gz = ngz + jj; const _h = _clipCellH(wx, gz * sp, sp, T, L.k); d[(((gz % R) + R) % R) * R + tcol] = _h; if (_h < _mn) _mn = _h; if (_h > _mx) _mx = _h; } }
   for (let gz = ngz; gz <= ngz + N; gz++) { if (gz >= ogz && gz <= ogz + N) continue;
     const trow = (((gz % R) + R) % R) * R, wz = gz * sp;
-    for (let ii = 0; ii <= N; ii++) { const gx = ngx + ii; d[trow + (((gx % R) + R) % R)] = _clipCellH(gx * sp, wz, sp, T, L.k); } }
+    for (let ii = 0; ii <= N; ii++) { const gx = ngx + ii; const _h = _clipCellH(gx * sp, wz, sp, T, L.k); d[trow + (((gx % R) + R) % R)] = _h; if (_h < _mn) _mn = _h; if (_h > _mx) _mx = _h; } }
+  L.hMin = _mn; L.hMax = _mx;
   L.mat._clipOrigin.value.set(((ngx % R) + R) % R, ((ngz % R) + R) % R);
   _clipOriginP(L);
   L.tex.needsUpdate = true;
@@ -35733,11 +36513,73 @@ function _clipBuild() {
     const mesh = new THREE.Mesh(k === 0 ? _clipmap.solidGeo : _clipmap.ringGeo, mat);
     mesh.receiveShadow = true;
     mesh.scale.set(spacing, 1, spacing);
-    mesh.frustumCulled = false; mesh.renderOrder = -2; mesh.userData = { isClipmap: true };
+    mesh.frustumCulled = false; mesh.renderOrder = -2; mesh.userData = { isClipmap: true, clipK: k };
+    mesh.onBeforeRender = function (r, s, cam, geo) { _clipWedgeRange(this, cam, geo); };   // (v48.62)
+    if (k === 0 && _clipmap.solidGeo.userData.clipW) {
+      const cg = new THREE.BufferGeometry();
+      for (const nm of Object.keys(_clipmap.solidGeo.attributes)) cg.setAttribute(nm, _clipmap.solidGeo.attributes[nm]);
+      cg.setIndex(_clipmap.solidGeo.index);
+      cg.setDrawRange(0, _clipmap.solidGeo.userData.clipW.coreCount);
+      const core = new THREE.Mesh(cg, mat);
+      core.receiveShadow = true; core.frustumCulled = false; core.renderOrder = -2; core.userData = { isClipmapCore: true };
+      mesh.add(core);
+    }
     mesh.visible = false; scene.add(mesh);
-    _clipmap.levels.push({ k: k, spacing: spacing, span: _CLIP_N * spacing, mesh: mesh, mat: mat, tex: null, data: new Float32Array((_CLIP_N + 1) * (_CLIP_N + 1)), cx: 1e9, cz: 1e9 });
+    _clipmap.levels.push({ k: k, spacing: spacing, span: _CLIP_N * spacing, mesh: mesh, mat: mat, tex: null, data: new Float32Array((_CLIP_N + 1) * (_CLIP_N + 1)), cx: 1e9, cz: 1e9,
+                           hMin: Infinity, hMax: -Infinity });   // (v48.62) every height this atlas has held - see _clipWedgeRange
   }
 }
+
+const _cwM = new THREE.Matrix4(), _cwF = new THREE.Frustum(), _cwVis = new Uint8Array(32);
+const _CW = { renders: 0, kept: 0, total: 0 };
+function _clipWedgeRange(mesh, cam, geo) {
+  const W = geo.userData.clipW;
+  if (!W) return;
+  const full = () => { geo.drawRange.start = W.coreCount; geo.drawRange.count = W.start[W.W] - W.coreCount; };
+  try {
+    if ((typeof window !== 'undefined' && window.__clipWedge === 0) || !cam || !cam.projectionMatrix ||
+        (typeof game !== 'undefined' && game && game.bendWorld)) { full(); return; }
+    const L = _clipmap.levels && _clipmap.levels[mesh.userData.clipK];
+    if (!L || !(L.hMax >= L.hMin)) { full(); return; }
+    const Pl = _clipmap.levels[L.k + 1];
+    let y0 = L.hMin, y1 = L.hMax;
+    if (Pl && Pl.hMax >= Pl.hMin) { if (Pl.hMin < y0) y0 = Pl.hMin; if (Pl.hMax > y1) y1 = Pl.hMax; }
+    y0 -= _CLIP_SKIRT + 64; y1 += 64;
+    _cwM.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+    _cwF.setFromProjectionMatrix(_cwM);
+    const e = mesh.matrixWorld.elements, px = e[12], pz = e[14], sx = e[0], sz = e[10];
+    const n = W.W, A = W.aabb, PL = _cwF.planes;
+    let anyV = false, allV = true;
+    for (let w = 0; w < n; w++) {
+      const bx0 = px + A[w * 4] * sx, bx1 = px + A[w * 4 + 1] * sx, bz0 = pz + A[w * 4 + 2] * sz, bz1 = pz + A[w * 4 + 3] * sz;
+      let v = 1;
+      for (let k = 0; k < 4; k++) {
+        const pn = PL[k].normal, c = PL[k].constant;
+        const x = pn.x > 0 ? bx1 : bx0, y = pn.y > 0 ? y1 : y0, z = pn.z > 0 ? bz1 : bz0;
+        if (pn.x * x + pn.y * y + pn.z * z + c < 0) { v = 0; break; }
+      }
+      _cwVis[w] = v;
+      if (v) anyV = true; else allV = false;
+    }
+    _CW.renders++; _CW.total += n;
+    if (allV) { _CW.kept += n; full(); return; }
+    if (!anyV) { geo.drawRange.start = W.coreCount; geo.drawRange.count = 0; return; }
+    let bestLen = 0, bestEnd = 0, run = 0;
+    for (let t = 0; t < 2 * n; t++) {
+      if (!_cwVis[t % n]) { run++; if (run > bestLen) { bestLen = run; bestEnd = t; } } else run = 0;
+    }
+    if (bestLen > n) bestLen = n;
+    const first = (bestEnd + 1) % n, cnt = n - bestLen;   // arc = wedges first .. first+cnt-1 (mod n)
+    _CW.kept += cnt;
+    geo.drawRange.start = W.start[first];
+    geo.drawRange.count = W.start[first + cnt] - W.start[first];
+  } catch (_) { full(); }
+}
+if (typeof window !== 'undefined') window.__clipWedgeInfo = function (reset) {
+  const r = { renders: _CW.renders, wedgesKeptPct: _CW.total ? +(100 * _CW.kept / _CW.total).toFixed(1) : null };
+  if (reset) { _CW.renders = 0; _CW.kept = 0; _CW.total = 0; }
+  return r;
+};
 
 function _clipEyeSet(x, z) {
   const u = (window.__clipEyeU || (window.__clipEyeU = { value: new THREE.Vector2(0, 0) }));
@@ -38450,6 +39292,7 @@ function _lssTexCap() {
   const K = (typeof window !== 'undefined') ? window.__texCap : null;
   if (K && K.on === false) return 0;
   if (K && typeof K.max === 'number') return K.max;
+  try { const _m = /[?&]texcap=(\d+)/i.exec(location.search || ''); if (_m) return +_m[1]; } catch (_) {}
   let small = false;
   try {
     small = (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) ||
@@ -38476,7 +39319,10 @@ function _lssSkyTexCap() {
   try { if (QUALITY && (QUALITY.isMega() || QUALITY.isUltra())) return 0; } catch (_) {}
   return 2048;
 }
-function _lssShrinkTexture(t, cap) {
+function _lssTexLQ() {
+  try { return /[?&]texlq\b/i.test(location.search || '') || window.__texHQ === false; } catch (_) { return false; }
+}
+function _lssShrinkTexture(t, cap, hq) {
   if (!t || !t.isTexture || !cap) return false;
   const img = t.image;
   if (!img || !img.width || !img.height) return false;
@@ -38488,7 +39334,9 @@ function _lssShrinkTexture(t, cap) {
   try {
     const c = document.createElement('canvas');
     c.width = w; c.height = h;
-    c.getContext('2d').drawImage(img, 0, 0, w, h);
+    const cx = c.getContext('2d');
+    if (hq && !_lssTexLQ()) { cx.imageSmoothingEnabled = true; cx.imageSmoothingQuality = 'high'; }
+    cx.drawImage(img, 0, 0, w, h);
     t.image = c;                 // r152+: setter writes source.data
     t.needsUpdate = true;
     try { if (img.close) img.close(); } catch (_) {}
@@ -38497,9 +39345,58 @@ function _lssShrinkTexture(t, cap) {
 }
 const _TEX_MAP_KEYS = ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap',
                        'aoMap', 'alphaMap', 'bumpMap', 'displacementMap', 'specularMap'];
+let _lssAnisoPref = null;
+const _lssModelTexRefs = [];   // WeakRefs to every model texture - the live knob's walk
+function _lssModelAniso() {
+  let pref = null;
+  try { pref = _lssAnisoPref; } catch (_) {}
+  if (typeof pref !== 'number') {
+    try { const _m = /[?&]aniso=(\d+)/i.exec(location.search || ''); if (_m) pref = +_m[1]; } catch (_) {}
+  }
+  if (typeof pref === 'number') return Math.max(1, pref | 0);
+  let small = false;
+  try {
+    small = (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) ||
+            ((typeof isStandaloneQuest === 'function') && isStandaloneQuest()) ||
+            ((typeof isXRPresenting === 'function') && isXRPresenting());
+  } catch (_) {}
+  if (small) return 1;
+  let mx = 1;
+  try { mx = renderer.capabilities.getMaxAnisotropy() || 1; } catch (_) {}
+  return Math.max(1, Math.min(8, mx));
+}
+if (typeof window !== 'undefined') window.__hullAniso = function (n) {
+  if (typeof n === 'number') _lssAnisoPref = Math.max(1, n | 0);
+  const want = _lssModelAniso();
+  let live = 0, applied = 0, mx = 1;
+  try { mx = renderer.capabilities.getMaxAnisotropy() || 1; } catch (_) {}
+  const gl = renderer.getContext();
+  const ext = gl.getExtension('EXT_texture_filter_anisotropic');
+  const seen = new Set();
+  for (let i = _lssModelTexRefs.length - 1; i >= 0; i--) {
+    const t = _lssModelTexRefs[i].deref();
+    if (!t) { _lssModelTexRefs.splice(i, 1); continue; }
+    if (seen.has(t)) continue;
+    seen.add(t);
+    live++;
+    if (typeof n !== 'number') continue;
+    t.anisotropy = want;
+    const p = renderer.properties.get(t);
+    if (ext && p && p.__webglTexture) {
+      renderer.state.bindTexture(gl.TEXTURE_2D, p.__webglTexture);
+      gl.texParameterf(gl.TEXTURE_2D, ext.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(want, mx));
+      p.__currentAnisotropy = want;
+      applied++;
+    }
+  }
+  if (applied) renderer.state.unbindTexture();
+  return { aniso: want, max: mx, textures: live, applied };
+};
 function _lssCapModelTextures(root, label) {
   const cap = _lssTexCap();
-  if (!cap || !root || !root.traverse) return 0;
+  let aniso = 1;
+  try { aniso = _lssModelAniso(); } catch (_) { aniso = 1; }
+  if ((!cap && aniso <= 1) || !root || !root.traverse) return 0;
   const seen = new Set();
   let n = 0;
   root.traverse(o => {
@@ -38511,7 +39408,9 @@ function _lssCapModelTextures(root, label) {
         const t = m[key];
         if (!t || !t.isTexture || seen.has(t.uuid)) continue;
         seen.add(t.uuid);
-        if (_lssShrinkTexture(t, cap)) n++;
+        if (cap && _lssShrinkTexture(t, cap, true)) n++;   // (v48.59) hq: the box-filtered shrink
+        if (aniso > 1) t.anisotropy = aniso;                 // (v48.59) see _lssModelAniso
+        try { if (typeof WeakRef === 'function') _lssModelTexRefs.push(new WeakRef(t)); } catch (_) {}
       }
     }
   });
@@ -47403,6 +48302,7 @@ function _makeRockGeometry(detail, seed) {
 }
 const _AFM_TIME = { value: 0 }, _AFM_VRLITE = { value: 0.0 };
 const _atomFractalMaterials = [];
+let _AFM_SRC = null;   // (v48.61) the atom shader's source, captured from the first material - the rock batch's twin is built from it
 function _makeAtomFractalMaterial(baseColor) {
   const mat = new THREE.ShaderMaterial({
     uniforms: {
@@ -47516,8 +48416,192 @@ function _makeAtomFractalMaterial(baseColor) {
     depthWrite: true,
     side: THREE.FrontSide,
   });
+  mat.userData._atomRock = true;   // (v48.61) how the rock batch recognises a cluster rock - see _ROCKB
+  if (!_AFM_SRC) _AFM_SRC = { vs: mat.vertexShader, fs: mat.fragmentShader };
   return mat;   // (v48.43) no push - the clock and the XR flag are shared uniforms now
 }
+
+const _RB_VERTS = 240;   // IcosahedronGeometry(1, 1), non-indexed: every _makeRockGeometry(1, seed)
+const _ROCKB = { mesh: null, mat: null, cap: 0, used: 0, ready: false, compiling: false, list: [], free: [],
+                 tick: 0, synced: -1, empty: 0, rebuilds: 0, regs: 0, drops: 0 };
+function _rbOn() { try { const K = window.__rockBatch; return !(K === 0 || K === false); } catch (_) { return true; } }
+function _rbIsRock(m) {
+  const mat = m && m.material;
+  if (!m || !m.isMesh || !mat || Array.isArray(mat) || !mat.userData || !mat.userData._atomRock) return false;
+  const g = m.geometry;
+  return !!(g && !g.index && g.attributes && g.attributes.position && g.attributes.normal &&
+            g.attributes.position.count === _RB_VERTS && !g.morphAttributes.position);
+}
+function _rbMaterial() {
+  if (!_AFM_SRC) { try { _makeAtomFractalMaterial(0x808080); } catch (_) {} }
+  if (!_AFM_SRC) return null;
+  const fs = _AFM_SRC.fs.replace('uniform vec3 uBaseColor;',
+    'uniform vec3 uBaseColor;\n#ifdef AFM_BATCHED\nvarying vec3 vBatchColor;\n#define uBaseColor vBatchColor\n#endif');
+  if (fs === _AFM_SRC.fs) return null;   // the source moved under us - stay unbatched rather than draw wrong
+  return new THREE.ShaderMaterial({
+    defines: { AFM_BATCHED: 1 },
+    uniforms: {
+      time:       _AFM_TIME,        // shared, like every atom material (v48.43)
+      uBaseColor: { value: new THREE.Color(1, 1, 1) },   // unused: the colour is per rock, from the batch
+      uOpacity:   { value: 1.0 },
+      uVRLite:    _AFM_VRLITE,
+    },
+    vertexShader: [
+      '#include <batching_pars_vertex>',
+      'varying vec3 vLocalPos;',
+      'varying vec3 vWorldPos;',
+      'varying vec3 vNormal;',
+      '#ifdef AFM_BATCHED',
+      'varying vec3 vBatchColor;',
+      '#endif',
+      'void main() {',
+      '  mat4 _afmM = modelMatrix;',
+      '  vec3 _afmN = normal;',
+      '  #ifdef USE_BATCHING',
+      '    #include <batching_vertex>',
+      '    _afmM = modelMatrix * batchingMatrix;',
+      '    _afmN = mat3(batchingMatrix) * normal;',
+      '  #endif',
+      '  #ifdef USE_BATCHING_COLOR',
+      '    vBatchColor = getBatchingColor(batchId);',
+      '  #elif defined(AFM_BATCHED)',
+      '    vBatchColor = vec3(1.0);',
+      '  #endif',
+      '  vLocalPos = position;',
+      '  vWorldPos = (_afmM * vec4(position, 1.0)).xyz;',
+      '  vNormal   = normalize(normalMatrix * _afmN);',
+      '  gl_Position = projectionMatrix * viewMatrix * _afmM * vec4(position, 1.0);',
+      '}',
+    ].join('\n'),
+    fragmentShader: fs,
+    transparent: false,
+    depthWrite: true,
+    side: THREE.FrontSide,
+  });
+}
+function _rbNew(cap) {
+  const bm = new THREE.BatchedMesh(cap, cap * _RB_VERTS, 0, _ROCKB.mat);
+  bm.name = 'lssRockBatch';
+  bm.frustumCulled = false;             // spans the level; each rock is culled by the batch itself
+  bm.castShadow = false; bm.receiveShadow = false;   // the rocks never cast (checked v48.61)
+  bm.raycast = function () {};          // the stand-ins are what raycasts hit, exactly as before
+  bm._initColorsTexture();              // USE_BATCHING_COLOR from the first compile - no second variant
+  const obr = bm.onBeforeRender;
+  bm.onBeforeRender = function (r, s, c, g, m, grp) { _rbSync(); return obr.call(this, r, s, c, g, m, grp); };
+  bm.visible = false;
+  return bm;
+}
+function _rbAdd(e) {
+  const bm = _ROCKB.mesh;
+  const src = e.p.geometry, g = new THREE.BufferGeometry();
+  g.setAttribute('position', src.attributes.position);
+  g.setAttribute('normal', src.attributes.normal);
+  let id;
+  if (_ROCKB.free.length) { id = _ROCKB.free.pop(); bm.setGeometryAt(id, g); }
+  else { id = bm.addGeometry(g); _ROCKB.used++; }
+  e.id = id;
+  bm.setMatrixAt(id, e.p.matrixWorld);
+  const c = e.mat.uniforms.uBaseColor.value;
+  bm.setColorAt(id, c); e.r = c.r; e.g = c.g; e.b = c.b;
+  bm.setVisibleAt(id, true);
+  e.p.userData._rbId = id;
+}
+function _rbRebuild(cap) {
+  const old = _ROCKB.mesh;
+  _ROCKB.mesh = _rbNew(cap); _ROCKB.cap = cap; _ROCKB.used = 0; _ROCKB.free.length = 0;
+  for (const e of _ROCKB.list) _rbAdd(e);
+  scene.add(_ROCKB.mesh);
+  if (old) { scene.remove(old); try { old.dispose(); } catch (_) {} _ROCKB.rebuilds++; }
+}
+function _rbDrop(i) {
+  const L = _ROCKB.list, e = L[i];
+  try { if (_ROCKB.mesh) _ROCKB.mesh.setVisibleAt(e.id, false); } catch (_) {}
+  _ROCKB.free.push(e.id);
+  try { delete e.p.userData._rbId; } catch (_) {}
+  try { e.mat.visible = true; } catch (_) {}   // it draws itself again if it is ever shown / re-added
+  L[i] = L[L.length - 1]; L.pop();
+  _ROCKB.drops++;
+}
+function _rbDropAll() { for (let i = _ROCKB.list.length - 1; i >= 0; i--) _rbDrop(i); }
+function _rbCompile() {
+  const go = () => {
+    _ROCKB.compiling = false; _ROCKB.ready = true;
+    for (const e of _ROCKB.list) e.mat.visible = false;   // the batch takes over from here
+  };
+  const bm = _ROCKB.mesh;
+  if (!bm || typeof renderer.compileAsync !== 'function') { go(); return; }
+  _ROCKB.compiling = true;
+  let job = null;
+  const pRT = renderer.getRenderTarget();
+  try {
+    const xr = !!(renderer.xr && renderer.xr.isPresenting);
+    if (!xr && typeof postFX !== 'undefined' && postFX && postFX.rtScene) renderer.setRenderTarget(postFX.rtScene);
+    job = renderer.compileAsync(bm, camera, scene);
+  } catch (_) { job = null; } finally { try { renderer.setRenderTarget(pRT); } catch (_) {} }
+  if (!job) { go(); return; }
+  job.then(go, go);
+  setTimeout(() => { if (_ROCKB.compiling) go(); }, 8000);   // never wedge the rocks on a stuck promise
+}
+function _rockBatchScan() {
+  _ROCKB.tick++;
+  const G = (typeof game !== 'undefined') ? game : null;
+  if (!_rbOn() || !G || !G.dynamicObjects) {
+    if (_ROCKB.list.length) _rbDropAll();
+    if (_ROCKB.mesh) _ROCKB.mesh.visible = false;
+    return;
+  }
+  const D = G.dynamicObjects;
+  let pend = null;
+  for (let i = 0; i < D.length; i++) {
+    const o = D[i], p = o && o.mesh;
+    if (!p || !p.parent || !p.visible || p.userData._rbId !== undefined) continue;
+    if (!_rbIsRock(p) || p.material.uniforms.uOpacity.value < 0.999) continue;
+    (pend || (pend = [])).push(p);
+  }
+  if (pend) {
+    if (!_ROCKB.mat) _ROCKB.mat = _rbMaterial();
+    if (_ROCKB.mat) {
+      const need = _ROCKB.list.length + pend.length;
+      if (!_ROCKB.mesh || need > _ROCKB.cap) _rbRebuild(Math.max(128, 1 << Math.ceil(Math.log2(need * 1.25))));
+      for (const p of pend) {
+        const e = { p, parent: p.parent, mat: p.material, id: -1, r: -1, g: -1, b: -1 };
+        _rbAdd(e);
+        _ROCKB.list.push(e);
+        if (_ROCKB.ready) e.mat.visible = false;
+      }
+      _ROCKB.regs += pend.length;
+      if (!_ROCKB.ready && !_ROCKB.compiling) _rbCompile();
+    }
+  }
+  if (_ROCKB.mesh) {
+    if (_ROCKB.list.length) _ROCKB.empty = 0;
+    else if (++_ROCKB.empty > 600) {   // ~5-10 s with nothing to draw: give the buffers back (the material stays, and so its program)
+      scene.remove(_ROCKB.mesh); try { _ROCKB.mesh.dispose(); } catch (_) {}
+      _ROCKB.mesh = null; _ROCKB.cap = 0; _ROCKB.used = 0; _ROCKB.free.length = 0;
+      return;
+    }
+    _ROCKB.mesh.visible = _ROCKB.ready && _ROCKB.list.length > 0;
+  }
+}
+function _rbSync() {
+  if (_ROCKB.synced === _ROCKB.tick) return;
+  _ROCKB.synced = _ROCKB.tick;
+  const bm = _ROCKB.mesh;
+  if (!bm) return;
+  const L = _ROCKB.list;
+  for (let i = L.length - 1; i >= 0; i--) {
+    const e = L[i], p = e.p;
+    if (p.parent !== e.parent || p.material !== e.mat || !p.visible || e.mat.uniforms.uOpacity.value < 0.999) { _rbDrop(i); continue; }
+    bm.setMatrixAt(e.id, p.matrixWorld);
+    const c = e.mat.uniforms.uBaseColor.value;
+    if (c.r !== e.r || c.g !== e.g || c.b !== e.b) { bm.setColorAt(e.id, c); e.r = c.r; e.g = c.g; e.b = c.b; }
+  }
+}
+if (typeof window !== 'undefined') window.__rockBatchInfo = function () {
+  return { on: _rbOn(), ready: _ROCKB.ready, compiling: _ROCKB.compiling, cap: _ROCKB.cap, live: _ROCKB.list.length,
+           free: _ROCKB.free.length, used: _ROCKB.used, registered: _ROCKB.regs, handedBack: _ROCKB.drops,
+           rebuilds: _ROCKB.rebuilds, batchVisible: !!(_ROCKB.mesh && _ROCKB.mesh.visible) };
+};
 
 function spawnRockChunks(pos, baseColor, parentScale) {
   if (typeof isVRStripFx === 'function' && isVRStripFx()) return;
@@ -57593,6 +58677,7 @@ function updateParticles(dt) {
   let _w = 0;
   let _ws = 0;
   const _W6 = window.__water || {};
+  const _HS = (typeof _swSlabFrame === 'function') ? _swSlabFrame() : null;   // (v48.63) the hull the drops may not enter
   const _pkLegacy = Math.pow(0.95, dt * 60);
   const _pkDrop = Math.pow((_W6.dropDrag != null) ? Math.max(0.001, +_W6.dropDrag) : 0.25, dt);
   const _dropG = (_W6.dropGrav != null) ? +_W6.dropGrav : 1.0;
@@ -57612,6 +58697,17 @@ function updateParticles(dt) {
     pos.x += _pv.x * dt;
     pos.y += _pv.y * dt;
     pos.z += _pv.z * dt;
+    if (p.splash && _HS && _HS.on) {
+      if (_swSlabIn(_HS, pos.x, pos.y, pos.z) || _swSlabIn(_HS, pos.x - _pv.x * dt * 0.5, pos.y - _pv.y * dt * 0.5, pos.z - _pv.z * dt * 0.5)) {
+        if (p._hOut) {
+          _HS.kills++;
+          const _lastP = game.particles.length - 1;
+          if (i !== _lastP) game.particles[i] = game.particles[_lastP];
+          game.particles.pop();
+          continue;
+        }
+      } else p._hOut = 1;
+    }
     const _pk = _drop ? _pkDrop : _pkLegacy;   // (v44.22) see the note above the loop
     _pv.x *= _pk;
     _pv.y *= _pk;
@@ -57819,6 +58915,7 @@ function _syncVRLiteMaterialUniforms() {
     const _bu = billboardCloudSystem.material.uniforms;
     if (_bu.uTime) _bu.uTime.value = (typeof game !== 'undefined' && game && typeof game.time === 'number') ? game.time : 0;
     if (_bu.uChurn) _bu.uChurn.value = (typeof QUALITY === 'undefined' || (QUALITY.cloudChurn && QUALITY.cloudChurn())) ? 1.0 : 0.0;
+    if (_bu.uMaskOn) _bu.uMaskOn.value = (billboardCloudSystem._maskReady && window.__bcsMask !== 0 && window.__bcsMask !== false) ? 1.0 : 0.0;
     if (_bu.uAerial && _bu.uAerial.value > 0.5 && typeof scene !== 'undefined' && scene && scene.fog) {
       if (_bu.uFogColor && scene.fog.color) _bu.uFogColor.value.copy(scene.fog.color);
       if (_bu.uFogD && typeof scene.fog.density === 'number') {

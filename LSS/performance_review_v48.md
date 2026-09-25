@@ -67,6 +67,13 @@ Implemented and measured in the pane against a byte-exact v48.32 served beside i
 | O3.17 step 1 shore-mask budget per row | **shipped v48.46** | same mask; per-frame overshoot capped at one row |
 | O2.8 MEGA refraction copy trim | **shipped v48.47** | copy GPU 0.31 -> 0.16 ms at 4608x2592 vs the live bucket; readable region 0 px; in play 225/239 copies trimmed, GL error 0 |
 | O2.2 sun-shadow tree cull | **shipped v48.48-49** | 0 bytes differ (4 sun angles; 16 headings with the mirror live); 32 of 64 caster meshes culled on average; 1080p render 1.898 -> 1.635 ms GPU at spawn |
+| O2.5 step 2 cloud alpha mask baked | **shipped v48.59, owner to judge** | clouds-only GPU at 2276x1588: 0.685 -> 0.180 ms inside the deck, 0.390 -> 0.103 ms at cruise; vs live: max 0.0107 linear, none over 4/255; boot bake 119 ms off-thread + 12 ms; `window.__bcsMask = 0` = live |
+| [#70] bloom 4-tap bright pass | **shipped v48.59, owner to judge** | real shader, 1-2 px lights: at 2:1 equals the full-res threshold (old under-bloomed 2-5x); flicker CV 2.5-8x lower; 1 px at 4.24:1 unbloomed 21/25 -> 0-3/25 positions; +0.001 ms; `window.__bloomTaps = 1` = old |
+| [#71] model texture anisotropy | **shipped v48.59, owner to judge** | desktop 8x (32 hub textures verified on the GPU); `__hullAniso(1)` / `(8)` live, `?aniso=N` from load |
+| [#72] phone texture shrink | **shipped v48.59, owner to judge** | 8:1 RMSE vs box 69.7 -> 0.29, 4:1 55.7 -> 0.32, 2:1 unchanged; sky excluded; `?texlq` = old, `?texcap=256` = phone cap on desktop |
+| O2.1 Panini lens mask | **shipped v48.60** | main pass 3.89 -> 3.50 ms at 2276x1588, 6.46 -> 5.34 ms at MEGA 4183x2918; shown scene + bloom texels 0 differ; tracks fov live (29 % unshown at 120, 19 % at 90); `window.__panMask = 0` |
+| O2.9 cluster rock batch | **shipped v48.61, owner to A/B the waterline/gas** | Shifting Run start: CPU 6.5 -> 4.2 ms, draws 1123 -> 306, GPU 2.60 -> 2.49; 5 of 903 k px > 1/255 vs the old path; `window.__rockBatch = 0` |
+| O2.3 clipmap wedges | **shipped v48.62** | 50 % of wedges kept; hub spawn 4.91 -> 4.79 ms GPU, -0.66 M tris; 16 poses with the mirror live: no pixel beyond noise; `window.__clipWedge = 0` |
 | O3.11 HUD while hidden | **not done** | the draw carries state (ready-flash latch, per-draw decays): skipping it would flash on return from orbit view; phone-only saving |
 | O3.13 joinRoom Promise.all | **not done** | menu latency only; network join path; relays unreachable from the dev machine |
 | O3.2 ULTRA MSAA check | **checked, owner call** | r165 invalidates MSAA only in the Oculus Browser - desktop safe; a Quest flat browser at strict ULTRA would draw the ADS / goo overlay over undefined colour |
