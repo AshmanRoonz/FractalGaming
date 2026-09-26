@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "49.43";
+const LSS_BUILD = "49.44";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -79683,6 +79683,15 @@ function _howtoRender(ov) {
     '<button id="howto-close" style="background:rgba(40,30,15,0.6);border:1px solid #ffaa00;color:#ffaa00;' +
     "padding:8px 18px;border-radius:6px;font-family:'Rajdhani',sans-serif;font-size:12px;letter-spacing:2px;cursor:pointer;\">CLOSE</button></div>";
   h += '<div id="howto-scroll" style="width:100%;max-width:1080px;flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:14px 22px 40px;">';
+  h += '<div style="font-size:15px;color:#e4e8f0;letter-spacing:0.5px;line-height:1.6;margin:2px 0 16px;padding:10px 14px;' +
+       'border-left:3px solid #ffaa00;background:rgba(255,170,0,0.06);border-radius:4px;">' +
+       "<span class='lss-title' style='color:#ffaa00;letter-spacing:2px;font-size:14px;'>WELCOME, PILOT.</span> " +
+       'This is your training page, in a nutshell. You&#8217;ll be piloting one of seven ships. ' +
+       'You&#8217;ll need to know your ship&#8217;s ' +
+       '<a href="#" data-howto-jump="howto-ships" style="color:#ffaa00;text-decoration:underline dotted;">abilities</a>' +
+       ' and how to read the heads-up display (the ' +
+       '<a href="#" data-howto-jump="howto-hud" style="color:#ffaa00;text-decoration:underline dotted;">HUD infographic</a>' +
+       ' at the bottom of this page).</div>';
   h += '<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:8px;">' +
        "<span class='lss-title' style='font-size:12px;letter-spacing:3px;color:#7cf;'>CONTROL METHOD</span>" +
        '<select id="howto-scheme" style="background:rgba(15,25,45,0.95);border:1px solid rgba(120,200,255,0.45);color:#cce8ff;' +
@@ -79780,7 +79789,7 @@ function _howtoRender(ov) {
          "<div class='lss-title' style='font-size:13px;letter-spacing:3px;color:" + col + ";'>" + nm + '</div>' +
          "<div style='font-size:12px;color:#cdd;line-height:1.55;margin-top:4px;'>" + txt + '</div></div>';
   }
-  h += "<div class='lss-title' style='font-size:15px;letter-spacing:4px;color:#7cf;margin:18px 0 8px;'>SHIPS</div>";
+  h += "<div id='howto-ships' class='lss-title' style='font-size:15px;letter-spacing:4px;color:#7cf;margin:18px 0 8px;'>SHIPS</div>";
   const slotTag = [
     tag('ability0') + ' · OFFENSIVE',
     tag('ability1') + ' · DEFENSIVE',
@@ -79901,7 +79910,7 @@ function _howtoRender(ov) {
          '<span style="color:#fff;font-weight:bold;">' + r[1] + '</span></span>'
        ).join('<span style="color:#456;"> · </span>') + '</div>';
   if (ctlNote) h += '<div style="font-size:12px;color:#9ab;letter-spacing:1px;margin-top:6px;">' + ctlNote + '</div>';
-  h += "<div class='lss-title' style='font-size:15px;letter-spacing:4px;color:#7cf;margin:18px 0 8px;'>THE HUD</div>";
+  h += "<div id='howto-hud' class='lss-title' style='font-size:15px;letter-spacing:4px;color:#7cf;margin:18px 0 8px;'>THE HUD</div>";
   h += '<div style="font-size:12px;color:#9ab;letter-spacing:1px;line-height:1.6;margin-bottom:8px;">' +
        'Everything lives in one cluster around your reticle, with the radar disc at the bottom of the screen. Each ship paints it in its own colours &#8212; this is the VORTEX:</div>';
   h += '<div style="border:1px solid rgba(120,200,255,0.2);border-radius:8px;background:rgba(10,14,28,0.55);padding:8px;overflow-x:auto;">' +
@@ -79919,6 +79928,11 @@ function _howtoRender(ov) {
     try { localStorage.setItem(_HOWTO_LSKEY, schemeSel.value); } catch (_) {}
     _howtoRender(ov);
   });
+  ov.querySelectorAll('[data-howto-jump]').forEach((a) => a.addEventListener('click', (e) => {
+    e.preventDefault();
+    const t = ov.querySelector('#' + a.getAttribute('data-howto-jump'));
+    if (t) { try { t.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (_) { t.scrollIntoView(); } }
+  }));
 }
 function openHowToPlay() {
   let ov = document.getElementById('howto-overlay');
