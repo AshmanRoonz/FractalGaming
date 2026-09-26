@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "49.44";
+const LSS_BUILD = "49.45";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -12587,6 +12587,7 @@ try {
       try {
         const _d = { t: Date.now(), up: Math.round(performance.now() / 1000), path: location.pathname,
                      mobile: !!(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE), dpr: window.devicePixelRatio,
+                     lite: (function () { try { return _LSS_LITE || ''; } catch (_) { return ''; } })(),   // (v49.45)
                      win: [window.innerWidth, window.innerHeight],
                      mode: (typeof LSS !== 'undefined' && LSS && LSS.MODE) || null,
                      state: (typeof game !== 'undefined' && game) ? game.state : null,
@@ -12613,8 +12614,15 @@ try {
           try { localStorage.setItem('lss_quality_ctx', _down); } catch (_) {}
           _stepMsg = ' Reloading at ' + _down.toUpperCase() + ' quality (was ' + _lvl.toUpperCase() + '); Settings can put it back.';
         }
+        try {
+          if (_lvl === 'low' && !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE)) {
+            localStorage.setItem('lss_lite', '1');
+            localStorage.setItem('lss_lite_ctx', '1');
+            _stepMsg = ' Reloading in LITE mode (phone-class graphics: lighter ships, simpler terrain, no shadows); Settings can switch it off.';
+          }
+        } catch (_) {}
         const _fx = (_d.fx && typeof _d.fx === 'object') ? _d.fx : null;
-        _diagText = (_lvl || '?') + ' | ' + (_d.mobile ? 'mobile' : 'desktop') + ' dpr ' + (+_d.dpr).toFixed(2) +
+        _diagText = (_lvl || '?') + ' | ' + (_d.lite ? 'lite:' + _d.lite : (_d.mobile ? 'mobile' : 'desktop')) + ' dpr ' + (+_d.dpr).toFixed(2) +
           (_fx ? ' | canvas ' + _fx.canvas.join('x') + ' | scene ' + _fx.scene[0] + 'x' + _fx.scene[1] + ' s' + _fx.scene[3] +
                  ((_fx.active && _fx.active.length > 3) ? ' | live ' + _fx.active[0] + 'x' + _fx.active[1] + ' @' + (+_fx.active[3]).toFixed(2) +
                     ((_fx.active.length > 7) ? ' ema ' + (+_fx.active[7]).toFixed(1) : '') : '') +
@@ -12714,8 +12722,27 @@ try {
   }
 } catch (_) {}
 
-const _LSS_IS_MOBILE = (navigator.maxTouchPoints > 0) &&
-  (window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+function _lssLiteDecide() {
+  try {
+    const m = /[?&]lite=([01])\b/i.exec((typeof location !== 'undefined' && location.search) || '');
+    if (m) return (m[1] === '1') ? 'url' : '';
+  } catch (_) {}
+  let s = null; try { s = localStorage.getItem('lss_lite'); } catch (_) {}
+  if (s === '1') { let c = null; try { c = localStorage.getItem('lss_lite_ctx'); } catch (_) {} return c ? 'crash' : 'setting'; }
+  if (s === '0') return '';
+  try { if (/Xbox/i.test(navigator.userAgent || '')) return 'xbox'; } catch (_) {}
+  return '';
+}
+function _lssLiteStored() {   // the Settings row's value: 'auto' | '1' | '0'
+  let s = null; try { s = localStorage.getItem('lss_lite'); } catch (_) {}
+  return (s === '1' || s === '0') ? s : 'auto';
+}
+const _LSS_TOUCH_PHONE = !!((navigator.maxTouchPoints > 0) &&
+  (window.matchMedia && window.matchMedia('(pointer: coarse)').matches));
+const _LSS_LITE = _LSS_TOUCH_PHONE ? '' : _lssLiteDecide();
+const _LSS_IS_MOBILE = _LSS_TOUCH_PHONE || !!_LSS_LITE;
+try { window.__lssLite = _LSS_LITE || (_LSS_TOUCH_PHONE ? 'phone' : 'off'); } catch (_) {}
+try { if (_LSS_LITE) console.log('[lite] phone-class budget on this device (' + _LSS_LITE + ')'); } catch (_) {}
 
 setTimeout(() => {
   try {
@@ -80095,7 +80122,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     const saved = localStorage.getItem('lss_touch_enabled');
     _enabled = _touchForced ? true
       : (saved != null) ? (saved === '1')
-      : !!(typeof _LSS_IS_MOBILE !== 'undefined' ? _LSS_IS_MOBILE
+      : !!(typeof _LSS_TOUCH_PHONE !== 'undefined' ? _LSS_TOUCH_PHONE
            : ((navigator.maxTouchPoints > 0) &&
               window.matchMedia && window.matchMedia('(pointer: coarse)').matches));
   } catch (_) { _enabled = true; }
@@ -81133,6 +81160,19 @@ function buildSettingsPage() {
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
         <label style="flex:1;">High is the baseline everywhere, phones included. Low and Medium sit below it: they turn bloom off and render the world at 0.65× / 0.85× before it is scaled to your screen — so they trade the glow and some sharpness for fill rate. Try them if the frame rate is poor; the picture gets plainer, not broken. If your GPU has headroom, push to Ultra or Mega. The change applies to newly-spawned effects ; existing smoke plumes keep their settings until they fade out. Quality change applies to clouds + bloom on the next round-start. Window-resize also rebinds bloom RT size to the new tier.</label>
       </div>
+      <!-- (v49.45) LITE MODE - phone-class graphics on a non-touch device. Boot-time, so a change that
+           flips the effective mode reloads. Hidden on touch phones: they are always on this budget. -->
+      <div class="setting-row" id="set-lite-row" style="${(typeof _LSS_TOUCH_PHONE !== 'undefined' && _LSS_TOUCH_PHONE) ? 'display:none;' : ''}">
+        <label>Lite mode</label>
+        <select id="set-lite" style="flex:1;">
+          <option value="auto" ${_lssLiteStored() === 'auto' ? 'selected' : ''}>Auto (on for Xbox, or after a crash at Low)</option>
+          <option value="1" ${_lssLiteStored() === '1' ? 'selected' : ''}>On - phone-class graphics (lighter ships, simpler terrain, no shadows)</option>
+          <option value="0" ${_lssLiteStored() === '0' ? 'selected' : ''}>Off - full desktop graphics</option>
+        </select>
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;${(typeof _LSS_TOUCH_PHONE !== 'undefined' && _LSS_TOUCH_PHONE) ? 'display:none;' : ''}">
+        <label style="flex:1;">For consoles, TV browsers and weak PCs: runs the game on the same budget as a phone. Now: <b>${(typeof _LSS_LITE !== 'undefined' && _LSS_LITE) ? 'LITE (' + _LSS_LITE + ')' : 'full'}</b>. Changing it reloads the game.</label>
+      </div>
       <div class="setting-row">
         <label>Field of View</label>
         <input type="range" id="set-fov" min="60" max="120" step="1" value="${(typeof input.fovDeg === 'number') ? input.fovDeg : 90}">
@@ -81895,6 +81935,18 @@ function buildSettingsPage() {
     qSel.addEventListener('change', e => {
       _qByUser = true;            // (v44.08) a deliberate pick - applyQualityPreset stamps it
       try { applyQualityPreset(e.target.value); } finally { _qByUser = false; }
+    });
+  }
+  const liteSel = overlay.querySelector('#set-lite');
+  if (liteSel) {
+    liteSel.addEventListener('change', e => {
+      const v = e.target.value;
+      try {
+        if (v === 'auto') localStorage.removeItem('lss_lite'); else localStorage.setItem('lss_lite', v);
+        localStorage.removeItem('lss_lite_ctx');
+      } catch (_) {}
+      let now = false; try { now = !!_LSS_LITE; } catch (_) {}
+      if ((_lssLiteDecide() !== '') !== now) { try { location.reload(); } catch (_) {} }
     });
   }
   const wallOpEl = overlay.querySelector('#set-wall-opacity');
