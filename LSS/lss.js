@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "49.45";
+const LSS_BUILD = "49.49";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -23726,6 +23726,54 @@ function _swSilAssign(sn, rec, slot) {
   }
   try { if (!slot) window.__hullSil = R.hullSil; } catch (_) {}
 }
+function _swSilWarm(root) {
+  if (!root || typeof root.traverse !== 'function' || typeof renderer === 'undefined' || !renderer) return 0;
+  if (!_swSil.mat) _swSil.mat = new THREE.MeshDepthMaterial({ depthPacking: THREE.BasicDepthPacking, side: THREE.DoubleSide });
+  const sc = new THREE.Scene();
+  sc.overrideMaterial = _swSil.mat;
+  let n = 0;
+  try { root.updateMatrixWorld(true); } catch (_) {}
+  root.traverse((o) => {
+    if (!o.isMesh || !o.geometry || !o.geometry.attributes || !o.geometry.attributes.position) return;
+    let m;
+    if (o.isSkinnedMesh && o.skeleton) {
+      m = new THREE.SkinnedMesh(o.geometry);
+      m.skeleton = o.skeleton;
+      m.bindMatrix.copy(o.bindMatrix);
+      m.matrix.identity(); m.matrixWorld.identity();
+    } else {
+      m = new THREE.Mesh(o.geometry);
+      m.matrix.copy(o.matrixWorld); m.matrixWorld.copy(o.matrixWorld);
+    }
+    m.matrixAutoUpdate = false;
+    m.frustumCulled = false;   // the draw is the point; where it lands is not
+    sc.add(m); n++;
+  });
+  if (!n) return 0;
+  const cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+  const rt = new THREE.WebGLRenderTarget(8, 8, { minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+    format: THREE.RGBAFormat, type: THREE.UnsignedByteType, depthBuffer: true, stencilBuffer: false, generateMipmaps: false });
+  const prevRT = renderer.getRenderTarget();
+  const prevClear = new THREE.Color(); renderer.getClearColor(prevClear); const prevAlpha = renderer.getClearAlpha();
+  const prevAuto = renderer.autoClear;
+  const _xrOn = !!(renderer.xr && renderer.xr.enabled);
+  const _shAuto = renderer.shadowMap ? renderer.shadowMap.autoUpdate : undefined;
+  try {
+    if (_xrOn) renderer.xr.enabled = false;
+    if (renderer.shadowMap) renderer.shadowMap.autoUpdate = false;
+    renderer.setRenderTarget(rt); renderer.setClearColor(0x000000, 1); renderer.autoClear = true;
+    renderer.render(sc, cam);
+  } catch (_) {
+  } finally {
+    if (_xrOn) renderer.xr.enabled = true;
+    if (renderer.shadowMap && _shAuto !== undefined) renderer.shadowMap.autoUpdate = _shAuto;
+    renderer.setRenderTarget(prevRT); renderer.setClearColor(prevClear, prevAlpha); renderer.autoClear = prevAuto;
+    try { rt.dispose(); } catch (_) {}
+    sc.overrideMaterial = null;
+    while (sc.children.length) sc.remove(sc.children[0]);   // the geometry is the source's: never dispose it here
+  }
+  return n;
+}
 if (typeof window !== 'undefined') window.__silCache = () => ({ size: _swSil.cache.size, builds: _swSil.builds, hits: _swSil.hits,
   empty: _swSil.emptyN, orphans: _swSil.orphans.size, keys: Array.from(_swSil.cache.keys()).map(k => k.slice(0, 8)) });
 function _swHullSilhouette(mesh, slot) {
@@ -35200,8 +35248,29 @@ function _owFleetKeys(c) {
   if (!c._fleetKeys) c._fleetKeys = (typeof _campWaveShips === 'function') ? _campWaveShips(OW.FLEET) : HOARD_SHIPS.slice(0, OW.FLEET);
   return c._fleetKeys;
 }
+function _owDesc(a) {
+  try {
+    if (a == null) return String(a);
+    if (a === 'player' || (typeof player !== 'undefined' && a === player)) return 'player';
+    if (typeof a === 'string') return a;
+    if (typeof a === 'object') return (a.isOwCarrier ? 'carrier:' + a.id : (a.isOwBoss ? 'boss' : (a.loadoutKey || a.name || 'ent'))) +
+      ' t' + a.team + (a._owCity != null ? ' c' + a._owCity : '');
+  } catch (_) {}
+  return '?';
+}
+function _owLog(k, o) {
+  try {
+    const e = Object.assign({ t: +(((typeof game !== 'undefined' && game) ? game.time : 0) || 0).toFixed(1), k: k }, o || {});
+    const L = OW._log || (OW._log = []);
+    L.push(e); if (L.length > 120) L.shift();
+    console.log('[cities] ' + k + ' ' + JSON.stringify(o || {}));
+  } catch (_) {}
+}
 function _owSpawnFleet(c, team, at) {
-  if (c._fleetPending || typeof Bot === 'undefined' || typeof loadHoardModel !== 'function') return;
+  if (c._fleetPending || typeof Bot === 'undefined' || typeof loadHoardModel !== 'function') {
+    if (c._fleetPending) _owLog('fleet-skip', { c: c.idx, team: team, why: 'pending' });   // (v49.47)
+    return;
+  }
   const keys = _owFleetKeys(c);
   c._fleetPending = true;
   const anchor = at.clone();
@@ -35209,7 +35278,10 @@ function _owSpawnFleet(c, team, at) {
     c._fleetPending = false;
     if (!OW.cities || OW.cities[c.idx] !== c || !_owAuthority()) return;
     const hostileTeam = OW.TEAM0 + c.idx;
-    if (!((team === hostileTeam && c.owner == null) || (c.owner != null && team === c.owner))) return;   // changed hands while loading
+    if (!((team === hostileTeam && c.owner == null) || (c.owner != null && team === c.owner))) {   // changed hands while loading
+      _owLog('fleet-drop', { c: c.idx, team: team, owner: c.owner });   // (v49.47)
+      return;
+    }
     const ships = (typeof CYBER !== 'undefined' && CYBER.botShips) ? CYBER.botShips : ['VORTEX', 'PYRO', 'TRACKER', 'SLAYER', 'PUNCTURE', 'SYPHON', 'BLASTER'];
     for (let i = 0; i < keys.length; i++) {
       if (!protos[i]) continue;
@@ -35225,6 +35297,7 @@ function _owSpawnFleet(c, team, at) {
       c.fleet.push(b);
       try { if (typeof spawnFXBurst === 'function') spawnFXBurst('cloud', p, 70, 0.7, { startScale: 0.3, endScale: 1.2 }); } catch (_) {}
     }
+    _owLog('fleet+', { c: c.idx, team: team, n: c.fleet.length });   // (v49.47)
     try { if (typeof _botSendRoster === 'function') _botSendRoster(); } catch (_) {}
   }).catch(() => { c._fleetPending = false; });
 }
@@ -35593,6 +35666,13 @@ class OwCarrier {
     let gun = this.guns[0], gd = Infinity;
     for (const g of this.guns) { g.getWorldPosition(_owV1); const d = _owV1.distanceToSquared(best.position); if (d < gd) { gd = d; gun = g; } }
     this.zapTgt = best;
+    if (best.isOwCarrier) {
+      const _nowZ = game.time || 0, _lz = this._logZap;
+      if (!_lz || _lz.id !== best.id || _nowZ - _lz.t > 30) {
+        this._logZap = { id: best.id, t: _nowZ };
+        _owLog('carzap', { from: this.id, fromTeam: this.team, fromMode: this.mode, to: best.id, toTeam: best.team, toMode: best.mode, playerTeam: player.team });
+      }
+    }
     this._chargeStart(gun, charge);
   }
   _chargeStart(gun, dur) {
@@ -35772,6 +35852,7 @@ function _owSpawnCarrier(c, team, at, mode, owner) {
   car.owner = owner || null;
   game.entities.push(car);
   c.carrier = car;
+  _owLog('carrier+', { c: c.idx, id: car.id, team: team, mode: mode, owner: c.owner });   // (v49.47)
   _owWarpFx(at, 800);
   _owSend({ type: 'ow_evt', k: 'warp', p: [Math.round(at.x), Math.round(at.y), Math.round(at.z)], r: 800 });
   return car;
@@ -35780,6 +35861,7 @@ function _owCarrierDied(car) {
   const c = car.city;
   const killerTeam = _owKillerTeam(car._lastAttacker);
   const wasHostile = (c.owner == null);
+  _owLog('carrier-', { c: c.idx, id: car.id, team: car.team, mode: car.mode, by: _owDesc(car._lastAttacker), killerTeam: killerTeam, wasHostile: wasHostile, owner: c.owner });   // (v49.47)
   if (c.carrier === car) c.carrier = null;
   const oi = OW.orphans.indexOf(car); if (oi >= 0) OW.orphans.splice(oi, 1);
   OW.dying.push(car);   // stays in the state packet (alive 0) while the blast chain runs on every peer
@@ -35918,6 +36000,7 @@ function _owFieldUIOff() {
 }
 function _owCaptured(c, team, ship) {
   const car = (c.carrier && c.carrier.alive) ? c.carrier : null;
+  _owLog('capture', { c: c.idx, team: team, owner: c.owner, carrier: car ? (car.id + ' t' + car.team + ' ' + car.mode) : null, by: _owDesc(ship) });   // (v49.47)
   if (team === c.owner) {
     if (c.buildT > 0) { _owMakeField(c, _owFieldSpot(c), false); return; }   // a build is running: the marker stays
     if (car) {
@@ -35949,6 +36032,7 @@ function _owCaptured(c, team, ship) {
 function _owArm(c) {
   c.armed = true;
   const team = OW.TEAM0 + c.idx;
+  _owLog('arm', { c: c.idx, team: team, dist: Math.round(c._playerDist || 0) });   // (v49.47)
   const at = new THREE.Vector3(c.x, _owTowerTop(c), c.z);
   _owSpawnCarrier(c, team, at, 'home', null);
   _owSpawnFleet(c, team, at);
@@ -36513,6 +36597,8 @@ function _owSyncTeams(oldTeam, newTeam) {
       if (c.fleet) for (const b of c.fleet) { if (b && b.team === oldTeam) { b.team = newTeam; n++; } }
       if (c.carrier && c.carrier.team === oldTeam) { c.carrier.team = newTeam; n++; }
     }
+    if (Array.isArray(OW.orphans)) for (const car of OW.orphans) { if (car && car.team === oldTeam) { car.team = newTeam; n++; } }
+    if (n) _owLog('sync', { from: oldTeam, to: newTeam, n: n });   // (v49.47)
     return n;
   } catch (_) { return 0; }
 }
@@ -36732,7 +36818,11 @@ if (typeof window !== 'undefined') {
     proxyBots: game.entities.filter(e => (e instanceof Bot) && e.isProxy).length,
     boss: OW.boss ? { hp: Math.round(OW.boss.health), risen: OW.boss.risen, alive: OW.boss.alive, proxy: OW.boss.isProxy, x: Math.round(OW.boss.position.x), y: Math.round(OW.boss.position.y), z: Math.round(OW.boss.position.z) } : null,
     bossDone: OW.bossDone, orphans: OW.orphans.length, dying: OW.dying.length,
+    orphanList: OW.orphans.map(car => ({ id: car.id, c: car.city ? car.city.idx : null, team: car.team, mode: car.mode, alive: car.alive, hp: Math.round(car.health) })),
+    fleetTeams: (OW.cities || []).map(c => Array.from(new Set(c.fleet.filter(b => b && b.alive).map(b => b.team)))),
+    playerTeam: (typeof player !== 'undefined' && player) ? player.team : null,
   });
+  window.__citiesLog = () => (OW._log || []).slice();   // (v49.47) the city ledger
   window.__citiesTp = (i, far) => {
     const c = OW.cities && OW.cities[i]; if (!c) return 'no city ' + i;
     const d = (far != null) ? far : 3800;
@@ -58379,7 +58469,14 @@ function _warmRealCombatFXInner(_fxDefer) {
 }
 
 const _PREBAKE = { on: false, last: null };
-const _PREBAKE_MAX_MS     = 12000;   // hard ceiling for the whole prebake
+const _PREBAKE_MAX_MS = (() => {
+  try {
+    const m = /[?&]pbmax=(\d+)/i.exec((typeof location !== 'undefined' && location.search) || '');
+    if (m) return Math.max(1000, +m[1]);
+  } catch (_) {}
+  return _LSS_IS_MOBILE ? 12000 : 48000;
+})();
+const _pbCapMul = Math.max(1, _PREBAKE_MAX_MS / 12000);
 const _PREBAKE_SLICE_MS   = 40;      // ms of streaming per yielded frame (see _swDrainStream)
 const _PREBAKE_MAX_CALLS  = 64;      // inner streamer calls per pass
 const _PREBAKE_MAX_PASSES = 900;     // belt: pass ceiling on top of the ms ceiling
@@ -58919,12 +59016,12 @@ async function _prebakeWorldForLaunch() {
     } catch (_) { _wildP = null; }
     const _tE = _pbNow();
     _pbSub('priming ships');
-    try { rep.ent = await _primeEntityModels(_entPrimePlan(), _bt0, _ENT_PRIME_MAX_MS); } catch (_) {}
+    try { rep.ent = await _primeEntityModels(_entPrimePlan(), _bt0, _ENT_PRIME_MAX_MS * _pbCapMul); } catch (_) {}   // (v49.46) x4 on desktop
     rep.ms.ent = Math.round(_pbNow() - _tE);
 
     const _tM = _pbNow();
     _pbSub('waking the leviathans');
-    try { rep.mon = await _primeMonsterModels(_bt0, _MON_PRIME_MAX_MS); } catch (_) {}
+    try { rep.mon = await _primeMonsterModels(_bt0, _MON_PRIME_MAX_MS * _pbCapMul); } catch (_) {}   // (v49.46) x4 on desktop
     rep.ms.mon = Math.round(_pbNow() - _tM);
 
     let _carWarmGroup = null;
@@ -58938,11 +59035,32 @@ async function _prebakeWorldForLaunch() {
             let done = false; const fin = () => { if (!done) { done = true; res(); } };
             try { _carrierLoadProto(fin); } catch (_) { fin(); }
             if (_carrier.proto) fin();
-            setTimeout(fin, 4000);
+            setTimeout(fin, 4000 * _pbCapMul);   // (v49.46) x4 on desktop - see _PREBAKE_MAX_MS
           });
         }
         _carWarmGroup = new THREE.Group();
         try { _carWarmGroup.position.set(player.position.x, player.position.y - 1500, player.position.z); } catch (_) { _carWarmGroup.position.set(0, -100000, 0); }
+        try {
+          let _tsrc = null;
+          if (game.sandwichChunks) for (const _tc of game.sandwichChunks.values()) {
+            const _ta = _tc && _tc.trees; if (!_ta) continue;
+            for (let _ti = 0; _ti < _ta.length; _ti++) { const _im = _ta[_ti]; if (_im && _im.isInstancedMesh && _im.instanceColor && _im.userData && _im.userData._cs) { _tsrc = _im; break; } }
+            if (_tsrc) break;
+          }
+          if (_tsrc) {
+            const _sep = new THREE.Mesh(new THREE.BoxGeometry(4, 4, 4), new THREE.MeshBasicMaterial());
+            _sep.castShadow = true; _sep.receiveShadow = false; _sep.frustumCulled = false;
+            _sep.userData._treeShadowWarm = 'sep';
+            _carWarmGroup.add(_sep);
+            const _fp = new THREE.InstancedMesh(_tsrc.geometry, _tsrc.material, 1);
+            _fp.setMatrixAt(0, new THREE.Matrix4());
+            _fp.setColorAt(0, new THREE.Color(1, 1, 1));
+            _fp.castShadow = true; _fp.receiveShadow = false; _fp.frustumCulled = false;
+            _fp.userData._treeShadowWarm = 'tree';   // disposed (instance buffers only) with the group below
+            _carWarmGroup.add(_fp);
+            rep.treeShadow = 1;
+          } else rep.treeShadow = 0;
+        } catch (_) {}
         if (_ffMode && typeof _carrier !== 'undefined' && _carrier && _carrier.proto) {
           const _cl = _carrier.proto.clone(true);
           _cl.traverse((o) => { if (o.isMesh) { o.frustumCulled = false; o.castShadow = true; } });
@@ -58951,7 +59069,7 @@ async function _prebakeWorldForLaunch() {
         try {
           if (_wildP) {
             _pbSub('waking the wild leviathans');
-            const _protos = await Promise.race([_wildP, new Promise((r) => setTimeout(() => r(null), 6000))]);
+            const _protos = await Promise.race([_wildP, new Promise((r) => setTimeout(() => r(null), 6000 * _pbCapMul))]);   // (v49.46) x4 on desktop
             let _wi = 0;
             for (const _pr of (_protos || [])) {
               if (!_pr || !_pr.scene) continue;
@@ -58997,6 +59115,7 @@ async function _prebakeWorldForLaunch() {
               }
             });
             if (game._hubWater && typeof _warmReflLiftForRoot === 'function') _warmReflLiftForRoot(_cl);
+            if (game._hubWater && typeof _swSilWarm === 'function') { try { window.__silWarm = (window.__silWarm || 0) + _swSilWarm(_cl); } catch (_) {} }
           } finally { try { renderer.setRenderTarget(_pRTK); } catch (_) {} }
         }
         try {
@@ -59020,7 +59139,7 @@ async function _prebakeWorldForLaunch() {
       rep.hullGrids = _gn; rep.ms.hullGrid = Math.round(_pbNow() - _tG);
     } catch (_) {}
     if (_wildP && rep.wild == null) {
-      try { _pbSub('waking the wild leviathans'); await Promise.race([_wildP, new Promise((r) => setTimeout(r, 6000))]); rep.wild = 'loaded, not drawn'; } catch (_) {}
+      try { _pbSub('waking the wild leviathans'); await Promise.race([_wildP, new Promise((r) => setTimeout(r, 6000 * _pbCapMul))]); rep.wild = 'loaded, not drawn'; } catch (_) {}
     }
 
     const _tD = _pbNow();
@@ -59032,6 +59151,11 @@ async function _prebakeWorldForLaunch() {
     try {
       if (_carWarmGroup) {
         _carWarmGroup.traverse((o) => { if (o.isSkinnedMesh && o.skeleton) { let w = false; for (let p = o; p; p = p.parent) if (p.userData && p.userData._wildWarm) { w = true; break; } if (w) { try { o.skeleton.dispose(); } catch (_) {} } } });
+        _carWarmGroup.traverse((o) => {
+          const _tw = o.userData && o.userData._treeShadowWarm;
+          if (_tw === 'tree' && typeof o.dispose === 'function') { try { o.dispose(); } catch (_) {} }
+          else if (_tw === 'sep') { try { o.geometry.dispose(); o.material.dispose(); } catch (_) {} }
+        });
         scene.remove(_carWarmGroup); _carWarmGroup = null;
       }
     } catch (_) {}
@@ -59465,6 +59589,11 @@ async function _prebakeGpuPrime() {
       if (typeof player !== 'undefined' && player && player.mesh) _n += _warmReflLiftForRoot(player.mesh);
       for (const _e of (game.entities || [])) { if (_e && _e.mesh) _n += _warmReflLiftForRoot(_e.mesh); }
       try { window.__reflWarm = _n; } catch (_) {}
+    }
+  } catch (_) {}
+  try {
+    if (game._hubWater && typeof _swSilWarm === 'function' && typeof player !== 'undefined' && player && player.mesh) {
+      window.__silWarm = (window.__silWarm || 0) + _swSilWarm(player.mesh);
     }
   } catch (_) {}
   try {
@@ -67673,8 +67802,16 @@ function fireSpread(origin, dir, w) {
     }
 
     let hitBot = false;
+    let _carHit = null, _carD = Infinity;
     for (const bot of game.entities) {
       if (!bot.alive || bot.team === player.team) continue;
+      if ((bot.isOwCarrier && typeof bot.rayDist === 'function') || (bot.isCarrier && typeof _carrierRayDist === 'function')) {
+        let _cd = -1;
+        const _cLim = Math.min(_slRange, levelDist + 24);
+        try { _cd = bot.isOwCarrier ? bot.rayDist(origin, spreadDir, _cLim) : _carrierRayDist(origin, spreadDir, _cLim); } catch (_) {}
+        if (_cd >= 0 && _cd <= levelDist + 24 && _cd < _carD) { _carHit = bot; _carD = _cd; }
+        continue;
+      }
       if (bot.isOwBoss && typeof bot.rayDist === 'function') {   // (v38.90) the leviathan: the pellet meets its body, range to the skin
         const _bd = bot.rayDist(origin, spreadDir, Math.min(_slRange, levelDist));
         if (_bd >= 0) {
@@ -67717,6 +67854,20 @@ function fireSpread(origin, dir, w) {
         hitBot = true;
         break;
       }
+    }
+    if (!hitBot && _carHit && !(bestObst && bestObstDist < _carD)) {
+      const rangeFalloff = Math.max(0.3, 1 - (_carD / _slRange) * 0.7);
+      let finalDmg = w.damage * rangeFalloff;
+      if (player.syphonDmgMult > 1) finalDmg *= player.syphonDmgMult;
+      const _hp = _spColTest.copy(origin).addScaledVector(spreadDir, _carD);
+      const dealt = _carHit.takeDamage(finalDmg, 'player', _hp);
+      if (dealt > 0) {
+        player.damageDealt += dealt;
+        player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
+        showHitMarker();
+        spawnImpactSparks(_hp, 3);
+      }
+      hitBot = true;
     }
 
     if (bestObst && !hitBot) {
