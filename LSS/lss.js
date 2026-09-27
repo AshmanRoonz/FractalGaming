@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "49.49";
+const LSS_BUILD = "49.50";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -20714,7 +20714,11 @@ try {
     if (_n >= 3) { window.__hubView = _n; try { console.warn('[hub] view radius forced to ' + _n + ' (' + Math.pow(2 * _n + 1, 2) + ' chunks) by ?hubview'); } catch (_) {} }
   }
 } catch (_) {}
-function _swHubView() { return window.__hubView || (((typeof isStandaloneQuest === 'function' && isStandaloneQuest()) || _LSS_IS_MOBILE) ? 8 : 12); }   // (perf) hub terrain view radius: desktop 12 (was 16), mobile/Quest 8 (was 9/16). Streams as one draw call per chunk, so radius^2 drives draw-call + triangle count; 16->12 cuts hub terrain draws ~40%, the #1 hub GPU cost. Live override: window.__hubView
+function _swHubTierView() {
+  try { const L = QUALITY.level; if (L === 'low') return 8; if (L === 'medium') return 10; } catch (_) {}
+  return 99;
+}
+function _swHubView() { return window.__hubView || Math.min((((typeof isStandaloneQuest === 'function' && isStandaloneQuest()) || _LSS_IS_MOBILE) ? 8 : 12), _swHubTierView()); }   // (perf) hub terrain view radius: desktop 12 (was 16), mobile/Quest 8 (was 9/16). Streams as one draw call per chunk, so radius^2 drives draw-call + triangle count; 16->12 cuts hub terrain draws ~40%, the #1 hub GPU cost. Live override: window.__hubView
 function _lssEndlessMobile() { return !!window.__endlessMobileSim || (typeof isStandaloneQuest === 'function' && isStandaloneQuest()) || _LSS_IS_MOBILE; }
 const _SW_HUB_VIEW = 11;
 const _SW_BUILD_PER_FRAME = 2;
@@ -21704,7 +21708,7 @@ function _swBuildTrees(x0,z0,T){
         im.setColorAt(k,_tc);
       } }
     im.instanceMatrix.needsUpdate=true; if(im.instanceColor) im.instanceColor.needsUpdate=true;
-    im.frustumCulled=true; im.castShadow=!noShadow; im.receiveShadow=true; im.userData={isSandwichTerrain:true, _cs:!noShadow}; scene.add(im); meshes.push(im);   // (v48.47) _cs: see _swTreeShadowCull
+    im.frustumCulled=true; im.castShadow=!noShadow; im.receiveShadow=true; im.userData={isSandwichTerrain:true, _cs:!noShadow}; scene.add(_lssFreezeStatic(im)); meshes.push(im);   // (v48.47) _cs: see _swTreeShadowCull; (v49.50) frozen: see _lssFreezeStatic
   };
   for(let v=0;v<sets.std.length;v++)   emit(sets.std[v],   _swTreeMatGet(),   buckets.std[v],   -6,   2.6,1.4, 0,false, _tint);
   for(let v=0;v<sets.snow.length;v++)  emit(sets.snow[v],  _swTreeMatGet(),   buckets.snow[v],  -6,   2.4,1.3, 0,false, _tintSnow);
@@ -22040,7 +22044,7 @@ function _swBuildDrapes(x0, z0, T) {
     m.castShadow = false;        // a strand's shadow is not worth a shadow-pass draw on a cliff
     m.receiveShadow = true;
     m.userData = { isSandwichTerrain: true, drape: kind, ownGeo: true, strands: acc.n };   // ownGeo: _swRemoveTrees disposes it
-    scene.add(m);
+    scene.add(_lssFreezeStatic(m));   // (v49.50) world-space strands, never moved
     out.push(m);
   };
   emit(accIce,  _swIceMatGet(),       'ice');
@@ -22141,7 +22145,7 @@ function _swShellJobFinish(J) {
   mesh.receiveShadow = !isCeil;
   mesh.userData = { isSandwichTerrain: true };
   mesh.renderOrder = -2;
-  scene.add(mesh);
+  scene.add(_lssFreezeStatic(mesh));   // (v49.50) world-space shell, never moved
   return mesh;
 }
 function _swBuildShell(x0, z0, isCeil, T) {
@@ -28932,8 +28936,9 @@ function _swBuildHubWater(T) {
         const _WK = window.__water || {};
         try { if (window.__lssWarmDraw) return; } catch (_) {}
         const _sm = _fxSmallDevice() && _swVrNoRefl();
-        const _gMin = (_WK.reflGapMin != null) ? _WK.reflGapMin : (_sm ? 4 : 2);   // hard cost ceiling
-        const _gMax = (_WK.reflGapMax != null) ? _WK.reflGapMax : (_sm ? 6 : 3);   // shipped cadence
+        let _tq = 'high'; try { _tq = QUALITY.level; } catch (_) {}
+        const _gMin = (_WK.reflGapMin != null) ? _WK.reflGapMin : ((_sm || _tq === 'low') ? 4 : (_tq === 'medium' ? 3 : 2));   // hard cost ceiling
+        const _gMax = (_WK.reflGapMax != null) ? _WK.reflGapMax : ((_sm || _tq === 'low') ? 6 : (_tq === 'medium' ? 4 : 3));   // shipped cadence
         this._reflGap++;
         let _go = (this._reflGap >= _gMax);
         if (!_go) {
@@ -34013,6 +34018,7 @@ const SKY_I = {
   nMin: 4, nMax: 11,   // islands per column
   rMin: 300, rMax: 950,
   range: 30000,        // build radius around the player
+  detailR: 9000,       // (v49.50) past this only rock + foliage draw (0 = off); see the visibility pass in _skFrame
   res: 26,             // surface-net grid per island
   budget: 1,           // islands meshed per frame
   skin: 70,
@@ -34025,6 +34031,7 @@ const SKY_I = {
   _ms: 0,
 };
 try { window.__sky = SKY_I; } catch (_) {}
+try { window.__skyIslands = SKY_I; } catch (_) {}
 
 function _skH3(x, y, z) { const h = Math.sin(x * 127.1 + y * 311.7 + z * 74.7) * 43758.5453; return h - Math.floor(h); }
 function _skH3m(xi, yi, zi) {
@@ -34454,6 +34461,8 @@ function* _skBuildG(I) {
   const rockMesh = new THREE.Mesh(g, _skRockMat);
   rockMesh.userData.skOwned = true;
   grp.add(rockMesh);
+  const det = new THREE.Group(); det.name = 'skDetail';
+  grp.add(det); grp.userData._det = det;
 
   const rnd = (() => { let a = (Math.imul(I.id.length + 7, 2654435761) ^ Math.round(I.x) ^ Math.round(I.z * 31)) | 0;
     return () => { a = (a + 0x6D2B79F5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a);
@@ -34486,7 +34495,7 @@ function* _skBuildG(I) {
       }
       im.instanceMatrix.needsUpdate = true;
       im.frustumCulled = true;
-      grp.add(im);
+      det.add(im);   // (v49.50) detail
     }
   }
 
@@ -34540,16 +34549,16 @@ function* _skBuildG(I) {
       }
       im.instanceMatrix.needsUpdate = true;
       if (im.instanceColor) im.instanceColor.needsUpdate = true;
-      grp.add(im);
+      det.add(im);   // (v49.50) detail
     }
     if (cy !== null) {
       I.padY = cy; I.padR = SKY_I.padR;
       const padM = new THREE.Mesh(_SK_PAD, _skPadMat);
       padM.scale.set(SKY_I.padR, 3, SKY_I.padR); padM.position.set(I.x, cy - 1, I.z);
-      grp.add(padM);
+      det.add(padM);   // (v49.50) detail
       const ring = new THREE.Mesh(_SK_RING, _skRingMat);
       ring.scale.set(SKY_I.padR, SKY_I.padR, SKY_I.padR); ring.position.set(I.x, cy + 5, I.z);
-      grp.add(ring);
+      det.add(ring);   // (v49.50) detail
     }
     if (glows.length) {
       const ng = glows.length / 4;
@@ -34561,7 +34570,7 @@ function* _skBuildG(I) {
         M2.compose(P2, Q2, S2); gm.setMatrixAt(i, M2);
       }
       gm.instanceMatrix.needsUpdate = true;
-      grp.add(gm);
+      det.add(gm);   // (v49.50) detail
     }
   }
 
@@ -34638,6 +34647,8 @@ function* _skBuildG(I) {
     }
   }
 
+  _lssFreezeStatic(grp);
+  try { const _bb = new THREE.Box3().setFromObject(grp); if (!_bb.isEmpty()) grp.userData._bs = _bb.getBoundingSphere(new THREE.Sphere()); } catch (_) {}
   I.grp = grp;
   return grp;
 }
@@ -34692,6 +34703,27 @@ function _skFrame(px, py, pz) {
     _skKeep.delete(k); _skFreeRec(rec);
   }
   if (_skJob && !want.has(_skJob.I.id)) _skJob = null;
+  try {
+    const _occ = (typeof _clipSkyOccluder === 'function') ? _clipSkyOccluder() : null;
+    const _dR = (SKY_I.detailR != null) ? +SKY_I.detailR : 9000;
+    const _cp = (typeof camera !== 'undefined' && camera) ? camera.position : null;
+    let _nOut = 0, _nDet = 0;
+    if (_cp) for (const rec of _skLive.values()) {
+      const g = rec.grp, bs = g && g.userData && g.userData._bs;
+      if (!bs) continue;
+      let out = false;
+      if (_occ) out = (Math.hypot(bs.center.x - _occ.x, bs.center.y - _occ.y, bs.center.z - _occ.z) - bs.radius) > _occ.r + 600;
+      if (g.visible === out) g.visible = !out;
+      const det = g.userData._det;
+      if (det) {
+        const dv = !out && (!(_dR > 0) || (Math.hypot(bs.center.x - _cp.x, bs.center.y - _cp.y, bs.center.z - _cp.z) - bs.radius) < _dR);
+        if (det.visible !== dv) det.visible = dv;
+        if (!dv) _nDet++;
+      }
+      if (out) _nOut++;
+    }
+    SKY_I._vis = { live: _skLive.size, behindDome: _nOut, noDetail: _nDet };
+  } catch (_) {}
   near.sort((a, b) => (Math.hypot(a.x - px, a.y - py, a.z - pz)) - (Math.hypot(b.x - px, b.y - py, b.z - pz)));
   const syncR = (SKY_I.syncR != null) ? +SKY_I.syncR : 21000;
   const curtain = _skCurtainUp();
@@ -38607,7 +38639,7 @@ function _clipSkyOccluder() {
         2 * Math.abs(camera.position.y - game._hubWaterWL) >= _rho) return null;
     let _m = (typeof window !== 'undefined' && window.__clipCullMul != null) ? +window.__clipCullMul : 1.0;
     if (!(isFinite(_m) && _m > 0)) _m = 1.0;
-    return { x: dome.position.x, z: dome.position.z, r: r * _m };
+    return { x: dome.position.x, y: dome.position.y, z: dome.position.z, r: r * _m };
   } catch (_) { return null; }
 }
 
@@ -38755,7 +38787,7 @@ function _swMergeBuild(key, list, sig) {
     const m = new THREE.Mesh(geo, src.material);
     m.receiveShadow = recv; m.renderOrder = -2;
     m.userData = { isSandwichTerrain: true, isSandwichMerge: true };
-    scene.add(m);
+    scene.add(_lssFreezeStatic(m));   // (v49.50) world-space block, never moved
     return m;
   };
   const g0 = list.find(function (c) { return c.ground; }), c0 = list.find(function (c) { return c.ceiling; });
@@ -81301,15 +81333,15 @@ function buildSettingsPage() {
                had something to display, real options do that better, and it carried a live bug -
                it had no stamp test, so EVERY phone on its first-run LOW default was shown
                "set automatically after a GPU crash" having never crashed. -->
-          <option value="low" ${QUALITY.level === 'low' ? 'selected' : ''}>Low (no bloom, 1-octave smoke, fewer particles, 0.65× render)</option>
-          <option value="medium" ${QUALITY.level === 'medium' ? 'selected' : ''}>Medium (no bloom, 2-octave smoke, 0.85× render)</option>
+          <option value="low" ${QUALITY.level === 'low' ? 'selected' : ''}>Low (no bloom, 1-octave smoke, fewer particles, 0.65× render, shorter view, slower reflections)</option>
+          <option value="medium" ${QUALITY.level === 'medium' ? 'selected' : ''}>Medium (no bloom, 2-octave smoke, 0.85× render, shorter view)</option>
           <option value="high" ${QUALITY.level === 'high' ? 'selected' : ''}>High (full bloom + 3-octave smoke) — recommended, incl. phones</option>
           <option value="ultra" ${QUALITY.level === 'ultra' ? 'selected' : ''}>Ultra (4-octave smoke, 1.5× particles, dense basin pools, 1.5× bloom RT)</option>
           <option value="mega" ${QUALITY.level === 'mega' ? 'selected' : ''}>Mega Ultra (2.5x supersample, 8-octave smoke, max particles - high-end GPUs)</option>
         </select>
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">High is the baseline everywhere, phones included. Low and Medium sit below it: they turn bloom off and render the world at 0.65× / 0.85× before it is scaled to your screen — so they trade the glow and some sharpness for fill rate. Try them if the frame rate is poor; the picture gets plainer, not broken. If your GPU has headroom, push to Ultra or Mega. The change applies to newly-spawned effects ; existing smoke plumes keep their settings until they fade out. Quality change applies to clouds + bloom on the next round-start. Window-resize also rebinds bloom RT size to the new tier.</label>
+        <label style="flex:1;">High is the baseline everywhere, phones included. Low and Medium sit below it: they turn bloom off and render the world at 0.65× / 0.85× before it is scaled to your screen — so they trade the glow and some sharpness for fill rate — and in the overworld they also draw a shorter distance (Low refreshes water reflections less often too), which is what helps a slow or battery-throttled CPU. Try them if the frame rate is poor; the picture gets plainer, not broken. If your GPU has headroom, push to Ultra or Mega. The change applies to newly-spawned effects ; existing smoke plumes keep their settings until they fade out. Quality change applies to clouds + bloom on the next round-start. Window-resize also rebinds bloom RT size to the new tier.</label>
       </div>
       <!-- (v49.45) LITE MODE - phone-class graphics on a non-touch device. Boot-time, so a change that
            flips the effective mode reloads. Hidden on touch phones: they are always on this budget. -->

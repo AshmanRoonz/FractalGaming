@@ -6688,6 +6688,26 @@ window.__lssOff = (function () {
 })();
 function _lssOff(n) { try { return !!(window.__lssOff && (window.__lssOff.all || window.__lssOff[n])); } catch (_) { return false; } }
 
+// ⭐ (v49.50) THE STATIC FREEZE. three recomputes EVERY object's local and world matrix on EVERY render of
+// the scene (scene.matrixWorldAutoUpdate -> updateMatrixWorld walks ~2,200 objects here), and the scene is
+// rendered 1.5x a frame with the water mirror. Most of what is in it never moves once built: terrain
+// shells, chunk trees, drapes and merged blocks, and whole sky islands - all built in WORLD coordinates
+// around an origin that stays put. Measured on the owner's laptop on battery (CPU-bound, see
+// _swHubTierView): freezing those families took updateMatrixWorld from 1.10 to 0.80 ms a call and ~0.7 ms
+// off the frame. A frozen root is skipped by the walk entirely (matrixWorldAutoUpdate false) after its
+// matrices are computed once here; visibility, castShadow and instance buffers are untouched and keep
+// working. ⚠ ONLY for objects nothing ever moves again - a frozen object that is later repositioned
+// silently stays where it was. `?off=freeze` restores the old behaviour for an A/B without a rebuild.
+function _lssFreezeStatic(root) {
+  if (!root || _lssOff('freeze')) return root;
+  try {
+    root.updateMatrixWorld(true);
+    root.traverse((o) => { o.matrixAutoUpdate = false; });
+    root.matrixWorldAutoUpdate = false;
+  } catch (_) {}
+  return root;
+}
+
 // ⭐⭐ (v44.09) `?texcap=N` - THE TEXTURE CAP, TESTABLE AT LAST, AND WITHOUT THE v39.49 TRAP.
 // Desktop HIGH has capped hull textures at 1024 since v39.34; ULTRA and MEGA are exempt ("they
 // exist to spend GPU") and upload the full 2048 maps - by that commit's own per-texture inventory,
@@ -6913,7 +6933,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "49.49";
+const LSS_BUILD = "49.50";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -36231,7 +36251,23 @@ try {
     if (_n >= 3) { window.__hubView = _n; try { console.warn('[hub] view radius forced to ' + _n + ' (' + Math.pow(2 * _n + 1, 2) + ' chunks) by ?hubview'); } catch (_) {} }
   }
 } catch (_) {}
-function _swHubView() { return window.__hubView || (((typeof isStandaloneQuest === 'function' && isStandaloneQuest()) || _LSS_IS_MOBILE) ? 8 : 12); }   // (perf) hub terrain view radius: desktop 12 (was 16), mobile/Quest 8 (was 9/16). Streams as one draw call per chunk, so radius^2 drives draw-call + triangle count; 16->12 cuts hub terrain draws ~40%, the #1 hub GPU cost. Live override: window.__hubView
+// ⭐⭐ (v49.50) THE LOW AND MEDIUM TIERS CUT CPU TOO. Owner: "the framerate on battery power is pretty
+// low, like 40fps, no matter what performance preset, mega, high or low, stayed around the same fps".
+// MEASURED (pane, laptop unplugged, hub): CPU 15-20 ms a frame against 8.5 ms of GPU - the frame is
+// CPU-BOUND, and every preset lever (pixel ratio, particles, smoke, bloom) is GPU-side, so MEGA and LOW
+// ran the same ~300-450 draws and paid the same three.js submission cost (renderFrame 10-14 ms).
+// Live A/B on battery, each bracketed by baselines: view radius 12 -> 8 saved ~1.0 ms of CPU a frame,
+// the mirror at the phone cadence another ~0.9; together with each other, parked, 60.8 fps and 99% of
+// frames on the 60 Hz vsync. The radius is read live by the streamer, the zone tick's fog density and
+// the tree fade (all three re-derive from this function), so a tier switch in Settings takes effect
+// within a second, fog closing in with the radius. `window.__hubView` still overrides everything.
+// ⚠ QUALITY is a top-level const declared far above this line, but read it through try/catch anyway:
+//   `typeof` does not shield a TDZ read (v39.02), and this function is called from boot-time code.
+function _swHubTierView() {
+  try { const L = QUALITY.level; if (L === 'low') return 8; if (L === 'medium') return 10; } catch (_) {}
+  return 99;
+}
+function _swHubView() { return window.__hubView || Math.min((((typeof isStandaloneQuest === 'function' && isStandaloneQuest()) || _LSS_IS_MOBILE) ? 8 : 12), _swHubTierView()); }   // (perf) hub terrain view radius: desktop 12 (was 16), mobile/Quest 8 (was 9/16). Streams as one draw call per chunk, so radius^2 drives draw-call + triangle count; 16->12 cuts hub terrain draws ~40%, the #1 hub GPU cost. Live override: window.__hubView
 // (v35.89) ENDLESS mobile budget gate — the SAME detection _swHubView uses, plus
 // window.__endlessMobileSim (debug: force the mobile branches from a desktop
 // console to A/B the phone budgets; set BEFORE startEndless so the view radius,
@@ -37840,7 +37876,7 @@ function _swBuildTrees(x0,z0,T){
         im.setColorAt(k,_tc);
       } }
     im.instanceMatrix.needsUpdate=true; if(im.instanceColor) im.instanceColor.needsUpdate=true;
-    im.frustumCulled=true; im.castShadow=!noShadow; im.receiveShadow=true; im.userData={isSandwichTerrain:true, _cs:!noShadow}; scene.add(im); meshes.push(im);   // (v48.47) _cs: see _swTreeShadowCull
+    im.frustumCulled=true; im.castShadow=!noShadow; im.receiveShadow=true; im.userData={isSandwichTerrain:true, _cs:!noShadow}; scene.add(_lssFreezeStatic(im)); meshes.push(im);   // (v48.47) _cs: see _swTreeShadowCull; (v49.50) frozen: see _lssFreezeStatic
   };
   // NOTE both tree emits pass a tint even when it is the identity family: std and
   // snow SHARE _swTreeMatGet(), and instanceColor is a program define, so a mesh
@@ -38417,7 +38453,7 @@ function _swBuildDrapes(x0, z0, T) {
     m.castShadow = false;        // a strand's shadow is not worth a shadow-pass draw on a cliff
     m.receiveShadow = true;
     m.userData = { isSandwichTerrain: true, drape: kind, ownGeo: true, strands: acc.n };   // ownGeo: _swRemoveTrees disposes it
-    scene.add(m);
+    scene.add(_lssFreezeStatic(m));   // (v49.50) world-space strands, never moved
     out.push(m);
   };
   emit(accIce,  _swIceMatGet(),       'ice');
@@ -38544,7 +38580,7 @@ function _swShellJobFinish(J) {
   mesh.receiveShadow = !isCeil;
   mesh.userData = { isSandwichTerrain: true };
   mesh.renderOrder = -2;
-  scene.add(mesh);
+  scene.add(_lssFreezeStatic(mesh));   // (v49.50) world-space shell, never moved
   return mesh;
 }
 function _swBuildShell(x0, z0, isCeil, T) {
@@ -49768,8 +49804,12 @@ function _swBuildHubWater(T) {
         // are paying for; a Quest that leaves the option off never reaches this line at all, because
         // the early return above fires first.
         const _sm = _fxSmallDevice() && _swVrNoRefl();
-        const _gMin = (_WK.reflGapMin != null) ? _WK.reflGapMin : (_sm ? 4 : 2);   // hard cost ceiling
-        const _gMax = (_WK.reflGapMax != null) ? _WK.reflGapMax : (_sm ? 6 : 3);   // shipped cadence
+        // (v49.50) ...and the LOW / MEDIUM tiers take a slower mirror too - a CPU lever (the mirror is a
+        // second full scene render, ~200-290 draws), measured ~0.9 ms a frame on the owner's laptop on
+        // battery at the phone cadence. See _swHubTierView. The knobs still override.
+        let _tq = 'high'; try { _tq = QUALITY.level; } catch (_) {}
+        const _gMin = (_WK.reflGapMin != null) ? _WK.reflGapMin : ((_sm || _tq === 'low') ? 4 : (_tq === 'medium' ? 3 : 2));   // hard cost ceiling
+        const _gMax = (_WK.reflGapMax != null) ? _WK.reflGapMax : ((_sm || _tq === 'low') ? 6 : (_tq === 'medium' ? 4 : 3));   // shipped cadence
         this._reflGap++;
         let _go = (this._reflGap >= _gMax);
         // (v40.49) A CUT IS NOT MOTION, AND _gMin MUST NOT HOLD ONE. The floor below is a cost
@@ -57118,6 +57158,7 @@ const SKY_I = {
   nMin: 4, nMax: 11,   // islands per column
   rMin: 300, rMax: 950,
   range: 30000,        // build radius around the player
+  detailR: 9000,       // (v49.50) past this only rock + foliage draw (0 = off); see the visibility pass in _skFrame
   res: 26,             // surface-net grid per island
   budget: 1,           // islands meshed per frame
   // How far OUTSIDE the analytic surface the collider stops. The visible mesh is a
@@ -57149,6 +57190,9 @@ const SKY_I = {
   _ms: 0,
 };
 try { window.__sky = SKY_I; } catch (_) {}
+// (v49.50) ⚠ `window.__sky` is REASSIGNED to the sky shader's uniforms further down (the sky dome's own
+// tuner), so this handle never survived boot. `__skyIslands` is the island config, reliably.
+try { window.__skyIslands = SKY_I; } catch (_) {}
 
 // ---- 3D value noise (the hub only had a 2D one) ------------------------------
 function _skH3(x, y, z) { const h = Math.sin(x * 127.1 + y * 311.7 + z * 74.7) * 43758.5453; return h - Math.floor(h); }
@@ -57681,6 +57725,11 @@ function* _skBuildG(I) {
   // adds is a shared singleton. Teardown disposes by this flag — see _skDispose.
   rockMesh.userData.skOwned = true;
   grp.add(rockMesh);
+  // (v49.50) the island's small parts - vines, towers, beacons, pad, ring - hang off ONE handle, so the
+  // detail LOD in _skFrame drops them past SKY_I.detailR with a single flag. Foliage stays on grp: it has
+  // its own distance gate (the `_fol` list below), and two owners of one `visible` would fight.
+  const det = new THREE.Group(); det.name = 'skDetail';
+  grp.add(det); grp.userData._det = det;
 
   const rnd = (() => { let a = (Math.imul(I.id.length + 7, 2654435761) ^ Math.round(I.x) ^ Math.round(I.z * 31)) | 0;
     return () => { a = (a + 0x6D2B79F5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a);
@@ -57718,7 +57767,7 @@ function* _skBuildG(I) {
       }
       im.instanceMatrix.needsUpdate = true;
       im.frustumCulled = true;
-      grp.add(im);
+      det.add(im);   // (v49.50) detail
     }
   }
 
@@ -57780,7 +57829,7 @@ function* _skBuildG(I) {
       }
       im.instanceMatrix.needsUpdate = true;
       if (im.instanceColor) im.instanceColor.needsUpdate = true;
-      grp.add(im);
+      det.add(im);   // (v49.50) detail
     }
     if (cy !== null) {
       // Publish the pad on the island record so the landing system can find it
@@ -57788,10 +57837,10 @@ function* _skBuildG(I) {
       I.padY = cy; I.padR = SKY_I.padR;
       const padM = new THREE.Mesh(_SK_PAD, _skPadMat);
       padM.scale.set(SKY_I.padR, 3, SKY_I.padR); padM.position.set(I.x, cy - 1, I.z);
-      grp.add(padM);
+      det.add(padM);   // (v49.50) detail
       const ring = new THREE.Mesh(_SK_RING, _skRingMat);
       ring.scale.set(SKY_I.padR, SKY_I.padR, SKY_I.padR); ring.position.set(I.x, cy + 5, I.z);
-      grp.add(ring);
+      det.add(ring);   // (v49.50) detail
     }
     if (glows.length) {
       const ng = glows.length / 4;
@@ -57803,7 +57852,7 @@ function* _skBuildG(I) {
         M2.compose(P2, Q2, S2); gm.setMatrixAt(i, M2);
       }
       gm.instanceMatrix.needsUpdate = true;
-      grp.add(gm);
+      det.add(gm);   // (v49.50) detail
     }
   }
 
@@ -57903,6 +57952,12 @@ function* _skBuildG(I) {
   }
 
   // (v48.33) SKY_I._ms is now kept by the callers: a sliced build's wall time spans frames.
+  // (v49.50) built in world coordinates and never moved again (kept islands re-enter the scene as they
+  // are) - freeze the whole group; the foliage gate only flips `visible`. See _lssFreezeStatic.
+  _lssFreezeStatic(grp);
+  // (v49.50) ...and its bounding sphere, once, for the dome cull and the detail LOD in _skFrame (instanced
+  // children are measured over their instances - three's Box3 uses InstancedMesh.boundingBox).
+  try { const _bb = new THREE.Box3().setFromObject(grp); if (!_bb.isEmpty()) grp.userData._bs = _bb.getBoundingSphere(new THREE.Sphere()); } catch (_) {}
   I.grp = grp;
   return grp;
 }
@@ -57975,6 +58030,40 @@ function _skFrame(px, py, pz) {
   // A build whose island left range mid-way just stops: nothing of it was published (I.grp is set on
   // its last line only) and nothing was uploaded, so there is nothing to free.
   if (_skJob && !want.has(_skJob.I.id)) _skJob = null;
+  // ⭐⭐ (v49.50) DRAW ONLY THE ISLANDS SOMEONE CAN SEE. Measured on the owner's laptop on battery (a
+  // CPU-bound frame - see _swHubTierView): sky islands were the biggest draw family in the game, ~120
+  // main-pass + ~37 mirror draws a frame, because islands are KEPT out to SKY_I.range (30,000) so they are
+  // built before they arrive - while the weather dome, an opaque camera-centred sphere of radius 20,500
+  // drawn after the world, paints over every fragment beyond it (the v47.07 proof, _clipSkyOccluder).
+  // Everything in the 20.5-30 km band was traversed, culled and submitted to be painted over.
+  //   1. Outside the dome (sphere vs sphere, +600 u for a frame of camera travel): the whole group goes.
+  //      Its opaque parts are exactly occluded; the two transparent ones (beacon glow, pad ring) take fog
+  //      and are sub-pixel at that range. _clipSkyOccluder returns null - cull nothing - whenever the proof
+  //      does not hold (no dome, the mirror's camera outside it, the bent world, window.__clipCull = 0).
+  //   2. Past SKY_I.detailR (9,000 u; 0 = off) only the rock and the foliage stay: vines, towers, beacons,
+  //      pad and ring are specks there. Interleaved A/B: ~0.6 ms of CPU a frame on its own.
+  // Only `visible` flips, and only on a change; nothing else ever writes an island group's `visible`.
+  try {
+    const _occ = (typeof _clipSkyOccluder === 'function') ? _clipSkyOccluder() : null;
+    const _dR = (SKY_I.detailR != null) ? +SKY_I.detailR : 9000;
+    const _cp = (typeof camera !== 'undefined' && camera) ? camera.position : null;
+    let _nOut = 0, _nDet = 0;
+    if (_cp) for (const rec of _skLive.values()) {
+      const g = rec.grp, bs = g && g.userData && g.userData._bs;
+      if (!bs) continue;
+      let out = false;
+      if (_occ) out = (Math.hypot(bs.center.x - _occ.x, bs.center.y - _occ.y, bs.center.z - _occ.z) - bs.radius) > _occ.r + 600;
+      if (g.visible === out) g.visible = !out;
+      const det = g.userData._det;
+      if (det) {
+        const dv = !out && (!(_dR > 0) || (Math.hypot(bs.center.x - _cp.x, bs.center.y - _cp.y, bs.center.z - _cp.z) - bs.radius) < _dR);
+        if (det.visible !== dv) det.visible = dv;
+        if (!dv) _nDet++;
+      }
+      if (out) _nOut++;
+    }
+    SKY_I._vis = { live: _skLive.size, behindDome: _nOut, noDetail: _nDet };
+  } catch (_) {}
   near.sort((a, b) => (Math.hypot(a.x - px, a.y - py, a.z - pz)) - (Math.hypot(b.x - px, b.y - py, b.z - pz)));
   // ⚠ SYNCHRONOUS ONLY WHERE IT COULD BE SEEN ARRIVING. The weather dome is an opaque camera-centred
   // shell (radius ~20,500) that paints over everything outside it (v47.07), and islands enter range at
@@ -63213,7 +63302,8 @@ function _clipSkyOccluder() {
     if (!(isFinite(_m) && _m > 0)) _m = 1.0;
     // The DOME's own position, not camera.position: it is the exact centre of the shell being reasoned
     // about (and equals camera.position as of this frame's _wxFrame / last onBeforeRender).
-    return { x: dome.position.x, z: dome.position.z, r: r * _m };
+    // (v49.50) `y` too: the clipmap rings are ground and test in XZ, the sky islands need the sphere.
+    return { x: dome.position.x, y: dome.position.y, z: dome.position.z, r: r * _m };
   } catch (_) { return null; }
 }
 
@@ -63467,7 +63557,7 @@ function _swMergeBuild(key, list, sig) {
     const m = new THREE.Mesh(geo, src.material);
     m.receiveShadow = recv; m.renderOrder = -2;
     m.userData = { isSandwichTerrain: true, isSandwichMerge: true };
-    scene.add(m);
+    scene.add(_lssFreezeStatic(m));   // (v49.50) world-space block, never moved
     return m;
   };
   const g0 = list.find(function (c) { return c.ground; }), c0 = list.find(function (c) { return c.ceiling; });
@@ -126686,15 +126776,15 @@ function buildSettingsPage() {
                had something to display, real options do that better, and it carried a live bug -
                it had no stamp test, so EVERY phone on its first-run LOW default was shown
                "set automatically after a GPU crash" having never crashed. -->
-          <option value="low" ${QUALITY.level === 'low' ? 'selected' : ''}>Low (no bloom, 1-octave smoke, fewer particles, 0.65× render)</option>
-          <option value="medium" ${QUALITY.level === 'medium' ? 'selected' : ''}>Medium (no bloom, 2-octave smoke, 0.85× render)</option>
+          <option value="low" ${QUALITY.level === 'low' ? 'selected' : ''}>Low (no bloom, 1-octave smoke, fewer particles, 0.65× render, shorter view, slower reflections)</option>
+          <option value="medium" ${QUALITY.level === 'medium' ? 'selected' : ''}>Medium (no bloom, 2-octave smoke, 0.85× render, shorter view)</option>
           <option value="high" ${QUALITY.level === 'high' ? 'selected' : ''}>High (full bloom + 3-octave smoke) — recommended, incl. phones</option>
           <option value="ultra" ${QUALITY.level === 'ultra' ? 'selected' : ''}>Ultra (4-octave smoke, 1.5× particles, dense basin pools, 1.5× bloom RT)</option>
           <option value="mega" ${QUALITY.level === 'mega' ? 'selected' : ''}>Mega Ultra (2.5x supersample, 8-octave smoke, max particles - high-end GPUs)</option>
         </select>
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">High is the baseline everywhere, phones included. Low and Medium sit below it: they turn bloom off and render the world at 0.65× / 0.85× before it is scaled to your screen — so they trade the glow and some sharpness for fill rate. Try them if the frame rate is poor; the picture gets plainer, not broken. If your GPU has headroom, push to Ultra or Mega. The change applies to newly-spawned effects ; existing smoke plumes keep their settings until they fade out. Quality change applies to clouds + bloom on the next round-start. Window-resize also rebinds bloom RT size to the new tier.</label>
+        <label style="flex:1;">High is the baseline everywhere, phones included. Low and Medium sit below it: they turn bloom off and render the world at 0.65× / 0.85× before it is scaled to your screen — so they trade the glow and some sharpness for fill rate — and in the overworld they also draw a shorter distance (Low refreshes water reflections less often too), which is what helps a slow or battery-throttled CPU. Try them if the frame rate is poor; the picture gets plainer, not broken. If your GPU has headroom, push to Ultra or Mega. The change applies to newly-spawned effects ; existing smoke plumes keep their settings until they fade out. Quality change applies to clouds + bloom on the next round-start. Window-resize also rebinds bloom RT size to the new tier.</label>
       </div>
       <!-- (v49.45) LITE MODE - phone-class graphics on a non-touch device. Boot-time, so a change that
            flips the effective mode reloads. Hidden on touch phones: they are always on this budget. -->

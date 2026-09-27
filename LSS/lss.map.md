@@ -8837,3 +8837,37 @@ Owner: *"i find our water to look a bit jello like... i like how this water move
   - **Other routes to "enemy ships spawned" the ledger tells apart:**
     - a third city arming (`ARM_DIST` 9,500; hostile carriers hunt attackers to 15,000 on aggro);
     - a hostile carrier killed by something that resolves to no team (the leviathan, another hostile city's carrier). That city stays hostile and re-arms after 90 s (`_carrierPending = 90`, `'home'`).
+- ⭐⭐⭐ **v49.50 ON BATTERY THE FRAME IS CPU-BOUND - LOW/MEDIUM now cut CPU, plus the first structural CPU pass.** Owner: *"the framerate on battery power is pretty low, like 40fps, no matter what performance preset, mega, high or low"*.
+  - **Measured** (pane, laptop unplugged, hub, `?pbhud`): CPU 15-20 ms a frame against 8.5 ms of GPU, ~300-450 draws across ~11 `renderer.render` calls.
+    - Every preset lever (pixel ratio, particles, smoke, bloom) is GPU-side, so MEGA = LOW.
+    - The panel runs at 60 Hz on battery, so a 20 ms frame alternates 16.7/33 ms and averages ~40.
+    - Windows' battery power mode here is Balanced (Best performance on AC).
+  - **How it was found** - a ladder, useful again:
+    - `__prof` section deltas over N frames (CPU) against `__f8log._R.gt` (GPU timer);
+    - a `renderer.render` wrap per call (scene / camera / target, CPU, draws);
+    - a `renderBufferDirect` wrap counting draws by owner family;
+    - the JS self-profiler on the `webgpu` launch config (`new Profiler({sampleInterval:1})`; Windows samples every ~20 ms, so aggregate over seconds).
+    - three's minified names decode by reading `three.module.min.js` line 6 at the frame's column: Vt=projectObject, Ht=renderScene, Wt=renderObjects, Xt=renderObject, 436807=renderBufferDirect, 436895=setProgram, `setup`@291749 = WebGLBindingStates (VAO) setup, w@367713 = shadow renderObject.
+  - ⚠ **`?pbhud` itself costs ~0.6-1 ms a frame**: its `renderBufferDirect` / `render` / `bindBuffer` wrappers (`_wrapFirstDraw`, `_altPoll`). Numbers taken with it on are pessimistic.
+  - **LOW/MEDIUM CPU levers.** **Jump:** `function _swHubTierView`.
+    - `_swHubView()` = min(device default, LOW 8 / MEDIUM 10). It is re-read by the streamer, the zone tick's fog and the tree fade, so it applies live and the fog closes in with it.
+    - The water mirror's cadence: LOW 4/6, MEDIUM 3/4 (desktop 2/3, the `reflGapMin/Max` defaults).
+    - The Settings labels say so.
+    - Measured, battery, flying: **LOW 53 fps, 13.9 ms CPU, 186 draws, 85% of frames at 60 Hz**, against HIGH/MEGA 46 fps, 17.6 ms, 364 draws.
+  - **The static freeze.** **Jump:** `function _lssFreezeStatic`.
+    - Terrain shells, chunk trees, drapes, merged blocks and whole sky islands: `matrixAutoUpdate = false`, root `matrixWorldAutoUpdate = false` after one compute.
+    - 287 roots / 611 objects; `updateMatrixWorld` 1.10 -> 0.58 ms a call.
+    - `?off=freeze` reverts it.
+    - ⚠ NOT the cities: their searchlight beams rotate every frame.
+  - **Sky islands draw only what can be seen.** **Jump:** the `DRAW ONLY THE ISLANDS SOMEONE CAN SEE` block in `_skFrame`.
+    - Islands are kept out to 30 km, but the weather dome (opaque, r 20,500, drawn after the world) paints over everything beyond it. `_clipSkyOccluder()` (now also returns `y`) + a 3D sphere test hides whole islands behind it.
+    - Past `SKY_I.detailR` (9,000; 0 = off) the vines, towers, beacons, pad and ring (now under one `skDetail` group per island) drop. Foliage keeps its own gate.
+    - Interleaved: -72 draws a frame (436 -> 364) but only ~0.4 ms of CPU.
+    - `window.__skyIslands` is the island config now: `window.__sky` is overwritten by the sky shader's uniforms.
+  - ⚠ **A draw costs ~5 µs of CPU here, not the 20-30 µs a naive division suggests.** Cutting 72 draws bought 0.4 ms. The frame is dozens of sub-millisecond systems (hub:stream/city/sky/ripple/critters, particles, HUD 0.5, lights setup), and no single family dominates any more.
+  - **Open, ranked:**
+    1. chunk trees (one InstancedMesh per chunk: ~140 draws across main/shadow/mirror) batched per block;
+    2. the overworld cities' OPAQUE parts behind the dome (beams are transparent and must stay);
+    3. ship hierarchies (606 objects for ~27 ships, mostly empty markers);
+    4. 14 point lights re-uploaded per lit program whenever the light state changes (a smaller constant pool for LOW would have to be boot-time: light counts are program-key terms);
+    5. per-system budgets in the hub tick.
