@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "49.55";
+const LSS_BUILD = "49.56";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -42649,7 +42649,7 @@ function _skinPatchHueShader(m) {
     uSkinPatFloor: { value: 0.05 }, uSkinPatCap: { value: 1.4 }, uSkinPatFlat: { value: 0 },
     uSkinReflPass: { value: 0 }, uSkinPatTex: { value: _skinDefaultTex() },
   };
-  ud._skinHueU = u;
+  Object.defineProperty(ud, '_skinHueU', { value: u, writable: true, configurable: true, enumerable: false });
   const prevOBC = m.onBeforeCompile;
   m.onBeforeCompile = function (shader, renderer) {
     if (prevOBC) { try { prevOBC.call(this, shader, renderer); } catch (_) {} }

@@ -8893,4 +8893,21 @@ Owner: *"i find our water to look a bit jello like... i like how this water move
     - The underside plane `game._hubWaterUnder` and the potato plane are untouched: `und` is always hidden, and the potato plane is a MeshBasicMaterial.
     - With the EYE below the waterline, the underwater fog, the CSS tint and the bubble cloud (`_swBubblesTick`, 240 points around the hull) still reach into a sealed cabin.
   - ⚠ **Driving the pane:** the flight model copies `camera.quaternion` INTO `player.mesh.quaternion`, so the camera is the truth. Pinning the mesh's quaternion levels the hull but not the view, and a console `camera.position` write is overwritten by the rig every frame. Pin `player.position` only and let the owner aim.
+- ⭐⭐⭐ **v49.56 THE IMAGE-CAMO SEAT HITCH: three.js JSON-copies `userData` on every clone** (**Jump:** `Object.defineProperty(ud, '_skinHueU'`). Owner: *"there's now a hitch when we switch to first person view from third person"*.
+  - **Symptom.** 0.6-2.0 s frames on entering the seat view on a hull for the first time: after a swap made in third person, or on every swap made in first person.
+    - Only with an IMAGE camo: CHROMIUM 1.2-1.5 s per swap, FRACTURE 2.0 s. FACTORY and the procedural CHROME took 35-78 ms.
+    - The F8 marks showed no cold link, no slow GL call and net-zero resource counts.
+  - **Cause.** r165 `Material.copy` does `userData = JSON.parse(JSON.stringify(source.userData))`. The skin's uniform block lived in `material.userData._skinHueU`, including `uSkinPatTex`, the camo `Texture`.
+    - `JSON.stringify` calls `Texture.toJSON` -> `Source.toJSON` -> `ImageUtils.getDataURL`: the whole 1024² image is drawn to a canvas and PNG-encoded, synchronously, and then only the uuid is kept.
+    - One clone took 144 ms (the stringify alone 70 ms, for 1,665 chars of JSON).
+    - The seat's ghost shell clones every hull material once per hull (`_ghostHullApply` -> `_addGhostHull(m.clone())`), and PYRO has 19 of them.
+  - **Fix.** The property is non-enumerable. Reads are unchanged, and JSON never sees it.
+    - Clone: 0.2 ms.
+    - Swap in first person: 35-53 ms, including first-ever hulls.
+    - Swap in third person, then V into the seat: 34-43 ms.
+    - The clone never used the copy: `Material.copy` does not carry `onBeforeCompile`, so a ghost clone has never worn the skin shader.
+  - ⚠ **THE TRAP, GENERALLY:** never keep a `Texture` (or a material, geometry or mesh) in any `userData` that could be cloned. `Object3D.clone` JSON-copies userData the same way. `o.userData._ghostMats` holds MATERIALS on the hull's meshes and is only safe because nothing clones those meshes: `_mirrorMeshTree` deliberately skips userData.
+  - **How it was found.** The F8 `first` keys in the owner's marks named a different ship per hitch (SLAYER, TRACKER, BLASTER...), which exposed hull swaps. A per-skin A/B split image camos from the rest.
+    - The decisive clue: the profiling origin (`webgpu`, 8096) has its OWN localStorage, defaulted to THIRD person, and there nothing hitched. **Copy the owner's `lss_view` / `lss_ship_skin` / `lss_quality` / `lss_panini` onto that origin, or the repro silently changes.**
+  - **Seen once, open:** the first hull swap after launch (to PYRO) took 1036 ms with only 11 ms of JS blocking, while PYRO's cabin ghost pipelines drew for the first time. It looks like a GPU-side pipeline build, once per session, and is not the clone.
 

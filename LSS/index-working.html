@@ -6933,7 +6933,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "49.55";
+const LSS_BUILD = "49.56";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -69200,7 +69200,24 @@ function _skinPatchHueShader(m) {
     uSkinPatFloor: { value: 0.05 }, uSkinPatCap: { value: 1.4 }, uSkinPatFlat: { value: 0 },
     uSkinReflPass: { value: 0 }, uSkinPatTex: { value: _skinDefaultTex() },
   };
-  ud._skinHueU = u;
+  // ⭐⭐ (v49.56) NOT ENUMERABLE - IT HOLDS A TEXTURE, AND three.js JSON-COPIES userData ON EVERY CLONE.
+  // Owner: "there's now a hitch when we switch to first person view from third person". Measured on
+  // the owner's F8 marks and reproduced: 0.6-2.0 s frames, in first person, with an IMAGE camo only
+  // (CHROMIUM 1.2-1.5 s a hull swap, FRACTURE 2.0 s; FACTORY and the procedural CHROME 35-78 ms).
+  // r165's Material.copy is `userData = JSON.parse(JSON.stringify(source.userData))`, and
+  // JSON.stringify calls Texture.toJSON, which serialises its Source - for an image that is
+  // ImageUtils.getDataURL: draw the whole image to a canvas and PNG-encode it, synchronously, then keep
+  // only the uuid. One clone of a CHROMIUM-skinned hull material: 144 ms (the stringify alone 70 ms,
+  // JSON 1,665 chars). The seat's ghost shell clones every hull material (_ghostHullApply ->
+  // _addGhostHull(m.clone())) - 19 of them on PYRO - once per hull, the first time you sit in it: after
+  // a swap made in third person, or on every swap made in first person. A procedural skin carries the
+  // tiny default texture, which is why only the image camos (v49.26, v49.51) hitched.
+  // The clone never used the copy: Material.copy does not carry onBeforeCompile, so a ghost clone has
+  // no skin shader and drew factory paint all along - its JSON'd block was dead plain objects (and a
+  // latent trap: _skinPatchHueShader(clone) would have handed back plain objects whose `.value.setHex`
+  // throws). Non-enumerable, the property reads exactly as before (the mirror lift's
+  // `_mm.userData._skinHueU`) and JSON.stringify never sees it.
+  Object.defineProperty(ud, '_skinHueU', { value: u, writable: true, configurable: true, enumerable: false });
   const prevOBC = m.onBeforeCompile;
   m.onBeforeCompile = function (shader, renderer) {
     if (prevOBC) { try { prevOBC.call(this, shader, renderer); } catch (_) {} }
