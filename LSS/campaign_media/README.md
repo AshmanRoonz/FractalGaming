@@ -39,6 +39,21 @@ travel→boss transition), over combat.
 | `voice6.mp3` | Leg 6 · The Crystal Caverns    | VoidGazer                     |
 | `voice7.mp3` | Leg 7 · The Broken Simulation  | The Summoner (the final duel) |
 
+## `media.json` — list what exists (v49.47)
+
+Nothing in this folder is requested unless `media.json` lists it, so a missing file never
+shows up as an error:
+
+```json
+{ "videos": [1, 2], "voices": [1], "lines": ["op_real", "op_light"] }
+```
+
+- `videos` / `voices` — the numbered slots in the tables above (`video1.mp4` = `1`).
+- `lines` — the dialogue box's spoken lines. Every line in `CAMP_LINES`
+  (index-working.html, beside `CampMedia`) has an id — `op_real`, `leg0_a`, `boss4_a`…
+  Record a line as `voice/<id>.mp3` and add its id here. A voiced line stays on screen for
+  its clip's length; an unvoiced one for its reading time.
+
 ## Notes
 - Keep videos reasonably small (web-friendly H.264 `.mp4`); they stream from this folder.
 - Filenames are case-sensitive on some hosts — use lowercase exactly as above.

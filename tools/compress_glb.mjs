@@ -118,7 +118,9 @@ const ONLY = (() => { const i = process.argv.indexOf('--only'); return i > 0 ? p
 // mesh+material clones per spawn. flatten+join merges everything sharing a material
 // into ONE primitive each (14 per hull), which is what buildModelShipMesh clones and
 // the GPU draws. Bytes: neutral. Frame time and spawn hitches: the whole point.
-const RECIPE_VERSION = '1.2';
+// (campaign) 1.2 -> 1.3: new 'prop' recipe for the campaign ARTIFACT podium. No other file's
+// output changes.
+const RECIPE_VERSION = '1.3';
 // The game's marker empties. join() leaves every absorbed part behind as a node holding
 // an EMPTY mesh; prune strips the mesh, then everything mesh-less that is not one of
 // these is dropped (prune's keepLeaves would otherwise keep ~240 dead empties).
@@ -187,6 +189,7 @@ function categoryOf(rel) {
   // no re-simplify via OVERRIDES) ; it only lives under objects/ because it is not a loadout.
   if (rel === 'objects/carrier.glb') return 'ship';
   if (rel.startsWith('objects/hoard/')) return 'hoard';
+  if (rel === 'objects/artifact.glb') return 'prop';
   if (rel === 'objects/Sphere.glb') return 'shell';
   if (rel.startsWith('rings/')) return 'ring';
   if (/^objects\/[A-Z]/.test(rel)) return 'monster';
@@ -272,6 +275,29 @@ const RECIPES = {
       quantize({ ...Q, quantizeWeight: 8 }), webp(),
     );
     return `quantize + WebP q${WEBP_Q}`;
+  },
+
+  // (campaign) The ARTIFACT podium Xorzo docks into. A Meshy model the owner rigged in Blender
+  // (a 28-joint Mixamo-style skin + an idle clip): 29k tris, but three 4096² PNG maps that are
+  // 46.8 of its 48.9 MB. The geometry is already lighter than any ship, so only the TEXTURES
+  // move. Every slot is kept - it renders with its own materials (nothing collapses it to
+  // MeshBasic) and it is the hero of the docking close-up, so colour + normal stay 2k.
+  // ⚠ Its KHR_materials_specular is specularFactor 0, NOT the default: it is KEPT. Stripping it
+  // (the lean-mobile trick above) would hand non-metal surfaces back the 4% sheen the author
+  // turned off. It costs one MeshPhysicalMaterial program for one prop.
+  // Skinned like the monsters, so weights quantize to 8 bits the same way.
+  prop: async (doc) => {
+    await doc.transform(
+      dedup(), prune({ keepLeaves: true }), weld(),
+      quantize({ ...Q, quantizeWeight: 8 }),
+      textureCompress({ encoder: sharp, targetFormat: 'webp', quality: 88, formats: /^image\/(png|jpeg)$/,
+        slots: /baseColorTexture/, resize: [2048, 2048] }),
+      textureCompress({ encoder: sharp, targetFormat: 'webp', quality: 90, formats: /^image\/(png|jpeg)$/,
+        slots: /normalTexture/, resize: [2048, 2048] }),
+      textureCompress({ encoder: sharp, targetFormat: 'webp', quality: 85, formats: /^image\/(png|jpeg)$/,
+        slots: /metallicRoughnessTexture|occlusionTexture/, resize: [1024, 1024] }),
+    );
+    return 'skinned prop: quantize ; colour + normal 2k WebP, MR 1k WebP ; every slot + specular ext kept';
   },
 
   // ChampionShell. _champSelfIlluminate collapses it to MeshBasicMaterial({map}),

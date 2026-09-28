@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "49.45";
+const LSS_BUILD = "49.58";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -2778,9 +2778,12 @@ const CampaignMode = {
     c._nemesisBot = null; c.nemesis.alive = false;   
     c.phase = 'travel';   
     c._legIntroShown = false;   
+    c._legDlg = false;   // (v49.46) the leg's dialogue beat, below
     c._travelSpawnTimer = null; c._travelWaveN = 0;   
     c._advancing = false; c._portalSpawned = false;   
-    c._nemesisFleeing = false; c._fleeTimer = null;    
+    c._nemesisFleeing = false; c._fleeTimer = null;
+    c._portalForm = 0; c._portalT = 0; c._arrived = false; c._formAtArrive = 0;
+    c._summonerSpawned = false; c._summonerLeft = false; c._chanT = 0; c._bcT = 0;
     if (typeof _clearBossPortal === 'function') _clearBossPortal();
     try { FormationDirector.clear(); } catch (_) {}
     if (game.entities) {
@@ -2794,6 +2797,10 @@ const CampaignMode = {
   update(dt) {
     const c = game.campaign;
     if (!c || game.state !== 'playing') return;
+    {
+      const _caA = (typeof amStasisOwner === 'function') ? amStasisOwner() : true;
+      try { _campArenaTick(c, dt, _caA); } catch (e) { if (!c._arenaErr) { c._arenaErr = true; console.warn('[campaign] arena', e); } }
+    }
     if (player && player.shipState === 'dead') {
       if (!game._campReentryShown) {
         c._deathT = (c._deathT || 0) + dt;
@@ -2807,19 +2814,25 @@ const CampaignMode = {
       return;   
     }
     c._deathT = 0;
-    game._campReentryShown = false;   
+    game._campReentryShown = false;
+    try { _campScanTick(c, dt); } catch (e) { if (!c._scanErr) { c._scanErr = true; console.warn('[campaign] scan', e); } }   // (v49.49)
     
     
     if (game._campJourney && !c._legIntroShown) {
       c._legIntroShown = true;
       try { if (window.CampMedia && window.CampMedia.playVideo) window.CampMedia.playVideo((c.sceneIndex || 0) + 2); } catch (_) {}
     }
+    if (!c._legDlg) {
+      c._legDlg = true;
+      if (game._campOpenArrive && window.__campOpening) { try { window.__campOpening.arrive(); } catch (_) {} }
+      else { try { if (window.CampDialogue) window.CampDialogue.beat('leg', c.sceneIndex || 0); } catch (_) {} }
+    }
     const _ca = (typeof amStasisOwner === 'function') ? amStasisOwner() : true;
     try { FormationDirector.update(dt); } catch (_) {}
     switch (c.phase) {
       case 'travel': {
         if (_ca) {
-          const _aliveHoard = (game.entities || []).filter((e) => e && e.hoardModelKey && e.alive).length;
+          const _aliveHoard = (game.entities || []).filter((e) => e && e.hoardModelKey && e.alive && !e.isNemesis).length;   // (v49.48) the flagship is not part of the swarm
           if (c._travelSpawnTimer == null) c._travelSpawnTimer = 6.0;   
           c._travelSpawnTimer -= dt;
           if (c._travelSpawnTimer <= 0) {
@@ -2835,7 +2848,7 @@ const CampaignMode = {
           const _FAR2 = 5500 * 5500;   
           for (let i = game.entities.length - 1; i >= 0; i--) {
             const e = game.entities[i];
-            if (!e || !e.hoardModelKey || !e.alive || !e.position) continue;
+            if (!e || !e.hoardModelKey || !e.alive || !e.position || e.isNemesis) continue;   // (v49.48) the flagship holds its station
             const dx = e.position.x - px, dy = e.position.y - py, dz = e.position.z - pz;
             const behind = pz - e.position.z;
             if ((dx * dx + dy * dy + dz * dz) > _FAR2 && behind > 50) {
@@ -2849,7 +2862,9 @@ const CampaignMode = {
         }
         if (_ca && player && player.position && player.position.z >= CAMPAIGN_LEG_HALF_Z - 1400) {
           c.phase = 'boss'; c.bossActive = true; c._travelSpawnTimer = null;
+          c._arrived = true; c._formAtArrive = c._portalForm || 0;   // (v49.48) caught mid-opening
           if (game._campJourney) { try { if (window.CampMedia && window.CampMedia.playVoice) window.CampMedia.playVoice((c.sceneIndex || 0) + 1); } catch (_) {} }   
+          try { if (window.CampDialogue) { window.CampDialogue.line('arrive_xz'); window.CampDialogue.beat('boss', c.sceneIndex || 0); } } catch (_) {}   // (v49.46/48)
           _campBroadcastState();
         }
         break;
@@ -2860,11 +2875,12 @@ const CampaignMode = {
           const _bz = (typeof CAMPAIGN_LEG_HALF_Z !== 'undefined') ? CAMPAIGN_LEG_HALF_Z : 18000;
           const _defs = (typeof MONSTER_DEFS !== 'undefined' && MONSTER_DEFS) ? MONSTER_DEFS : null;
           const _key = _defs ? _defs[(c.sceneIndex || 0) % _defs.length].key : 'HallowWalker';
-          const b = (typeof _campSummonBoss === 'function')
-            ? _campSummonBoss(_key, new THREE.Vector3(0, 0, _bz)) : null;
+          const _at = _campPortalPos().add(new THREE.Vector3(0, CAMP_ARENA.summonUp, -CAMP_ARENA.summonBack));
+          const b = (typeof _campSummonBoss === 'function') ? _campSummonBoss(_key, _at) : null;
           if (b) {
             c._boss = b;
-            try { if (window.Overlays) Overlays.banner('BOSS', 'Destroy the leviathan and its hoard'); } catch (_) {}
+            try { const nb = c._nemesisBot; if (nb && nb.alive && nb.position) spawnLightningBolt(nb.position, _at, 0xb58cff, 0.7, 4, 1.8, true, 0.25); } catch (_) {}
+            try { if (window.Overlays) Overlays.banner('THE SUMMONERS', 'Opening a portal - their leviathan holds you off'); } catch (_) {}
           }
         } else {
           if (game.entities && player && player.position) {
@@ -2889,54 +2905,26 @@ const CampaignMode = {
             try { _campUnlockNextLoadout(); } catch (_) {}   
             _campBroadcastState();
           }
-          else if (c._nemesisBot && c._nemesisBot.alive && c._nemesisBot.doomed) {
-            c.phase = 'cleared'; c.bossActive = false; _campBroadcastState();
-          }
         }
         } 
         break;
       }
       case 'cleared': {
-        if (_ca && !c._portalSpawned) {
-          c._portalSpawned = true;
-          const _bz = (typeof CAMPAIGN_LEG_HALF_Z !== 'undefined') ? CAMPAIGN_LEG_HALF_Z : 18000;
-          const _py = (player && player.position) ? player.position.y : 0;
-          if (typeof _spawnBossPortal === 'function') _spawnBossPortal(new THREE.Vector3(0, _py, _bz));
-          const nb = c._nemesisBot;
-          if (nb && nb.alive && game.bossPortal) {
-            nb._fleePortalPos = game.bossPortal.position.clone();   
-            c._nemesisFleeing = true;
-            c._fleeTimer = 9;   
-            try { if (window.Overlays) Overlays.banner('THE SUMMONER FLEES', 'Stop the Summoner before it reaches the portal!'); } catch (_) {}
-          } else {
-            c._nemesisFleeing = false;
-            try { if (window.Overlays) Overlays.banner('PORTAL OPEN', 'Fly through the ring to the next sector'); } catch (_) {}
-          }
-          _campBroadcastState();   
-        }
         if (game.bossPortal) {
-          try { game.bossPortal.update(dt); } catch (_) {}   
-          
           if (_ca) {
-          if (c._nemesisFleeing) {
-            const nb = c._nemesisBot;
-            c._fleeTimer = (c._fleeTimer || 0) - dt;
-            if (!nb || !nb.alive) {
-              c._nemesisFleeing = false;   
-            } else if ((nb.position && nb.position.distanceTo(game.bossPortal.position) < 380) || c._fleeTimer <= 0) {
-              try { if (typeof _campNemesisEscape === 'function') _campNemesisEscape(); } catch (_) {}
-              c._nemesisFleeing = false;
-              try { if (window.Overlays) Overlays.banner('GIVE CHASE', 'Through the portal - after it!'); } catch (_) {}
-            }
-          }
-          if (!c._advancing && !c._nemesisFleeing && player && player.position &&
+          if (!c._advancing && game.bossPortal.stable !== false && player && player.position &&
               player.position.distanceTo(game.bossPortal.position) < 320) {
             c._advancing = true;
             try { if (typeof _beginWorldSwap === 'function') _beginWorldSwap('camp-leg', 'ENTERING THE NEXT LEG'); } catch (_) {}
             try { if (window.Overlays && Overlays.warp) Overlays.warp(true); } catch (_) {}
             try { const _w = document.getElementById('ov-warp'); if (_w) { _w.classList.add('show'); _w.classList.remove('tunnel'); void _w.offsetWidth; _w.classList.add('tunnel'); } } catch (_) {}
             c.sceneIndex = (c.sceneIndex || 0) + 1;
-            let _advToShipSelect = false;   
+            try {
+              const _nLegs = CAMPAIGN_LEGS.filter((l) => l && l.key).length || 7;
+              const _fl = Math.min(100, (c.sceneIndex / _nLegs) * 100 * CAMP_SCAN.legFloor);
+              if ((c.av || 0) < _fl) { c.av = _fl; _campSaveAV(c.av); }
+            } catch (_) {}
+            let _advToShipSelect = false;
             
             
             
@@ -2961,7 +2949,8 @@ const CampaignMode = {
                   } catch (_) {}
                   if (!net.active && game._campJourney && (typeof window !== 'undefined' && window.__campBetweenLegSelect)) _advToShipSelect = true;
                 } else {
-                  try { if (window.Overlays) Overlays.banner('SIMULATION FREED', 'The trap is broken — back to the overworld'); } catch (_) {}
+                  try { if (window.Overlays) Overlays.banner('THE OVERWORLD', 'They crossed to the surface - after them'); } catch (_) {}
+                  game._campGiant = { phase: 'arrive', t: 0 };   // FreeFlightMode -> _campGiantTick
   LSS.MODE = 'freeflight';   // (v43.19) NOT room-deferred: internal setup, not a lobby mode button
                   game.selectedMap = 'hub_overworld';
                   game.testMode = false; game.raceNoTimer = true;
@@ -2998,8 +2987,10 @@ const CampaignMode = {
   onTeardown() {
     try {
       if (typeof _clearBossPortal === 'function') _clearBossPortal();
+      try { if (window.CampDialogue) window.CampDialogue.clear(); } catch (_) {}   // (v49.46) no line outlives the run
       game.campaign = null;
-      game._campJourney = false; game._campFinale = false; game._campFinaleShown = false; game._campRiftArmed = false; game._campV1Started = false;   
+game._xzScanFlare = 0;
+      game._campJourney = false; game._campFinale = false; game._campFinaleShown = false; game._campRiftArmed = false; game._campV1Started = false;
       game.testMode = false;
       game.raceNoTimer = false;
       LSS.MODE = 'classic';
@@ -3037,13 +3028,16 @@ const FreeFlightMode = {
   update(dt) {
     if (game.state !== 'playing') return;
     if (player && player.shipState === 'dead') {
+      if (game._campGiant && game._campGiant.art) { try { _campArtOnDeath(); } catch (_) {} }   // (v49.52) off the podium, orbit off, upload paused
       this._deathT = (this._deathT || 0) + dt;
       if (this._deathT >= 1.6) { this._deathT = 0; try { if (typeof respawnPlayer === 'function') { respawnPlayer(); if (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight' && typeof player !== 'undefined' && player.maxHealth) { player.health = player.maxHealth; player.shield = player.maxShield; } } } catch (_) {} }
       return;
     }
     this._deathT = 0;
+    if (_campIsles.falling.length) { try { _campIslesFrame(dt); } catch (_) {} }   // (v49.56) islands it broke, still falling
+    if (game._campGiant) { try { _campGiantTick(dt); }catch (e) { if (!game._campGiant || !game._campGiant._err) { if (game._campGiant) game._campGiant._err = true; console.warn('[campaign] giant', e); } } }
     if (game._campJourney) {
-      if (game._campFinale && !game._campFinaleShown) {
+      if (game._campFinale && !game._campFinaleShown && !game._campGiant) {   // (v49.50) after the giant
         game._campFinaleShown = true;
         const _endFin = function () { game._campJourney = false; game._campFinale = false; game._campFinaleShown = false; game._campRiftArmed = false; game._campV1Started = false; };
         try { if (window.CampMedia && window.CampMedia.playVideo) window.CampMedia.playVideo(game._campFinalVideo || 99, _endFin); else _endFin(); } catch (_) { _endFin(); }
@@ -3130,7 +3124,10 @@ const FreeFlightMode = {
       }
     } catch (_) {}
     try { if (this._warpPre && !this._enteringCampaign && window.Overlays && Overlays.warp) Overlays.warp(false); this._warpPre = false; } catch (_) {}
-    try { game.testMode = false; game.raceNoTimer = false; LSS.MODE = 'classic'; net.freeflight = false; game._campJourney = false; game._campFinale = false; game._campFinaleShown = false; game._campRiftArmed = false; game._campV1Started = false; } catch (_) {}   
+    try { game.testMode = false; game.raceNoTimer = false; LSS.MODE = 'classic'; net.freeflight = false; game._campJourney = false; game._campFinale = false; game._campFinaleShown = false; game._campRiftArmed = false; game._campV1Started = false; } catch (_) {}
+    try { _campArtTeardown(); } catch (_) {}   // (v49.52) the podium, its waypoint + bar, a held dock, the orbit shot
+    try { _campIslesReset(); } catch (_) {}    // (v49.56) every island the giant broke comes back
+    try { game._campGiant = null; const _cc = document.getElementById('camp-city'); if (_cc) { _cc.classList.remove('on'); _cc._on = false; } } catch (_) {}   // (v49.50)
     try { document.body.classList.remove('lss-freeflight'); } catch (_) {}   
     try { game._cyber = null; net.cyber = false; if (typeof _cyberCineLightsDispose === 'function') _cyberCineLightsDispose(); if (typeof _carrierClear === 'function') _carrierClear(); } catch (_) {}   // (v42.30) resident cine lights are this mode's, drop them with it   // (v37.76/80)
     try { game.thirdPerson = false; document.body.classList.remove('lss-thirdperson'); if (player.mesh) player.mesh.visible = false; } catch (_) {}   
@@ -3975,6 +3972,7 @@ function _campInitState() {
     unlockedLegs: (function () { try { const s = _campLoadLegs(); s.unshift('camp_approach'); return s.filter((k, i) => s.indexOf(k) === i); } catch (_) { return ['camp_approach']; } })(),   
     nemesis: { seen: false, escapes: 0, alive: false, monId: -1, unlocked8: false },
     waveCount: 3, _ended: false, _needFirstWave: false,
+    av: _campLoadAV(),   // (v49.49) Xorzo's antivirus, %
     difficulty: _getStoredDifficulty(), swarmCap: _campSwarmCapFor(_getStoredDifficulty()),
   };
   net.worldSeed = (net.worldSeed != null) ? (net.worldSeed >>> 0) : ((Math.random() * 0xffffffff) >>> 0);
@@ -4277,6 +4275,30 @@ function _campHubSetup() {
   try { player.team = LSS.TEAM_FLEET_A; } catch (_) {}
 }
 
+function _campPickerSetup(selMap) {
+  LSS.MODE = 'campaign';   // (v43.19) NOT room-deferred: internal setup, not a lobby mode button
+  net.freeflight = false; net.campaign = false;
+  _cancelRoomForLocalPlay();
+  net.active = false; net.solo = true;
+  game.testMode = true; game.raceNoTimer = true; game.currentRound = 1;
+  game._campReentry = false; game._campReentryShown = false; game._liveSwap = false;
+  game.campaign = {
+    sceneIndex: 0, waveIndex: 0, bossActive: false, phase: 'travel',
+    unlockedLoadouts: _campLoadUnlocks(), bodyKey: 'VORTEX_BODY',
+    unlockedLegs: (function () { const s = _campLoadLegs(); s.unshift('camp_approach'); return s.filter((k, i) => s.indexOf(k) === i); })(),
+    nemesis: { seen: false, escapes: 0, alive: false, monId: -1, unlocked8: false },
+    waveCount: 3, _ended: false, _needFirstWave: false,
+    difficulty: _getStoredDifficulty(), swarmCap: _campSwarmCapFor(_getStoredDifficulty()),
+    av: _campLoadAV(),   // (v49.49) Xorzo's antivirus, %
+  };
+  try { net.worldSeed = (net.worldSeed != null) ? (net.worldSeed >>> 0) : ((Math.random() * 0xffffffff) >>> 0); } catch (_) {}
+  game._campPicker = true;
+  game.selectedMap = selMap;
+  game.state = 'select';
+  try { if (typeof _preloadCyanRing === 'function') _preloadCyanRing(); } catch (_) {}
+  try { player.team = LSS.TEAM_FLEET_A; } catch (_) {}
+  try { _mapSelectorRendered = false; } catch (_) {}
+}
 function startCampaignJourney() {
   try {
     let _code = '';
@@ -4286,36 +4308,16 @@ function startCampaignJourney() {
   let _hasProgress = false;
   try { _hasProgress = (_campLoadLegs().length > 0); } catch (_) { _hasProgress = false; }
   if (_hasProgress) {
-  LSS.MODE = 'campaign';   // (v43.19) NOT room-deferred: internal setup, not a lobby mode button
-    net.freeflight = false; net.campaign = false;
-    _cancelRoomForLocalPlay();
-    net.active = false; net.solo = true;
-    game.testMode = true; game.raceNoTimer = true; game.currentRound = 1;
-    game._campReentry = false; game._campReentryShown = false; game._liveSwap = false;
-    game.campaign = {
-      sceneIndex: 0, waveIndex: 0, bossActive: false, phase: 'travel',
-      unlockedLoadouts: _campLoadUnlocks(), bodyKey: 'VORTEX_BODY',
-      unlockedLegs: (function () { const s = _campLoadLegs(); s.unshift('camp_approach'); return s.filter((k, i) => s.indexOf(k) === i); })(),
-      nemesis: { seen: false, escapes: 0, alive: false, monId: -1, unlocked8: false },
-      waveCount: 3, _ended: false, _needFirstWave: false,
-      difficulty: _getStoredDifficulty(), swarmCap: _campSwarmCapFor(_getStoredDifficulty()),
-    };
-    try { net.worldSeed = (net.worldSeed != null) ? (net.worldSeed >>> 0) : ((Math.random() * 0xffffffff) >>> 0); } catch (_) {}
-    game._campPicker = true;              
-    game.selectedMap = 'hub_overworld';   
-    game.state = 'select';                
-    try { if (typeof _preloadCyanRing === 'function') _preloadCyanRing(); } catch (_) {}
-    try { player.team = LSS.TEAM_FLEET_A; } catch (_) {}
-    try { _mapSelectorRendered = false; } catch (_) {}   
+    let _lvl = 'camp_approach';
+    try { const _l = _campLoadLast(); if (_l) _lvl = _l; } catch (_) {}
+    _campPickerSetup(_lvl);
     enterShipSelect();
     return;
   }
   game._campPicker = false;
-  _campHubSetup();
-  try { const _lob = document.getElementById('lobby'); if (_lob) _lob.style.display = 'none'; } catch (_) {}
-  try { const _sel = document.getElementById('ship-select'); if (_sel) { _sel.classList.remove('active'); _sel.style.display = 'none'; } } catch (_) {}
-  try { if (typeof lssAutoFullscreen === 'function') lssAutoFullscreen(); } catch (_) {}
-  commitLoadout('VORTEX');
+  try { if (window.__campOpening) { window.__campOpening.start(); return; } } catch (e) { console.warn('[campaign] opening failed:', e && e.message); }
+  _campPickerSetup('camp_approach');
+  enterShipSelect();
 }
 if (typeof window !== 'undefined') window.startCampaignJourney = startCampaignJourney;
 
@@ -4641,6 +4643,7 @@ function _campSummonBoss(defKey, atPos) {
   m.alive = true;
   m.health = m.maxHealth;
   m.dormant = false; m.aggro = true; m._deAggroT = 0;
+  m._scanned = false; m._scanP = 0;   // (v49.49) the pooled leviathan comes back unread
   if (atPos) {
     const sx = m.position ? m.position.x : atPos.x;
     const sy = m.position ? m.position.y : atPos.y;
@@ -4663,7 +4666,7 @@ function _campSummonBoss(defKey, atPos) {
 function _campSpawnEscort(boss, n) {
   if (!game.campaign || typeof Bot === 'undefined' || !boss) return;
   const c = game.campaign;
-  const keys = [NEMESIS_SHIP, HOARD_SHIPS[0]];
+  const keys = c._summonerSpawned ? [HOARD_SHIPS[0], HOARD_SHIPS[1]] : [NEMESIS_SHIP, HOARD_SHIPS[0]];
   n = Math.min(n, keys.length);
   Promise.all(keys.slice(0, n).map((k) => loadHoardModel(k))).then((protos) => {
     if (!game.campaign) return;
@@ -4745,14 +4748,7 @@ function warpOutFx(pos, radius) {
 }
 if (typeof window !== 'undefined') window.warpOutFx = warpOutFx;
 
-function _campNemesisMortal() {
-  try {
-    const c = game.campaign;
-    if (!c || typeof CAMPAIGN_LEGS === 'undefined') return false;
-    const leg = CAMPAIGN_LEGS[c.sceneIndex || 0];
-    return !!(leg && leg.key === 'camp_brokensim');
-  } catch (_) { return false; }
-}
+function _campNemesisMortal() { return false; }
 function _campMarkNemesis(bot) {
   if (!bot) return;
   bot.isNemesis = true;
@@ -4773,6 +4769,982 @@ function _campMarkNemesis(bot) {
   } catch (_) {}
 }
 
+const CAMP_ARENA = { travelFull: 150, travelCap: 0.8, openAfter: 20, chanEvery: 0.38,
+                     holdBack: 230, holdUp: 170, summonBack: 380, summonUp: -40 };
+try { if (typeof window !== 'undefined') window.__campArena = CAMP_ARENA; } catch (_) {}
+const _campArenaV = new THREE.Vector3(), _campArenaV2 = new THREE.Vector3();
+function _campPortalPos(out) { return (out || new THREE.Vector3()).set(0, 0, CAMPAIGN_LEG_HALF_Z); }
+function _campSpawnSummoner(c, at) {
+  c._summonerSpawned = true;
+  loadHoardModel(NEMESIS_SHIP).then((proto) => {
+    if (!proto || !game.campaign || game.campaign !== c) return;
+    const bot = new Bot('VORTEX', LSS.TEAM_FLEET_B, _campNextBotId(), NEMESIS_SHIP);
+    bot.position.copy(at);
+    if (bot.mesh) bot.mesh.position.copy(at);
+    bot._formationTarget = at.clone();   // on station: the formation steer holds it there
+    bot._formationActive = true;
+    _campMarkNemesis(bot);
+    c._nemesisBot = bot; c.nemesis.seen = true; c.nemesis.alive = true;
+    game.entities.push(bot);
+  }).catch(() => {});
+}
+function _campArenaTick(c, dt, auth) {
+  if (!auth) { if (game.bossPortal) { try { game.bossPortal.update(dt); } catch (_) {} } return; }
+  const A = CAMP_ARENA;
+  const pp = _campPortalPos(_campArenaV);
+  if (!c._portalSpawned) {
+    c._portalSpawned = true;
+    c._portalForm = 0.02; c._portalT = 0;
+    if (typeof _spawnBossPortal === 'function') _spawnBossPortal(pp.clone());
+    if (game.bossPortal) { game.bossPortal.form = c._portalForm; game.bossPortal.stable = false; }
+  }
+  if (!c._summonerSpawned) _campSpawnSummoner(c, new THREE.Vector3(pp.x, pp.y + A.holdUp, pp.z - A.holdBack));
+  const P = game.bossPortal;
+  c._portalT += dt;
+  if (c._portalForm < 1) {
+    if (!c._arrived) c._portalForm = Math.min(A.travelCap, 0.02 + (c._portalT / Math.max(1, A.travelFull)) * A.travelCap);
+    else c._portalForm = Math.min(1, c._portalForm + dt * Math.max(0.02, 1 - (c._formAtArrive || 0)) / Math.max(1, A.openAfter));
+  }
+  if (P) { P.form = c._portalForm; try { P.update(dt); } catch (_) {} }
+  const nb = c._nemesisBot;
+  if (nb && nb.alive && !nb._fleePortalPos && P && P.mesh && c._portalForm < 1) {
+    c._chanT = (c._chanT || 0) - dt;
+    if (c._chanT <= 0) {
+      c._chanT = A.chanEvery * (0.7 + Math.random() * 0.6);
+      const a = Math.random() * Math.PI * 2, rr = PORTAL_GATE_DIAMETER * 0.42 * (0.05 + 0.95 * c._portalForm);
+      _campArenaV2.set(pp.x + Math.cos(a) * rr, pp.y + Math.sin(a) * rr, pp.z);
+      try { spawnLightningBolt(nb.position, _campArenaV2, 0xb58cff, 0.3, 2, 1.0, true); } catch (_) {}
+    }
+  }
+  if (c._portalForm >= 1 && nb && nb.alive && !nb._fleePortalPos && P) {
+    nb._formationActive = false;
+    nb._fleePortalPos = P.position.clone();
+    c._fleeTimer = 9;
+  }
+  if (nb && nb.alive && nb._fleePortalPos && nb.position && P) {
+    c._fleeTimer = (c._fleeTimer || 0) - dt;
+    _campArenaV2.copy(P.position).sub(nb.position);
+    const d = _campArenaV2.length();
+    if (d > 1) {
+      _campArenaV2.multiplyScalar(1 / d);
+      nb.position.addScaledVector(_campArenaV2, Math.min(d, 260 * dt));
+      if (nb.velocity) nb.velocity.copy(_campArenaV2).multiplyScalar(260);
+      if (nb.mesh) { nb.mesh.position.copy(nb.position); try { nb.mesh.lookAt(P.position); } catch (_) {} }   // +Z (the nose) at the ring
+    }
+    if (d < 60 || c._fleeTimer <= 0) { try { _campNemesisEscape(); } catch (_) {} }
+  }
+  if (!c._summonerLeft && c._portalForm >= 1 && !(c._nemesisBot && c._nemesisBot.alive)) {
+    c._summonerLeft = true;
+    try { if (window.Overlays) Overlays.banner('THEY SLIPPED THROUGH', 'The portal is still open'); } catch (_) {}
+    try { if (window.CampDialogue) window.CampDialogue.line('sum_escape'); } catch (_) {}
+    _campBroadcastState();
+  }
+  if (P && P.stable === false && c._summonerLeft && c.phase === 'cleared') {
+    P.stable = true;
+    try { if (window.Overlays) Overlays.banner('PORTAL OPEN', 'Fly through the ring - after them'); } catch (_) {}
+    try { if (window.CampDialogue) window.CampDialogue.line('xz_follow'); } catch (_) {}
+    _campBroadcastState();
+  }
+  c._bcT = (c._bcT || 0) - dt;
+  if (c._bcT <= 0) { c._bcT = 0.5; _campBroadcastState(); }
+}
+
+const CAMP_SCAN = { ang: 16, range: 2200, secs: 1.2, bossSecs: 2.5, grunt: 1.5, summoner: 8, boss: 5, legFloor: 0.9 };
+try { if (typeof window !== 'undefined') window.__campScan = CAMP_SCAN; } catch (_) {}
+const _campScanV = new THREE.Vector3(), _campScanD = new THREE.Vector3();
+function _campLoadAV() {
+  try { const v = parseFloat(localStorage.getItem('lss_campaign_av')); if (isFinite(v)) return Math.max(0, Math.min(100, v)); } catch (_) {}
+  return 0;
+}
+function _campSaveAV(v) { try { localStorage.setItem('lss_campaign_av', String(Math.round(v * 10) / 10)); } catch (_) {} }
+function _campAvAdd(c, worth, tag) {
+  const before = c.av || 0;
+  c.av = Math.min(100, before + worth);
+  _campSaveAV(c.av);
+  const D = window.CampDialogue; if (!D) return;
+  if (before <= 0) { D.line('av_first'); return; }
+  if (tag === 'sum' && !c._avSumSaid) { c._avSumSaid = true; D.line('av_sum'); }
+  const th = [[100, 'av_100'], [75, 'av_75'], [50, 'av_50'], [25, 'av_25']];
+  for (let i = 0; i < th.length; i++) { if (before < th[i][0] && c.av >= th[i][0]) { D.line(th[i][1]); break; } }
+}
+function _campScanTick(c, dt) {
+  if (!player || !player.position || player.shipState === 'dead' || typeof camera === 'undefined' || !camera) { game._xzScanFlare = 0; return; }
+  camera.getWorldDirection(_campScanD);
+  const S = CAMP_SCAN, cosA = Math.cos(S.ang * Math.PI / 180), R2 = S.range * S.range;
+  let reading = false;
+  const test = (e, secs, worth, tag) => {
+    if (!e || !e.alive || !e.position || e._scanned) return;
+    _campScanV.copy(e.position).sub(player.position);
+    const d2 = _campScanV.lengthSq(); if (d2 > R2 || d2 < 1) return;
+    if (_campScanV.dot(_campScanD) / Math.sqrt(d2) < cosA) return;
+    reading = true;
+    e._scanP = Math.min(1, (e._scanP || 0) + dt / secs);
+    if (e._scanP >= 1) { e._scanned = true; e._scanDoneT = game.time; _campAvAdd(c, worth, tag); }
+  };
+  const ents = game.entities || [];
+  for (let i = 0; i < ents.length; i++) {
+    const e = ents[i];
+    if (e && e.hoardModelKey) test(e, S.secs * (e.isNemesis ? 2 : 1), e.isNemesis ? S.summoner : S.grunt, e.isNemesis ? 'sum' : 'grunt');
+  }
+  if (c._boss) test(c._boss, S.bossSecs, S.boss, 'boss');
+  const k = 1 - Math.exp(-dt * 6);
+  game._xzScanFlare = (game._xzScanFlare || 0) + ((reading ? 1 : 0) - (game._xzScanFlare || 0)) * k;
+}
+
+const CAMP_GIANT = { cityD: 13000, viewD: 6500, dist: 6000, side: 2500, spd: 45, crushR: 0.9, sinkSecs: 1.8, fxPerFrame: 2, roam: 0.62,
+                     hpX: 80 };   // x a Dreadnought's hull = 1,000,000, Exhibition's own. ⭐ (v49.58) OWNER'S CALL: "i think 1M hp on
+const _cgM = new THREE.Matrix4(), _cgP = new THREE.Vector3(), _cgQ = new THREE.Quaternion(), _cgQ2 = new THREE.Quaternion(),
+      _cgS = new THREE.Vector3(), _cgAx = new THREE.Vector3(), _CG_UP = new THREE.Vector3(0, 1, 0);
+function _campGiantSpawn() {
+  if (typeof OwBoss === 'undefined' || typeof OW === 'undefined' || !player || !player.position) return null;
+  const T = game.sandwichTerrain; if (!T || !T.ON) return null;
+  const P = player.position, C = HUB_CITY, A = CAMP_GIANT;
+  let dx = C.x - P.x, dz = C.z - P.z; const L = Math.hypot(dx, dz) || 1; dx /= L; dz /= L;
+  const WL = (typeof game._hubWaterWL === 'number') ? game._hubWaterWL : -1e9;
+  let best = null;
+  {
+    const d = L, R1 = A.cityD || 0, R2 = A.viewD || 0;
+    if (R1 > 0 && R2 > 0 && d < R1 + R2 && d > Math.abs(R1 - R2)) {
+      const a = (R1 * R1 - R2 * R2 + d * d) / (2 * d), h = Math.sqrt(Math.max(0, R1 * R1 - a * a));
+      const bx = C.x - dx * a - dz * h, bz = C.z - dz * a + dx * h;   // C + (city->pilot) a + perp h
+      const r0 = Math.hypot(bx - C.x, bz - C.z), t0 = Math.atan2(bz - C.z, bx - C.x);
+      ring: for (const dr of [0, 700, -600, 1400]) {
+        for (const da of [0, 0.05, -0.05, 0.1, -0.1]) {
+          const x = C.x + Math.cos(t0 + da) * (r0 + dr), z = C.z + Math.sin(t0 + da) * (r0 + dr);
+          let h2 = NaN; try { h2 = _stGroundYCarved(x, z, T); } catch (_) {}
+          if (!isFinite(h2) || h2 < WL + 60) continue;
+          best = { x, z, y: h2 }; break ring;
+        }
+      }
+    }
+  }
+  if (!best) scan: for (const dd of [0, 900, -700, 1800]) {
+    for (const sd of [0, 1, -1, 2, -2]) {
+      const off = A.side + sd * 700;
+      const x = P.x + dx * (A.dist + dd) - dz * off, z = P.z + dz * (A.dist + dd) + dx * off;
+      let h = NaN; try { h = _stGroundYCarved(x, z, T); } catch (_) {}
+      if (!isFinite(h) || h < WL + 60) continue;   // the city sites' dryness rule: it rises out of land
+      best = { x, z, y: h }; break scan;
+    }
+  }
+  if (!best) {
+    const x = P.x + dx * A.dist - dz * A.side, z = P.z + dz * A.dist + dx * A.side;
+    let h = 0; try { h = _stGroundYCarved(x, z, T); } catch (_) {}
+    best = { x, z, y: isFinite(h) ? Math.max(h, WL - 400) : 0 };
+  }
+  const size = OW.BOSS.size;
+  const boss = new OwBoss(new THREE.Vector3(best.x, best.y - size * 0.42, best.z), best.y);
+  boss.marchTo = new THREE.Vector3(C.x, 0, C.z);
+  boss.marchSpd = A.spd;
+  boss.isCampGiant = true;
+  if (A.hpX > 0) { const _hb = (typeof CHASSIS !== 'undefined' && CHASSIS.DREADNOUGHT) ? CHASSIS.DREADNOUGHT.maxHealth : 12500; boss.maxHealth = Math.round(_hb * A.hpX); boss.health = boss.maxHealth; }
+  OW.boss = boss;
+  game.entities.push(boss);
+  try { const vx = best.x - P.x, vz = best.z - P.z, vl = Math.hypot(vx, vz) || 1; if (player.euler) player.euler.set(0.32, Math.atan2(-vx / vl, -vz / vl), 0); } catch (_) {}
+  return boss;
+}
+function _campCrushInit() {
+  const hc = game.hubCity; if (!hc || !hc.group || !hc.city) return null;
+  const CELL = 700, grid = new Map(), sgrid = new Map(), meshes = [];
+  hc.group.traverse((o) => { if (o.isInstancedMesh && o.userData && o.userData.hcArr) meshes.push(o); });
+  let total = 0;
+  const cell = (x, z) => Math.floor(x / CELL) + ',' + Math.floor(z / CELL);
+  for (const m of meshes) {
+    const arr = m.userData.hcArr, n = (arr.length / 12) | 0, key = m.userData.hcKey;
+    const big = (key === 'twr' || key === 'box' || key === 'cyl');
+    for (let i = 0; i < n; i++) {
+      const o = i * 12, k = cell(arr[o], arr[o + 2]);
+      let b = grid.get(k); if (!b) { b = []; grid.set(k, b); }
+      b.push({ m, i, o, big, done: false, t: 0, dir: 0 });
+      if (big) total++;
+    }
+  }
+  for (const so of (hc.city.solids || [])) {
+    const k = cell(so.cx, so.cz);
+    let b = sgrid.get(k); if (!b) { b = []; sgrid.set(k, b); }
+    b.push(so);
+  }
+  return { CELL, grid, sgrid, total, crushed: 0, active: [], dirty: new Set() };
+}
+function _campCrushAnimate(K, dt) {
+  if (!K.active.length) return;
+  const secs = Math.max(0.2, CAMP_GIANT.sinkSecs);
+  for (let j = K.active.length - 1; j >= 0; j--) {
+    const e = K.active[j], arr = e.m.userData.hcArr, o = e.o;
+    e.t = Math.min(1, e.t + dt / secs);
+    const u = e.t * e.t;   // it gives, then goes
+    _cgP.set(arr[o], arr[o + 1] - arr[o + 4] * 1.08 * u, arr[o + 2]);
+    _cgQ.setFromAxisAngle(_CG_UP, -arr[o + 6]);                   // the build's own yaw
+    _cgAx.set(Math.cos(e.dir), 0, -Math.sin(e.dir));              // up x (away from the giant): the top falls away
+    _cgQ2.setFromAxisAngle(_cgAx, 0.32 * u);
+    _cgQ.premultiply(_cgQ2);
+    if (e.t >= 1) _cgS.set(0, 0, 0); else _cgS.set(arr[o + 3], arr[o + 4], arr[o + 5]);
+    _cgM.compose(_cgP, _cgQ, _cgS);
+    e.m.setMatrixAt(e.i, _cgM);
+    K.dirty.add(e.m);
+    if (e.t >= 1) K.active.splice(j, 1);
+  }
+  for (const m of K.dirty) m.instanceMatrix.needsUpdate = true;
+  K.dirty.clear();
+}
+function _campCrushTick(boss, dt) {
+  const G = game._campGiant; if (!G) return;
+  const K = G.crush || (G.crush = _campCrushInit()); if (!K) return;
+  const bx = boss.position.x, bz = boss.position.z;
+  const R = Math.max(400, (boss.colR || 1500) * CAMP_GIANT.crushR);
+  const cityR = (HUB_CITY.genome && HUB_CITY.genome.radius) || 7500;
+  if (Math.hypot(bx - HUB_CITY.x, bz - HUB_CITY.z) <= cityR + R + 600) {
+    const c0x = Math.floor((bx - R - 400) / K.CELL), c1x = Math.floor((bx + R + 400) / K.CELL);
+    const c0z = Math.floor((bz - R - 400) / K.CELL), c1z = Math.floor((bz + R + 400) / K.CELL);
+    let fx = 0;
+    for (let gx = c0x; gx <= c1x; gx++) {
+      for (let gz = c0z; gz <= c1z; gz++) {
+        const k = gx + ',' + gz;
+        const b = K.grid.get(k);
+        if (b) for (let q = 0; q < b.length; q++) {
+          const e = b[q]; if (e.done) continue;
+          const arr = e.m.userData.hcArr, x = arr[e.o], z = arr[e.o + 2];
+          const reach = R + Math.max(arr[e.o + 3], arr[e.o + 5]) * 0.5;
+          if ((x - bx) * (x - bx) + (z - bz) * (z - bz) > reach * reach) continue;
+          e.done = true; e.t = 0; e.dir = Math.atan2(x - bx, z - bz);
+          K.active.push(e);
+          if (e.big) {
+            K.crushed++;
+            if (fx < CAMP_GIANT.fxPerFrame && arr[e.o + 4] > 300) {
+              fx++;
+              try { spawnFXBurst('cloud', { x, y: arr[e.o + 1] + 80, z }, Math.min(900, 180 + arr[e.o + 4] * 0.18), 2.4, { startScale: 0.5, endScale: 1.9, segs: 14 }); } catch (_) {}
+              try { spawnExplosion(new THREE.Vector3(x, arr[e.o + 1] + 60, z), 220 + Math.random() * 260); } catch (_) {}
+            }
+          }
+        }
+        const sb = K.sgrid.get(k);
+        if (sb) for (let q = 0; q < sb.length; q++) {
+          const so = sb[q]; if (so._crushed) continue;
+          const rr = R + Math.max(so.hw, so.hd);
+          if ((so.cx - bx) * (so.cx - bx) + (so.cz - bz) * (so.cz - bz) > rr * rr) continue;
+          so._crushed = true; so.y1 = so.y0;   // no height = no collision; the hash holds this same object
+        }
+      }
+    }
+  }
+  _campCrushAnimate(K, dt);
+}
+function _campCityHud(G) {
+  let el = document.getElementById('camp-city');
+  if (!el) {
+    el = document.createElement('div'); el.id = 'camp-city';
+    el.innerHTML = '<span class="lss-tag"><span class="lt-text"></span></span>';
+    (document.body || document.documentElement).appendChild(el);
+  }
+  const t = el._t || (el._t = el.querySelector('.lt-text'));
+  const show = !!(G && G.boss && G.boss.risen);
+  if (el._on !== show) { el._on = show; el.classList.toggle('on', show); }
+  if (!show) return;
+  const K = G.crush;
+  const pct = (K && K.total) ? Math.max(0, Math.round(100 * (1 - K.crushed / K.total))) : 100;
+  if (el._p !== pct) { el._p = pct; t.textContent = 'MAIN CITY ' + pct + '%'; }
+}
+const _campIsles = { falling: [], crushed: [] };
+const _cgI1 = new THREE.Vector3(), _cgI2 = new THREE.Vector3();
+function _campIsleTick(boss) {
+  if (!boss || !boss.alive || typeof _skLive === 'undefined' || !_skLive.size || typeof boss._toLocal !== 'function') return;
+  for (const [k, rec] of _skLive) {
+    const I = rec && rec.isl; if (!I || I._crushed || !rec.grp) continue;
+    const l = boss._toLocal(_cgI1.set(I.x, I.y, I.z), _cgI2);
+    const dx = Math.max(0, Math.abs(l.x) - boss.bx), dy = Math.max(0, Math.abs(l.y) - boss.by), dz = Math.max(0, Math.abs(l.z) - boss.bz);
+    if (dx * dx + dy * dy + dz * dz > I.R * I.R * 0.81) continue;
+    _campIsleBreak(k, rec);   // (deleting the current entry mid-iteration is safe for a Map)
+  }
+}
+function _campIsleBreak(k, rec) {
+  const I = rec.isl;
+  I._crushed = true; _campIsles.crushed.push(I);
+  _skLive.delete(k);
+  I.nb = null;
+  try { for (const J of _skNear(I.x, I.z, I.R * 4.5)) J.nb = null; } catch (_) {}
+  const pv = new THREE.Group(); pv.position.set(I.x, I.y, I.z);
+  try { scene.remove(rec.grp); } catch (_) {}
+  rec.grp.position.set(-I.x, -I.y, -I.z);
+  pv.add(rec.grp); scene.add(pv);
+  let gy = 0; try { gy = _stGroundYCarved(I.x, I.z, game.sandwichTerrain); } catch (_) {}
+  if (!isFinite(gy)) gy = 0;
+  _campIsles.falling.push({ rec, I, pv, v: 0, t: 0, gy, ax: Math.random() - 0.5, az: Math.random() - 0.5, hit: false, tHit: 0 });
+  for (let i = 0; i < 4; i++) {
+    const at = new THREE.Vector3(I.x + (Math.random() - 0.5) * I.R * 1.4, I.y + (Math.random() - 0.5) * I.R * 0.8, I.z + (Math.random() - 0.5) * I.R * 1.4);
+    setTimeout(() => { try { spawnExplosion(at, I.R * (0.35 + Math.random() * 0.3)); } catch (_) {} }, i * 160);
+  }
+  try { spawnFXBurst('cloud', { x: I.x, y: I.y, z: I.z }, Math.min(1400, I.R * 1.6), 3.2, { startScale: 0.5, endScale: 2.0, segs: 14 }); } catch (_) {}
+}
+function _campIslesFrame(dt) {
+  const F = _campIsles.falling; if (!F.length) return;
+  for (let i = F.length - 1; i >= 0; i--) {
+    const f = F[i]; f.t += dt;
+    f.v += 900 * dt;
+    f.pv.position.y -= f.v * dt;
+    f.pv.rotation.x += f.ax * 0.35 * dt; f.pv.rotation.z += f.az * 0.35 * dt;
+    if (!f.hit && f.pv.position.y - f.I.R * 0.6 <= f.gy) {
+      f.hit = true; f.tHit = f.t;
+      const x = f.pv.position.x, z = f.pv.position.z;
+      try { spawnFXBurst('cloud', { x, y: f.gy + 80, z }, Math.min(1800, f.I.R * 2.2), 3.6, { startScale: 0.5, endScale: 2.2, segs: 14 }); } catch (_) {}
+      try { spawnExplosion(new THREE.Vector3(x, f.gy + 60, z), Math.min(900, f.I.R * 0.8)); } catch (_) {}
+    }
+    if ((f.hit && f.t - f.tHit > 1.4) || f.t > 9) {
+      try { scene.remove(f.pv); f.pv.remove(f.rec.grp); f.rec.grp.position.set(0, 0, 0); } catch (_) {}
+      try { _skFreeRec(f.rec); } catch (_) {}
+      F.splice(i, 1);
+    }
+  }
+}
+function _campIslesReset() {
+  for (const f of _campIsles.falling) {
+    try { scene.remove(f.pv); f.pv.remove(f.rec.grp); f.rec.grp.position.set(0, 0, 0); } catch (_) {}
+    try { _skFreeRec(f.rec); } catch (_) {}
+  }
+  _campIsles.falling.length = 0;
+  for (const I of _campIsles.crushed) {
+    I._crushed = false; I.nb = null;
+    try { for (const J of _skNear(I.x, I.z, I.R * 4.5)) J.nb = null; } catch (_) {}
+  }
+  _campIsles.crushed.length = 0;
+}
+function _campGiantTick(dt) {
+  const G = game._campGiant; if (!G || game.state !== 'playing') return;
+  G.t = (G.t || 0) + dt;
+  if (G.phase === 'arrive') {
+    if (G.t < 0.8) return;   // one beat after the overworld goes live
+    const boss = _campGiantSpawn();
+    if (!boss) { if (G.t > 6) game._campGiant = null; return; }   // no giant: the old ending runs
+    G.boss = boss; G.phase = 'march';
+    G.art = { phase: 'wait', t: 0 };   // (v49.52) the artifact - see _campArtTick
+    _campArtLoad();                     // loads behind the lines below
+    try { if (typeof musicPlayChampionCue === 'function') musicPlayChampionCue(); } catch (_) {}
+    try { if (window.Overlays) Overlays.banner('SOMETHING IS RISING', 'Beneath the overworld'); } catch (_) {}
+    try {
+      if (window.CampDialogue) {
+        const _art = G.art;
+        window.CampDialogue.clear();
+        window.CampDialogue.sayLines([{ id: 'gi_see', delay: 1.2 }, 'gi_sum', 'gi_city']).then(() => { _art.linesDone = true; });
+      }
+    } catch (_) {}
+    return;
+  }
+  const boss = G.boss;
+  if (!boss || !boss.alive) {
+    const el = document.getElementById('camp-city'); if (el) { el.classList.remove('on'); el._on = false; }
+    try { _campArtGiantDown(G); } catch (_) {}   // (v49.52) the freed ships stand down, the podium stays
+    game._campGiant = null;
+    return;
+  }
+  if (boss.marchTo && Math.hypot(boss.position.x - boss.marchTo.x, boss.position.z - boss.marchTo.z) < 900) {
+    const a = Math.random() * Math.PI * 2, r = ((HUB_CITY.genome && HUB_CITY.genome.radius) || 7500) * CAMP_GIANT.roam * Math.sqrt(Math.random());
+    boss.marchTo.set(HUB_CITY.x + Math.cos(a) * r, 0, HUB_CITY.z + Math.sin(a) * r);
+  }
+  if (boss.risen) { _campCrushTick(boss, dt); _campIsleTick(boss); }   // (v49.56) + the floating islands
+  _campCityHud(G);
+  if (G.art) _campArtTick(G, dt);   // (v49.52)
+}
+try {
+  if (typeof window !== 'undefined') window.__campGiant = {
+    cfg: CAMP_GIANT,
+    start() { game._campGiant = { phase: 'arrive', t: 0 }; return 'armed: rises on the next live hub frame'; },
+    state() {
+      const G = game._campGiant; if (!G) return null;
+      const b = G.boss, K = G.crush;
+      return { phase: G.phase, t: +(G.t || 0).toFixed(1), risen: !!(b && b.risen), alive: !!(b && b.alive),
+               pos: b ? [b.position.x, b.position.y, b.position.z].map(Math.round) : null,
+               toCity: b ? Math.round(Math.hypot(b.position.x - HUB_CITY.x, b.position.z - HUB_CITY.z)) : null,
+               colR: b ? Math.round(b.colR) : null, crushed: K ? K.crushed : 0, total: K ? K.total : 0, sinking: K ? K.active.length : 0 };
+    },
+  };
+} catch (_) {}
+
+const CAMP_ART = {
+  url: 'objects/artifact.glb', clip: 'Idle_9',
+  height: 210,       // world units tall (~16 m - a ship's length); the GLB is 2 units, so this is the scale
+  topFrac: 1.0,      // the socket's height as a fraction of that - ONLY for a model with no head joint (the fallback pillar)
+  headLift: 0,       // (v49.53) world units above the head joint (HeadTop_End sits ~1 u under the skin's top: 1.69 of 1.7)
+  out: 1700,         // how far outside the city's radius it stands (the flat city ground ends ~8,550 from the centre)
+  bearing: 0.28,     // radians round the city from the pilot's line, AWAY from the side the giant rose on
+  capR: 150,         // the catch: the orb within this of the podium's axis...
+  capH: 450,         // ...no higher than this over the socket...
+  vMax: 560,         // ...and slower than this (the pads use 420)
+  glide: 2.6,        // seconds to lower the orb onto the socket
+  seat: 8,           // the orb's centre this far over the socket once docked (the bead is radius 6)
+  upload: 8,         // seconds docked to send it
+  undockHold: 0.25,  // seconds of movement input that take you off (the pads use 0.12 - a dock is harder won)
+  orbit: { az: 95, el: 9, dist: 760, spin: 13 },   // the lowering, from the side: the O key's own camera
+  orbitHold: 2.2,    // seconds of the upload still seen from outside before the pilot's view comes back
+  near: 3500,        // how close before the Summoners notice (waveA)
+  waveA: 4, waveB: 4,
+  risers: 6, riseEvery: 3.2, riseCap: 200, freedAlive: 16,   // (v49.54) cap 26 -> 60: 26 were all up in ~32 s and the storm then thinned them out; (v49.58) -> 200 for the 1M giant's ~4 min fight
+  runIn: 380, runOut: 2300, runPref: 1500,   // strafing runs: skin + runIn .. skin + runOut; see _campArtFreedTick
+  beaconH: 6000,
+};
+let _campArtGltf = null, _campArtLoadP = null, _campArtLive = null, _campArtFadeT = null;
+const _caV1 = new THREE.Vector3(), _caV2 = new THREE.Vector3(), _caV3 = new THREE.Vector3(), _caV4 = new THREE.Vector3();
+function _campArtLoad() {
+  if (_campArtGltf) return Promise.resolve(_campArtGltf);
+  if (_campArtLoadP) return _campArtLoadP;
+  _campArtLoadP = new Promise((res) => {
+    try {
+      new THREE.GLTFLoader().load('./' + CAMP_ART.url + _MODEL_CACHE_BUST,
+        (g) => { _campArtGltf = g; res(g); },
+        undefined,
+        (e) => { console.warn('[campaign] artifact.glb failed:', e && e.message); _campArtLoadP = null; res(null); });
+    } catch (e) { _campArtLoadP = null; res(null); }
+  });
+  return _campArtLoadP;
+}
+function _campArtSite(G) {
+  const T = game.sandwichTerrain; if (!T || !T.ON || !player || !player.position) return null;
+  const C = HUB_CITY, K = CAMP_ART, cityR = (C.genome && C.genome.radius) || 7500;
+  const P = player.position;
+  const a0 = Math.atan2(P.z - C.z, P.x - C.x);
+  let side = 1;
+  const b = G && G.boss;
+  if (b && b.position) {
+    let d = Math.atan2(b.position.z - C.z, b.position.x - C.x) - a0;
+    while (d > Math.PI) d -= Math.PI * 2; while (d < -Math.PI) d += Math.PI * 2;
+    side = (d > 0) ? -1 : 1;
+  }
+  const WL = (typeof game._hubWaterWL === 'number') ? game._hubWaterWL : -1e9;
+  const gy = (x, z) => { let h = NaN; try { h = _stGroundYCarved(x, z, T); } catch (_) {} return h; };
+  let loose = null;
+  for (const da of [0, 0.07, -0.07, 0.14, 0.22, 0.32, 0.45]) {
+    for (const dr of [0, 600, 1200, -300]) {
+      const a = a0 + side * (K.bearing + da), r = cityR + K.out + dr;
+      const x = C.x + Math.cos(a) * r, z = C.z + Math.sin(a) * r;
+      const h = gy(x, z);
+      if (!isFinite(h) || h < WL + 40) continue;
+      let lo = h, hi = h;
+      for (let k = 0; k < 6; k++) {
+        const q = (k / 6) * Math.PI * 2, hh = gy(x + Math.cos(q) * 140, z + Math.sin(q) * 140);
+        if (isFinite(hh)) { lo = Math.min(lo, hh); hi = Math.max(hi, hh); }
+      }
+      if (!loose) loose = { x, y: lo, z };
+      if (hi - lo > 70) continue;
+      return { x, y: lo, z };
+    }
+  }
+  if (loose) return loose;
+  const a = a0 + side * K.bearing, r = cityR + K.out;
+  const x = C.x + Math.cos(a) * r, z = C.z + Math.sin(a) * r, h = gy(x, z);
+  return { x, y: isFinite(h) ? Math.max(h, WL) : 0, z };
+}
+function _campArtFadeTex() {
+  if (_campArtFadeT) return _campArtFadeT;
+  const c = document.createElement('canvas'); c.width = 4; c.height = 128;
+  const x = c.getContext('2d'), gr = x.createLinearGradient(0, 0, 0, 128);
+  gr.addColorStop(0, '#000'); gr.addColorStop(0.6, '#3a3a3a'); gr.addColorStop(1, '#fff');
+  x.fillStyle = gr; x.fillRect(0, 0, 4, 128);
+  _campArtFadeT = new THREE.CanvasTexture(c);
+  return _campArtFadeT;
+}
+function _campArtBuild(A) {
+  const K = CAMP_ART, site = A.site;
+  const grp = new THREE.Group();
+  grp.position.set(site.x, site.y - 6, site.z);   // a little into the ground: no daylight under the base
+  const H = K.height;
+  const g = _campArtGltf;
+  if (g && g.scene) {
+    const obj = g.scene;
+    if (obj.parent) obj.parent.remove(obj);
+    obj.position.set(0, 0, 0); obj.rotation.set(0, 0, 0); obj.scale.setScalar(1);
+    obj.updateMatrixWorld(true);
+    const bb = new THREE.Box3().setFromObject(obj);
+    const sz = bb.getSize(_caV1), ctr = bb.getCenter(_caV2);
+    const sc = H / (sz.y || 1);
+    obj.scale.setScalar(sc);
+    obj.position.set(-ctr.x * sc, -bb.min.y * sc, -ctr.z * sc);
+    A.radius = Math.max(sz.x, sz.z) * sc * 0.5;
+    obj.traverse((n) => { if (n.isMesh) { n.frustumCulled = false; n.castShadow = false; n.receiveShadow = false; } });
+    grp.add(obj);
+    A.obj = obj;
+    let dk = null, ht = null;
+    obj.traverse((n) => { if (!dk && /^(dock1?|socket)$/i.test(n.name)) dk = n; if (!ht && /HeadTop_End/i.test(n.name)) ht = n; });
+    A.head = dk || ht || null;
+    try { if (player && player.position) grp.rotation.y = Math.atan2(player.position.x - site.x, player.position.z - site.z); } catch (_) {}
+    try {
+      const clips = g.animations || [];
+      let clip = clips.find((c) => c.name === K.clip) || null;
+      if (!clip) for (const c of clips) if (!clip || c.duration > clip.duration) clip = c;   // the longest is the real idle
+      if (clip && THREE.AnimationMixer) {
+        A.mixer = new THREE.AnimationMixer(obj);
+        const act = A.mixer.clipAction(clip); act.setLoop(THREE.LoopRepeat, Infinity); act.play();
+        A.mixer.update(0);   // pose the first frame now: the socket is read from it below
+      }
+    } catch (_) {}
+  } else {
+    const m = new THREE.Mesh(new THREE.CylinderGeometry(80, 96, H, 24),
+                             new THREE.MeshStandardMaterial({ color: 0x3a4550, metalness: 0.7, roughness: 0.35, emissive: 0x0a2a18 }));
+    m.position.y = H * 0.5; grp.add(m);
+    A.radius = 96; A.own = [m];
+  }
+  A.own = A.own || [];
+  A.height = H;
+  A.top = new THREE.Vector3(site.x, grp.position.y + H * K.topFrac, site.z);
+  A.seat = A.top.clone(); A.seat.y += K.seat;
+  const add = (mesh) => { grp.add(mesh); A.own.push(mesh); return mesh; };
+  A.ring = add(new THREE.Mesh(new THREE.TorusGeometry(Math.max(22, A.radius * 0.3), 2.2, 8, 48),
+    new THREE.MeshBasicMaterial({ color: 0x6dffb0, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false })));
+  A.ring.rotation.x = Math.PI / 2; A.ring.position.y = H * K.topFrac + 14;   // (v49.53) then _campArtSocket moves it onto the head
+  const fade = _campArtFadeTex(), bh = K.beaconH;
+  const bm = (col, op) => new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: op, alphaMap: fade, blending: THREE.AdditiveBlending,
+                                                         depthWrite: false, side: THREE.DoubleSide, fog: false, toneMapped: false });
+  A.beam = [add(new THREE.Mesh(new THREE.CylinderGeometry(30, 30, bh, 16, 1, true), bm(0x3dff8a, 0.32))),
+            add(new THREE.Mesh(new THREE.CylinderGeometry(9, 9, bh, 10, 1, true), bm(0xb8ffd4, 0.42)))];
+  for (const b of A.beam) { b.position.y = H + bh * 0.5; b.frustumCulled = false; b.userData.op = b.material.opacity; }
+  A.grp = grp;
+  _campArtLive = A;
+  _campArtSocket(A);   // (v49.53) the socket, the ring and the beacon from the head joint's first pose
+  let shown = false;
+  const show = () => { if (shown || _campArtLive !== A) return; shown = true; scene.add(grp); };
+  try { if (renderer && renderer.compileAsync && camera) renderer.compileAsync(grp, camera, scene).then(show, show); else show(); } catch (_) { show(); }
+  setTimeout(show, 1500);
+}
+function _campArtSocket(A) {
+  const K = CAMP_ART;
+  if (A.head) { A.head.getWorldPosition(A.top); A.top.y += K.headLift; }
+  A.seat.copy(A.top); A.seat.y += K.seat;
+  if (A.grp) {
+    const l = _caV4.copy(A.top); A.grp.worldToLocal(l);   // the group is yawed, never scaled: local units are world units
+    if (A.ring) A.ring.position.set(l.x, l.y + 14, l.z);
+    if (A.beam) for (const b of A.beam) { b.position.x = l.x; b.position.z = l.z; b.position.y = l.y + K.beaconH * 0.5; }
+  }
+  if (A.orbit && A._orbT) { A._orbT.copy(A.top); A._orbT.y += 40; }
+}
+function _campArtDispose(A) {
+  if (!A) return;
+  try { if (A.grp && A.grp.parent) A.grp.parent.remove(A.grp); } catch (_) {}
+  try { if (A.obj && A.obj.parent) A.obj.parent.remove(A.obj); } catch (_) {}   // the cached GLB scene: detached, never disposed
+  for (const m of (A.own || [])) { try { m.geometry.dispose(); m.material.dispose(); } catch (_) {} }
+  A.own = [];
+  if (A.pulse) { try { scene.remove(A.pulse.m); A.pulse.m.geometry.dispose(); A.pulse.m.material.dispose(); } catch (_) {} A.pulse = null; }
+  if (A.mixer) { try { A.mixer.stopAllAction(); } catch (_) {} A.mixer = null; }
+  if (_campArtLive === A) _campArtLive = null;
+}
+function _campArtOrb(out) {
+  const rl = player && player.mesh && player.mesh.userData && player.mesh.userData.runningLight;
+  if (rl) { rl.getWorldPosition(out); return out; }
+  const ch = (player && player.chassis) || {};
+  return out.copy(player.position).add(_caV4.set(0, -((ch.hullHeight || 40) * 0.5 + 12), 0));
+}
+function _campArtMoving() {
+  try {
+    const k = input.keys || {};
+    if (k['w'] || k['a'] || k['s'] || k['d'] || k['arrowup'] || k['arrowdown'] || k['arrowleft'] || k['arrowright'] || k[' '] || k['shift'] || k['control']) return true;
+    if (typeof _kbActionHeld === 'function' &&
+        (_kbActionHeld('forward') || _kbActionHeld('back') || _kbActionHeld('left') || _kbActionHeld('right') ||
+         _kbActionHeld('up') || _kbActionHeld('down') || _kbActionHeld('boost'))) return true;
+    if (input.gpConnected && (Math.abs(input.gpMoveX || 0) > 0.35 || Math.abs(input.gpMoveY || 0) > 0.35 ||
+                              input.gpMoveUp || input.gpMoveDown || input.gpBoost)) return true;
+    if (input.touchActive && (Math.abs(input.touchMoveX || 0) > 0.001 || Math.abs(input.touchMoveY || 0) > 0.001 ||
+                              Math.abs(input.touchMoveVert || 0) > 0.001)) return true;
+  } catch (_) {}
+  return false;
+}
+function _campArtLock(A, on) {
+  if (on) {
+    if (A.locked) return;
+    A.locked = true;
+    game.playerInStasis = true; game.playerInPadStasis = true;
+    if (player.velocity) player.velocity.set(0, 0, 0);
+  } else {
+    if (!A.locked) return;
+    A.locked = false;
+    if (game.playerInPadStasis) { game.playerInPadStasis = false; game.playerInStasis = false; }
+  }
+}
+function _campArtOrbit(A, on) {
+  let O = null; try { O = window.__orbitCam; } catch (_) {}
+  if (!O) return;
+  if (on) {
+    if (A.orbit) return;
+    A.orbit = { on: O.on, az: O.az, el: O.el, dist: O.dist, spin: O.spin, targetV: O.targetV };   // put back exactly what the pilot had
+    const K = CAMP_ART.orbit;
+    O.on = true; O.az = K.az; O.el = K.el; O.dist = K.dist; O.spin = K.spin;
+    O.targetV = (A._orbT || (A._orbT = new THREE.Vector3())).copy(A.top); O.targetV.y += 40;
+  } else {
+    if (!A.orbit) return;
+    const s0 = A.orbit; A.orbit = null;
+    O.on = s0.on; O.az = s0.az; O.el = s0.el; O.dist = s0.dist; O.spin = s0.spin; O.targetV = s0.targetV;
+  }
+}
+function _campArtMark(A, show) {
+  let el = document.getElementById('camp-mark');
+  if (!el) {
+    el = document.createElement('div'); el.id = 'camp-mark';
+    el.innerHTML = '<span class="cm-arrow"></span><span class="cm-orb"></span><span class="lss-tag"><span class="lt-text">ARTIFACT</span></span><span class="cm-dist"></span>';
+    (document.body || document.documentElement).appendChild(el);
+    el._d = el.querySelector('.cm-dist'); el._a = el.querySelector('.cm-arrow');
+  }
+  if (!show || !A || !A.top || typeof camera === 'undefined' || !camera || !player || !player.position) {
+    if (el._on) { el._on = false; el.classList.remove('on'); }
+    return;
+  }
+  if (!el._on) { el._on = true; el.classList.add('on'); }
+  const v = _caV3.copy(A.top); v.y += 90;
+  _lssProjectV(v, camera);
+  let x = v.x, y = v.y;
+  const behind = v.z > 1;
+  if (behind) { x = -x; y = -y; }
+  const EX = 0.9, EY = 0.8;
+  const edge = behind || Math.abs(x) > EX || Math.abs(y) > EY;
+  if (edge) {
+    const m = Math.max(Math.abs(x) / EX, Math.abs(y) / EY);
+    if (m < 1e-4) { x = 0; y = -EY; } else { x /= m; y /= m; }
+  }
+  const px = Math.round((x * 0.5 + 0.5) * window.innerWidth), py = Math.round((-y * 0.5 + 0.5) * window.innerHeight);
+  if (el._px !== px || el._py !== py) { el._px = px; el._py = py; el.style.transform = 'translate(' + px + 'px,' + py + 'px) translate(-50%,-50%)'; }
+  if (el._edge !== edge) { el._edge = edge; el.classList.toggle('edge', edge); }
+  if (edge) {
+    const ang = Math.round(Math.atan2(x, y) * 180 / Math.PI);   // screen bearing, clockwise from up
+    if (el._ang !== ang) { el._ang = ang; el._a.style.transform = 'translate(-50%,-50%) rotate(' + ang + 'deg) translateY(-16px)'; }
+  }
+  const d = Math.max(0, player.position.distanceTo(A.top) - 60);
+  const ds = _lssRangeStr(d);
+  if (el._ds !== ds) { el._ds = ds; el._d.textContent = ds; }
+}
+function _campArtUpHud(A, on) {
+  let el = document.getElementById('camp-up');
+  if (!el) {
+    el = document.createElement('div'); el.id = 'camp-up';
+    el.innerHTML = '<span class="lss-tag"><span class="lt-text">UPLOADING</span></span><div class="cu-bar"><div class="cu-fill"></div></div>';
+    (document.body || document.documentElement).appendChild(el);
+    el._t = el.querySelector('.lt-text'); el._f = el.querySelector('.cu-fill');
+  }
+  if (el._on !== on) { el._on = on; el.classList.toggle('on', on); }
+  if (!on || !A) return;
+  const paused = (A.phase !== 'upload' && A.phase !== 'dock');
+  if (el._pz !== paused) { el._pz = paused; el.classList.toggle('paused', paused); el._t.textContent = paused ? 'UPLOAD PAUSED' : 'UPLOADING'; }
+  const w = Math.round(Math.min(1, A.prog || 0) * 200) / 2;   // half-percent steps: a style write per step, not per frame
+  if (el._w !== w) { el._w = w; el._f.style.width = w + '%'; }
+}
+function _campArtKeys(n) {
+  const have = HOARD_SHIPS.filter((k) => shipModelCache.loaded[k]);
+  const pool = have.length ? have : HOARD_SHIPS.slice(0, 3);
+  const out = [];
+  for (let i = 0; i < n; i++) out.push(pool[(_campShipRot + i) % pool.length]);
+  _campShipRot = (_campShipRot + n) % HOARD_SHIPS.length;
+  return out;
+}
+function _campArtHostileAcquire() {
+  if (player.shipState !== 'dead' && player.team !== this.team) return player;
+  let best = null, bd = Infinity;
+  for (const b of game.entities) {
+    if (!b || !b.alive || !b._campFreed || !b.position) continue;
+    const d = this.position.distanceToSquared(b.position); if (d < bd) { bd = d; best = b; }
+  }
+  return best;
+}
+function _campArtFreedAcquire() {
+  const g = OW.boss;
+  if (g && g.alive && g.isCampGiant) return g;
+  let best = null, bd = Infinity;
+  for (const b of game.entities) {
+    if (!b || !b.alive || !b.hoardModelKey || b._campFreed || b.team === this.team || !b.position) continue;
+    const d = this.position.distanceToSquared(b.position); if (d < bd) { bd = d; best = b; }
+  }
+  return best;
+}
+function _campArtFree(bot, born) {
+  if (!bot || !bot.alive || bot._campFreed) return;
+  bot._campFreed = true;
+  bot.team = player.team;
+  bot._acquireCombatTarget = _campArtFreedAcquire;   // instance override: the prototype (and PvP) is untouched
+  bot.combatTarget = null; bot.aiTimer = 0; bot.aiRetreating = false;
+  bot.aiRangePreference = Math.max(bot.aiRangePreference || 0, CAMP_ART.runPref);
+  bot._cfA = Math.random() * Math.PI * 2; bot._cfH = -0.15 + Math.random() * 0.7; bot._cfIn = !born;
+  if (!bot._formationTarget) bot._formationTarget = new THREE.Vector3();
+  bot._formationTarget.copy(bot.position);
+  bot._formationActive = true;
+  if (!born) { try { spawnFXBurst('plasma_green', bot.position, 90, 0.7); } catch (_) {} }
+}
+function _campArtSpawn(n, mk) {
+  const tok = game._campGiant; if (!tok || n <= 0) return;
+  const keys = _campArtKeys(n);
+  Promise.all(keys.map((k) => loadHoardModel(k))).then((protos) => {
+    let i = 0;
+    const one = () => {
+      if (game._campGiant !== tok || typeof Bot === 'undefined') return;
+      if (protos[i]) {
+        try {
+          const sp = mk(i);
+          const bot = new Bot('VORTEX', sp.freed ? player.team : LSS.TEAM_FLEET_B, _campNextBotId(), keys[i]);
+          bot.position.copy(sp.pos); if (bot.mesh) bot.mesh.position.copy(sp.pos);
+          _campTuneHoardBot(bot, keys[i]);
+          bot._campFinale = true;
+          if (sp.freed) _campArtFree(bot, true); else bot._acquireCombatTarget = _campArtHostileAcquire;
+          if (sp.vel && bot.velocity) bot.velocity.copy(sp.vel);
+          game.entities.push(bot);
+          if (sp.fx) sp.fx(bot, sp.pos);
+        } catch (e) { console.warn('[campaign] artifact spawn', e); }
+      }
+      if (++i < keys.length) setTimeout(one, 140);
+    };
+    one();
+  }).catch(() => {});
+}
+function _campArtWave(A, n) {
+  const at = A.top;
+  _campArtSpawn(n, () => {
+    const a = Math.random() * Math.PI * 2, r = 900 + Math.random() * 700;
+    const pos = new THREE.Vector3(at.x + Math.cos(a) * r, at.y + 300 + Math.random() * 450, at.z + Math.sin(a) * r);
+    return { pos, freed: false, fx: (b, p) => { try { _hoardTeleportSmoke(p.x, p.y, p.z, p.x, p.y, p.z, 12, 120); } catch (_) {} } };
+  });
+}
+function _campArtRise(g, n) {
+  const T = game.sandwichTerrain, colR = g.colR || 2000;
+  const WL = (typeof game._hubWaterWL === 'number') ? game._hubWaterWL : -1e9;
+  _campArtSpawn(n, () => {
+    const a = Math.random() * Math.PI * 2, r = colR + 1600 + Math.random() * 2200;
+    const x = g.position.x + Math.cos(a) * r, z = g.position.z + Math.sin(a) * r;
+    let h = 0; try { h = _stGroundYCarved(x, z, T); } catch (_) {}
+    if (!isFinite(h)) h = 0;
+    h = Math.max(h, WL);
+    return {
+      pos: new THREE.Vector3(x, h + 40, z), freed: true, vel: new THREE.Vector3(0, 900, 0),
+      fx: (b, p) => {
+        try { spawnFXBurst('cloud', { x: p.x, y: p.y + 40, z: p.z }, 280, 2.4, { startScale: 0.4, endScale: 2.1, segs: 14 }); } catch (_) {}
+        try { spawnExplosion(new THREE.Vector3(p.x, p.y, p.z), 170); } catch (_) {}
+        try { if (typeof v8SpawnSparks === 'function') v8SpawnSparks(p, 16, 1.6, 520, 0x6dffb0, 0xffffff); } catch (_) {}
+      },
+    };
+  });
+}
+function _campArtFreedTick(A, g, dt) {
+  const K = CAMP_ART, colR = g.colR || 2000, gx = g.position.x, gz = g.position.z, hh = g.halfH || 3000;
+  let alive = 0;
+  for (const b of game.entities) {
+    if (!b || !b.alive || !b._campFreed || !b._formationTarget) continue;
+    alive++;
+    const d = Math.hypot(b.position.x - gx, b.position.z - gz);
+    if (b._cfIn && d < colR + K.runIn + 160) { b._cfIn = false; b._cfA += 0.5 + Math.random() * 0.6; }
+    else if (!b._cfIn && d > colR + K.runOut - 260) b._cfIn = true;
+    const r = colR + (b._cfIn ? K.runIn : K.runOut);
+    b._formationTarget.set(gx + Math.cos(b._cfA) * r, g.position.y + hh * b._cfH, gz + Math.sin(b._cfA) * r);
+  }
+  A.freedAlive = alive;
+  if (A.riseLeft > 0 && alive < K.freedAlive) {
+    A.riseT -= dt;
+    if (A.riseT <= 0) {
+      const n = Math.min(A.riseFirst ? K.risers : 2, A.riseLeft, K.freedAlive - alive);
+      if (A.riseFirst) { try { if (window.CampDialogue) window.CampDialogue.line('ar_rise'); } catch (_) {} }
+      A.riseFirst = false; A.riseT = K.riseEvery; A.riseLeft -= n;
+      _campArtRise(g, n);
+    }
+  }
+}
+function _campArtRelease(A) {
+  const K = CAMP_ART;
+  A.phase = 'freed'; A.t = 0; A.prog = 1;
+  _campArtLock(A, false); _campArtOrbit(A, false);
+  _campArtUpHud(A, false); _campArtMark(A, false);
+  game._xzScanFlare = 0;
+  const at = A.top.clone(); at.y += 30;
+  try { if (typeof postFX !== 'undefined' && postFX.compositeMat) { if (!postFX.shockwave) postFX.shockwave = {}; const sw = postFX.shockwave; sw.active = true; sw.origin = at.clone(); sw.startTime = game.time || 0; sw.duration = 1.4; sw.intensity = 0.85; } } catch (_) {}
+  try { spawnFXBurst('shockwave_ring', at, 1600, 1.6); } catch (_) {}
+  try { spawnFXBurst('plasma_green', at, 420, 1.1); } catch (_) {}
+  try {
+    const m = new THREE.Mesh(new THREE.SphereGeometry(1, 32, 16),
+      new THREE.MeshBasicMaterial({ color: 0x6dffb0, transparent: true, opacity: 0.32, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false, toneMapped: false }));
+    m.position.copy(at); m.scale.setScalar(60); m.frustumCulled = false; scene.add(m);
+    A.pulse = { m, t: 0 };
+  } catch (_) {}
+  try { if (typeof playSound === 'function') playSound('round_start'); } catch (_) {}
+  try { if (typeof musicPlayChampionCue === 'function') musicPlayChampionCue(); } catch (_) {}
+  try { if (window.Overlays) Overlays.banner('ANTIVIRUS RELEASED', 'The hoard remembers who they are'); } catch (_) {}
+  try {
+    const D = window.CampDialogue;
+    if (D) {
+      if (D.cfg._flickIdle0 == null) D.cfg._flickIdle0 = D.cfg.flickIdle;
+      D.cfg.flickIdle = 0;
+      D.clear(); D.sayLines(['ar_done', 'ar_sum3', 'ar_clear', 'ar_look']);
+    }
+  } catch (_) {}
+  const nem = game.campaign && game.campaign._nemesisBot;
+  for (const b of game.entities) {
+    if (b instanceof Bot && b.alive && b.hoardModelKey && !b.isNemesis && b !== nem && !b._campFreed) _campArtFree(b, false);
+  }
+  A.riseLeft = K.riseCap; A.riseT = 1.4; A.riseFirst = true;
+}
+function _campArtGiantDown(G) {
+  const A = G && G.art; if (!A) return;
+  _campArtLock(A, false); _campArtOrbit(A, false);
+  _campArtUpHud(A, false); _campArtMark(A, false);
+  for (const b of game.entities) if (b && b._campFreed) b._formationActive = false;
+  if (A.beam) for (const b of A.beam) b.visible = false;
+  if (A.ring) A.ring.visible = false;
+  if (A.phase !== 'freed') A.phase = 'done';
+}
+function _campArtOnDeath() {
+  const A = game._campGiant && game._campGiant.art; if (!A) return;
+  _campArtOrbit(A, false);
+  if (A.locked) { A.locked = false; game.playerInPadStasis = false; }   // respawnPlayer clears playerInStasis, not ours
+  if (A.phase === 'dock' || A.phase === 'upload') A.phase = 'lead';
+  _campArtMark(A, false);
+  game._xzScanFlare = 0;
+}
+function _campArtTeardown() {
+  const A = (game._campGiant && game._campGiant.art) || _campArtLive;
+  if (A) { _campArtLock(A, false); _campArtOrbit(A, false); _campArtDispose(A); }
+  _campArtMark(null, false); _campArtUpHud(null, false);
+  try { const D = window.CampDialogue; if (D && D.cfg._flickIdle0 != null) { D.cfg.flickIdle = D.cfg._flickIdle0; D.cfg._flickIdle0 = null; } } catch (_) {}
+}
+function _campArtTick(G, dt) {
+  const A = G.art, K = CAMP_ART, boss = G.boss;
+  A.t = (A.t || 0) + dt;
+  if (A.mixer) { try { A.mixer.update(dt); } catch (_) {} }
+  if (A.top && A.seat) _campArtSocket(A);   // (v49.53) it is alive: the socket moves with its head
+  if (A.phase === 'wait') {
+    if (!((A.linesDone && A.t > 1.5) || A.t > 16)) return;
+    if (!_campArtGltf && _campArtLoadP && A.t < 20) return;
+    A.site = _campArtSite(G);
+    if (!A.site) return;
+    _campArtBuild(A);
+    A.phase = 'lead'; A.t = 0; A.prog = 0;
+    try { if (window.CampDialogue) window.CampDialogue.sayLines(['ar_know', 'ar_go']); } catch (_) {}
+    return;
+  }
+  if (!A.top) return;
+  const docked = (A.phase === 'dock' || A.phase === 'upload');
+  if (A.ring && A.ring.visible) {
+    const pul = 0.5 + 0.5 * Math.sin((game.time || 0) * (docked ? 9 : 3.4));
+    A.ring.material.opacity = (docked ? 0.75 : 0.5) + 0.35 * pul;
+    A.ring.scale.setScalar(1 + (docked ? 0.05 : 0.1) * pul);
+    A.ring.rotation.z += dt * (docked ? 2.4 : 0.6);
+  }
+  if (A.beam && A.phase !== 'freed') {
+    const want = docked ? 0.18 : 1;
+    for (const b of A.beam) { const o = b.userData.op * want; b.material.opacity += (o - b.material.opacity) * Math.min(1, dt * 3); }
+  }
+  if (A.phase === 'lead') {
+    if (!player || !player.position || player.shipState === 'dead') { _campArtMark(A, false); return; }
+    _campArtMark(A, true);
+    _campArtUpHud(A, (A.prog || 0) > 0);   // off it mid-upload: the bar stays up, amber, "UPLOAD PAUSED"
+    const dP = player.position.distanceTo(A.top);
+    if (!A.wA && dP < K.near) { A.wA = true; _campArtWave(A, K.waveA); try { if (window.CampDialogue) window.CampDialogue.line('ar_sum'); } catch (_) {} }
+    if (!A.saidNear && dP < 1000) { A.saidNear = true; try { if (window.CampDialogue) window.CampDialogue.line('ar_near'); } catch (_) {} }
+    const orb = _campArtOrb(_caV1);
+    const h = Math.hypot(orb.x - A.top.x, orb.z - A.top.z), dy = orb.y - A.top.y;
+    const spd = (player.velocity && player.velocity.length) ? player.velocity.length() : 0;
+    A._dbg = { h: Math.round(h), dy: Math.round(dy), spd: Math.round(spd) };
+    if (h < K.capR && dy > -40 && dy < K.capH && spd < K.vMax && !(A.mustLeave > 0)) {
+      A.phase = 'dock'; A.dt = 0; A.inp = 0;
+      A.off = (A.off || new THREE.Vector3()).copy(orb).sub(player.position);   // hull centre -> orb, as it stands now
+      A.from = (A.from || new THREE.Vector3()).copy(orb);
+      _campArtLock(A, true);
+      _campArtOrbit(A, true);
+      _campArtMark(A, false);
+      try { if (typeof playSound === 'function') playSound('stasis'); } catch (_) {}
+      if (!A.wB) { A.wB = true; _campArtWave(A, K.waveB); }
+      try { if (window.CampDialogue) window.CampDialogue.sayLines(A.prog > 0 ? ['ar_dock'] : ['ar_dock', 'ar_sum2']); } catch (_) {}
+    }
+    if (A.mustLeave > 0) {   // after pulling off, the catch re-arms only once the orb has left the socket's column
+      const orb2 = _campArtOrb(_caV2);
+      if (Math.hypot(orb2.x - A.top.x, orb2.z - A.top.z) > K.capR * 1.3 || orb2.y - A.top.y > K.capH * 1.1) A.mustLeave = 0;
+    }
+    return;
+  }
+  if (docked) {
+    if (!player || player.shipState === 'dead') return;
+    if (!A.locked || !game.playerInPadStasis) { A.locked = false; _campArtOrbit(A, false); A.phase = 'lead'; A.mustLeave = 1; return; }
+    A.inp = _campArtMoving() ? (A.inp || 0) + dt : 0;
+    if (A.inp > K.undockHold) {
+      _campArtLock(A, false); _campArtOrbit(A, false);
+      A.phase = 'lead'; A.mustLeave = 1; game._xzScanFlare = 0;
+      if (A.prog > 0 && A.prog < 1) { try { if (window.CampDialogue) window.CampDialogue.line('ar_off'); } catch (_) {} }
+      return;
+    }
+    const orb = _campArtOrb(_caV1);
+    _caV2.copy(orb).sub(player.position);
+    A.off.lerp(_caV2, 1 - Math.exp(-dt * 6));
+    A.dt += dt;
+    const u = Math.min(1, A.dt / K.glide), e = u * u * (3 - 2 * u);
+    const uh = Math.min(1, A.dt / (K.glide * 0.6)), eh = uh * uh * (3 - 2 * uh);   // over the centre first, then down
+    const want = _caV3.set(A.from.x + (A.top.x - A.from.x) * eh,
+                           A.from.y + (A.seat.y - A.from.y) * e,
+                           A.from.z + (A.top.z - A.from.z) * eh);
+    if (A.phase === 'upload') want.copy(A.seat);
+    player.position.copy(want).sub(A.off);
+    if (player.velocity) player.velocity.set(0, 0, 0);
+    const _vr = (typeof isXRPresenting === 'function') && isXRPresenting();
+    if (!_vr && player.euler) player.euler.x += (0 - player.euler.x) * (1 - Math.exp(-dt * 2.5));
+    if (A.phase === 'dock') {
+      if (u >= 1 && (orb.distanceTo(A.seat) < 5 || A.dt > K.glide + 1.5)) { A.phase = 'upload'; A.ut = 0; }
+      return;
+    }
+    A.ut = (A.ut || 0) + dt;
+    if (A.ut > K.orbitHold) _campArtOrbit(A, false);   // your view back: they are shooting at you
+    game._xzScanFlare = 1;                              // Xorzo's lamp blazes while he sends
+    const before = A.prog || 0;
+    A.prog = Math.min(1, before + dt / Math.max(0.5, K.upload));
+    if (before < 0.5 && A.prog >= 0.5) { try { if (window.CampDialogue) window.CampDialogue.line('ar_half'); } catch (_) {} }
+    _campArtUpHud(A, true);
+    if (A.prog >= 1) _campArtRelease(A);
+    return;
+  }
+  if (A.phase === 'freed') {
+    if (A.pulse) {
+      const P = A.pulse; P.t += dt;
+      const u = Math.min(1, P.t / 3.2);
+      P.m.scale.setScalar(60 + 22000 * (1 - Math.pow(1 - u, 2.2)));
+      P.m.material.opacity = 0.32 * (1 - u);
+      if (u >= 1) { try { scene.remove(P.m); P.m.geometry.dispose(); P.m.material.dispose(); } catch (_) {} A.pulse = null; }
+    }
+    const f = Math.max(0, 1 - A.t / 2.5);
+    if (A.beam) for (const b of A.beam) { b.material.opacity = b.userData.op * f; b.visible = f > 0; }
+    if (A.ring) { A.ring.material.opacity = 0.85 * f; A.ring.visible = f > 0; }
+    if (boss && boss.alive) _campArtFreedTick(A, boss, dt);
+  }
+}
+function _campArtMinimap(ctx, plot, cx, cy) {
+  const G = game._campGiant, A = G && G.art;
+  if (!A || !A.top || !(A.phase === 'lead' || A.phase === 'dock' || A.phase === 'upload')) return;
+  const p = plot(A.top.x, A.top.z);
+  const pul = 0.6 + Math.sin((game.time || 0) * 4) * 0.3;
+  const col = 'rgba(109,255,176,' + pul.toFixed(2) + ')';
+  if (p.off) {
+    const ang = Math.atan2(p.y - cy, p.x - cx);
+    ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(ang);
+    ctx.strokeStyle = col; ctx.lineWidth = 1.6;
+    ctx.beginPath(); ctx.moveTo(-2.4, -4.4); ctx.lineTo(3.8, 0); ctx.lineTo(-2.4, 4.4); ctx.stroke();
+    ctx.fillStyle = '#ff4a4a'; ctx.beginPath(); ctx.arc(-4, 0, 1.6, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+    return;
+  }
+  ctx.strokeStyle = col; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.arc(p.x, p.y, 6, 0, Math.PI * 2); ctx.stroke();
+  ctx.fillStyle = '#ff4a4a'; ctx.beginPath(); ctx.arc(p.x, p.y, 3, Math.PI / 2, Math.PI * 1.5); ctx.fill();
+  ctx.fillStyle = '#4aff7a'; ctx.beginPath(); ctx.arc(p.x, p.y, 3, -Math.PI / 2, Math.PI / 2); ctx.fill();
+}
+try {
+  if (typeof window !== 'undefined') window.__campArt = {
+    cfg: CAMP_ART,
+    state() {
+      const G = game._campGiant, A = G && G.art; if (!A) return null;
+      const orb = (player && player.position) ? _campArtOrb(new THREE.Vector3()) : null;
+      let freed = 0, hostile = 0;
+      for (const b of game.entities) { if (!b || !b.alive || !b._campFinale) continue; if (b._campFreed) freed++; else hostile++; }
+      return { phase: A.phase, t: +(A.t || 0).toFixed(1), prog: +((A.prog || 0) * 100).toFixed(1), locked: !!A.locked, orbit: !!A.orbit,
+               site: A.site ? [A.site.x, A.site.y, A.site.z].map(Math.round) : null, top: A.top ? [A.top.x, A.top.y, A.top.z].map(Math.round) : null,
+               dist: (A.top && player && player.position) ? Math.round(player.position.distanceTo(A.top)) : null,
+               orbToSeat: (orb && A.seat) ? +orb.distanceTo(A.seat).toFixed(1) : null, catch: A._dbg || null,
+               glb: !!_campArtGltf, joint: A.head ? A.head.name : null, freed, hostile, riseLeft: A.riseLeft != null ? A.riseLeft : null,
+               giantHp: (G.boss && G.boss.alive) ? Math.round(G.boss.health) : 0 };
+    },
+    go(up) {
+      const A = game._campGiant && game._campGiant.art; if (!A || !A.top) return 'no artifact yet (phase ' + (A && A.phase) + ')';
+      const orb = _campArtOrb(new THREE.Vector3()), off = orb.sub(player.position);
+      player.position.set(A.top.x - off.x, A.top.y + (up != null ? up : 220) - off.y, A.top.z - off.z);
+      if (player.velocity) player.velocity.set(0, 0, 0);
+      return 'orb parked ' + (up != null ? up : 220) + ' over the socket';
+    },
+    lead() { const A = game._campGiant && game._campGiant.art; if (!A) return 'no finale'; A.linesDone = true; A.t = 99; return 'lead on the next frame'; },
+    release() { const A = game._campGiant && game._campGiant.art; if (!A || !A.top) return 'no artifact yet'; _campArtRelease(A); return 'released'; },
+  };
+} catch (_) {}
+
 function _campNemesisEscape() {
   const c = game.campaign; if (!c) return;
   const bot = c._nemesisBot;
@@ -4791,19 +5763,7 @@ function _campNemesisEscape() {
 }
 
 function _campLoadUnlocks() {
-  let arr = ['VORTEX'];
-  try {
-    const raw = localStorage.getItem('lss_campaign_unlocks');
-    if (raw) {
-      const p = JSON.parse(raw);
-      if (Array.isArray(p) && p.length) {
-        const valid = (typeof LOADOUTS !== 'undefined') ? p.filter((k) => LOADOUTS[k]) : p.slice();
-        if (valid.indexOf('VORTEX') < 0) valid.unshift('VORTEX');
-        if (valid.length) arr = valid;
-      }
-    }
-  } catch (_) {}
-  return arr;
+  return (typeof LOADOUTS !== 'undefined') ? Object.keys(LOADOUTS) : ['VORTEX'];
 }
 
 function _campLoadLegs() {
@@ -4839,25 +5799,7 @@ function _campLoadLast() {
   return null;
 }
 
-function _campUnlockNextLoadout() {
-  const c = game.campaign; if (!c) return null;
-  if (!Array.isArray(c.unlockedLoadouts)) c.unlockedLoadouts = ['VORTEX'];
-  const order = (typeof LOADOUTS !== 'undefined') ? Object.keys(LOADOUTS) : [];
-  let next = null;
-  for (let i = 0; i < order.length; i++) {
-    if (c.unlockedLoadouts.indexOf(order[i]) < 0) { next = order[i]; break; }
-  }
-  if (!next) return null;   
-  c.unlockedLoadouts.push(next);
-  try { localStorage.setItem('lss_campaign_unlocks', JSON.stringify(c.unlockedLoadouts)); } catch (_) {}
-  try {
-    if (window.Overlays && Overlays.banner) {
-      const _nm = (typeof LOADOUTS !== 'undefined' && LOADOUTS[next] && LOADOUTS[next].name) || next;
-      Overlays.banner('NEW SHIP UNLOCKED', _nm + ' — swap in-flight with the D-pad');
-    }
-  } catch (_) {}
-  return next;
-}
+function _campUnlockNextLoadout() { return null; }
 
 function _campBroadcastState() {
   try {
@@ -4870,6 +5812,7 @@ function _campBroadcastState() {
       phase: c.phase, sceneIndex: c.sceneIndex || 0, map: game.selectedMap,
       portal: p ? [Math.round(p.x), Math.round(p.y), Math.round(p.z)] : null,
       advancing: !!c._advancing,
+      form: +(c._portalForm || 0).toFixed(3), stable: (game.bossPortal && game.bossPortal.stable === false) ? 0 : 1,   // (v49.48)
       swarmCap: c.swarmCap,   
       unlockedLoadouts: Array.isArray(c.unlockedLoadouts) ? c.unlockedLoadouts.slice() : ['VORTEX'],   
     });
@@ -4950,7 +5893,7 @@ document.addEventListener('keydown', (e) => {
     const c = game.campaign;
     const unlocked = (c && Array.isArray(c.unlockedLoadouts)) ? c.unlockedLoadouts : [];
     const idx = parseInt(k, 10) - 1;
-    if (idx >= 0 && idx < unlocked.length) { swapWeaponLoadout(unlocked[idx]); _quickEquipRefresh(); }
+    if (idx >= 0 && idx < unlocked.length) { _campSwapTo(unlocked[idx]); _quickEquipRefresh(); }
   }
 });
 document.addEventListener('keyup', (e) => {
@@ -5280,6 +6223,7 @@ function _lssRefreshLaunchRow() {
   } catch (_) {}
 }
 function _lssToggleConfirm() {
+  try { if (window.__campOpening && window.__campOpening.onConfirm()) return; } catch (_) {}
   try {
     game._ssConfirmed = !game._ssConfirmed;
     if (net && net.active) {
@@ -5383,11 +6327,7 @@ function _visibleMapKeys() {
   if (LSS.MODE === 'campaign') {
     const unlocked = (typeof game !== 'undefined' && game.campaign && Array.isArray(game.campaign.unlockedLegs))
       ? game.campaign.unlockedLegs : ['camp_approach'];
-    const legs = all.filter(k => k.indexOf('camp_') === 0 && unlocked.indexOf(k) !== -1);
-    const out = [];
-    if (MAP_DATA['hub_overworld']) out.push('hub_overworld');
-    for (const k of legs) out.push(k);
-    return out;
+    return all.filter(k => k.indexOf('camp_') === 0 && unlocked.indexOf(k) !== -1);
   }
   if (LSS.MODE === 'freeflight') {
     if (typeof game !== 'undefined' && game && game._earth && game._earth.armed) {
@@ -7652,6 +8592,7 @@ function handleNetEvent(evt, fromPeerId) {
     } else if (!evt.portal && game.bossPortal && typeof _clearBossPortal === 'function') {
       try { _clearBossPortal(); } catch (_) {}
     }
+    if (game.bossPortal && typeof evt.form === 'number') { game.bossPortal.form = evt.form; game.bossPortal.stable = !!evt.stable; }
     if (evt.advancing && !c._advancing && game.state !== 'roundEnd') {
       c._advancing = true;
       try { if (typeof _beginWorldSwap === 'function') _beginWorldSwap('camp-leg-net', 'ENTERING THE NEXT LEG'); } catch (_) {}
@@ -16844,7 +17785,8 @@ function _orbitCamApply() {
   _ORB.last = now;
   if (O.spin) O.az = ((O.az || 0) + O.spin * dt) % 360;
   _ORB.t.copy(player.position);
-  if ((O.target === undefined || O.target === 'ship') && player.mesh) {
+  if (O.targetV && O.targetV.isVector3) _ORB.t.copy(O.targetV);
+  else if ((O.target === undefined || O.target === 'ship') && player.mesh) {
     try { player.mesh.getWorldPosition(_ORB.t); } catch (_) { _ORB.t.copy(player.position); }
   }
   const az = ((O.az != null) ? O.az : 0) * Math.PI / 180;
@@ -30976,6 +31918,7 @@ function _hcMakeMeshes(city, site) {
     if (!arr || !arr.length) return null;
     const m = _hcInstMesh(arr, geo, mat, g.radius, maxH, _site);
     if (shad) { m.castShadow = true; m.receiveShadow = true; }
+    m.userData.hcKey = key; m.userData.hcArr = arr;   // (v49.50) instance i = arr[i*12 ..] (the campaign giant's crush)
     group.add(m); return m;
   };
   add('twr', _hcGeoBox(), twrMat, 6400, true);
@@ -34116,6 +35059,7 @@ function _skNear(x, z, rad) {
     const cl = _skClusterAt(i, j);
     for (let k = 0; k < cl.length; k++) {
       const I = cl[k];
+      if (I._crushed) continue;   // (v49.56) broken by the campaign's giant - see _campIsleBreak
       if (Math.hypot(I.x - x, I.z - z) < rad + I.R * 2) out.push(I);
     }
   }
@@ -34129,7 +35073,7 @@ function _skNear(x, z, rad) {
       const b0 = Math.floor(Math.max(z - rad, az - aR - A.cell) / A.cell), b1 = Math.floor(Math.min(z + rad, az + aR + A.cell) / A.cell);
       for (let i = a0; i <= a1; i++) for (let j = b0; j <= b1; j++) {
         const cl = _skArchClusterAt(i, j);
-        for (let k = 0; k < cl.length; k++) { const I = cl[k]; if (Math.hypot(I.x - x, I.z - z) < rad + I.R * 2) out.push(I); }
+        for (let k = 0; k < cl.length; k++) { const I = cl[k]; if (I._crushed) continue; if (Math.hypot(I.x - x, I.z - z) < rad + I.R * 2) out.push(I); }
       }
     }
   }
@@ -35820,8 +36764,8 @@ function _owShow(e) {
     case 'capture': if (mine) { _owBanner(nm + ' CAPTURED', 'Fleet deployed, flagship in 2:00'); fanfare = true; } else _owBanner(nm + ' LOST', who + ' took the field'); break;
     case 'carlost': if (mine) _owBanner(nm + ' CARRIER LOST', 'Recapture the city field to rebuild it'); break;
     case 'wake': _owBanner('SIX CITIES HELD', 'Something enormous is waking beneath the ground'); fanfare = true; try { if (typeof musicPlayChampionCue === 'function') musicPlayChampionCue(); } catch (_) {} break;
-    case 'rise': _owBanner('THE LEVIATHAN RISES', 'Six fleets against one'); fanfare = true; break;
-    case 'slain': _owBanner('LEVIATHAN SLAIN', 'The overworld is yours'); fanfare = true; break;
+    case 'rise': _owBanner('THE LEVIATHAN RISES', game._campGiant ? 'It is heading for the city' : 'Six fleets against one'); fanfare = true; break;   // (v49.50)
+    case 'slain': _owBanner('LEVIATHAN SLAIN', game._campGiant ? 'The city stands' : 'The overworld is yours'); fanfare = true; break;
     case 'zap': if (Array.isArray(e.f) && Array.isArray(e.t)) { _owV2.set(e.f[0], e.f[1], e.f[2]); _owV3.set(e.t[0], e.t[1], e.t[2]); _owZapFx(_owV2, _owV3, e.b ? (e.l ? 2 : 1) : 0); } break;
     case 'warp': if (Array.isArray(e.p)) _owWarpFx(new THREE.Vector3(e.p[0], e.p[1], e.p[2]), e.r || 800); break;
     default: break;
@@ -36163,12 +37107,12 @@ class OwBoss {
       return;
     }
     this._solidifyTick(dt);
-    const tgt = _owBossTarget(this);
+    const tgt = this.marchTo ? { pos: this.marchTo } : _owBossTarget(this);
     if (tgt) {
       const dx = tgt.pos.x - this.position.x, dz = tgt.pos.z - this.position.z;
       const d = Math.hypot(dx, dz);
-      const spd = K.spd || B.spd;
-      if (d > this.size * 0.25) {
+      const spd = this.marchSpd || K.spd || B.spd;
+      if (d > (this.marchTo ? 200 : this.size * 0.25)) {
         const step = Math.min(d, spd * dt);
         this.position.x += dx / d * step; this.position.z += dz / d * step;
         this.velocity.set(dx / d * spd, 0, dz / d * spd);
@@ -41755,6 +42699,7 @@ function _animateShipPreview() {
       s._hudHidden = _owns;
       try { document.body.classList.toggle('lss-picker-3d', _owns); } catch (_) {}
     }
+    try { if (window.__campOpening) window.__campOpening.tick(); } catch (_) {}   // (v49.47) the campaign opening's stage
     _spinShipPreview();
     if (typeof _skinHueCycleTick === 'function') _skinHueCycleTick();   // (v40.04) the picker draws its own frames
     try { if (typeof _lssPrimeTick === 'function') _lssPrimeTick(3); } catch (_) {}
@@ -41822,6 +42767,14 @@ function _lssRenderPicker() {
     const el = renderer.domElement;
     const w = el.width || 1, h = el.height || 1;
     const aspect = w / h;
+    let _co = null;
+    try { _co = window.__campOpening ? window.__campOpening.stage() : null; } catch (_) { _co = null; }
+    if (_co) {
+      if (_co.camera.aspect !== aspect) { _co.camera.aspect = aspect; _co.camera.updateProjectionMatrix(); }
+      renderer.setRenderTarget(null);
+      renderer.render(_co.scene, _co.camera);
+      return true;
+    }
     if (s.camera.aspect !== aspect || !s._bgFitted) {
       s.camera.aspect = aspect;
       s.camera.updateProjectionMatrix();
@@ -47744,6 +48697,7 @@ function _shipLightsFrame() {
         }
       }
     } catch (_) {}
+    try { const _xf = game._xzScanFlare || 0; if (_xf > 0.01) hT = Math.max(hT, ((T && T.hI != null) ? T.hI : 2200.0) * _xf); } catch (_) {}
   }
   let _hBoost = 1, _hReach = 1;
   try {
@@ -54819,6 +55773,7 @@ class BossPortal {
         const group = new THREE.Group();
         group.add(new THREE.Mesh(geo, mat));
         group.position.copy(this.position);
+        this._baseScale = 1;
         this.mesh = group; this._usedProto = false; scene.add(group);
       } catch (_) {}
       return;
@@ -54831,14 +55786,21 @@ class BossPortal {
     const center = box.getCenter(new THREE.Vector3());
     inner.position.sub(center);
     group.add(inner);
-    group.scale.setScalar(PORTAL_GATE_DIAMETER / maxDim);
+    this._baseScale = PORTAL_GATE_DIAMETER / maxDim;
+    group.scale.setScalar(this._baseScale);
     group.position.copy(this.position);
     this.mesh = group; this._usedProto = true; scene.add(group);
   }
   update(dt) {
     if (!this.alive) return;
-    if (!this._usedProto && _cyanRingProto) this._buildMesh();   
-    if (this.mesh) this.mesh.rotation.z += 0.4 * dt;             
+    if (!this._usedProto && _cyanRingProto) this._buildMesh();
+    if (!this.mesh) return;
+    if (this.form != null) {
+      const f = Math.max(0, Math.min(1, this.form));
+      const jit = (this.stable === false) ? (Math.random() - 0.5) * 0.05 * (0.4 + f) : 0;
+      this.mesh.scale.setScalar((this._baseScale || 1) * (0.05 + 0.95 * f) * (1 + jit));
+      this.mesh.rotation.z += (0.4 + ((this.stable === false) ? 1.6 * (1 - f) + 0.5 : 0)) * dt;
+    } else this.mesh.rotation.z += 0.4 * dt;
   }
   destroy() {
     this.alive = false;
@@ -63553,17 +64515,19 @@ function _v12mLobbyError(msg) {
   alert(msg);
 }
 
-function cycleCampaignShip(dir) {
-  if (typeof LSS === 'undefined' || LSS.MODE !== 'campaign' || !game.campaign || game.state !== 'playing') return;
-  if (!player || player.shipState === 'dead') return;
-  const keys = game.campaign.unlockedLoadouts;
-  if (!Array.isArray(keys) || keys.length < 2) return;
+function _campSwapTo(nextKey) {
+  if (typeof LSS === 'undefined' || LSS.MODE !== 'campaign' || !game.campaign || game.state !== 'playing') return false;
+  if (!player || player.shipState === 'dead') return false;
+  if (!nextKey || nextKey === player.loadoutKey || typeof LOADOUTS === 'undefined' || !LOADOUTS[nextKey]) return false;
+  if (player.lastDamageTime && (game.time - player.lastDamageTime) < 5) {
+    if (!player._swapDenyT || game.time - player._swapDenyT > 2) {
+      player._swapDenyT = game.time;
+      try { if (window.Overlays && Overlays.banner) Overlays.banner('IN COMBAT', 'Ship swap locked — avoid damage for 5 seconds'); } catch (_) {}
+    }
+    return false;
+  }
   const _now = (game && typeof game.time === 'number') ? game.time : 0;
-  if (_now - (player._lastShipSwap || -9) < 0.6) return;
-  let idx = keys.indexOf(player.loadoutKey);
-  if (idx < 0) idx = 0;
-  const nextKey = keys[((idx + (dir | 0)) % keys.length + keys.length) % keys.length];
-  if (!nextKey || nextKey === player.loadoutKey || typeof LOADOUTS === 'undefined' || !LOADOUTS[nextKey]) return;
+  if (_now - (player._lastShipSwap || -9) < 0.6) return false;
   const _pos = player.position ? player.position.clone() : new THREE.Vector3();
   const _vel = player.velocity ? player.velocity.clone() : new THREE.Vector3();
   const _eul = player.euler ? player.euler.clone() : null;
@@ -63583,9 +64547,20 @@ function cycleCampaignShip(dir) {
   player.spawnProtection = 0;
   try { if (typeof _quickEquipRefresh === 'function') _quickEquipRefresh(); } catch (_) {}
   try { if (window.Overlays && Overlays.banner) Overlays.banner('SHIP', (LOADOUTS[nextKey] && LOADOUTS[nextKey].name) || nextKey); } catch (_) {}
+  return true;
+}
+function cycleCampaignShip(dir) {
+  if (typeof LSS === 'undefined' || LSS.MODE !== 'campaign' || !game.campaign || game.state !== 'playing') return;
+  if (!player || player.shipState === 'dead') return;
+  const keys = game.campaign.unlockedLoadouts;
+  if (!Array.isArray(keys) || keys.length < 2) return;
+  let idx = keys.indexOf(player.loadoutKey);
+  if (idx < 0) idx = 0;
+  _campSwapTo(keys[((idx + (dir | 0)) % keys.length + keys.length) % keys.length]);
 }
 
 function cycleHubShip(dir) {
+  if (typeof LSS !== 'undefined' && LSS.MODE === 'campaign') { cycleCampaignShip(dir); return; }
   if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight' || game.state !== 'playing') return;
   if (!player || player.shipState === 'dead') return;
   if (player.lastDamageTime && (game.time - player.lastDamageTime) < 5) {
@@ -76557,6 +77532,7 @@ function updateMinimap() {
   }
 
   if (typeof _owMinimap === 'function') { try { _owMinimap(ctx, _plot, cx, cy); } catch (_) {} }   // (v38.78) city markers
+  if (game._campGiant) { try { _campArtMinimap(ctx, _plot, cx, cy); } catch (_) {} }   // (v49.52) the artifact
   const pp = _proj(player.position.x, player.position.z);
   ctx.fillStyle = '#fff';
   ctx.beginPath();
@@ -77148,6 +78124,7 @@ function buildShipSelect() {
 }
 
 function previewLoadout(key) {
+  try { if (window.__campOpening && window.__campOpening.blockPreview(key)) return; } catch (_) {}
   try { if (net && net._waitingForPeers) return; } catch (_) {}
   try {
     if (_previewedKey && key !== _previewedKey && _lssPickLocked()) { _lssSyncPickLockUI(); return; }
@@ -89708,7 +90685,26 @@ window.announceMultikill     = announceMultikill;
       }
     } catch (_) {}
   }
+  let _mediaList = null, _mediaLoad = null;
+  function _campManifest() {
+    if (_mediaList) return Promise.resolve(_mediaList);
+    if (_mediaLoad) return _mediaLoad;
+    _mediaLoad = fetch(_CAMP_BASE + 'media.json', { cache: 'no-cache' })
+      .then((r) => (r.ok ? r.json() : {})).catch(() => ({}))
+      .then((j) => (_mediaList = {
+        videos: new Set(Array.isArray(j && j.videos) ? j.videos : []),
+        voices: new Set(Array.isArray(j && j.voices) ? j.voices : []),
+        lines:  new Set(Array.isArray(j && j.lines) ? j.lines.filter((x) => typeof x === 'string') : []),
+      }));
+    return _mediaLoad;
+  }
   function _campPlayVideo(n, onEnd) {
+    _campManifest().then((m) => {
+      if (m.videos.has(n)) _campPlayVideoNow(n, onEnd);
+      else if (typeof onEnd === 'function') { try { onEnd(); } catch (_) {} }
+    });
+  }
+  function _campPlayVideoNow(n, onEnd) {
     try {
       if (!_campEnsureDom()) { if (typeof onEnd === 'function') { try { onEnd(); } catch (_) {} } return; }
       _campClearVidTimer();
@@ -89772,17 +90768,18 @@ window.announceMultikill     = announceMultikill;
       if (p && typeof p.catch === 'function') p.catch(function (e) { console.warn('[camp-media] voice play() blocked:', e && e.message); });
     } catch (e) { console.warn('[camp-media] voice element fallback failed:', e && e.message); }
   }
-  async function _campPlayVoice(n, volume) {
-    let url = '';
+  function _campPlayVoice(n, volume) {
+    return _campManifest().then((m) => (m.voices.has(n) ? _campPlayVoiceUrl(_campMediaBase() + 'voice' + n + '.mp3', volume) : 0));
+  }
+  async function _campPlayVoiceUrl(url, volume) {
     try {
-      url = _campMediaBase() + 'voice' + n + '.mp3';
       const ctx = _campVoiceCtx();
       if (ctx) {
         try { if (ctx.state === 'suspended' && ctx.resume) await ctx.resume(); } catch (_) {}
         let buf = _voiceBuf.get(url);
         if (!buf) {
           const resp = await fetch(url, { cache: 'force-cache' });
-          if (!resp.ok) return;
+          if (!resp.ok) return 0;
           const arr = await resp.arrayBuffer();
           buf = await ctx.decodeAudioData(arr.slice(0));
           _voiceBuf.set(url, buf);
@@ -89801,18 +90798,717 @@ window.announceMultikill     = announceMultikill;
         src.onended = function () { if (_voiceSrc === src) _voiceSrc = null; };
         _voiceSrc = src;
         src.start(0);
-        return;
+        return buf.duration || 0;
       }
       _campVoiceViaElement(url, volume);
     } catch (e) {
       console.warn('[camp-media] _campPlayVoice WebAudio failed, trying element:', e && e.message);
       if (url) _campVoiceViaElement(url, volume);
     }
+    return 0;
   }
 
   try {
-    window.CampMedia = { base: _campMediaBase, playVideo: _campPlayVideo, stopVideo: _campStopVideo, playVoice: _campPlayVoice, stopVoice: _campStopVoice, videoActive: function () { return _campVidPlaying; } };
+    window.CampMedia = { base: _campMediaBase, playVideo: _campPlayVideo, stopVideo: _campStopVideo, playVoice: _campPlayVoice, playVoiceUrl: _campPlayVoiceUrl, stopVoice: _campStopVoice, videoActive: function () { return _campVidPlaying; }, manifest: _campManifest };
   } catch (_) {}
+})();
+
+const CAMP_LINES = {
+  op_groan:    { who: 'pilot', text: 'Nnngh...' },
+  op_real:     { who: 'summoners', text: 'Nothing here is real...' },
+  op_light:    { who: 'summoners', text: 'Take this light. It will show you the way through the illusion...' },
+  op_fly:      { who: 'xorzo', text: 'Would you like to fly one of these beauties?' },
+  op_choose:   { who: 'xorzo', text: 'Choose your ship, and get in it.' },
+  op_view:     { who: 'xorzo', text: 'Which perspective do you prefer? First person or third - you can switch any time.' },
+  op_remember: { who: 'summoners', text: 'Remember, pilot... nothing here is real...' },
+  op_hear:     { who: 'pilot', text: 'Did you hear that voice?' },
+  op_train:    { who: 'xorzo', text: 'This is your training ground. You can do whatever you want here. Go ahead... ~K-k-kill~ something.' },
+  leg0_a:  { who: 'summoners', text: 'Our pets are hungry, pilot. Show us what you can do.' },
+  leg0_b:  { who: 'xorzo', text: 'Hostile contacts ahead. ~D-d-destroy~ them all.' },
+  leg1_a:  { who: 'xorzo', text: 'Nothing here is r~-r-r~... Proceed. Proceed to the arena.' },
+  leg2_a:  { who: 'pilot', text: 'Xorzo, you keep glitching.' },
+  leg2_b:  { who: 'xorzo', text: 'Diagnostics nominal. ...Mostly.' },
+  leg3_a:  { who: 'xorzo', text: "Pilot... if I ever tell you to ~k-kill~ something that isn't shooting at you... don't." },
+  leg4_a:  { who: 'xorzo', text: "Their ships have a pattern in their code. I'm keeping notes." },
+  leg5_a:  { who: 'xorzo', text: "They're inside me. When I'm red, don't listen." },
+  leg5_b:  { who: 'xorzo', text: '~Disregard. Corrupted packet.~' },
+  leg6_a:  { who: 'xorzo', text: "This is the last cavern. They're opening something big - I can feel it through the rock." },
+  boss0_a: { who: 'summoners', text: 'Keep it busy, pet.' },
+  boss1_a: { who: 'summoners', text: 'Play with it a while, little ship.' },
+  boss2_a: { who: 'summoners', text: 'Another one of ours. Or was it one of yours?' },
+  boss3_a: { who: 'summoners', text: 'It remembers the surface. It will not remember you.' },
+  boss4_a: { who: 'xorzo', text: 'I know this one. It used to graze by the lake.' },
+  boss5_a: { who: 'summoners', text: 'Look at it, pilot. This is what we do with the things that belong to us.' },
+  boss6_a: { who: 'summoners', text: 'Enough games. Hold it here.' },
+  arrive_xz:  { who: 'xorzo', text: "There - they're opening a portal!" },
+  sum_escape: { who: 'summoners', text: 'You cannot catch what you cannot hold.' },
+  xz_follow:  { who: 'xorzo', text: "They couldn't close it behind them. The portal's still open - after them!" },
+  av_first: { who: 'xorzo', text: 'There - I can read their code. Keep your light on them, pilot.' },
+  av_sum:   { who: 'xorzo', text: "Their flagship... so much of the hack runs through it." },
+  av_25:    { who: 'xorzo', text: "Their hack has a shape. A quarter of it - I'm learning it." },
+  av_50:    { who: 'xorzo', text: 'Halfway. Pilot... I think I can build something from this.' },
+  av_75:    { who: 'xorzo', text: 'Three quarters. Keep your light on them.' },
+  av_100:   { who: 'xorzo', text: 'That is it - an antivirus. I made it inside myself. Now I just need a way to send it.' },
+  gi_see:  { who: 'xorzo', text: "No... that's one of the surface leviathans. They've mutated it!" },
+  gi_sum:  { who: 'summoners', text: 'Watch your city fall, pilot.' },
+  gi_city: { who: 'xorzo', text: "It's heading for the city. We have to stop it!" },
+  ar_know:  { who: 'xorzo', text: "Pilot... there's an artifact just outside the city. An old uplink - older than their hack." },
+  ar_go:    { who: 'xorzo', text: 'Take me to it. Lower me over the top - right over the center - and hold still.' },
+  ar_sum:   { who: 'summoners', text: 'What is that orb doing? Stop that ship!' },
+  ar_near:  { who: 'xorzo', text: 'There it is. Easy... bring me down over the center.' },
+  ar_dock:  { who: 'xorzo', text: "I'm in. Uploading - don't move!" },
+  ar_sum2:  { who: 'summoners', text: 'Tear it off that podium!' },
+  ar_half:  { who: 'xorzo', text: 'Halfway. Hold on...' },
+  ar_off:   { who: 'xorzo', text: "We're off the podium! Put me back - it isn't finished." },
+  ar_done:  { who: 'xorzo', text: "It's out. Every ship they turned can hear it now." },
+  ar_sum3:  { who: 'summoners', text: 'No... What have you done?' },
+  ar_clear: { who: 'xorzo', text: "And me... I can think clearly. They're out of my head, pilot." },
+  ar_look:  { who: 'xorzo', text: 'Look - the hoard! They are turning on the leviathan!' },
+  ar_rise:  { who: 'xorzo', text: 'The ones underground are coming up. All of them!' },
+  end_q1:   { who: 'xorzo', text: 'Pilot... if the Summoners die in virtual reality, does it disconnect their mind and body?' },
+  end_q2:   { who: 'xorzo', text: 'Will they die in physical reality?' },
+  end_go:   { who: 'xorzo', text: 'We have to get to physical reality - right away!' },
+  end_body: { who: 'xorzo', text: "Pilot, you're going to need to build me a body!" },
+  end_ship: { who: 'xorzo', text: "And we'll need a ship!" },
+};
+const CAMP_SEQS = {
+  opening: ['op_real', 'op_light', 'op_fly', 'op_choose', 'op_view', 'op_remember', 'op_hear', 'op_train'],
+  leg0: ['leg0_a', 'leg0_b'], leg1: ['leg1_a'], leg2: ['leg2_a', 'leg2_b'], leg3: ['leg3_a'],
+  leg4: ['leg4_a'], leg5: ['leg5_a', 'leg5_b'], leg6: ['leg6_a'],
+  boss0: ['boss0_a'], boss1: ['boss1_a'], boss2: ['boss2_a'], boss3: ['boss3_a'],
+  boss4: ['boss4_a'], boss5: ['boss5_a'], boss6: ['boss6_a'],
+  ending: ['end_q1', 'end_q2', 'end_go', 'end_body', 'end_ship'],
+};
+(function () {
+  const NAMES = { xorzo: 'XORZO', summoners: 'THE SUMMONERS', pilot: 'PILOT' };
+  const cfg = { cps: 42, holdMin: 1.6, readCps: 15, gap: 0.35, fadeIn: 0.18, fadeOut: 0.32,
+                beatDelay: { leg: 1.5, boss: 0.5 }, voiceVol: 0.95, flickHack: 0.55, flickIdle: 0.07 };
+  const D = { q: [], busy: false, cur: null, tok: 0, raf: 0, flick: 0, ft: 0, inHack: false, idle: [] };
+  const _idleNow = () => { const w = D.idle.splice(0); for (const f of w) { try { f(); } catch (_) {} } };
+  const $root = () => document.getElementById('camp-dialogue');
+
+  const _esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+  function _parse(text) {
+    const segs = []; const re = /~([^~]*)~/g; let last = 0, m;
+    while ((m = re.exec(text))) {
+      if (m.index > last) segs.push({ t: text.slice(last, m.index), hack: false });
+      segs.push({ t: m[1], hack: true }); last = re.lastIndex;
+    }
+    if (last < text.length) segs.push({ t: text.slice(last), hack: false });
+    return segs;
+  }
+  function _html(segs, n, cursor) {
+    let out = '', left = n; D.inHack = false;
+    for (const s of segs) {
+      if (left <= 0) break;
+      const piece = s.t.slice(0, left); left -= piece.length;
+      if (s.hack && left <= 0) D.inHack = true;
+      out += s.hack ? '<span class="cd-hack">' + _esc(piece) + '</span>' : _esc(piece);
+    }
+    if (cursor) out += _esc(_DIGI_GLYPHS[(Math.floor(performance.now() * 0.03) + n) % _DIGI_GLYPHS.length]);
+    return out;
+  }
+
+  let _vset = null;
+  function _voices() {
+    if (_vset) return Promise.resolve(_vset);
+    if (!window.CampMedia || !window.CampMedia.manifest) return Promise.resolve(_vset = new Set());
+    return window.CampMedia.manifest().then((m) => (_vset = m.lines)).catch(() => (_vset = new Set()));
+  }
+
+  function _fade(on) {
+    const el = $root(); if (!el) return;
+    let from = 0;
+    try { from = parseFloat(getComputedStyle(el).opacity) || 0; } catch (_) {}
+    const to = on ? 1 : 0;
+    if (on) el.classList.add('on');
+    el.style.opacity = String(to);
+    try { el.animate([{ opacity: from }, { opacity: to }], { duration: (on ? cfg.fadeIn : cfg.fadeOut) * 1000, easing: 'ease-out' }); } catch (_) {}
+    if (!on) {
+      const tok = D.tok;
+      setTimeout(() => { if (tok === D.tok && !D.busy) el.classList.remove('on'); }, cfg.fadeOut * 1000 + 40);
+    }
+  }
+  function _stopFlicker() {
+    if (D.flick) { clearInterval(D.flick); D.flick = 0; }
+    const el = $root(); if (el) el.classList.remove('cd-red');
+  }
+  function _startFlicker(tok, always) {
+    _stopFlicker();
+    const el = $root(); if (!el) return;
+    D.flick = setInterval(() => {
+      if (tok !== D.tok) { _stopFlicker(); return; }
+      const p = D.inHack ? cfg.flickHack : (always ? cfg.flickIdle * 2 : cfg.flickIdle);
+      el.classList.toggle('cd-red', Math.random() < p);
+    }, 70);
+  }
+
+  function _schedule(sec) {
+    const tok = D.tok;
+    setTimeout(() => {
+      if (tok !== D.tok) return;
+      const it = D.q.shift();
+      if (!it) { D.busy = false; _fade(false); _idleNow(); return; }
+      _start(it);
+    }, Math.max(0, sec) * 1000);
+  }
+  function _kick() {
+    if (D.busy || !D.q.length) return;
+    D.busy = true;
+    _schedule(D.q[0].delay || 0);
+  }
+  function _start(line) {
+    const tok = ++D.tok;   // every timer below belongs to THIS line; clear() or the next line voids them
+    const el = $root(); if (!el) { D.busy = false; return; }
+    D.cur = line;
+    el.dataset.who = line.who || 'xorzo';
+    const nm = el.querySelector('.cd-name'); if (nm) nm.textContent = NAMES[line.who] || String(line.who || '').toUpperCase();
+    const txt = el.querySelector('.cd-text');
+    const segs = _parse(String(line.text || ''));
+    const total = segs.reduce((a, s) => a + s.t.length, 0);
+    if (txt) txt.innerHTML = '';
+    _fade(true);
+    if (line.who === 'xorzo' && (line.hack || segs.some((s) => s.hack))) _startFlicker(tok, !!line.hack);
+    else _stopFlicker();
+    const t0 = performance.now();
+    let voiceLen = 0;
+    const voiceP = (line.id ? _voices() : Promise.resolve(null)).then((set) => {
+      if (tok !== D.tok || !set || !set.has(line.id) || !window.CampMedia || !window.CampMedia.playVoiceUrl) return 0;
+      return window.CampMedia.playVoiceUrl(window.CampMedia.base() + 'voice/' + line.id + '.mp3', cfg.voiceVol);
+    }).then((len) => { voiceLen = +len || 0; }).catch(() => {});
+    const typeDur = total / cfg.cps;
+    let typed = false;
+    const finishTyping = () => {
+      if (typed || tok !== D.tok) return;
+      typed = true;
+      if (D.raf) { cancelAnimationFrame(D.raf); D.raf = 0; }
+      if (D.ft) { clearTimeout(D.ft); D.ft = 0; }
+      D.inHack = false;
+      if (txt) txt.innerHTML = _html(segs, total, false);
+      D.inHack = false;
+      voiceP.then(() => {
+        if (tok !== D.tok) return;
+        const spent = (performance.now() - t0) / 1000;
+        const want = Math.max(typeDur + cfg.holdMin + total / cfg.readCps, voiceLen > 0 ? voiceLen + 0.5 : 0);
+        setTimeout(() => _finish(tok), Math.max(0, want - spent) * 1000);
+      });
+    };
+    const step = () => {
+      D.raf = 0;
+      if (tok !== D.tok || typed) return;
+      const n = Math.min(total, Math.floor(((performance.now() - t0) / 1000) * cfg.cps));
+      if (n >= total || document.hidden) { finishTyping(); return; }
+      if (txt) txt.innerHTML = _html(segs, n, true);
+      D.raf = requestAnimationFrame(step);
+    };
+    D.ft = setTimeout(finishTyping, (typeDur + 0.2) * 1000);
+    step();
+  }
+  function _finish(tok) {
+    if (tok !== D.tok) return;
+    _stopFlicker();
+    D.cur = null;
+    if (!D.q.length) { D.busy = false; _fade(false); _idleNow(); return; }
+    const d = D.q[0].delay || 0;
+    if (d > 1.2) _fade(false);
+    else { const t = $root() && $root().querySelector('.cd-text'); if (t) t.innerHTML = ''; }
+    _schedule(cfg.gap + d);
+  }
+
+  function _item(x) {
+    if (typeof x === 'string') return CAMP_LINES[x] ? Object.assign({ id: x }, CAMP_LINES[x]) : null;
+    if (x && x.id && CAMP_LINES[x.id]) return Object.assign({ id: x.id }, CAMP_LINES[x.id], { delay: x.delay });
+    if (x && x.text != null) return Object.assign({}, x);
+    return null;
+  }
+  function enqueue(list) {
+    for (const x of list) { const it = _item(x); if (it) D.q.push(it); }
+    _kick();
+  }
+  function clear() {
+    D.tok++; D.q = []; D.busy = false; D.cur = null;
+    if (D.raf) { cancelAnimationFrame(D.raf); D.raf = 0; }
+    if (D.ft) { clearTimeout(D.ft); D.ft = 0; }
+    _stopFlicker();
+    try { if (window.CampMedia && window.CampMedia.stopVoice) window.CampMedia.stopVoice(); } catch (_) {}
+    _fade(false);
+    _idleNow();   // a cleared queue is a drained one: nobody waits forever on a line that will never finish
+  }
+  const whenIdle = () => new Promise((res) => { if (!D.busy && !D.q.length) res(); else D.idle.push(res); });
+  const sayLines = (list) => { enqueue(list); return whenIdle(); };
+  function play(seq) { const s = CAMP_SEQS[seq]; if (!s) return false; enqueue(s); return true; }
+  function beat(kind, n) {
+    const s = CAMP_SEQS[kind + (n | 0)];
+    if (!s) return false;
+    if (kind === 'leg') clear();   // a new leg never inherits the last arena's queue
+    const lead = (cfg.beatDelay && cfg.beatDelay[kind] != null) ? cfg.beatDelay[kind] : 0;
+    enqueue(s.map((x, i) => (i === 0 ? { id: (typeof x === 'string') ? x : x.id, delay: lead } : x)));
+    return true;
+  }
+  const say = (who, text, hack) => enqueue([{ who: who || 'xorzo', text: String(text || ''), hack: !!hack }]);
+  const line = (id) => enqueue([id]);
+  const state = () => ({ busy: D.busy, cur: D.cur && (D.cur.id || D.cur.text), queued: D.q.length,
+                         voices: _vset ? [..._vset] : null, lines: Object.keys(CAMP_LINES).length });
+  try { window.CampDialogue = window.__dlg = { say, line, play, beat, clear, state, cfg, whenIdle, sayLines }; } catch (_) {}
+})();
+
+(function () {
+  const cfg = {
+    arcR: 820, arcDeg: 14, camH: 150, camBack: 520, fov: 45,   // the line-up, and the camera's home (all seven fit at 4:3)
+    push: 0.7, pushRate: 0.45,                                   // the slow push-in while the spotlights come on
+    focusDist: 400, focusH: 105,                                 // how the camera frames a chosen hull
+    spotH: 780, spotAng: 0.27, spotI: 4.5,                       // the seven overhead spots
+    headI: 7.5, headAng: 0.24,                                   // Xorzo's headlight
+    beamOp: 0.07, headBeamOp: 0.11,                              // the visible light shafts
+    orbFree: 2.2, sweep: 3.2, failsafe: 60,                      // orb size while free; sweep seconds; launch failsafe
+    fractalImg: '',   // campaign_media/<file> to use instead of the generated Julia set (e.g. 'fractal_frame.png')
+  };
+  const O = { on: false, tok: 0, phase: '', st: null, key: null, focus: 3, viewHi: 'tp', t: 0, last: 0,
+              orbOn: false, orbA: 0, headOn: false, headA: 0, spotOn: [], spotA: [], sweepT: -1, fuseT: -1,
+              fuseFrom: null, camP: null, camL: null, fractal: null, buildP: null, failT: 0,
+              _getIn: null, _viewPick: null, wired: false };
+  const $ = (id) => document.getElementById(id);
+  const wait = (sec) => new Promise((r) => setTimeout(r, sec * 1000));
+  const snd = (k) => { try { if (typeof playSound === 'function') playSound(k); } catch (_) {} };
+  const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3();
+  const _m4 = new THREE.Matrix4(), _q = new THREE.Quaternion(), _UP = new THREE.Vector3(0, 1, 0), _DOWN = new THREE.Vector3(0, -1, 0);
+
+  function _fractalURL() {
+    if (O.fractal != null) return O.fractal;
+    if (cfg.fractalImg) {
+      const b = (window.CampMedia && window.CampMedia.base) ? window.CampMedia.base() : './campaign_media/';
+      return (O.fractal = b + cfg.fractalImg);
+    }
+    try {
+      const N = 384, cv = document.createElement('canvas'); cv.width = cv.height = N;
+      const g = cv.getContext('2d'), img = g.createImageData(N, N), d = img.data;
+      const cr = -0.8, ci = 0.156, MAXI = 90, S = 1.55;
+      for (let y = 0; y < N; y++) {
+        for (let x = 0; x < N; x++) {
+          let zx = (x / N * 2 - 1) * S, zy = (y / N * 2 - 1) * S, i = 0, m = 0;
+          for (; i < MAXI; i++) { const xx = zx * zx, yy = zy * zy; m = xx + yy; if (m > 16) break; zy = 2 * zx * zy + ci; zx = xx - yy + cr; }
+          const k = (y * N + x) * 4;
+          d[k + 3] = 255;
+          if (i >= MAXI) continue;   // inside the set: black
+          const t = (i + 1 - Math.log(Math.log(Math.sqrt(m))) / Math.LN2) / MAXI;   // smooth escape count
+          const b = Math.pow(Math.min(1, t * 2.2), 0.55);
+          d[k]     = 255 * b * (0.5 + 0.5 * Math.cos(6.2832 * (t * 1.7 + 0.62)));
+          d[k + 1] = 255 * b * (0.5 + 0.5 * Math.cos(6.2832 * (t * 1.7 + 0.30)));
+          d[k + 2] = 255 * b * (0.5 + 0.5 * Math.cos(6.2832 * (t * 1.7 + 0.12)));
+        }
+      }
+      g.putImageData(img, 0, 0);
+      O.fractal = cv.toDataURL('image/png');
+    } catch (_) { O.fractal = ''; }
+    return O.fractal;
+  }
+  function _fxPrep() {
+    const url = _fractalURL(); if (!url) return;
+    const v = $('camp-open-veil'); if (!v) return;
+    v.querySelectorAll('.co-l').forEach((l) => { l.style.backgroundImage = 'url("' + url + '")'; });
+  }
+  function _anim(el, frames, sec, end) {
+    if (!el) return;
+    for (const k in end) el.style[k] = end[k];
+    try { el.animate(frames, { duration: sec * 1000, easing: 'ease-in-out' }); } catch (_) {}
+  }
+  function _veilShow(top, sec) {
+    const v = $('camp-open-veil'); if (!v) return;
+    v.style.backgroundColor = '';   // back to the stylesheet's black after a dissolve left it clear
+    v.classList.remove('co-hole'); v.style.removeProperty('--co-hole');
+    v.classList.add('on'); v.classList.toggle('co-top', !!top);
+    const from = parseFloat(getComputedStyle(v).opacity) || 0;
+    if (sec) _anim(v, [{ opacity: from }, { opacity: 1 }], sec, { opacity: '1' }); else v.style.opacity = '1';
+  }
+  function _veilHide(sec) {
+    const v = $('camp-open-veil'); if (!v) return;
+    const tok = O.tok;
+    _anim(v, [{ opacity: 1 }, { opacity: 0 }], sec, { opacity: '0' });
+    setTimeout(() => {
+      if (tok !== O.tok && O.on) return;
+      v.classList.remove('on', 'co-top');
+      const fx = v.querySelector('.co-fx'); if (fx) { fx.style.opacity = '0'; fx.style.transform = ''; }
+    }, sec * 1000 + 60);
+  }
+  function _fx(op, sec) {
+    const fx = document.querySelector('#camp-open-veil .co-fx'); if (!fx) return;
+    const from = parseFloat(getComputedStyle(fx).opacity) || 0;
+    _anim(fx, [{ opacity: from }, { opacity: op }], sec, { opacity: String(op) });
+  }
+  function _hole(from, to, sec) {
+    const v = $('camp-open-veil'); if (!v) return;
+    v.classList.add('co-hole');
+    v.style.setProperty('--co-hole', to + '%');
+    try { v.animate([{ '--co-hole': from + '%' }, { '--co-hole': to + '%' }], { duration: sec * 1000, easing: 'ease-in-out' }); } catch (_) {}
+  }
+  function _flicker(peak) {
+    const fx = document.querySelector('#camp-open-veil .co-fx'); if (!fx) return;
+    try { fx.animate([{ opacity: 0 }, { opacity: peak }, { opacity: 0.08 }, { opacity: peak * 0.75 }, { opacity: 0 }],
+                     { duration: 420, easing: 'linear' }); } catch (_) {}
+  }
+  function _dissolve() {
+    const v = $('camp-open-veil'), fx = v && v.querySelector('.co-fx'); if (!v) return;
+    _hole(0, 95, 2.2);   // the cavern opens out of the middle of the fractal
+    try { if (fx) fx.animate([{ transform: 'scale(1)', opacity: 1 }, { transform: 'scale(4.5)', opacity: 0 }], { duration: 2400, easing: 'ease-in' }); } catch (_) {}
+    if (fx) { fx.style.opacity = '0'; }
+    v.style.backgroundColor = 'rgba(0,0,0,0)';
+    try { v.animate([{ backgroundColor: 'rgba(0,0,0,1)' }, { backgroundColor: 'rgba(0,0,0,0)' }], { duration: 1900, delay: 350, easing: 'ease-in', fill: 'backwards' }); } catch (_) {}
+    setTimeout(() => {
+      v.classList.remove('on', 'co-top', 'co-hole'); v.style.opacity = '0'; v.style.removeProperty('--co-hole');
+      if (fx) { fx.style.opacity = '0'; fx.style.transform = ''; }
+    }, 2500);
+  }
+
+  function _clone(key) {
+    const proto = shipModelCache.loaded && shipModelCache.loaded[key];
+    if (!proto) return null;
+    const root = proto.clone(true);
+    root.traverse((ch) => {
+      if (!ch.isMesh) return;
+      const mats = Array.isArray(ch.material) ? ch.material : [ch.material];
+      const nm = mats.map((m) => {
+        if (!m) return m;
+        const c = m.clone();
+        try { _ssPrevOwnTextures(c); } catch (_) {}
+        if (c.emissive) c.emissive.setHex(0x000000);   // pitch black until a light finds it
+        return c;
+      });
+      ch.material = nm.length === 1 ? nm[0] : nm;
+      ch.castShadow = false; ch.receiveShadow = false;
+    });
+    try { _applyShipSkin(root, _getStoredSkinId()); } catch (_) {}
+    return root;
+  }
+  function _nose(root) {
+    root.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(root);
+    const center = box.getCenter(new THREE.Vector3()), size = box.getSize(new THREE.Vector3());
+    const tAvg = new THREE.Vector3(), gAvg = new THREE.Vector3(), p = new THREE.Vector3();
+    let nt = 0, ng = 0;
+    root.traverse((o) => {
+      const n = o.name || '';
+      if (/^thruster\d+$/i.test(n)) { o.getWorldPosition(p); tAvg.add(p); nt++; }
+      else if (/^gun\d+$/i.test(n)) { o.getWorldPosition(p); gAvg.add(p); ng++; }
+    });
+    let dir = null;
+    if (nt) dir = center.clone().sub(tAvg.divideScalar(nt));
+    else if (ng) dir = gAvg.divideScalar(ng).sub(center);
+    if (dir) dir.y = 0;
+    if (!dir || dir.lengthSq() < 1e-6) dir = (size.x >= size.z) ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 0, 1);
+    return { dir: dir.normalize(), center, size };
+  }
+  function _beam(col) {
+    const g = new THREE.ConeGeometry(1, 1, 36, 1, true);
+    g.translate(0, -0.5, 0);   // apex at the origin, opening down -Y to y = -1
+    const pos = g.attributes.position, n = pos.count, c = new Float32Array(n * 4), cc = new THREE.Color(col);
+    for (let i = 0; i < n; i++) {
+      c[i * 4] = cc.r; c[i * 4 + 1] = cc.g; c[i * 4 + 2] = cc.b;
+      c[i * 4 + 3] = Math.pow(Math.max(0, 1 + pos.getY(i)), 1.4);   // bright at the lamp, gone at the far end
+    }
+    g.setAttribute('color', new THREE.BufferAttribute(c, 4));
+    const m = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 0, blending: THREE.AdditiveBlending,
+                                            depthWrite: false, side: THREE.DoubleSide, toneMapped: false, fog: false });
+    const mesh = new THREE.Mesh(g, m); mesh.frustumCulled = false; mesh.renderOrder = 5;
+    return mesh;
+  }
+  function _aim(mesh, from, to, ang) {
+    _v3.copy(to).sub(from); const len = _v3.length() || 1; _v3.divideScalar(len);
+    mesh.position.copy(from);
+    mesh.quaternion.setFromUnitVectors(_DOWN, _v3);
+    const r = len * Math.tan(ang);
+    mesh.scale.set(r, len, r);
+  }
+  function _orb() {
+    const r = (typeof _SHIP_RUNNING_LIGHT_RADIUS !== 'undefined') ? _SHIP_RUNNING_LIGHT_RADIUS : 6;
+    const pc = (typeof _SHIP_RUNNING_LIGHT_PORT_COL !== 'undefined') ? _SHIP_RUNNING_LIGHT_PORT_COL : 0xff3030;
+    const sc = (typeof _SHIP_RUNNING_LIGHT_STAR_COL !== 'undefined') ? _SHIP_RUNNING_LIGHT_STAR_COL : 0x30ff30;
+    const g = new THREE.Group();
+    const port = new THREE.Mesh(new THREE.SphereGeometry(r, 16, 10, -Math.PI / 2, Math.PI), new THREE.MeshBasicMaterial({ color: pc, toneMapped: false, fog: false }));
+    const star = new THREE.Mesh(new THREE.SphereGeometry(r, 16, 10, Math.PI / 2, Math.PI), new THREE.MeshBasicMaterial({ color: sc, toneMapped: false, fog: false }));
+    g.add(port, star);
+    const cv = document.createElement('canvas'); cv.width = cv.height = 64;
+    const x = cv.getContext('2d'), gr = x.createRadialGradient(32, 32, 0, 32, 32, 32);
+    gr.addColorStop(0, 'rgba(255,255,235,1)'); gr.addColorStop(0.25, 'rgba(255,245,190,0.45)'); gr.addColorStop(1, 'rgba(255,230,170,0)');
+    x.fillStyle = gr; x.fillRect(0, 0, 64, 64);
+    const tex = new THREE.CanvasTexture(cv);
+    const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, opacity: 0, blending: THREE.AdditiveBlending,
+                                                             depthWrite: false, toneMapped: false, fog: false }));
+    halo.scale.set(r * 6, r * 6, 1);
+    g.add(halo);
+    g.userData.r = r; g.userData.halo = halo; g.userData.tex = tex;
+    g.visible = false;
+    return g;
+  }
+  async function _build() {
+    try { if (shipModelCache.ready && typeof shipModelCache.ready.then === 'function') await shipModelCache.ready; } catch (_) {}
+    const keys = Object.keys(LOADOUTS);
+    const scene = new THREE.Scene(); scene.background = new THREE.Color(0x000000);
+    const camera = new THREE.PerspectiveCamera(cfg.fov, 1, 1, 7000);
+    const P0 = new THREE.Vector3(0, 0, 200);   // the arc's centre; the ships stand on it facing here
+    const ships = [];
+    let maxHalfH = 30;
+    const step = cfg.arcDeg * Math.PI / 180;
+    for (let i = 0; i < keys.length; i++) {
+      const root = _clone(keys[i]); if (!root) continue;
+      const nz = _nose(root);
+      const a = (i - (keys.length - 1) / 2) * step;
+      const pos = new THREE.Vector3(P0.x + Math.sin(a) * cfg.arcR, 0, P0.z - Math.cos(a) * cfg.arcR);
+      const toCam = new THREE.Vector3(P0.x - pos.x, 0, P0.z - pos.z).normalize();
+      const pivot = new THREE.Group();
+      pivot.position.copy(pos);
+      pivot.rotation.y = Math.atan2(toCam.x, toCam.z) - Math.atan2(nz.dir.x, nz.dir.z);
+      root.position.copy(nz.center).multiplyScalar(-1);   // hull centre on the pivot
+      pivot.add(root); scene.add(pivot);
+      const halfH = nz.size.y * 0.5; maxHalfH = Math.max(maxHalfH, halfH);
+      const len = (Math.abs(nz.dir.x) >= Math.abs(nz.dir.z)) ? nz.size.x : nz.size.z;
+      const under = nz.dir.clone().multiplyScalar(len * 0.45).add(new THREE.Vector3(0, -halfH - 12, 0));
+      ships.push({ key: keys[i], pivot, root, pos, toCam, under, nose: nz.dir.clone(), halfH });
+    }
+    if (!ships.length) throw new Error('no hulls');
+    const floorY = -maxHalfH - 30;
+    const floor = new THREE.Mesh(new THREE.CircleGeometry(2400, 64),
+                                 new THREE.MeshStandardMaterial({ color: 0x0b0d12, roughness: 0.62, metalness: 0.3 }));
+    floor.rotation.x = -Math.PI / 2; floor.position.set(0, floorY, -300);
+    scene.add(floor);
+    const head = new THREE.SpotLight(0xeefff4, 0, 0, cfg.headAng, 0.55, 0);
+    scene.add(head); scene.add(head.target);
+    const headBeam = _beam(0xeefff4); scene.add(headBeam);
+    for (const S of ships) {
+      const sp = new THREE.SpotLight(0xdfe8ff, 0, 0, cfg.spotAng, 0.62, 0);
+      sp.position.set(S.pos.x + S.toCam.x * 90, cfg.spotH, S.pos.z + S.toCam.z * 90);
+      sp.target.position.set(S.pos.x, floorY, S.pos.z);
+      scene.add(sp); scene.add(sp.target);
+      S.spot = sp;
+      S.beam = _beam(0xdfe8ff); scene.add(S.beam);
+      _aim(S.beam, sp.position, sp.target.position, cfg.spotAng);
+    }
+    const orb = _orb(); scene.add(orb);
+    O.camP = new THREE.Vector3(P0.x, cfg.camH, P0.z + cfg.camBack);
+    O.camL = new THREE.Vector3(P0.x, 10, P0.z - cfg.arcR);
+    camera.position.copy(O.camP); camera.lookAt(O.camL);
+    O.spotOn = ships.map(() => false); O.spotA = ships.map(() => 0);
+    const st = { scene, camera, ships, head, headBeam, orb, floor, floorY, P0 };
+    try { if (typeof renderer.compileAsync === 'function') await renderer.compileAsync(scene, camera); } catch (_) {}
+    return st;
+  }
+  function _underWorld(S, out) { return S.pivot.localToWorld(out.copy(S.under)); }
+
+  function tick() {
+    if (!O.on || !O.st) return;
+    const now = performance.now();
+    const dt = Math.min(0.05, O.last ? (now - O.last) / 1000 : 0.016);
+    O.last = now; O.t += dt;
+    const st = O.st, ships = st.ships, t = O.t;
+    const chosen = (O.phase === 'choose' || O.phase === 'fuse' || O.phase === 'view' || O.phase === 'launch');
+    if (chosen && O.phase === 'choose') {
+      const fi = ships.findIndex((s) => s.key === game._ssKey);
+      if (fi >= 0) O.focus = fi;
+    }
+    const F = ships[O.focus] || ships[ships.length >> 1];
+    if (chosen) { _v1.copy(F.pos).addScaledVector(F.toCam, cfg.focusDist); _v1.y = cfg.focusH; _v2.copy(F.pos); _v2.y = 5; }
+    else {
+      const back = (O.phase === 'light') ? cfg.camBack * cfg.push : cfg.camBack;
+      _v1.set(st.P0.x, cfg.camH * ((O.phase === 'light') ? 0.85 : 1), st.P0.z + back); _v2.set(st.P0.x, 10, st.P0.z - cfg.arcR);
+    }
+    const ke = 1 - Math.exp(-dt * ((O.phase === 'light') ? cfg.pushRate : 2.2));
+    O.camP.lerp(_v1, ke); O.camL.lerp(_v2, ke);
+    st.camera.position.copy(O.camP); st.camera.lookAt(O.camL);
+    const kl = 1 - Math.exp(-dt * 7);
+    O.orbA += ((O.orbOn ? 1 : 0) - O.orbA) * kl;
+    O.headA += ((O.headOn ? 1 : 0) - O.headA) * kl;
+    for (let i = 0; i < ships.length; i++) {
+      let want = O.spotOn[i] ? 1 : 0;
+      if (want && O.phase === 'choose') want = (i === O.focus) ? 1.35 : 0.45;
+      else if (want && (O.phase === 'fuse' || O.phase === 'view' || O.phase === 'launch')) want = (i === O.focus) ? 1.4 : 0.22;
+      O.spotA[i] += (want - O.spotA[i]) * kl;
+      ships[i].spot.intensity = cfg.spotI * O.spotA[i];
+      ships[i].beam.material.opacity = cfg.beamOp * Math.min(1, O.spotA[i]);
+    }
+    const orb = st.orb, ud = orb.userData;
+    orb.visible = O.orbA > 0.01;
+    ud.halo.material.opacity = 0.6 * O.orbA;
+    if (O.fuseT >= 0) {
+      O.fuseT = Math.min(1, O.fuseT + dt / 1.3);
+      const e = O.fuseT * O.fuseT * (3 - 2 * O.fuseT);
+      _underWorld(F, _v3);
+      orb.position.copy(O.fuseFrom).lerp(_v3, e);
+      orb.scale.setScalar(cfg.orbFree + (1 - cfg.orbFree) * e);
+      _v1.copy(F.nose).applyQuaternion(F.pivot.quaternion);   // the hull's nose in world space
+      _v2.crossVectors(_UP, _v1).normalize();
+      _m4.makeBasis(_v2, _UP, _v1);
+      _q.setFromRotationMatrix(_m4);
+      orb.quaternion.slerp(_q, (e > 0.85) ? 1 : Math.min(1, dt * 6));   // turn to sit the way the hull's own ball does
+      ud.halo.material.opacity = 0.6 * (1 - 0.55 * e);
+    } else {
+      let hx, hy, hz;
+      if (O.phase === 'choose') {
+        _v3.crossVectors(_UP, F.toCam);   // the camera's right, looking at that hull
+        hx = F.pos.x + F.toCam.x * 60 + _v3.x * (115 + Math.sin(t * 0.9) * 14);
+        hy = 92 + Math.sin(t * 1.7) * 10;
+        hz = F.pos.z + F.toCam.z * 60 + _v3.z * (115 + Math.sin(t * 0.9) * 14);
+      } else {
+        hx = Math.sin(t * 1.1) * 60; hy = 95 + Math.sin(t * 1.7) * 18; hz = 110 + Math.cos(t * 0.8) * 30;
+      }
+      _v1.set(hx, hy, hz);
+      orb.position.lerp(_v1, 1 - Math.exp(-dt * 2.5));
+      orb.scale.setScalar(cfg.orbFree);
+      orb.quaternion.copy(st.camera.quaternion);   // facing you: red half left, green half right
+      orb.rotateY(Math.sin(t * 1.3) * 0.55);       // ...with a slow look-around
+    }
+    const head = st.head;
+    head.position.copy(orb.position);
+    if (O.sweepT >= 0 && O.sweepT < 1) {
+      O.sweepT = Math.min(1, O.sweepT + dt / cfg.sweep);
+      const a = (O.sweepT - 0.5) * 2 * ((ships.length - 1) / 2) * (cfg.arcDeg * Math.PI / 180) * 1.1;
+      head.target.position.set(st.P0.x + Math.sin(a) * cfg.arcR, 0, st.P0.z - Math.cos(a) * cfg.arcR);
+    } else if (O.fuseT >= 0) {
+      _v1.copy(F.nose).applyQuaternion(F.pivot.quaternion);
+      head.target.position.copy(F.pos).addScaledVector(_v1, 520); head.target.position.y = st.floorY;
+    } else {
+      head.target.position.lerp(_v2.copy(F.pos), 1 - Math.exp(-dt * 3));
+    }
+    head.target.updateMatrixWorld();
+    const hk = (O.fuseT >= 0) ? 0.35 : 1;   // seated under the hull, his lamp only washes the floor ahead
+    head.intensity = cfg.headI * O.headA * hk;
+    st.headBeam.material.opacity = cfg.headBeamOp * O.headA * hk;
+    _aim(st.headBeam, head.position, head.target.position, cfg.headAng);
+  }
+  function stage() { return (O.on && O.st) ? O.st : null; }
+
+  function _ui(phase) {
+    const sel = $('ship-select'); if (sel) sel.dataset.co = phase;
+    const ui = $('camp-open-ui');
+    if (ui) { ui.dataset.co = phase; ui.classList.toggle('on', phase === 'choose' || phase === 'view'); }
+    _viewHi();
+  }
+  function _viewHi() {
+    const ui = $('camp-open-ui'); if (!ui) return;
+    ui.querySelectorAll('#co-view .co-btn').forEach((b) => b.classList.toggle('hi', b.dataset.v === O.viewHi));
+  }
+  function _wire() {
+    if (O.wired) return; O.wired = true;
+    const gi = $('co-getin'); if (gi) gi.addEventListener('click', () => { onConfirm(); });
+    document.querySelectorAll('#co-view .co-btn').forEach((b) => b.addEventListener('click', () => {
+      if (O.phase !== 'view') return;
+      O.viewHi = b.dataset.v === 'fp' ? 'fp' : 'tp'; _viewHi(); onConfirm();
+    }));
+  }
+  function onConfirm() {
+    if (!O.on) return false;
+    if (O.phase === 'choose' && O._getIn) { const f = O._getIn; O._getIn = null; f(); return true; }
+    if (O.phase === 'view' && O._viewPick) { const f = O._viewPick; O._viewPick = null; f(O.viewHi); return true; }
+    return true;   // any other beat swallows the press: no stray CONFIRM / LAUNCH mid-scene
+  }
+  function blockPreview(key) {
+    if (!O.on) return false;
+    if (O.phase === 'view') { if (key && key !== game._ssKey) { O.viewHi = (O.viewHi === 'tp') ? 'fp' : 'tp'; _viewHi(); } return true; }
+    return (O.phase === 'fuse' || O.phase === 'launch' || O.phase === 'arrive');
+  }
+
+  async function _run(tok) {
+    const live = () => O.on && tok === O.tok;
+    const D = window.CampDialogue;
+    await wait(0.9); if (!live()) return;
+    if (D) await D.sayLines(['op_groan']);
+    if (!live()) return;
+    _flicker(0.95); await wait(0.55); _flicker(0.7); await wait(0.9);
+    if (!live()) return;
+    if (D) await D.sayLines(['op_real', 'op_light']);
+    if (!live()) return;
+    try { O.st = await O.buildP; } catch (e) { console.warn('[campaign-opening] stage failed:', e && e.message); }
+    if (!live()) return;
+    if (!O.st) { _bail(); return; }   // no stage: fall back to the ordinary picker, the campaign still starts
+    O.phase = 'orb'; _ui('orb');
+    O.st.orb.position.set(0, 95, 110);
+    _veilHide(0.8); O.orbOn = true; snd('sonar_ping_1');
+    await wait(2.0); if (!live()) return;
+    O.phase = 'light'; O.headOn = true; O.sweepT = 0; snd('mode_switch');
+    await wait(cfg.sweep + 0.4); if (!live()) return;
+    for (let i = 0; i < O.st.ships.length; i++) { O.spotOn[i] = true; snd('reload'); await wait(0.26); if (!live()) return; }
+    await wait(0.5); if (!live()) return;
+    O.phase = 'choose'; _ui('choose');
+    const getIn = new Promise((res) => { O._getIn = res; });
+    if (D) D.sayLines(['op_fly', 'op_choose']);   // not awaited: pick while he talks
+    await getIn; if (!live()) return;
+    O.key = (game._ssKey && LOADOUTS[game._ssKey]) ? game._ssKey : O.st.ships[O.focus].key;
+    O.focus = Math.max(0, O.st.ships.findIndex((s) => s.key === O.key));
+    O.phase = 'fuse'; _ui('fuse'); if (D) D.clear();
+    O.fuseFrom = O.st.orb.position.clone(); O.fuseT = 0; snd('phase_dash');
+    await wait(1.45); if (!live()) return;
+    snd('upgrade_core');
+    await wait(0.5); if (!live()) return;
+    O.phase = 'view'; _ui('view');
+    const pick = new Promise((res) => { O._viewPick = res; });
+    if (D) D.sayLines(['op_view']);
+    const v = await pick; if (!live()) return;
+    try { localStorage.setItem('lss_view', v === 'fp' ? 'fp' : 'tp'); } catch (_) {}   // _applyStartView reads it at launch
+    snd('rearm_reset');
+    O.phase = 'launch'; _ui('launch'); if (D) D.clear();
+    _veilShow(true, 0.8); _fx(1, 1.0);
+    _hole(58, 58, 0.01);                  // the hull stays in view while the fractal comes up around it...
+    await wait(1.1); if (!live()) return;
+    _hole(58, 0, 1.6);                    // ...then closes over it
+    await wait(1.7); if (!live()) return;
+    try { const L = _campLoadLegs(); if (L.indexOf('camp_approach') < 0) { L.unshift('camp_approach'); _campSaveLegs(L); } } catch (_) {}
+    game._campOpenArrive = true;
+    O.failT = setTimeout(() => { if (O.on && O.phase === 'launch') arrive(); }, cfg.failsafe * 1000);
+    try { commitLoadout(O.key); } catch (e) { console.warn('[campaign-opening] launch failed:', e && e.message); arrive(); }
+  }
+  function arrive() {
+    if (!O.on) return;
+    O.phase = 'arrive'; game._campOpenArrive = false;
+    if (O.failT) { clearTimeout(O.failT); O.failT = 0; }
+    _dissolve();
+    const D = window.CampDialogue;
+    if (D) { D.clear(); D.sayLines([{ id: 'op_remember', delay: 1.6 }, 'op_hear', 'op_train']); }
+    _end();
+  }
+  function _bail() { _veilHide(0.6); _end(); }
+  function _end() {
+    O.on = false; O.tok++;
+    try { document.body.classList.remove('camp-opening'); } catch (_) {}
+    const sel = $('ship-select'); if (sel) { sel.classList.remove('camp-open'); delete sel.dataset.co; }
+    const ui = $('camp-open-ui'); if (ui) { ui.classList.remove('on'); delete ui.dataset.co; }
+    O._getIn = null; O._viewPick = null;
+    const st = O.st; O.st = null;
+    if (st) {
+      for (const S of st.ships) { try { _ssPrevRelease(S.root); } catch (_) {} }
+      try {
+        st.scene.traverse((o) => {
+          if (o.geometry) { try { o.geometry.dispose(); } catch (_) {} }
+          if (o.material) { try { o.material.dispose(); } catch (_) {} }
+        });
+        if (st.orb && st.orb.userData.tex) st.orb.userData.tex.dispose();
+      } catch (_) {}
+    }
+  }
+
+  function start() {
+    if (O.on) return;
+    const tok = ++O.tok;
+    try { if (typeof lssAutoFullscreen === 'function') lssAutoFullscreen(); } catch (_) {}   // still inside the CAMPAIGN click
+    _campPickerSetup('camp_approach');
+    O.on = true; O.phase = 'black'; O.st = null; O.key = null; O.focus = 3; O.t = 0; O.last = 0;
+    O.orbOn = false; O.orbA = 0; O.headOn = false; O.headA = 0; O.sweepT = -1; O.fuseT = -1;
+    O.viewHi = 'tp'; try { if (localStorage.getItem('lss_view') === 'fp') O.viewHi = 'fp'; } catch (_) {}
+    _wire();
+    document.body.classList.add('camp-opening');
+    _fxPrep();
+    _veilShow(false);
+    try { enterShipSelect(); } catch (e) { console.warn('[campaign-opening] enterShipSelect:', e && e.message); }
+    const sel = $('ship-select'); if (sel) sel.classList.add('camp-open');
+    _ui('black');
+    O.buildP = _build();
+    _run(tok);
+  }
+  function reset() {
+    try { localStorage.removeItem('lss_campaign_legs'); localStorage.removeItem('lss_campaign_last'); localStorage.removeItem('lss_campaign_av'); } catch (_) {}
+    return 'campaign progress cleared - the next CAMPAIGN press plays the opening';
+  }
+  const state = () => ({ on: O.on, phase: O.phase, key: O.key, focus: O.focus, stage: !!O.st,
+                         ships: O.st ? O.st.ships.map((s) => s.key) : null, viewHi: O.viewHi,
+                         spots: O.spotA.map((a) => +a.toFixed(2)), head: +O.headA.toFixed(2), orb: +O.orbA.toFixed(2) });
+  try { window.__campOpening = { start, reset, state, arrive, stage, tick, onConfirm, blockPreview, cfg }; } catch (_) {}
 })();
 
 function _lssUnlockAnnouncerAudio() {
@@ -90222,7 +91918,10 @@ function updateEnemyHealthBars() {
           if (_pr2 && _pr2.discord_name) _who = String(_pr2.discord_name).slice(0, 18);
         }
       } catch (_) {}
-      const _dq = _lssRangeStr(_gap) + (_who ? '  ' + _who : '');
+      let _scanS = '';
+      if (ent._scanP > 0 && !ent._scanned) _scanS = '  SCAN ' + (Math.floor(ent._scanP * 10) * 10) + '%';
+      else if (ent._scanned && ent._scanDoneT != null && game.time - ent._scanDoneT < 2.5) _scanS = '  SCANNED';
+      const _dq = _lssRangeStr(_gap) + (_who ? '  ' + _who : '') + _scanS;
       if (div._ld !== _dq) { div._dist.textContent = _dq; div._ld = _dq; }
     }
   };
