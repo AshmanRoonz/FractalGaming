@@ -180,6 +180,9 @@ const OVERRIDES = {
   // (v37.73) the flying carrier: 565k triangles decimated to 120k in Blender with its own UVs and
   // all three maps kept. Simplifying again would decimate twice.
   'objects/carrier.glb': { simplify: 1.0, reason: 'Blender-decimated capital hull' },
+  // (2026-09-28) the second carrier the owner added (Meshy, 1.19 M tris): ship_plain.py --nobake --no-eye took it to
+  // 120k with its own UVs and all three maps, exactly as the first. Not referenced by the game yet.
+  'objects/carrier2.glb': { simplify: 1.0, reason: 'Blender-decimated capital hull (not in the game yet)' },
 };
 
 // ------------------------------------------------------------- categories --
@@ -187,7 +190,8 @@ function categoryOf(rel) {
   if (rel.startsWith('ships/')) return 'ship';
   // (v37.73) the flying carrier is a Blender-authored hull like the ships (weld + quantize,
   // no re-simplify via OVERRIDES) ; it only lives under objects/ because it is not a loadout.
-  if (rel === 'objects/carrier.glb') return 'ship';
+  if (rel === 'objects/carrier.glb' || rel === 'objects/carrier2.glb') return 'ship';
+  if (rel === 'objects/xorzo.glb') return 'orb';
   if (rel.startsWith('objects/hoard/')) return 'hoard';
   if (rel === 'objects/artifact.glb') return 'prop';
   if (rel === 'objects/Sphere.glb') return 'shell';
@@ -298,6 +302,22 @@ const RECIPES = {
         slots: /metallicRoughnessTexture|occlusionTexture/, resize: [1024, 1024] }),
     );
     return 'skinned prop: quantize ; colour + normal 2k WebP, MR 1k WebP ; every slot + specular ext kept';
+  },
+
+  // (2026-09-28) XORZO - the red and green orb under every ship's nose, so he is instanced once per ship:
+  // tools/blender/xorzo_build.py already baked him down from Meshy's 4.39 M triangles to a ~4k-triangle sphere
+  // with one fresh atlas (colour + tangent normal + metal/rough, PNG). Only weld + quantize + WebP here. He is
+  // ~12 units across in flight, so 1k colour and normal carry every texel anyone will see - the campaign
+  // opening's close-up included.
+  orb: async (doc) => {
+    await doc.transform(
+      dedup(), prune({ keepLeaves: true }), weld(), quantize(Q),
+      textureCompress({ encoder: sharp, targetFormat: 'webp', quality: 90, formats: /^image\/(png|jpeg)$/,
+        slots: /baseColorTexture|normalTexture/, resize: [1024, 1024] }),
+      textureCompress({ encoder: sharp, targetFormat: 'webp', quality: 85, formats: /^image\/(png|jpeg)$/,
+        slots: /metallicRoughnessTexture|occlusionTexture/, resize: [512, 512] }),
+    );
+    return 'baked orb: quantize ; colour + normal 1k WebP, metal/rough 512 WebP';
   },
 
   // ChampionShell. _champSelfIlluminate collapses it to MeshBasicMaterial({map}),

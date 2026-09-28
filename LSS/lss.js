@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "49.72";
+const LSS_BUILD = "49.73";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -44092,6 +44092,72 @@ function bakeShipThumbnails() {
 }
 
 
+const XORZO = { url: 'objects/xorzo.glb', size: 1.0, glow: 1.4, on: true };
+try { if (typeof window !== 'undefined') window.__xorzo = XORZO; } catch (_) {}
+let _xorzoProto = null, _xorzoState = 0;   // 0 idle, 1 loading, 2 ready, 3 failed
+const _xorzoWaiting = [];
+const _xorzoWaiters = [];
+function _xorzoLoad() {
+  if (_xorzoState) return;
+  if (typeof THREE === 'undefined' || typeof THREE.GLTFLoader === 'undefined') return;   // retried by the next caller
+  _xorzoState = 1;
+  const done = () => { for (const f of _xorzoWaiters.splice(0)) { try { f(); } catch (_) {} } };
+  try {
+    new THREE.GLTFLoader().load('./' + XORZO.url + _MODEL_CACHE_BUST, (g) => {
+      try {
+        const model = g.scene;
+        model.updateMatrixWorld(true);
+        const bb = new THREE.Box3().setFromObject(model);
+        const sz = bb.getSize(new THREE.Vector3()), c = bb.getCenter(new THREE.Vector3());
+        model.position.sub(c);                 // centred on the bead's own origin
+        const holder = new THREE.Group();
+        holder.add(model);
+        holder.userData._diam = Math.max(sz.x, sz.y, sz.z) || 1;
+        model.traverse((n) => {
+          if (!n.isMesh) return;
+          n.userData.isRunningLight = true; n.castShadow = false; n.receiveShadow = false;
+          const m = n.material;
+          if (m && m.map) { m.emissiveMap = m.map; m.emissive = new THREE.Color(0xffffff); m.emissiveIntensity = XORZO.glow; }
+          if (m) m.userData._xorzo = true;
+        });
+        _xorzoProto = holder; _xorzoState = 2;
+        for (const w of _xorzoWaiting.splice(0)) { try { _xorzoMount(w.lg, w.group); } catch (_) {} }
+      } catch (e) { _xorzoState = 3; _xorzoWaiting.length = 0; console.warn('[xorzo] prepare failed:', e && e.message); }
+      done();
+    }, undefined, (e) => { _xorzoState = 3; _xorzoWaiting.length = 0; console.warn('[xorzo] load failed:', e && e.message); done(); });
+  } catch (e) { _xorzoState = 3; done(); }
+}
+function _xorzoReady(ms) {
+  _xorzoLoad();
+  if (_xorzoState >= 2) return Promise.resolve(!!_xorzoProto);
+  return new Promise((res) => { _xorzoWaiters.push(() => res(!!_xorzoProto)); setTimeout(() => res(!!_xorzoProto), ms || 4000); });
+}
+function _xorzoClone() {
+  if (!_xorzoProto) return null;
+  const clone = _xorzoProto.clone(true);
+  let mat = null;
+  clone.traverse((n) => {
+    if (!n.isMesh || !n.material) return;
+    if (!mat) { mat = n.material.clone(); mat.userData = Object.assign({}, n.material.userData, { _xorzo: true }); }
+    n.material = mat;
+    n.userData.isRunningLight = true;
+  });
+  clone.userData.mat = mat;
+  _xorzoScale(clone, _SHIP_RUNNING_LIGHT_RADIUS);
+  return clone;
+}
+function _xorzoScale(clone, r) {
+  clone.userData._r = r; clone.userData._s = XORZO.size;
+  clone.scale.setScalar((2 * r * (XORZO.size || 1)) / ((_xorzoProto && _xorzoProto.userData._diam) || 1));
+}
+function _xorzoMount(lg, group) {
+  if (!lg || lg.userData._xorzo || XORZO.on === false) return;
+  const clone = _xorzoClone(); if (!clone) return;
+  for (const ch of lg.children) if (ch.isMesh) ch.visible = false;   // the procedural halves: kept, hidden
+  lg.add(clone);
+  lg.userData._xorzo = clone;
+  if (group && group.userData) { group.userData.runningLightPortMat = clone.userData.mat; group.userData.runningLightStarMat = clone.userData.mat; }
+}
 const _SHIP_RUNNING_LIGHT_RADIUS = 6.0;
 const _SHIP_RUNNING_LIGHT_PORT_COL = 0xff3030;       
 const _SHIP_RUNNING_LIGHT_STAR_COL = 0x30ff30;       
@@ -44117,6 +44183,10 @@ function _addShipRunningLight(group, hullW, hullH, hullL) {
   group.userData.runningLight = lightGroup;
   group.userData.runningLightPortMat = portMat;
   group.userData.runningLightStarMat = starMat;
+  if (XORZO.on !== false) {
+    if (_xorzoProto) _xorzoMount(lightGroup, group);
+    else if (_xorzoState !== 3) { _xorzoWaiting.push({ lg: lightGroup, group }); _xorzoLoad(); }
+  }
   return lightGroup;
 }
 
@@ -45211,6 +45281,8 @@ function animateShipMesh(mesh, speed, maxSpeed, isFiring, dt, doomed) {
   }
   const rl = mesh.userData.runningLight;
   if (rl) {
+    const _xz = rl.userData && rl.userData._xorzo;
+    if (_xz && _xz.userData._s !== XORZO.size) _xorzoScale(_xz, _xz.userData._r || _SHIP_RUNNING_LIGHT_RADIUS);
     const bobBaseY = (rl.userData && rl.userData.baseY != null) ? rl.userData.baseY : rl.position.y;
     rl.position.y = bobBaseY + Math.sin(time * Math.PI) * 0.6;  
     const portM = mesh.userData.runningLightPortMat;
@@ -45225,6 +45297,7 @@ function animateShipMesh(mesh, speed, maxSpeed, isFiring, dt, doomed) {
         const beat = 0.4 + (lub + dub) * 1.6;
         portM.color.setRGB(beat, 0.04, 0.04);
         starM.color.setRGB(beat, 0.04, 0.04);
+        if (portM.userData._xorzo && portM.emissive) portM.emissive.setRGB(beat, 0.05, 0.05);   // (v49.73) he glows through it
         portM.userData._rlAlpha = 1.0;
         starM.userData._rlAlpha = 1.0;
       } else {
@@ -45233,6 +45306,10 @@ function animateShipMesh(mesh, speed, maxSpeed, isFiring, dt, doomed) {
         portM.userData._rlAlpha = next; starM.userData._rlAlpha = next;
         portM.color.setHex(portM.userData._baseHex).multiplyScalar(next);
         starM.color.setHex(starM.userData._baseHex).multiplyScalar(next);
+        if (portM.userData._xorzo && portM.emissive) {
+          portM.emissive.setRGB(next, next, next);
+          if (!portM.userData._seatDim) portM.emissiveIntensity = XORZO.glow;   // the live knob
+        }
       }
     }
   }
@@ -68469,10 +68546,12 @@ function _navLightSeatDim(mesh, on) {
       const _o = Math.max(0, Math.min(1, dim));
       if (m.opacity !== _o) m.opacity = _o;
       m.color.setHex(m.userData._navBaseCol).multiplyScalar(Math.max(0.05, _o * 1.6));
+      if (m.userData._xorzo) { m.userData._seatDim = true; m.emissiveIntensity = XORZO.glow * Math.max(0.05, _o * 1.6); }   // (v49.73)
     } else if (m.transparent) {
       m.transparent = false; m.depthWrite = true; m.needsUpdate = true;
       m.opacity = m.userData._navBaseOp;
       m.color.setHex(m.userData._navBaseCol);
+      if (m.userData._xorzo) { m.userData._seatDim = false; m.emissiveIntensity = XORZO.glow; }
     }
   }
 }
@@ -92490,9 +92569,15 @@ const CAMP_SEQS = {
     const pc = (typeof _SHIP_RUNNING_LIGHT_PORT_COL !== 'undefined') ? _SHIP_RUNNING_LIGHT_PORT_COL : 0xff3030;
     const sc = (typeof _SHIP_RUNNING_LIGHT_STAR_COL !== 'undefined') ? _SHIP_RUNNING_LIGHT_STAR_COL : 0x30ff30;
     const g = new THREE.Group();
+    const xz = (typeof _xorzoClone === 'function') ? _xorzoClone() : null;
+    if (xz) {
+      g.add(xz);
+      if (xz.userData.mat) xz.userData.mat.fog = false;
+    } else {
     const port = new THREE.Mesh(new THREE.SphereGeometry(r, 16, 10, -Math.PI / 2, Math.PI), new THREE.MeshBasicMaterial({ color: pc, toneMapped: false, fog: false }));
     const star = new THREE.Mesh(new THREE.SphereGeometry(r, 16, 10, Math.PI / 2, Math.PI), new THREE.MeshBasicMaterial({ color: sc, toneMapped: false, fog: false }));
     g.add(port, star);
+    }
     const cv = document.createElement('canvas'); cv.width = cv.height = 64;
     const x = cv.getContext('2d'), gr = x.createRadialGradient(32, 32, 0, 32, 32, 32);
     gr.addColorStop(0, 'rgba(255,255,235,1)'); gr.addColorStop(0.25, 'rgba(255,245,190,0.45)'); gr.addColorStop(1, 'rgba(255,230,170,0)');
@@ -92508,6 +92593,7 @@ const CAMP_SEQS = {
   }
   async function _build() {
     try { if (shipModelCache.ready && typeof shipModelCache.ready.then === 'function') await shipModelCache.ready; } catch (_) {}
+    try { if (typeof _xorzoReady === 'function') await _xorzoReady(4000); } catch (_) {}   // (v49.73) the orb is Xorzo
     const keys = Object.keys(LOADOUTS);
     const scene = new THREE.Scene(); scene.background = new THREE.Color(0x000000);
     const camera = new THREE.PerspectiveCamera(cfg.fov, 1, 1, 7000);
