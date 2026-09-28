@@ -6,7 +6,7 @@ crash, no hang) — so you can add them one at a time.
 
 A full draft script for every file below lives in **`SCRIPT.md`** (same folder).
 
-## Videos (`.mp4`) — 9 files
+## Videos (`.mp4`) — 10 files
 
 Played in a semi-transparent panel **over the HUD, non-modal, no skip** — you keep
 flying while it plays, and the next story beat fires when the clip **ends** (so keep
@@ -22,7 +22,8 @@ them short; see the production notes in SCRIPT.md).
 | `video6.mp4` | Leg 5 · The Golden Deep        | Start of the leg.                                                 |
 | `video7.mp4` | Leg 6 · The Crystal Caverns    | Start of the leg.                                                 |
 | `video8.mp4` | Leg 7 · The Broken Simulation  | Start of the finale leg.                                          |
-| `video9.mp4` | Hub (overworld)                | The final video — back in the overworld after the last boss falls. |
+| `video9.mp4` | Hub (overworld)                | The final video — after Xorzo's closing lines ("...And we'll need a ship!"), right before TO BE CONTINUED. (v49.68) |
+| `video10.mp4` | Hub (overworld)               | **The Summoners' vow** — after the giant falls, before their escape attempt. Until it exists, the vow plays as dialogue lines (`vw_1`, `vw_2`). (v49.68) |
 
 ## Voice (`.mp3`) — 7 files
 
