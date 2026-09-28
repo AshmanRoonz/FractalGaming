@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "49.58";
+const LSS_BUILD = "49.59";   // (merge 2026-09-28: this session's campaign 49.46-49.58 + origin/main's parallel 49.46-49.57 - one number above both)
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -110,7 +110,17 @@ const LSS = {
   INSANE_SPEED: false,
 };
 
-const LSS_API_BASE = 'https://lss-backend.ashroney.workers.dev';
+const LSS_API_BASE = (function () {
+  const prod = 'https://lss-backend.ashroney.workers.dev';
+  try {
+    const h = String(location.hostname || '');
+    if (h === 'localhost' || h === '127.0.0.1') {
+      const o = localStorage.getItem('lss_api_base');
+      if (o && /^http:\/\/(localhost|127\.0\.0\.1):\d{2,5}$/.test(o)) return o;
+    }
+  } catch (_) {}
+  return prod;
+})();
 if (typeof window !== 'undefined') window.LSS_API_BASE = LSS_API_BASE;
 
 const LSS_DISCORD = {
@@ -392,6 +402,69 @@ const SHIP_SKINS = {
     shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.3,
     metalness: 0.20, roughness: 0.55, envMapIntensity: 0.25, emissive: 0x000000,
   },
+  img_fractal_shoreline: {
+    id: 'img_fractal_shoreline', name: 'FRACTAL SHORELINE', swatch: '#767e69', thumb: 'skins/fractal_shoreline.webp',
+    desc: 'Teal shallows and sand along an endless fractal coast.',
+    pattern: 'image', image: 'skins/fractal_shoreline.webp', imageMean: 0x767e69, patScale: 1.4,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.1,
+    metalness: 0.20, roughness: 0.55, envMapIntensity: 0.25, emissive: 0x000000,
+  },
+  img_carbon_fiber: {
+    id: 'img_carbon_fiber', name: 'CARBON FIBER', swatch: '#333333', thumb: 'skins/carbon_fiber.webp',
+    desc: 'Woven carbon under a gloss coat. Light, stiff and fast.',
+    pattern: 'image', image: 'skins/carbon_fiber.webp', imageMean: 0x333333, patScale: 2.2,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.2,
+    metalness: 0.25, roughness: 0.35, envMapIntensity: 0.45, emissive: 0x000000,
+  },
+  img_chromium: {
+    id: 'img_chromium', name: 'CHROMIUM', swatch: '#b1b5bb', thumb: 'skins/chromium.webp',
+    desc: 'Brushed chromium plate. It wears the sky.',
+    pattern: 'image', image: 'skins/chromium.webp', imageMean: 0xb1b5bb, patScale: 1.2,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.1,
+    metalness: 0.40, roughness: 0.30, envMapIntensity: 0.55, emissive: 0x000000,
+  },
+  img_radioactive: {
+    id: 'img_radioactive', name: 'RADIOACTIVE', swatch: '#4d8318', thumb: 'skins/radioactive.webp',
+    desc: 'Glowing green ooze over black circuitry. Handle with care.',
+    pattern: 'image', image: 'skins/radioactive.webp', imageMean: 0x4d8318, patScale: 1.5,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.1,
+    metalness: 0.20, roughness: 0.55, envMapIntensity: 0.25, emissive: 0x000000,
+  },
+  img_emerald: {
+    id: 'img_emerald', name: 'EMERALD', swatch: '#2a6f3d', thumb: 'skins/emerald.webp',
+    desc: 'Cut emerald, deep green with light caught inside.',
+    pattern: 'image', image: 'skins/emerald.webp', imageMean: 0x2a6f3d, patScale: 1.8,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.15,
+    metalness: 0.25, roughness: 0.30, envMapIntensity: 0.45, emissive: 0x000000,
+  },
+  img_diamond: {
+    id: 'img_diamond', name: 'DIAMOND', swatch: '#bccddf', thumb: 'skins/diamond.webp',
+    desc: 'Brilliant-cut diamond. Every facet throws the light back.',
+    pattern: 'image', image: 'skins/diamond.webp', imageMean: 0xbccddf, patScale: 1.8,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.1,
+    metalness: 0.25, roughness: 0.30, envMapIntensity: 0.45, emissive: 0x000000,
+  },
+  img_ruby: {
+    id: 'img_ruby', name: 'RUBY', swatch: '#8e2b2c', thumb: 'skins/ruby.webp',
+    desc: 'Blood-red ruby with fire in the cuts.',
+    pattern: 'image', image: 'skins/ruby.webp', imageMean: 0x8e2b2c, patScale: 1.8,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.15,
+    metalness: 0.25, roughness: 0.30, envMapIntensity: 0.45, emissive: 0x000000,
+  },
+  img_nebula: {
+    id: 'img_nebula', name: 'NEBULA', swatch: '#7b49c6', thumb: 'skins/nebula.webp',
+    desc: 'A slice of deep space: magenta gas and blue starlight.',
+    pattern: 'image', image: 'skins/nebula.webp', imageMean: 0x7b49c6, patScale: 1.3,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.1,
+    metalness: 0.20, roughness: 0.55, envMapIntensity: 0.25, emissive: 0x000000,
+  },
+  img_vortex: {
+    id: 'img_vortex', name: 'VORTEX SWIRL', swatch: '#3646ae', thumb: 'skins/vortex.webp',
+    desc: 'A blue whirlpool of light spiralling into the dark.',
+    pattern: 'image', image: 'skins/vortex.webp', imageMean: 0x3646ae, patScale: 1.2,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.1,
+    metalness: 0.20, roughness: 0.55, envMapIntensity: 0.25, emissive: 0x000000,
+  },
 };
 const _SKIN_TUNE_HEX = { c0: 1, c1: 1, c2: 1, emissive: 1 };
 if (typeof window !== 'undefined') window.__skinTune = function (id, patch) {
@@ -424,12 +497,13 @@ const SHIP_SKIN_DEFAULT = 'factory';
 function _getStoredSkinId() {
   try {
     const s = localStorage.getItem('lss_ship_skin');
-    if (s && SHIP_SKINS[s]) return s;
+    if (s && SHIP_SKINS[s] && !lssSkinLocked(s)) return s;
   } catch (_) {}
   return SHIP_SKIN_DEFAULT;
 }
 function _setStoredSkinId(id) {
   if (!SHIP_SKINS[id]) return;
+  if (lssSkinLocked(id)) return;   // (v49.57) a locked livery goes through the buy bar, never the equip path
   try { localStorage.setItem('lss_ship_skin', id); } catch (_) {}
   if (typeof player !== 'undefined' && player) player.skinId = id;
 }
@@ -788,6 +862,7 @@ const input = {
     scoreboard: 'tab',
     menu:       'escape',
     hideHud:    'h',        // (v49.09) hide the HUD / crosshair / text (toggle)
+    skinNext:   'k',
   },
 };
 
@@ -936,6 +1011,7 @@ async function _handleDiscordCallback() {
     localStorage.setItem(LSS_DISCORD.STORAGE_TOKEN, tokenRes.access_token);
     localStorage.setItem(LSS_DISCORD.STORAGE_USER,  JSON.stringify(user));
     sessionStorage.removeItem(LSS_DISCORD.STORAGE_VERIFIER);
+    try { _lssSessionWrite(null); _lssClearAuthExpired(); } catch (_) {}
     const cleanUrl = window.location.origin + window.location.pathname;
     window.history.replaceState({}, document.title, cleanUrl);
     _discordRenderIdentity();
@@ -949,10 +1025,19 @@ async function _handleDiscordCallback() {
 }
 
 function discordSignout() {
+  try {
+    const s = _lssSessionRead();
+    if (s && s.token) {
+      fetch(LSS_API_BASE + '/auth/logout', { method: 'POST', headers: { 'Authorization': 'Bearer ' + s.token }, keepalive: true })
+        .catch(() => {});
+    }
+  } catch (_) {}
+  try { _lssSessionWrite(null); _lssClearAuthExpired(); } catch (_) {}
   localStorage.removeItem(LSS_DISCORD.STORAGE_TOKEN);
   localStorage.removeItem(LSS_DISCORD.STORAGE_USER);
   _discordRenderIdentity();
   _lssAuthNotifyChange();
+  try { _renderSkinPicker(); } catch (_) {}   // premium liveries lock again for a signed-out pilot
 }
 
 const _lssAuthListeners = new Set();
@@ -1804,7 +1889,7 @@ window.LSS_AUTH = {
       id:          u.id,
       username:    u.global_name || u.username,
       avatar:      _discordAvatarUrlFor(u, 64),
-      accessToken: t,
+      accessToken: lssAuthToken() || t,
     };
   },
   signIn() {
@@ -1831,6 +1916,117 @@ function discordCurrentToken() {
   return localStorage.getItem(LSS_DISCORD.STORAGE_TOKEN) || null;
 }
 
+const _LSS_SESSION_KEY = 'lss_session';        // { token, discord_id, expires_at, at }
+const _LSS_EXPIRED_KEY = 'lss_auth_expired';   // '1' while SIGN IN AGAIN is showing
+let _lssAuthExpired = false;
+try { _lssAuthExpired = localStorage.getItem(_LSS_EXPIRED_KEY) === '1'; } catch (_) {}
+let _lssSessionMinting = null;
+
+function _lssSessionRead() {
+  try {
+    const s = JSON.parse(localStorage.getItem(_LSS_SESSION_KEY) || 'null');
+    return (s && typeof s.token === 'string' && s.token.indexOf('lss_') === 0 && s.discord_id) ? s : null;
+  } catch (_) { return null; }
+}
+function _lssSessionWrite(s) {
+  try {
+    if (s) localStorage.setItem(_LSS_SESSION_KEY, JSON.stringify(s));
+    else localStorage.removeItem(_LSS_SESSION_KEY);
+  } catch (_) {}
+}
+function lssAuthToken() {
+  if (_lssAuthExpired) return null;
+  const u = discordCurrentUser();
+  if (!u || !u.id) return null;
+  const s = _lssSessionRead();
+  if (s && String(s.discord_id) === String(u.id)) return s.token;
+  return discordCurrentToken() || null;
+}
+function _lssClearAuthExpired() {
+  _lssAuthExpired = false;
+  try { localStorage.removeItem(_LSS_EXPIRED_KEY); } catch (_) {}
+}
+function _lssMarkAuthExpired(why) {
+  _lssSessionWrite(null);
+  if (_lssAuthExpired) return;
+  _lssAuthExpired = true;
+  try { localStorage.setItem(_LSS_EXPIRED_KEY, '1'); } catch (_) {}
+  console.warn('[lss-auth] sign-in expired (' + (why || '?') + ') ; matches stay queued until you sign in again');
+  try { _discordRenderIdentity(); } catch (_) {}
+  try {
+    const st = (typeof game !== 'undefined' && game) ? game.state : 'select';
+    if (st !== 'playing' && st !== 'warmup' && st !== 'roundEnd') {
+      const me = discordCurrentUser();
+      const n = _lssOutboxRead().filter(e => !e.who || (me && String(e.who) === String(me.id))).length;
+      _lssNotice('DISCORD SIGN-IN EXPIRED', n
+        ? ('Sign in again to upload ' + n + ' finished match' + (n === 1 ? '' : 'es') + ' to the leaderboard.')
+        : 'Sign in again to keep recording your matches.', 'warn');
+    }
+  } catch (_) {}
+}
+function _lssAuthRejected(tokenUsed) {
+  const s = _lssSessionRead();
+  if (s && tokenUsed && tokenUsed === s.token) {
+    _lssSessionWrite(null);
+    lssEnsureSession();
+    return;
+  }
+  _lssMarkAuthExpired('401');
+}
+function lssEnsureSession() {
+  const u = discordCurrentUser();
+  if (!u || !u.id || _lssAuthExpired) return Promise.resolve(null);
+  const s = _lssSessionRead();
+  if (s && String(s.discord_id) === String(u.id)) return Promise.resolve(s.token);
+  const dt = discordCurrentToken();
+  if (!dt) { _lssMarkAuthExpired('no discord token'); return Promise.resolve(null); }
+  if (_lssSessionMinting) return _lssSessionMinting;
+  const p = (async () => {
+    try {
+      const res = await fetch(LSS_API_BASE + '/auth/session', {
+        method: 'POST', headers: { 'Authorization': 'Bearer ' + dt },
+      });
+      if (res.status === 401) { _lssMarkAuthExpired('discord token rejected'); return null; }
+      if (!res.ok) return null;          // 404 = a Worker without sessions; 5xx = try again later
+      const j = await res.json().catch(() => null);
+      if (!j || typeof j.session !== 'string') return null;
+      const id = String((j.user && j.user.id) || u.id);
+      _lssSessionWrite({ token: j.session, discord_id: id, expires_at: j.expires_at || 0, at: Date.now() });
+      _lssClearAuthExpired();
+      if (Array.isArray(j.entitlements)) { try { _lssShopSetOwned(id, j.entitlements); } catch (_) {} }
+      console.log('[lss-auth] session minted for ' + id);
+      return j.session;
+    } catch (_) {
+      return null;                       // offline: the Discord token keeps working until it lapses
+    }
+  })();
+  _lssSessionMinting = p;
+  p.finally(() => { if (_lssSessionMinting === p) _lssSessionMinting = null; });
+  return p;
+}
+function _lssNotice(title, sub, kind) {
+  try {
+    const host = _lobbyToastContainer();
+    const col = kind === 'warn' ? '#ffb347' : (kind === 'ok' ? '#7dffa8' : '#8fd0ff');
+    const el = document.createElement('div');
+    el.className = 'lss-notice';
+    el.style.cssText = 'pointer-events:auto;background:rgba(12,16,28,0.95);border:1px solid ' + col + ';'
+      + 'border-left:4px solid ' + col + ';border-radius:8px;padding:10px 14px;max-width:320px;color:#dfeaff;'
+      + "font-family:'Rajdhani','Orbitron',sans-serif;box-shadow:0 6px 24px rgba(0,0,0,0.5);cursor:pointer;";
+    el.innerHTML = '<div style="font-weight:700;letter-spacing:1.5px;font-size:12px;color:' + col + '"></div>'
+      + '<div style="font-size:13px;margin-top:3px;line-height:1.35"></div>';
+    el.children[0].textContent = title || '';
+    el.children[1].textContent = sub || '';
+    el.addEventListener('click', () => { try { el.remove(); } catch (_) {} });
+    host.appendChild(el);
+    setTimeout(() => { try { el.remove(); } catch (_) {} }, kind === 'warn' ? 14000 : 8000);
+  } catch (_) {}
+}
+try {
+  window.lssAuth = { token: lssAuthToken, ensure: lssEnsureSession, session: _lssSessionRead,
+                     expired: () => _lssAuthExpired };
+} catch (_) {}
+
 function _discordAvatarUrlFor(user, size) {
   if (!user || !user.id) return null;
   const sz = size || 64;
@@ -1850,7 +2046,26 @@ function _discordRenderIdentity() {
   const avatarEl  = document.getElementById('discord-avatar');
   const nameEl    = document.getElementById('discord-name');
   const hintEl = document.getElementById('btn-discord-signin-hint');
+  const labelEl = document.getElementById('btn-discord-signin-label');
   if (!signinBtn || !signedIn) return;
+  if (user && _lssAuthExpired) {
+    signinBtn.style.display = 'flex';
+    signedIn.style.display  = 'none';
+    let n = 0;
+    try { n = _lssOutboxRead().filter(e => !e.who || String(e.who) === String(user.id)).length; } catch (_) {}
+    if (labelEl) labelEl.textContent = n
+      ? ('SIGN IN AGAIN · ' + n + ' MATCH' + (n === 1 ? '' : 'ES') + ' WAITING') : 'SIGN IN AGAIN';
+    signinBtn.classList.add('lss-auth-expired');
+    signinBtn.title = (user.global_name || user.username) + ': your Discord sign-in expired. '
+      + (n ? (n + ' finished match' + (n === 1 ? ' is' : 'es are') + ' saved on this device and upload the moment you sign in.')
+           : 'Sign in to keep recording your matches.');
+    if (hintEl) hintEl.textContent = signinBtn.title;
+    return;
+  }
+  signinBtn.classList.remove('lss-auth-expired');
+  signinBtn.title = '';
+  if (labelEl) labelEl.textContent = 'SIGN IN WITH DISCORD';
+  if (hintEl) hintEl.textContent = 'for ID, leaderboard, stats, and the multiplayer lobby';
   if (user) {
     signinBtn.style.display = 'none';
     signedIn.style.display  = 'flex';
@@ -1871,15 +2086,19 @@ function _discordRenderIdentity() {
 
 (async function _discordBootInit() {
   await _handleDiscordCallback();
+  try { await lssEnsureSession(); } catch (_) {}
   _discordRenderIdentity();
+  try { lssShopRefresh(); } catch (_) {}      // what is premium + what this account owns (GET /me = liveness probe)
+  try { _lssPaypalResume(); } catch (_) {}    // a checkout that came back through a full-page redirect
 })();
 
 
 let _lastPostedMatchId = null;
 
 const _LSS_OUTBOX_KEY = 'lss_match_outbox';
-const _LSS_OUTBOX_MAX = 24;          // a hard cap; the oldest fall off rather than filling storage
-const _LSS_OUTBOX_TRIES = 40;        // ...and a bad entry cannot retry forever
+const _LSS_OUTBOX_MAX = 100;         // (v49.57, was 24) ~2 KB each; the oldest fall off beyond this
+const _LSS_OUTBOX_TRIES = 200;       // (v49.57, was 40) TRANSIENT failures only - auth never counts
+const _LSS_OUTBOX_MAX_AGE_MS = 60 * 24 * 3600 * 1000;
 
 function _lssOutboxRead() {
   try {
@@ -1894,7 +2113,9 @@ function _lssOutboxWrite(list) {
 function _lssOutboxPut(payload) {
   const list = _lssOutboxRead();
   const i = list.findIndex(e => e.payload.match_id === payload.match_id);
-  const entry = { payload, tries: 0, queuedAt: Date.now() };
+  let who = null;
+  try { const u = discordCurrentUser(); who = (u && u.id) ? String(u.id) : null; } catch (_) {}
+  const entry = { payload, tries: 0, queuedAt: Date.now(), who };
   if (i >= 0) list[i] = entry; else list.push(entry);
   _lssOutboxWrite(list);
 }
@@ -1917,11 +2138,12 @@ async function _lssPostMatchPayload(payload, token) {
       });
     } finally { clearTimeout(t); }
     if (res.ok) return 'ok';
+    if (res.status === 401) return 'auth';              // (v49.57) the CREDENTIAL died, not the match
     if (res.status === 400 || res.status === 403 || res.status === 413) {
       console.warn('[lss-outbox] permanent rejection', res.status, payload.match_id);
       return 'permanent';
     }
-    return 'transient';                                 // 401 / 429 / 5xx - try again later
+    return 'transient';                                 // 429 / 5xx - try again later
   } catch (_) {
     return 'transient';                                 // offline, DNS, abort, CORS
   }
@@ -1932,21 +2154,30 @@ async function _lssOutboxFlush() {
   if (_lssOutboxFlushing) return;
   _lssOutboxFlushing = true;
   try {
-    const token = (typeof discordCurrentToken === 'function') && discordCurrentToken();
-    if (!token) return;                                 // signed out: hold everything, lose nothing
+    const me = (typeof discordCurrentUser === 'function') && discordCurrentUser();
+    if (!me || !me.id) return;                          // signed out: hold everything, lose nothing
+    try { await lssEnsureSession(); } catch (_) {}      // (v49.57) prefer the durable session
+    const token = lssAuthToken();
+    if (!token) return;                                 // expired: hold everything until SIGN IN AGAIN
+    const now = Date.now();
     for (const entry of _lssOutboxRead()) {
+      if (entry.who && String(entry.who) !== String(me.id)) continue;
+      if (now - (entry.queuedAt || now) > _LSS_OUTBOX_MAX_AGE_MS) { _lssOutboxDrop(entry.payload.match_id); continue; }
       const r = await _lssPostMatchPayload(entry.payload, token);
       if (r === 'ok' || r === 'permanent') { _lssOutboxDrop(entry.payload.match_id); continue; }
+      if (r === 'auth') { _lssAuthRejected(token); break; }   // never counted against the match
       const list = _lssOutboxRead();
       const i = list.findIndex(e => e.payload.match_id === entry.payload.match_id);
       if (i >= 0) {
-        list[i].tries = (list[i].tries | 0) + 1;
-        if (list[i].tries >= _LSS_OUTBOX_TRIES) list.splice(i, 1);
+        const e = list.splice(i, 1)[0];
+        e.tries = (e.tries | 0) + 1;
+        if (e.tries < _LSS_OUTBOX_TRIES) list.push(e);
         _lssOutboxWrite(list);
       }
       break;
     }
   } finally { _lssOutboxFlushing = false; }
+  try { _discordRenderIdentity(); } catch (_) {}      // keeps the "N waiting" count honest
 }
 
 try {
@@ -1957,7 +2188,7 @@ try {
     });
     setTimeout(() => { _lssOutboxFlush(); }, 4000);     // after boot settles + auth is readable
     setInterval(() => { _lssOutboxFlush(); }, 120000);
-    window.lssOutbox = { read: _lssOutboxRead, flush: _lssOutboxFlush, drop: _lssOutboxDrop };
+    window.lssOutbox = { read: _lssOutboxRead, flush: _lssOutboxFlush, drop: _lssOutboxDrop, put: _lssOutboxPut };
   }
 } catch (_) {}
 
@@ -2060,11 +2291,11 @@ let _roomHeartbeatTimer = null;
 
 async function _fireRoomHeartbeat() {
   if (!net || !net.active || !net.roomCode) return;
-  const token = discordCurrentToken();
+  const token = lssAuthToken();                    // (v49.57) the session, not the 7-day Discord token
   if (!token) return;
   try {
     const peerCount = (net.peers && net.peers.size) || 0;
-    await fetch(LSS_API_BASE + '/heartbeat', {
+    const res = await fetch(LSS_API_BASE + '/heartbeat', {
       method:  'POST',
       headers: {
         'Authorization': 'Bearer ' + token,
@@ -2077,6 +2308,7 @@ async function _fireRoomHeartbeat() {
         version:      'v10',
       }),
     });
+    if (res && res.status === 401) _lssAuthRejected(token);
   } catch (err) {
     console.warn('[lss-backend] heartbeat failed:', err);
   }
@@ -2094,7 +2326,7 @@ function stopRoomHeartbeat() {
     _roomHeartbeatTimer = null;
   }
   if (net && net.roomCode) {
-    const token = discordCurrentToken();
+    const token = lssAuthToken();                  // (v49.57)
     const code  = net.roomCode;
     if (token) {
       fetch(LSS_API_BASE + '/room/' + encodeURIComponent(code), {
@@ -2178,9 +2410,10 @@ function _lssCollectAccountPrefs() {
 
 async function lssPullAccountState() {
   try {
-    const token = (typeof discordCurrentToken === 'function') && discordCurrentToken();
+    const token = lssAuthToken();                  // (v49.57) the session, not the 7-day Discord token
     if (!token) return null;
     const res = await fetch(LSS_API_BASE + '/me/state', { headers: { 'Authorization': 'Bearer ' + token } });
+    if (res.status === 401) { _lssAuthRejected(token); return null; }
     if (!res.ok) return null;
     const remote = await res.json();
 
@@ -2225,7 +2458,7 @@ function lssPushAccountStateSoon(delayMs) {
 
 async function lssPushAccountState() {
   try {
-    const token = (typeof discordCurrentToken === 'function') && discordCurrentToken();
+    const token = lssAuthToken();                  // (v49.57)
     if (!token) return;
     let aegis = {};
     try { aegis = JSON.parse(localStorage.getItem('lss_aegis') || '{}') || {}; } catch (_) {}
@@ -2234,6 +2467,7 @@ async function lssPushAccountState() {
       headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
       body: JSON.stringify({ aegis, prefs: _lssCollectAccountPrefs() }),
     });
+    if (res.status === 401) { _lssAuthRejected(token); return; }
     if (!res.ok) { console.warn('[lss-backend] state push failed', res.status); return; }
     const merged = await res.json().catch(() => null);
     if (merged && merged.aegis && !(Object.keys(merged.aegis).length === 0 && Object.keys(aegis).length > 0)) {
@@ -2258,6 +2492,334 @@ try {
   if (window.LSS_AUTH && window.LSS_AUTH.isSignedIn && window.LSS_AUTH.isSignedIn()) {
     lssPullAccountState();
   }
+} catch (_) {}
+
+const _LSS_CATALOG_KEY = 'lss_shop_catalog';   // { products, checkout, at }
+const _LSS_OWNED_KEY   = 'lss_shop_owned';     // { discord_id, skus, at }
+const _lssShop = { products: [], premium: new Map(), checkout: false, ownedFor: null, owned: new Set(), at: 0, meAt: 0 };
+
+function _lssShopSetCatalog(j, fromCache) {
+  const products = (j && Array.isArray(j.products)) ? j.products.filter(p => p && typeof p.sku === 'string') : [];
+  const premium = new Map();
+  for (const p of products) {
+    for (const s of (Array.isArray(p.grants) && p.grants.length ? p.grants : [p.sku])) {
+      if (!premium.has(s) || s === p.sku) premium.set(s, p);
+    }
+  }
+  _lssShop.products = products;
+  _lssShop.premium = premium;
+  _lssShop.checkout = !!(j && j.checkout && j.checkout.paypal);
+  _lssShop.at = fromCache ? 0 : Date.now();
+  if (!fromCache) {
+    try { localStorage.setItem(_LSS_CATALOG_KEY, JSON.stringify({ products, checkout: j.checkout || null, at: Date.now() })); } catch (_) {}
+  }
+}
+function _lssShopSetOwned(discordId, skus) {
+  _lssShop.ownedFor = String(discordId);
+  _lssShop.owned = new Set((skus || []).filter(s => typeof s === 'string'));
+  try { localStorage.setItem(_LSS_OWNED_KEY, JSON.stringify({ discord_id: String(discordId), skus: [..._lssShop.owned], at: Date.now() })); } catch (_) {}
+}
+(function _lssShopLoadCache() {
+  try { const c = JSON.parse(localStorage.getItem(_LSS_CATALOG_KEY) || 'null'); if (c) _lssShopSetCatalog(c, true); } catch (_) {}
+  try {
+    const o = JSON.parse(localStorage.getItem(_LSS_OWNED_KEY) || 'null');
+    if (o && o.discord_id && Array.isArray(o.skus)) { _lssShop.ownedFor = String(o.discord_id); _lssShop.owned = new Set(o.skus); }
+  } catch (_) {}
+})();
+
+function lssSkinOffer(id) { try { return _lssShop.premium.get('skin:' + id) || null; } catch (_) { return null; } }
+function lssSkinIsPremium(id) { return !!lssSkinOffer(id); }
+function lssSkinOwned(id) {
+  try {
+    const u = discordCurrentUser();
+    return !!(u && u.id && _lssShop.ownedFor === String(u.id) && _lssShop.owned.has('skin:' + id));
+  } catch (_) { return false; }
+}
+function lssSkinLocked(id) {
+  try {
+    if (!id || id === SHIP_SKIN_DEFAULT) return false;
+    return _lssShop.premium.has('skin:' + id) && !lssSkinOwned(id);
+  } catch (_) { return false; }
+}
+function _lssPriceLabel(p) {
+  if (!p) return '';
+  const v = (Number(p.price_cents) / 100).toFixed(2);
+  return (String(p.currency || 'USD').toUpperCase() === 'USD') ? ('$' + v) : (v + ' ' + p.currency);
+}
+
+async function lssShopLoadCatalog(force) {
+  if (!force && Date.now() - _lssShop.at < 60000) return;
+  try {
+    const res = await fetch(LSS_API_BASE + '/shop/catalog');
+    if (!res.ok) return;                             // 404 = a Worker without the shop: keep the cache
+    const j = await res.json();
+    _lssShopSetCatalog(j, false);
+    _lssShopAfterChange();
+  } catch (_) {}
+}
+async function lssRefreshMe(force) {
+  const u = discordCurrentUser();
+  if (!u || !u.id) return null;
+  if (!force && Date.now() - _lssShop.meAt < 30000) return null;
+  const tok = lssAuthToken();
+  if (!tok) return null;
+  _lssShop.meAt = Date.now();
+  try {
+    const res = await fetch(LSS_API_BASE + '/me', { headers: { 'Authorization': 'Bearer ' + tok } });
+    if (res.status === 401) { _lssAuthRejected(tok); return null; }
+    if (!res.ok) return null;                        // 404 = a Worker without /me
+    const j = await res.json();
+    if (j && j.user && Array.isArray(j.entitlements)) { _lssShopSetOwned(j.user.id, j.entitlements); _lssShopAfterChange(); }
+    if (j && j.session && j.session.expires_at) {
+      const s = _lssSessionRead();
+      if (s && s.token === tok) { s.expires_at = j.session.expires_at; _lssSessionWrite(s); }
+    }
+    return j;
+  } catch (_) { return null; }
+}
+function lssShopRefresh(force) { lssShopLoadCatalog(force); lssRefreshMe(force); }
+function _lssShopAfterChange() {
+  try { _renderSkinPicker(); } catch (_) {}
+  try { if (_lssBuyFocus) _lssOpenBuy(_lssBuyFocus, true); } catch (_) {}
+}
+
+let _lssBuyFocus = null;
+const _LSS_LOCK_SVG = '<svg class="skin-lock" viewBox="0 0 10 12" width="9" height="11" aria-hidden="true">'
+  + '<path d="M3 5V3.4a2 2 0 0 1 4 0V5" fill="none" stroke="#ffc439" stroke-width="1.4"/>'
+  + '<rect x="1" y="5" width="8" height="6.5" rx="1.2" fill="#ffc439"/></svg>';
+function _lssBuyPlace() {
+  const bar = document.getElementById('skin-buy');
+  const ss = document.getElementById('ship-select');
+  if (!bar || !ss || !bar.classList.contains('open')) return;
+  const sr = ss.getBoundingClientRect();
+  const bh = bar.offsetHeight || 36;
+  const perks = document.getElementById('ship-preview-perks');
+  const pr = (perks && getComputedStyle(perks).display !== 'none') ? perks.getBoundingClientRect() : null;
+  if (pr && pr.height > 0 && pr.top - sr.top > 260) {
+    bar.style.top = Math.round(pr.top - sr.top - bh - 12) + 'px';
+    return;
+  }
+  const hero = document.getElementById('ship-hero');
+  const hr = hero ? hero.getBoundingClientRect() : null;
+  if (hr && hr.width > 0 && hr.height > 0) bar.style.top = Math.round(hr.bottom - sr.top + 6) + 'px';
+}
+let _lssBuyResizeWired = false;
+function _lssOpenBuy(id, refreshOnly) {
+  const body = document.getElementById('ship-select-body');
+  const sk = SHIP_SKINS[id];
+  if (!body || !sk) return;
+  if (refreshOnly && !lssSkinLocked(id)) { _lssCloseBuy(); return; }   // it just got unlocked
+  if (refreshOnly && _lssBuyFocus !== id) return;
+  let bar = document.getElementById('skin-buy');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'skin-buy';
+    bar.addEventListener('click', (e) => e.stopPropagation());
+    body.appendChild(bar);
+  }
+  if (!_lssBuyResizeWired) {
+    _lssBuyResizeWired = true;
+    try { window.addEventListener('resize', _lssBuyPlace); } catch (_) {}
+  }
+  _lssBuyFocus = id;
+  const offer = lssSkinOffer(id);
+  const u = discordCurrentUser();
+  const pend = _lssPaypalPendingRead();
+  const waiting = !!(pend && pend.skin === id && Date.now() - (pend.at || 0) < 3 * 3600 * 1000);
+  let action;
+  if (!offer || !offer.on_sale)             action = '<span class="skb-note">NOT FOR SALE</span>';
+  else if (!u || !u.id || _lssAuthExpired)  action = '<button type="button" class="skb-pay" data-act="signin">SIGN IN TO BUY</button>';
+  else if (!_lssShop.checkout)              action = '<span class="skb-note">SHOP OPENING SOON</span>';
+  else if (waiting)                         action = '<button type="button" class="skb-pay" data-act="check">I’VE PAID — CHECK</button>';
+  else                                      action = '<button type="button" class="skb-pay" data-act="buy"></button>';
+  bar.innerHTML = '<span class="skb-title">' + _LSS_LOCK_SVG + '<span class="skb-name"></span>'
+    + '<span class="skb-price"></span></span>' + action
+    + '<button type="button" class="skb-x" data-act="close" title="Close" aria-label="Close">×</button>'
+    + '<div class="skb-status"></div>';
+  bar.querySelector('.skb-name').textContent = sk.name;
+  bar.querySelector('.skb-price').textContent = offer ? _lssPriceLabel(offer) : '';
+  const buyBtn = bar.querySelector('[data-act="buy"]');
+  if (buyBtn) buyBtn.textContent = 'BUY WITH PAYPAL';
+  const st = bar.querySelector('.skb-status');
+  if (waiting) st.textContent = 'Finish paying in the PayPal window — it unlocks here the moment PayPal confirms.';
+  bar.title = (offer && offer.on_sale) ? ('Premium livery · yours on every device you sign into with Discord') : '';
+  for (const b of bar.querySelectorAll('button[data-act]')) {
+    b.addEventListener('click', () => {
+      const act = b.getAttribute('data-act');
+      if (act === 'close')  _lssCloseBuy();
+      if (act === 'signin') discordSignin();
+      if (act === 'buy')    lssBuySkin(id);
+      if (act === 'check')  _lssPaypalCapture(null, false, true);
+    });
+  }
+  bar.classList.add('open');
+  _lssBuyPlace();
+}
+function _lssCloseBuy() {
+  const had = _lssBuyFocus;
+  _lssBuyFocus = null;
+  const bar = document.getElementById('skin-buy');
+  if (bar) bar.classList.remove('open');
+  if (had) { try { setShipPreviewSkin(_getStoredSkinId()); } catch (_) {} }   // the preview was a try-on
+}
+function _lssBuyStatus(text) {
+  try { const st = document.querySelector('#skin-buy .skb-status'); if (st) st.textContent = text; } catch (_) {}
+}
+
+function _lssPaypalPending(p) {
+  try { if (p) localStorage.setItem('lss_paypal_pending', JSON.stringify(p)); else localStorage.removeItem('lss_paypal_pending'); } catch (_) {}
+}
+function _lssPaypalPendingRead() {
+  try {
+    const p = JSON.parse(localStorage.getItem('lss_paypal_pending') || 'null');
+    if (p && p.order_id && Date.now() - (p.at || 0) < 3 * 3600 * 1000) return p;   // PayPal drops unapproved orders
+    if (p) localStorage.removeItem('lss_paypal_pending');
+  } catch (_) {}
+  return null;
+}
+async function lssBuySkin(id) {
+  const offer = lssSkinOffer(id);
+  if (!offer || !offer.on_sale || !_lssShop.checkout) return;
+  const u = discordCurrentUser();
+  if (!u || !u.id || _lssAuthExpired) { discordSignin(); return; }
+  let pop = null;
+  try { pop = window.open('', 'lss_paypal', 'width=520,height=760'); } catch (_) {}
+  try {
+    if (pop && pop.document) {
+      pop.document.write('<title>PayPal</title><body style="background:#05070d;color:#cfe3ff;font:15px system-ui;'
+        + 'display:grid;place-items:center;height:100vh;margin:0">Opening PayPal…</body>');
+    }
+  } catch (_) {}
+  _lssBuyStatus('Opening PayPal…');
+  try {
+    await lssEnsureSession();
+    const tok = lssAuthToken();
+    if (!tok) throw new Error('sign-in expired');
+    const res = await fetch(LSS_API_BASE + '/shop/paypal/create', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sku: offer.sku, origin: location.origin }),
+    });
+    if (res.status === 401) { _lssAuthRejected(tok); throw new Error('sign-in expired'); }
+    const j = await res.json().catch(() => null);
+    if (res.status === 409) { try { if (pop) pop.close(); } catch (_) {} lssRefreshMe(true); return; }   // already owned
+    if (!res.ok || !j || !j.approve_url) throw new Error((j && j.error) || ('HTTP ' + res.status));
+    _lssPaypalPending({ order_id: j.order_id, sku: offer.sku, skin: id, at: Date.now() });
+    if (pop && !pop.closed) {
+      try { localStorage.setItem('lss_paypal_mode', 'popup'); } catch (_) {}
+      pop.location.href = j.approve_url;
+      _lssOpenBuy(id, true);                         // flips the bar to "I'VE PAID - CHECK"
+    } else {
+      try { localStorage.setItem('lss_paypal_mode', 'redirect'); } catch (_) {}
+      location.href = j.approve_url;
+    }
+  } catch (e) {
+    try { if (pop && !pop.closed) pop.close(); } catch (_) {}
+    _lssBuyStatus('Checkout could not start: ' + String((e && e.message) || e));
+  }
+}
+let _lssCapturing = false;
+const _lssCapturedOrders = new Set();
+let _lssLastCaptureTry = 0;
+async function _lssPaypalCapture(orderId, cancelled, manual) {
+  const pend = _lssPaypalPendingRead();
+  if (!orderId && pend) orderId = pend.order_id;
+  if (!orderId || _lssCapturing || _lssCapturedOrders.has(orderId)) return;
+  if (cancelled) {
+    _lssPaypalPending(null);
+    _lssBuyStatus('Checkout cancelled — nothing was charged.');
+    if (_lssBuyFocus) _lssOpenBuy(_lssBuyFocus, true);
+    return;
+  }
+  if (!manual && Date.now() - _lssLastCaptureTry < 4000) return;   // focus/storage/broadcast can all fire at once
+  _lssLastCaptureTry = Date.now();
+  _lssCapturing = true;
+  try {
+    await lssEnsureSession();
+    const tok = lssAuthToken();
+    if (!tok) return;
+    if (manual) _lssBuyStatus('Checking with PayPal…');
+    const res = await fetch(LSS_API_BASE + '/shop/paypal/capture', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ order_id: orderId }),
+    });
+    if (res.status === 401) { _lssAuthRejected(tok); return; }
+    const j = await res.json().catch(() => null);
+    if (!res.ok || !j) { if (manual) _lssBuyStatus('PayPal could not be reached — try again in a moment.'); return; }
+    const u = discordCurrentUser();
+    if (u && u.id && Array.isArray(j.entitlements)) _lssShopSetOwned(u.id, j.entitlements);
+    if (j.status === 'completed') {
+      _lssCapturedOrders.add(orderId);
+      _lssPaypalPending(null);
+      const skin = (pend && pend.order_id === orderId && pend.skin)
+        || (typeof j.sku === 'string' && j.sku.indexOf('skin:') === 0 ? j.sku.slice(5) : null);
+      _lssCloseBuy();
+      if (skin && SHIP_SKINS[skin]) {
+        _setStoredSkinId(skin);                      // wear what you just bought
+        try { setShipPreviewSkin(skin); } catch (_) {}
+        try { lssPushAccountStateSoon(500); } catch (_) {}   // ...on every device
+      }
+      _lssShopAfterChange();
+      _lssNotice('LIVERY UNLOCKED', ((skin && SHIP_SKINS[skin] && SHIP_SKINS[skin].name) || j.sku)
+        + ' is yours on every device you sign into.', 'ok');
+    } else if (j.status === 'pending') {
+      _lssBuyStatus('Payment pending at PayPal — it unlocks by itself when it clears.');
+    } else if (j.status === 'created') {
+      if (manual) _lssBuyStatus(j.detail ? ('PayPal says: ' + j.detail + ' — finish or retry in the PayPal window.')
+                                         : 'Not paid yet — finish in the PayPal window, then check again.');
+    } else {
+      _lssCapturedOrders.add(orderId);
+      _lssPaypalPending(null);
+      _lssBuyStatus('Payment ' + j.status + ' — nothing was unlocked or kept.');
+      if (_lssBuyFocus) _lssOpenBuy(_lssBuyFocus, true);
+    }
+  } catch (_) {
+  } finally { _lssCapturing = false; }
+}
+try {
+  const _bc = new BroadcastChannel('lss_shop');
+  _bc.onmessage = (ev) => {
+    const m = ev && ev.data;
+    if (m && m.type === 'lss_paypal_return') _lssPaypalCapture(m.order_id, !!m.cancel, true);
+  };
+} catch (_) {}
+try {
+  window.addEventListener('message', (ev) => {
+    const m = ev && ev.data;
+    if (ev.origin === location.origin && m && m.type === 'lss_paypal_return') _lssPaypalCapture(m.order_id, !!m.cancel, true);
+  });
+  window.addEventListener('storage', (ev) => {
+    if (ev.key !== 'lss_paypal_return' || !ev.newValue) return;
+    try { const m = JSON.parse(ev.newValue); _lssPaypalCapture(m.order_id, !!m.cancel, true); } catch (_) {}
+  });
+  window.addEventListener('focus', () => { if (_lssPaypalPendingRead()) _lssPaypalCapture(); });
+} catch (_) {}
+function _lssPaypalResume() {
+  let order = null, cancel = false;
+  try {
+    const q = new URLSearchParams(location.search);
+    if (q.get('paypal_order')) {
+      order = q.get('paypal_order');
+      cancel = q.get('paypal_cancel') === '1';
+      q.delete('paypal_order'); q.delete('paypal_cancel');
+      const rest = q.toString();
+      history.replaceState({}, document.title, location.pathname + (rest ? '?' + rest : '') + location.hash);
+    }
+  } catch (_) {}
+  if (!order) {
+    try {
+      const m = JSON.parse(localStorage.getItem('lss_paypal_return') || 'null');
+      if (m && m.order_id && Date.now() - (m.at || 0) < 3 * 3600 * 1000) { order = m.order_id; cancel = !!m.cancel; }
+    } catch (_) {}
+  }
+  try { localStorage.removeItem('lss_paypal_return'); } catch (_) {}
+  if (order) _lssPaypalCapture(order, cancel, true);
+  else if (_lssPaypalPendingRead()) _lssPaypalCapture(null, false, true);   // left open when the tab closed
+}
+try {
+  window.lssShop = { state: _lssShop, refresh: lssShopRefresh, locked: lssSkinLocked, owned: lssSkinOwned,
+                     buy: lssBuySkin, capture: _lssPaypalCapture, pending: _lssPaypalPendingRead };
 } catch (_) {}
 
 async function postMatchResultToBackend() {
@@ -5064,6 +5626,7 @@ function _campIsleBreak(k, rec) {
   try { for (const J of _skNear(I.x, I.z, I.R * 4.5)) J.nb = null; } catch (_) {}
   const pv = new THREE.Group(); pv.position.set(I.x, I.y, I.z);
   try { scene.remove(rec.grp); } catch (_) {}
+  rec.grp.matrixAutoUpdate = true; rec.grp.matrixWorldAutoUpdate = true;
   rec.grp.position.set(-I.x, -I.y, -I.z);
   pv.add(rec.grp); scene.add(pv);
   let gy = 0; try { gy = _stGroundYCarved(I.x, I.z, game.sandwichTerrain); } catch (_) {}
@@ -21656,7 +22219,11 @@ try {
     if (_n >= 3) { window.__hubView = _n; try { console.warn('[hub] view radius forced to ' + _n + ' (' + Math.pow(2 * _n + 1, 2) + ' chunks) by ?hubview'); } catch (_) {} }
   }
 } catch (_) {}
-function _swHubView() { return window.__hubView || (((typeof isStandaloneQuest === 'function' && isStandaloneQuest()) || _LSS_IS_MOBILE) ? 8 : 12); }   // (perf) hub terrain view radius: desktop 12 (was 16), mobile/Quest 8 (was 9/16). Streams as one draw call per chunk, so radius^2 drives draw-call + triangle count; 16->12 cuts hub terrain draws ~40%, the #1 hub GPU cost. Live override: window.__hubView
+function _swHubTierView() {
+  try { const L = QUALITY.level; if (L === 'low') return 8; if (L === 'medium') return 10; } catch (_) {}
+  return 99;
+}
+function _swHubView() { return window.__hubView || Math.min((((typeof isStandaloneQuest === 'function' && isStandaloneQuest()) || _LSS_IS_MOBILE) ? 8 : 12), _swHubTierView()); }   // (perf) hub terrain view radius: desktop 12 (was 16), mobile/Quest 8 (was 9/16). Streams as one draw call per chunk, so radius^2 drives draw-call + triangle count; 16->12 cuts hub terrain draws ~40%, the #1 hub GPU cost. Live override: window.__hubView
 function _lssEndlessMobile() { return !!window.__endlessMobileSim || (typeof isStandaloneQuest === 'function' && isStandaloneQuest()) || _LSS_IS_MOBILE; }
 const _SW_HUB_VIEW = 11;
 const _SW_BUILD_PER_FRAME = 2;
@@ -21780,6 +22347,43 @@ float _lssSunVisW(vec3 wp) {
   return 1.0 - smoothstep(uSunTopK.y, uSunTopK.y + uSunTopK.z, d);
 }
 `;
+const _SW_HULLCUT_GLSL = `
+uniform float uHullCutOn; uniform sampler2D uHullCutBot; uniform sampler2D uHullCutTop;
+uniform mat3 uHullCutRot; uniform vec3 uHullCutPos; uniform vec4 uHullCutRect; uniform vec4 uHullCutY; uniform vec4 uHullCutK;
+float _swHullCutB(ivec2 ij, int n) { return texelFetch(uHullCutBot, clamp(ij, ivec2(0), ivec2(n - 1)), 0).r; }
+// 1 = inside the hull (cut). The rest only matter to the debug paint: 0.5 = over a hull column but above or below
+// it, 0.25 = a hull column the erosion spared, 0.1 = inside the hull's rect with no hull under it.
+float _swHullCut(vec3 wp) {
+  if (uHullCutOn < 0.5) return 0.0;
+  vec3 l = uHullCutRot * (wp - uHullCutPos);
+  vec2 uv = vec2((l.x - uHullCutRect.x) / (uHullCutRect.y - uHullCutRect.x), (l.z - uHullCutRect.z) / (uHullCutRect.w - uHullCutRect.z));
+  if (uv.x <= 0.0 || uv.y <= 0.0 || uv.x >= 1.0 || uv.y >= 1.0) return 0.0;
+  int n = int(uHullCutY.w + 0.5);
+  ivec2 ij = ivec2(uv * uHullCutY.w);
+  float b = _swHullCutB(ij, n);
+  if (b < 0.5 / 255.0) return 0.1;
+  if (uHullCutK.x > 0.5) {
+    float e = min(min(_swHullCutB(ij + ivec2(1, 0), n), _swHullCutB(ij - ivec2(1, 0), n)),
+                  min(_swHullCutB(ij + ivec2(0, 1), n), _swHullCutB(ij - ivec2(0, 1), n)));
+    if (e < 0.5 / 255.0) return 0.25;
+  }
+  ivec2 ijT = (uHullCutK.z > 0.5) ? ivec2(n - 1 - ij.x, ij.y) : ij;
+  float t = texelFetch(uHullCutTop, clamp(ijT, ivec2(0), ivec2(n - 1)), 0).r;
+  float bot = uHullCutY.x + (1.0 - b) * uHullCutY.y;
+  float top = uHullCutY.x + uHullCutY.y - (1.0 - t) * uHullCutY.y;
+  return (l.y > bot + uHullCutY.z && l.y < top - uHullCutY.z) ? 1.0 : 0.5;
+}
+// window.__water.hullCutDebug = 1 paints instead of cutting: magenta = cut, yellow = over/under a hull column,
+// cyan = spared by the erosion, dark blue = inside the rect off the hull. Anything water-coloured in the cabin
+// then is NOT the slab's doing.
+vec4 _swHullCutPaint(float c) {
+  return (c > 0.75) ? vec4(1.0, 0.0, 1.0, 1.0) : (c > 0.4) ? vec4(1.0, 0.9, 0.0, 1.0) : (c > 0.2) ? vec4(0.0, 1.0, 1.0, 1.0) : vec4(0.1, 0.1, 0.6, 1.0);
+}
+`;
+const _swHullCutU = { uHullCutOn: { value: 0 }, uHullCutBot: { value: null }, uHullCutTop: { value: null },
+  uHullCutRot: { value: new THREE.Matrix3() }, uHullCutPos: { value: new THREE.Vector3() },
+  uHullCutRect: { value: new THREE.Vector4(0, 1, 0, 1) }, uHullCutY: { value: new THREE.Vector4(0, 1, 0, 64) },
+  uHullCutK: { value: new THREE.Vector4(1, 0, 0, 0) } };
 function _sunTopPars() {
   if (_SUNTOP.pars) return _SUNTOP.pars;
   const c = THREE.ShaderChunk.lights_pars_begin, a = 'light.color = directionalLight.color;';
@@ -22646,7 +23250,7 @@ function _swBuildTrees(x0,z0,T){
         im.setColorAt(k,_tc);
       } }
     im.instanceMatrix.needsUpdate=true; if(im.instanceColor) im.instanceColor.needsUpdate=true;
-    im.frustumCulled=true; im.castShadow=!noShadow; im.receiveShadow=true; im.userData={isSandwichTerrain:true, _cs:!noShadow}; scene.add(im); meshes.push(im);   // (v48.47) _cs: see _swTreeShadowCull
+    im.frustumCulled=true; im.castShadow=!noShadow; im.receiveShadow=true; im.userData={isSandwichTerrain:true, _cs:!noShadow}; scene.add(_lssFreezeStatic(im)); meshes.push(im);   // (v48.47) _cs: see _swTreeShadowCull; (v49.50) frozen: see _lssFreezeStatic
   };
   for(let v=0;v<sets.std.length;v++)   emit(sets.std[v],   _swTreeMatGet(),   buckets.std[v],   -6,   2.6,1.4, 0,false, _tint);
   for(let v=0;v<sets.snow.length;v++)  emit(sets.snow[v],  _swTreeMatGet(),   buckets.snow[v],  -6,   2.4,1.3, 0,false, _tintSnow);
@@ -22982,7 +23586,7 @@ function _swBuildDrapes(x0, z0, T) {
     m.castShadow = false;        // a strand's shadow is not worth a shadow-pass draw on a cliff
     m.receiveShadow = true;
     m.userData = { isSandwichTerrain: true, drape: kind, ownGeo: true, strands: acc.n };   // ownGeo: _swRemoveTrees disposes it
-    scene.add(m);
+    scene.add(_lssFreezeStatic(m));   // (v49.50) world-space strands, never moved
     out.push(m);
   };
   emit(accIce,  _swIceMatGet(),       'ice');
@@ -23083,7 +23687,7 @@ function _swShellJobFinish(J) {
   mesh.receiveShadow = !isCeil;
   mesh.userData = { isSandwichTerrain: true };
   mesh.renderOrder = -2;
-  scene.add(mesh);
+  scene.add(_lssFreezeStatic(mesh));   // (v49.50) world-space shell, never moved
   return mesh;
 }
 function _swBuildShell(x0, z0, isCeil, T) {
@@ -24147,9 +24751,11 @@ function _swWaterReflectShader() {
       'uniform vec3 uSnellTint; uniform vec3 uDeepTint; uniform float uSubmerge; uniform vec3 uEye; uniform float uUnderMirror; uniform float uUnderDeep; uniform float uUnderThru; uniform sampler2D uAboveTex; uniform float uAboveOn; uniform float uAboveMix; uniform float uReflLive; uniform float uFlipFace;',   
       'uniform vec3 uShallowTint; uniform float uShoreSoft; uniform float uFoamThresh;',
       'uniform vec3 uSunDir;',   // (v49.39) the real sun (was the literal (0.29, 0.86, 0.43) twice below)
-      _SUNTOP_GLSL,   // (v49.40) the baked mountain shadow   
+      _SUNTOP_GLSL,   // (v49.40) the baked mountain shadow
+      _SW_HULLCUT_GLSL,   // (v49.54) no water inside the ship
       'varying vec4 vUv;', 'varying vec3 vWP;', 'varying vec4 vUvAbove;', '#include <fog_pars_fragment>',
       'void main(){',
+      '  { float _hc = _swHullCut(vWP); if (uHullCutK.y > 0.5 && _hc > 0.05) { gl_FragColor = _swHullCutPaint(_hc); return; } if (_hc > 0.75) discard; }',   // (v49.54) see _SW_HULLCUT_GLSL
       '  float t = uTime; vec2 q = vWP.xz;',
       '  float dist = length(vWP - uCam);',
       '  float fade = clamp(1.0 - (dist - 500.0) / 5000.0, 0.05, 1.0);',
@@ -24645,18 +25251,18 @@ function _swSilSweep() {
     if (C.size <= _swSil.max) break;
     if (_swSilInUse(rec)) continue;
     C.delete(k); rec._cached = false;
-    try { rec.rt.dispose(); } catch (_) {}
+    _swSilFree(rec);   // (v49.55) + its top and cut maps
   }
   for (const rec of _swSil.orphans) {    // dropped by a flush while still bound; free them once they are not
     if (_swSilInUse(rec)) continue;
     _swSil.orphans.delete(rec);
-    try { rec.rt.dispose(); } catch (_) {}
+    _swSilFree(rec);
   }
 }
 function _swSilFlush() {
   for (const rec of _swSil.cache.values()) {
     rec._cached = false;
-    if (_swSilInUse(rec)) _swSil.orphans.add(rec); else { try { rec.rt.dispose(); } catch (_) {} }
+    if (_swSilInUse(rec)) _swSil.orphans.add(rec); else _swSilFree(rec);
   }
   _swSil.cache.clear(); _swSil.empty.clear();
 }
@@ -24664,12 +25270,111 @@ function _swSilAssign(sn, rec, slot) {
   const R = _swRipple, old = R[sn];
   R[sn] = rec;
   if (old && old !== rec && !old._cached) {
-    if (_swSilInUse(old)) _swSil.orphans.add(old); else { try { old.rt.dispose(); } catch (_) {} }
+    if (_swSilInUse(old)) _swSil.orphans.add(old); else _swSilFree(old);
   }
   try { if (!slot) window.__hullSil = R.hullSil; } catch (_) {}
 }
+function _swSilWarm(root) {
+  if (!root || typeof root.traverse !== 'function' || typeof renderer === 'undefined' || !renderer) return 0;
+  if (!_swSil.mat) _swSil.mat = new THREE.MeshDepthMaterial({ depthPacking: THREE.BasicDepthPacking, side: THREE.DoubleSide });
+  const sc = new THREE.Scene();
+  sc.overrideMaterial = _swSil.mat;
+  let n = 0;
+  try { root.updateMatrixWorld(true); } catch (_) {}
+  root.traverse((o) => {
+    if (!o.isMesh || !o.geometry || !o.geometry.attributes || !o.geometry.attributes.position) return;
+    let m;
+    if (o.isSkinnedMesh && o.skeleton) {
+      m = new THREE.SkinnedMesh(o.geometry);
+      m.skeleton = o.skeleton;
+      m.bindMatrix.copy(o.bindMatrix);
+      m.matrix.identity(); m.matrixWorld.identity();
+    } else {
+      m = new THREE.Mesh(o.geometry);
+      m.matrix.copy(o.matrixWorld); m.matrixWorld.copy(o.matrixWorld);
+    }
+    m.matrixAutoUpdate = false;
+    m.frustumCulled = false;   // the draw is the point; where it lands is not
+    sc.add(m); n++;
+  });
+  if (!n) return 0;
+  const cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+  const rt = new THREE.WebGLRenderTarget(8, 8, { minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+    format: THREE.RGBAFormat, type: THREE.UnsignedByteType, depthBuffer: true, stencilBuffer: false, generateMipmaps: false });
+  const prevRT = renderer.getRenderTarget();
+  const prevClear = new THREE.Color(); renderer.getClearColor(prevClear); const prevAlpha = renderer.getClearAlpha();
+  const prevAuto = renderer.autoClear;
+  const _xrOn = !!(renderer.xr && renderer.xr.enabled);
+  const _shAuto = renderer.shadowMap ? renderer.shadowMap.autoUpdate : undefined;
+  try {
+    if (_xrOn) renderer.xr.enabled = false;
+    if (renderer.shadowMap) renderer.shadowMap.autoUpdate = false;
+    renderer.setRenderTarget(rt); renderer.setClearColor(0x000000, 1); renderer.autoClear = true;
+    renderer.render(sc, cam);
+  } catch (_) {
+  } finally {
+    if (_xrOn) renderer.xr.enabled = true;
+    if (renderer.shadowMap && _shAuto !== undefined) renderer.shadowMap.autoUpdate = _shAuto;
+    renderer.setRenderTarget(prevRT); renderer.setClearColor(prevClear, prevAlpha); renderer.autoClear = prevAuto;
+    try { rt.dispose(); } catch (_) {}
+    sc.overrideMaterial = null;
+    while (sc.children.length) sc.remove(sc.children[0]);   // the geometry is the source's: never dispose it here
+  }
+  return n;
+}
 if (typeof window !== 'undefined') window.__silCache = () => ({ size: _swSil.cache.size, builds: _swSil.builds, hits: _swSil.hits,
   empty: _swSil.emptyN, orphans: _swSil.orphans.size, keys: Array.from(_swSil.cache.keys()).map(k => k.slice(0, 8)) });
+function _swHullCutMaps(sc, frame, all, y0, range) {
+  if (typeof renderer === 'undefined' || !renderer || !_swSil.mat) return null;
+  const W = window.__water || {};
+  const res = Math.max(64, Math.min(1024, (W.hullCutRes != null) ? (+W.hullCutRes | 0) : 256));
+  const mg = 2;
+  const x0 = all.min.x - mg, x1 = all.max.x + mg, z0 = all.min.z - mg, z1 = all.max.z + mg;
+  const camB = new THREE.OrthographicCamera(x0, x1, z1, z0, 0, range);
+  camB.position.set(0, y0, 0); camB.up.set(0, 0, 1); camB.lookAt(0, y0 + 1, 0);
+  const camT = new THREE.OrthographicCamera(-x1, -x0, z1, z0, 0, range);
+  camT.position.set(0, y0 + range, 0); camT.up.set(0, 0, 1); camT.lookAt(0, y0 + range - 1, 0);
+  for (const c of [camB, camT]) {
+    c.updateMatrix(); c.matrixAutoUpdate = false;
+    c.matrixWorld.multiplyMatrices(frame, c.matrix); c.matrixWorldNeedsUpdate = false;
+    c.matrixWorldInverse.copy(c.matrixWorld).invert();
+  }
+  const mk = () => {
+    const rt = new THREE.WebGLRenderTarget(res, res, { minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+      format: THREE.RGBAFormat, type: THREE.UnsignedByteType, depthBuffer: true, stencilBuffer: false, generateMipmaps: false });
+    rt.texture.wrapS = rt.texture.wrapT = THREE.ClampToEdgeWrapping;
+    return rt;
+  };
+  const bot = mk(), top = mk();
+  const prevRT = renderer.getRenderTarget();
+  const prevClear = new THREE.Color(); renderer.getClearColor(prevClear); const prevAlpha = renderer.getClearAlpha();
+  const prevAuto = renderer.autoClear;
+  const _xrOn = !!(renderer.xr && renderer.xr.enabled);
+  const _shAuto = renderer.shadowMap ? renderer.shadowMap.autoUpdate : undefined;
+  sc.overrideMaterial = _swSil.mat;
+  try {
+    if (_xrOn) renderer.xr.enabled = false;
+    if (renderer.shadowMap) renderer.shadowMap.autoUpdate = false;
+    renderer.setClearColor(0x000000, 1); renderer.autoClear = true;
+    renderer.setRenderTarget(bot); renderer.render(sc, camB);
+    renderer.setRenderTarget(top); renderer.render(sc, camT);
+  } catch (e) {
+    try { bot.dispose(); top.dispose(); } catch (_) {}
+    return null;
+  } finally {
+    if (_xrOn) renderer.xr.enabled = true;
+    if (renderer.shadowMap && _shAuto !== undefined) renderer.shadowMap.autoUpdate = _shAuto;
+    renderer.setRenderTarget(prevRT); renderer.setClearColor(prevClear, prevAlpha); renderer.autoClear = prevAuto;
+    sc.overrideMaterial = null;
+  }
+  return { bot, top, x0, x1, z0, z1, res };
+}
+function _swSilFree(rec) {
+  if (!rec) return;
+  try { if (rec.rt) rec.rt.dispose(); } catch (_) {}
+  try { if (rec.topTex) rec.topTex.dispose(); } catch (_) {}
+  if (rec.cut) { try { rec.cut.bot.dispose(); rec.cut.top.dispose(); } catch (_) {} rec.cut = null; }
+}
 function _swHullSilhouette(mesh, slot) {
   const R = _swRipple;
   if (!mesh) return null;
@@ -24832,8 +25537,11 @@ function _swHullSilhouette(mesh, slot) {
         slab = { bot, top, n: _nIn, topTex: _tt };
       } catch (_) { slab = null; } finally { if (_rtT) { try { _rtT.dispose(); } catch (_) {} } }
     }
+    let _cut = null;
+    try { _cut = _swHullCutMaps(sc, frame, all, y0, range); } catch (_) { _cut = null; }
     const rec = { key, rt, tex: rt.texture, x0, x1, z0, z1, zMin: all.min.z, zMax: all.max.z, y0, range, beam, len, rimR, res, cnt, fill: +_fill.toFixed(4), _cached: true, slab,
-                  topTex: slab ? slab.topTex : null };   // (v48.65)
+                  topTex: slab ? slab.topTex : null,   // (v48.65)
+                  cut: _cut };   // (v49.55)
     _swSil.empty.delete(key);
     _swSil.cache.set(key, rec);
     _swSilAssign(_sn, rec, slot);
@@ -24882,6 +25590,45 @@ function _swSlabIn(T, x, y, z) {
   return ly >= S.bot[k] - T.mg && ly <= S.top[k] + T.mg;
 }
 if (typeof window !== 'undefined') window.__hullDropKills = function () { return _swSlabT.kills; };
+const _swHCq = new THREE.Quaternion(), _swHCp = new THREE.Vector3(), _swHCs = new THREE.Vector3(), _swHCm = new THREE.Matrix4();
+function _swHullCutBind() {
+  const U = _swHullCutU;
+  let on = 0;
+  try {
+    const W = window.__water || {};
+    const rec = (W.hullCut === 0 || typeof _swRipple === 'undefined' || !_swRipple) ? null : _swRipple.hullSil;
+    const m = (typeof player !== 'undefined' && player) ? player.mesh : null;
+    if (rec && rec.slab && rec.tex && rec.topTex && m && player.shipState !== 'dead') {
+      let hull = null;
+      for (let i = 0; i < m.children.length; i++) { const c = m.children[i]; if (c && c.userData && c.userData.bboxSize) { hull = c; break; } }
+      if (!hull) hull = m;
+      if (rec.key && rec.key.indexOf(hull.uuid + ':') === 0) {
+        m.matrixWorld.decompose(_swHCp, _swHCq, _swHCs);
+        _swHCm.makeRotationFromQuaternion(_swHCq);
+        U.uHullCutRot.value.setFromMatrix4(_swHCm).transpose();
+        U.uHullCutPos.value.copy(_swHCp);
+        const C = (W.hullCutFine === 0) ? null : rec.cut;
+        if (C) U.uHullCutRect.value.set(C.x0, C.x1, C.z0, C.z1); else U.uHullCutRect.value.set(rec.x0, rec.x1, rec.z0, rec.z1);
+        U.uHullCutY.value.set(rec.y0, rec.range, (W.hullCutMargin != null) ? +W.hullCutMargin : 0, C ? C.res : rec.res);
+        U.uHullCutK.value.x = (W.hullCutErode != null) ? (W.hullCutErode ? 1 : 0) : (C ? 0 : 1);
+        U.uHullCutK.value.y = W.hullCutDebug ? 1 : 0;
+        U.uHullCutK.value.z = C ? 1 : 0;   // the top camera's own image is mirrored in x
+        U.uHullCutBot.value = C ? C.bot.texture : rec.tex; U.uHullCutTop.value = C ? C.top.texture : rec.topTex;
+        on = 1;
+      }
+    }
+  } catch (_) { on = 0; }
+  U.uHullCutOn.value = on;
+  if (!on) { U.uHullCutBot.value = null; U.uHullCutTop.value = null; }
+  return on;
+}
+if (typeof window !== 'undefined') window.__hullCut = function () {
+  const U = _swHullCutU, rec = (typeof _swRipple !== 'undefined' && _swRipple) ? _swRipple.hullSil : null;
+  return { on: U.uHullCutOn.value, key: rec ? String(rec.key).slice(0, 8) : null, res: U.uHullCutY.value.w, fine: !!(rec && rec.cut), fill: rec ? rec.fill : 0,
+    debug: U.uHullCutK.value.y, flipTop: U.uHullCutK.value.z,
+    rect: U.uHullCutRect.value.toArray().map((v) => +v.toFixed(1)), y0: +U.uHullCutY.value.x.toFixed(1), range: +U.uHullCutY.value.y.toFixed(1),
+    erode: U.uHullCutK.value.x, margin: U.uHullCutY.value.z };
+};
 let _swSurfEnds = 0;   // (v49.08) drops ended / bubbles popped at the surface - see WATER ENDS AT THE WATER
 if (typeof window !== 'undefined') window.__dropSurfEnds = function () { return _swSurfEnds; };
 const _swSlabShipTs = [];   // pooled frames for the other hulls (yours is _swSlabT)
@@ -29313,6 +30060,7 @@ function _swBuildHubWaterDispGet(WL) {
     fragmentShader: [
       'uniform vec3 uSunDir;',   // (v49.39) the real sun - the diffuse, specular and all three foam-light terms below read it
       _SUNTOP_GLSL,   // (v49.40) the baked mountain shadow (G = the shadow-top height, compared with this surface)
+      _SW_HULLCUT_GLSL,   // (v49.54) no water inside the ship
       'uniform vec3 uCam; uniform vec3 color; uniform float uTime; uniform float uSprayBreak; uniform float uMist; uniform float uPeakLo; uniform float uSprayFreq; uniform float uFoamSlope; uniform float uSteepFoam;',
       'uniform float uPeakHi; uniform float uCapLo; uniform float uCapHi; uniform float uCapStr; uniform float uCapSteep; uniform float uCapFreq; uniform float uCapBright;',
       'uniform float uCapFoamLo; uniform float uCapFoamHi; uniform float uFoamMatte;',   // (v41.53/41.54)
@@ -29373,6 +30121,7 @@ function _swBuildHubWaterDispGet(WL) {
       '}',
       'float _swShapeF(float hh){ float sq = hh * (1.0 + uCrestQ * abs(hh)); float x = sq * uGain / max(uDispScale, 0.01); return uDispScale * (x / (1.0 + abs(x))); }',
       'void main(){',
+      '  { float _hc = _swHullCut(vWP); if (uHullCutK.y > 0.5 && _hc > 0.05) { gl_FragColor = _swHullCutPaint(_hc); return; } if (_hc > 0.75) discard; }',   // (v49.54) no water inside the ship - see _SW_HULLCUT_GLSL
       '  vec3 _dbgSeen = vec3(0.0); float _dbgCap = 0.0;',
       '  vec3 V = normalize(uCam - vWP);',
       '  vec3 N = normalize(vN);',
@@ -29596,6 +30345,7 @@ function _swBuildHubWaterDispGet(WL) {
   mesh.userData = { isHubWater: true, WL: WL };
   scene.add(mesh);
   mesh.onBeforeRender = function (rnd, scn, cam) {
+    try { _swHullCutBind(); } catch (_) {}   // (v49.54) the pose being drawn - see _swHullCutBind
     try {
       const _w = game._hubWater, _u = mesh.material.uniforms;
       if (_w && _w._reflWorldN > 0 && _u && _u.uReflLive && _u.uReflLive.value > 0.0) {
@@ -29609,6 +30359,7 @@ function _swBuildHubWaterDispGet(WL) {
   mesh.onAfterRender = function () { try { const u = mesh.material.uniforms; if (u && u.uRefract) u.uRefract.value = 0.0; } catch (_) {} };
   _hubWaterDisp = mesh;
   try { mat.uniforms.uSunDir = _swU.uSunDir; } catch (_) {}   // (v49.39) one sun (see the Reflector)
+  try { for (const _k in _swHullCutU) mat.uniforms[_k] = _swHullCutU[_k]; } catch (_) {}   // (v49.54) shared, see _SW_HULLCUT_GLSL
   try { mat.uniforms.uSunTop = _swU.uSunTop; mat.uniforms.uSunTopBox = _swU.uSunTopBox; mat.uniforms.uSunTopK = _swU.uSunTopK; } catch (_) {}   // (v49.40)
   try { game._hubWaterDispMat = mat; } catch (_) {}
   try {
@@ -29652,7 +30403,8 @@ function _swBuildHubWater(T) {
     mesh.material.uniforms.uTime = _swU.uTime;   
     mesh.material.uniforms.uCam = _swU.uCam;
     mesh.material.uniforms.uSunDir = _swU.uSunDir;   // (v49.39) one sun: _wxFrame writes it from _WX.sunDir
-    mesh.material.uniforms.uSunTop = _swU.uSunTop; mesh.material.uniforms.uSunTopBox = _swU.uSunTopBox; mesh.material.uniforms.uSunTopK = _swU.uSunTopK;   // (v49.40)      
+    mesh.material.uniforms.uSunTop = _swU.uSunTop; mesh.material.uniforms.uSunTopBox = _swU.uSunTopBox; mesh.material.uniforms.uSunTopK = _swU.uSunTopK;   // (v49.40)
+    for (const _k in _swHullCutU) mesh.material.uniforms[_k] = _swHullCutU[_k];   // (v49.54) shared, see _SW_HULLCUT_GLSL
     mesh.material.transparent = true;
     mesh.material.depthWrite = false;
     mesh.material.fog = true;
@@ -29815,6 +30567,7 @@ function _swBuildHubWater(T) {
     const _reflNrm = new THREE.Vector3(), _reflRot = new THREE.Matrix4();
     const _reflRP = new THREE.Vector3(), _reflCP = new THREE.Vector3();
     mesh.onBeforeRender = function (rnd, scn, cam, geo2, mat2, grp) {
+      try { _swHullCutBind(); } catch (_) {}
       if (game && game._reflBenchOff) return;
 
 
@@ -29826,8 +30579,9 @@ function _swBuildHubWater(T) {
         const _WK = window.__water || {};
         try { if (window.__lssWarmDraw) return; } catch (_) {}
         const _sm = _fxSmallDevice() && _swVrNoRefl();
-        const _gMin = (_WK.reflGapMin != null) ? _WK.reflGapMin : (_sm ? 4 : 2);   // hard cost ceiling
-        const _gMax = (_WK.reflGapMax != null) ? _WK.reflGapMax : (_sm ? 6 : 3);   // shipped cadence
+        let _tq = 'high'; try { _tq = QUALITY.level; } catch (_) {}
+        const _gMin = (_WK.reflGapMin != null) ? _WK.reflGapMin : ((_sm || _tq === 'low') ? 4 : (_tq === 'medium' ? 3 : 2));   // hard cost ceiling
+        const _gMax = (_WK.reflGapMax != null) ? _WK.reflGapMax : ((_sm || _tq === 'low') ? 6 : (_tq === 'medium' ? 4 : 3));   // shipped cadence
         this._reflGap++;
         let _go = (this._reflGap >= _gMax);
         if (!_go) {
@@ -34908,6 +35662,7 @@ const SKY_I = {
   nMin: 4, nMax: 11,   // islands per column
   rMin: 300, rMax: 950,
   range: 30000,        // build radius around the player
+  detailR: 9000,       // (v49.50) past this only rock + foliage draw (0 = off); see the visibility pass in _skFrame
   res: 26,             // surface-net grid per island
   budget: 1,           // islands meshed per frame
   skin: 70,
@@ -34920,6 +35675,7 @@ const SKY_I = {
   _ms: 0,
 };
 try { window.__sky = SKY_I; } catch (_) {}
+try { window.__skyIslands = SKY_I; } catch (_) {}
 
 function _skH3(x, y, z) { const h = Math.sin(x * 127.1 + y * 311.7 + z * 74.7) * 43758.5453; return h - Math.floor(h); }
 function _skH3m(xi, yi, zi) {
@@ -35350,6 +36106,8 @@ function* _skBuildG(I) {
   const rockMesh = new THREE.Mesh(g, _skRockMat);
   rockMesh.userData.skOwned = true;
   grp.add(rockMesh);
+  const det = new THREE.Group(); det.name = 'skDetail';
+  grp.add(det); grp.userData._det = det;
 
   const rnd = (() => { let a = (Math.imul(I.id.length + 7, 2654435761) ^ Math.round(I.x) ^ Math.round(I.z * 31)) | 0;
     return () => { a = (a + 0x6D2B79F5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a);
@@ -35382,7 +36140,7 @@ function* _skBuildG(I) {
       }
       im.instanceMatrix.needsUpdate = true;
       im.frustumCulled = true;
-      grp.add(im);
+      det.add(im);   // (v49.50) detail
     }
   }
 
@@ -35436,16 +36194,16 @@ function* _skBuildG(I) {
       }
       im.instanceMatrix.needsUpdate = true;
       if (im.instanceColor) im.instanceColor.needsUpdate = true;
-      grp.add(im);
+      det.add(im);   // (v49.50) detail
     }
     if (cy !== null) {
       I.padY = cy; I.padR = SKY_I.padR;
       const padM = new THREE.Mesh(_SK_PAD, _skPadMat);
       padM.scale.set(SKY_I.padR, 3, SKY_I.padR); padM.position.set(I.x, cy - 1, I.z);
-      grp.add(padM);
+      det.add(padM);   // (v49.50) detail
       const ring = new THREE.Mesh(_SK_RING, _skRingMat);
       ring.scale.set(SKY_I.padR, SKY_I.padR, SKY_I.padR); ring.position.set(I.x, cy + 5, I.z);
-      grp.add(ring);
+      det.add(ring);   // (v49.50) detail
     }
     if (glows.length) {
       const ng = glows.length / 4;
@@ -35457,7 +36215,7 @@ function* _skBuildG(I) {
         M2.compose(P2, Q2, S2); gm.setMatrixAt(i, M2);
       }
       gm.instanceMatrix.needsUpdate = true;
-      grp.add(gm);
+      det.add(gm);   // (v49.50) detail
     }
   }
 
@@ -35534,6 +36292,8 @@ function* _skBuildG(I) {
     }
   }
 
+  _lssFreezeStatic(grp);
+  try { const _bb = new THREE.Box3().setFromObject(grp); if (!_bb.isEmpty()) grp.userData._bs = _bb.getBoundingSphere(new THREE.Sphere()); } catch (_) {}
   I.grp = grp;
   return grp;
 }
@@ -35588,6 +36348,27 @@ function _skFrame(px, py, pz) {
     _skKeep.delete(k); _skFreeRec(rec);
   }
   if (_skJob && !want.has(_skJob.I.id)) _skJob = null;
+  try {
+    const _occ = (typeof _clipSkyOccluder === 'function') ? _clipSkyOccluder() : null;
+    const _dR = (SKY_I.detailR != null) ? +SKY_I.detailR : 9000;
+    const _cp = (typeof camera !== 'undefined' && camera) ? camera.position : null;
+    let _nOut = 0, _nDet = 0;
+    if (_cp) for (const rec of _skLive.values()) {
+      const g = rec.grp, bs = g && g.userData && g.userData._bs;
+      if (!bs) continue;
+      let out = false;
+      if (_occ) out = (Math.hypot(bs.center.x - _occ.x, bs.center.y - _occ.y, bs.center.z - _occ.z) - bs.radius) > _occ.r + 600;
+      if (g.visible === out) g.visible = !out;
+      const det = g.userData._det;
+      if (det) {
+        const dv = !out && (!(_dR > 0) || (Math.hypot(bs.center.x - _cp.x, bs.center.y - _cp.y, bs.center.z - _cp.z) - bs.radius) < _dR);
+        if (det.visible !== dv) det.visible = dv;
+        if (!dv) _nDet++;
+      }
+      if (out) _nOut++;
+    }
+    SKY_I._vis = { live: _skLive.size, behindDome: _nOut, noDetail: _nDet };
+  } catch (_) {}
   near.sort((a, b) => (Math.hypot(a.x - px, a.y - py, a.z - pz)) - (Math.hypot(b.x - px, b.y - py, b.z - pz)));
   const syncR = (SKY_I.syncR != null) ? +SKY_I.syncR : 21000;
   const curtain = _skCurtainUp();
@@ -36144,8 +36925,29 @@ function _owFleetKeys(c) {
   if (!c._fleetKeys) c._fleetKeys = (typeof _campWaveShips === 'function') ? _campWaveShips(OW.FLEET) : HOARD_SHIPS.slice(0, OW.FLEET);
   return c._fleetKeys;
 }
+function _owDesc(a) {
+  try {
+    if (a == null) return String(a);
+    if (a === 'player' || (typeof player !== 'undefined' && a === player)) return 'player';
+    if (typeof a === 'string') return a;
+    if (typeof a === 'object') return (a.isOwCarrier ? 'carrier:' + a.id : (a.isOwBoss ? 'boss' : (a.loadoutKey || a.name || 'ent'))) +
+      ' t' + a.team + (a._owCity != null ? ' c' + a._owCity : '');
+  } catch (_) {}
+  return '?';
+}
+function _owLog(k, o) {
+  try {
+    const e = Object.assign({ t: +(((typeof game !== 'undefined' && game) ? game.time : 0) || 0).toFixed(1), k: k }, o || {});
+    const L = OW._log || (OW._log = []);
+    L.push(e); if (L.length > 120) L.shift();
+    console.log('[cities] ' + k + ' ' + JSON.stringify(o || {}));
+  } catch (_) {}
+}
 function _owSpawnFleet(c, team, at) {
-  if (c._fleetPending || typeof Bot === 'undefined' || typeof loadHoardModel !== 'function') return;
+  if (c._fleetPending || typeof Bot === 'undefined' || typeof loadHoardModel !== 'function') {
+    if (c._fleetPending) _owLog('fleet-skip', { c: c.idx, team: team, why: 'pending' });   // (v49.47)
+    return;
+  }
   const keys = _owFleetKeys(c);
   c._fleetPending = true;
   const anchor = at.clone();
@@ -36153,7 +36955,10 @@ function _owSpawnFleet(c, team, at) {
     c._fleetPending = false;
     if (!OW.cities || OW.cities[c.idx] !== c || !_owAuthority()) return;
     const hostileTeam = OW.TEAM0 + c.idx;
-    if (!((team === hostileTeam && c.owner == null) || (c.owner != null && team === c.owner))) return;   // changed hands while loading
+    if (!((team === hostileTeam && c.owner == null) || (c.owner != null && team === c.owner))) {   // changed hands while loading
+      _owLog('fleet-drop', { c: c.idx, team: team, owner: c.owner });   // (v49.47)
+      return;
+    }
     const ships = (typeof CYBER !== 'undefined' && CYBER.botShips) ? CYBER.botShips : ['VORTEX', 'PYRO', 'TRACKER', 'SLAYER', 'PUNCTURE', 'SYPHON', 'BLASTER'];
     for (let i = 0; i < keys.length; i++) {
       if (!protos[i]) continue;
@@ -36169,6 +36974,7 @@ function _owSpawnFleet(c, team, at) {
       c.fleet.push(b);
       try { if (typeof spawnFXBurst === 'function') spawnFXBurst('cloud', p, 70, 0.7, { startScale: 0.3, endScale: 1.2 }); } catch (_) {}
     }
+    _owLog('fleet+', { c: c.idx, team: team, n: c.fleet.length });   // (v49.47)
     try { if (typeof _botSendRoster === 'function') _botSendRoster(); } catch (_) {}
   }).catch(() => { c._fleetPending = false; });
 }
@@ -36537,6 +37343,13 @@ class OwCarrier {
     let gun = this.guns[0], gd = Infinity;
     for (const g of this.guns) { g.getWorldPosition(_owV1); const d = _owV1.distanceToSquared(best.position); if (d < gd) { gd = d; gun = g; } }
     this.zapTgt = best;
+    if (best.isOwCarrier) {
+      const _nowZ = game.time || 0, _lz = this._logZap;
+      if (!_lz || _lz.id !== best.id || _nowZ - _lz.t > 30) {
+        this._logZap = { id: best.id, t: _nowZ };
+        _owLog('carzap', { from: this.id, fromTeam: this.team, fromMode: this.mode, to: best.id, toTeam: best.team, toMode: best.mode, playerTeam: player.team });
+      }
+    }
     this._chargeStart(gun, charge);
   }
   _chargeStart(gun, dur) {
@@ -36716,6 +37529,7 @@ function _owSpawnCarrier(c, team, at, mode, owner) {
   car.owner = owner || null;
   game.entities.push(car);
   c.carrier = car;
+  _owLog('carrier+', { c: c.idx, id: car.id, team: team, mode: mode, owner: c.owner });   // (v49.47)
   _owWarpFx(at, 800);
   _owSend({ type: 'ow_evt', k: 'warp', p: [Math.round(at.x), Math.round(at.y), Math.round(at.z)], r: 800 });
   return car;
@@ -36724,6 +37538,7 @@ function _owCarrierDied(car) {
   const c = car.city;
   const killerTeam = _owKillerTeam(car._lastAttacker);
   const wasHostile = (c.owner == null);
+  _owLog('carrier-', { c: c.idx, id: car.id, team: car.team, mode: car.mode, by: _owDesc(car._lastAttacker), killerTeam: killerTeam, wasHostile: wasHostile, owner: c.owner });   // (v49.47)
   if (c.carrier === car) c.carrier = null;
   const oi = OW.orphans.indexOf(car); if (oi >= 0) OW.orphans.splice(oi, 1);
   OW.dying.push(car);   // stays in the state packet (alive 0) while the blast chain runs on every peer
@@ -36862,6 +37677,7 @@ function _owFieldUIOff() {
 }
 function _owCaptured(c, team, ship) {
   const car = (c.carrier && c.carrier.alive) ? c.carrier : null;
+  _owLog('capture', { c: c.idx, team: team, owner: c.owner, carrier: car ? (car.id + ' t' + car.team + ' ' + car.mode) : null, by: _owDesc(ship) });   // (v49.47)
   if (team === c.owner) {
     if (c.buildT > 0) { _owMakeField(c, _owFieldSpot(c), false); return; }   // a build is running: the marker stays
     if (car) {
@@ -36893,6 +37709,7 @@ function _owCaptured(c, team, ship) {
 function _owArm(c) {
   c.armed = true;
   const team = OW.TEAM0 + c.idx;
+  _owLog('arm', { c: c.idx, team: team, dist: Math.round(c._playerDist || 0) });   // (v49.47)
   const at = new THREE.Vector3(c.x, _owTowerTop(c), c.z);
   _owSpawnCarrier(c, team, at, 'home', null);
   _owSpawnFleet(c, team, at);
@@ -37457,6 +38274,8 @@ function _owSyncTeams(oldTeam, newTeam) {
       if (c.fleet) for (const b of c.fleet) { if (b && b.team === oldTeam) { b.team = newTeam; n++; } }
       if (c.carrier && c.carrier.team === oldTeam) { c.carrier.team = newTeam; n++; }
     }
+    if (Array.isArray(OW.orphans)) for (const car of OW.orphans) { if (car && car.team === oldTeam) { car.team = newTeam; n++; } }
+    if (n) _owLog('sync', { from: oldTeam, to: newTeam, n: n });   // (v49.47)
     return n;
   } catch (_) { return 0; }
 }
@@ -37676,7 +38495,11 @@ if (typeof window !== 'undefined') {
     proxyBots: game.entities.filter(e => (e instanceof Bot) && e.isProxy).length,
     boss: OW.boss ? { hp: Math.round(OW.boss.health), risen: OW.boss.risen, alive: OW.boss.alive, proxy: OW.boss.isProxy, x: Math.round(OW.boss.position.x), y: Math.round(OW.boss.position.y), z: Math.round(OW.boss.position.z) } : null,
     bossDone: OW.bossDone, orphans: OW.orphans.length, dying: OW.dying.length,
+    orphanList: OW.orphans.map(car => ({ id: car.id, c: car.city ? car.city.idx : null, team: car.team, mode: car.mode, alive: car.alive, hp: Math.round(car.health) })),
+    fleetTeams: (OW.cities || []).map(c => Array.from(new Set(c.fleet.filter(b => b && b.alive).map(b => b.team)))),
+    playerTeam: (typeof player !== 'undefined' && player) ? player.team : null,
   });
+  window.__citiesLog = () => (OW._log || []).slice();   // (v49.47) the city ledger
   window.__citiesTp = (i, far) => {
     const c = OW.cities && OW.cities[i]; if (!c) return 'no city ' + i;
     const d = (far != null) ? far : 3800;
@@ -39461,7 +40284,7 @@ function _clipSkyOccluder() {
         2 * Math.abs(camera.position.y - game._hubWaterWL) >= _rho) return null;
     let _m = (typeof window !== 'undefined' && window.__clipCullMul != null) ? +window.__clipCullMul : 1.0;
     if (!(isFinite(_m) && _m > 0)) _m = 1.0;
-    return { x: dome.position.x, z: dome.position.z, r: r * _m };
+    return { x: dome.position.x, y: dome.position.y, z: dome.position.z, r: r * _m };
   } catch (_) { return null; }
 }
 
@@ -39609,7 +40432,7 @@ function _swMergeBuild(key, list, sig) {
     const m = new THREE.Mesh(geo, src.material);
     m.receiveShadow = recv; m.renderOrder = -2;
     m.userData = { isSandwichTerrain: true, isSandwichMerge: true };
-    scene.add(m);
+    scene.add(_lssFreezeStatic(m));   // (v49.50) world-space block, never moved
     return m;
   };
   const g0 = list.find(function (c) { return c.ground; }), c0 = list.find(function (c) { return c.ceiling; });
@@ -43278,7 +44101,7 @@ function _skinPatchHueShader(m) {
     uSkinPatFloor: { value: 0.05 }, uSkinPatCap: { value: 1.4 }, uSkinPatFlat: { value: 0 },
     uSkinReflPass: { value: 0 }, uSkinPatTex: { value: _skinDefaultTex() },
   };
-  ud._skinHueU = u;
+  Object.defineProperty(ud, '_skinHueU', { value: u, writable: true, configurable: true, enumerable: false });
   const prevOBC = m.onBeforeCompile;
   m.onBeforeCompile = function (shader, renderer) {
     if (prevOBC) { try { prevOBC.call(this, shader, renderer); } catch (_) {} }
@@ -59341,7 +60164,14 @@ function _warmRealCombatFXInner(_fxDefer) {
 }
 
 const _PREBAKE = { on: false, last: null };
-const _PREBAKE_MAX_MS     = 12000;   // hard ceiling for the whole prebake
+const _PREBAKE_MAX_MS = (() => {
+  try {
+    const m = /[?&]pbmax=(\d+)/i.exec((typeof location !== 'undefined' && location.search) || '');
+    if (m) return Math.max(1000, +m[1]);
+  } catch (_) {}
+  return _LSS_IS_MOBILE ? 12000 : 48000;
+})();
+const _pbCapMul = Math.max(1, _PREBAKE_MAX_MS / 12000);
 const _PREBAKE_SLICE_MS   = 40;      // ms of streaming per yielded frame (see _swDrainStream)
 const _PREBAKE_MAX_CALLS  = 64;      // inner streamer calls per pass
 const _PREBAKE_MAX_PASSES = 900;     // belt: pass ceiling on top of the ms ceiling
@@ -59881,12 +60711,12 @@ async function _prebakeWorldForLaunch() {
     } catch (_) { _wildP = null; }
     const _tE = _pbNow();
     _pbSub('priming ships');
-    try { rep.ent = await _primeEntityModels(_entPrimePlan(), _bt0, _ENT_PRIME_MAX_MS); } catch (_) {}
+    try { rep.ent = await _primeEntityModels(_entPrimePlan(), _bt0, _ENT_PRIME_MAX_MS * _pbCapMul); } catch (_) {}   // (v49.46) x4 on desktop
     rep.ms.ent = Math.round(_pbNow() - _tE);
 
     const _tM = _pbNow();
     _pbSub('waking the leviathans');
-    try { rep.mon = await _primeMonsterModels(_bt0, _MON_PRIME_MAX_MS); } catch (_) {}
+    try { rep.mon = await _primeMonsterModels(_bt0, _MON_PRIME_MAX_MS * _pbCapMul); } catch (_) {}   // (v49.46) x4 on desktop
     rep.ms.mon = Math.round(_pbNow() - _tM);
 
     let _carWarmGroup = null;
@@ -59900,11 +60730,32 @@ async function _prebakeWorldForLaunch() {
             let done = false; const fin = () => { if (!done) { done = true; res(); } };
             try { _carrierLoadProto(fin); } catch (_) { fin(); }
             if (_carrier.proto) fin();
-            setTimeout(fin, 4000);
+            setTimeout(fin, 4000 * _pbCapMul);   // (v49.46) x4 on desktop - see _PREBAKE_MAX_MS
           });
         }
         _carWarmGroup = new THREE.Group();
         try { _carWarmGroup.position.set(player.position.x, player.position.y - 1500, player.position.z); } catch (_) { _carWarmGroup.position.set(0, -100000, 0); }
+        try {
+          let _tsrc = null;
+          if (game.sandwichChunks) for (const _tc of game.sandwichChunks.values()) {
+            const _ta = _tc && _tc.trees; if (!_ta) continue;
+            for (let _ti = 0; _ti < _ta.length; _ti++) { const _im = _ta[_ti]; if (_im && _im.isInstancedMesh && _im.instanceColor && _im.userData && _im.userData._cs) { _tsrc = _im; break; } }
+            if (_tsrc) break;
+          }
+          if (_tsrc) {
+            const _sep = new THREE.Mesh(new THREE.BoxGeometry(4, 4, 4), new THREE.MeshBasicMaterial());
+            _sep.castShadow = true; _sep.receiveShadow = false; _sep.frustumCulled = false;
+            _sep.userData._treeShadowWarm = 'sep';
+            _carWarmGroup.add(_sep);
+            const _fp = new THREE.InstancedMesh(_tsrc.geometry, _tsrc.material, 1);
+            _fp.setMatrixAt(0, new THREE.Matrix4());
+            _fp.setColorAt(0, new THREE.Color(1, 1, 1));
+            _fp.castShadow = true; _fp.receiveShadow = false; _fp.frustumCulled = false;
+            _fp.userData._treeShadowWarm = 'tree';   // disposed (instance buffers only) with the group below
+            _carWarmGroup.add(_fp);
+            rep.treeShadow = 1;
+          } else rep.treeShadow = 0;
+        } catch (_) {}
         if (_ffMode && typeof _carrier !== 'undefined' && _carrier && _carrier.proto) {
           const _cl = _carrier.proto.clone(true);
           _cl.traverse((o) => { if (o.isMesh) { o.frustumCulled = false; o.castShadow = true; } });
@@ -59913,7 +60764,7 @@ async function _prebakeWorldForLaunch() {
         try {
           if (_wildP) {
             _pbSub('waking the wild leviathans');
-            const _protos = await Promise.race([_wildP, new Promise((r) => setTimeout(() => r(null), 6000))]);
+            const _protos = await Promise.race([_wildP, new Promise((r) => setTimeout(() => r(null), 6000 * _pbCapMul))]);   // (v49.46) x4 on desktop
             let _wi = 0;
             for (const _pr of (_protos || [])) {
               if (!_pr || !_pr.scene) continue;
@@ -59959,6 +60810,7 @@ async function _prebakeWorldForLaunch() {
               }
             });
             if (game._hubWater && typeof _warmReflLiftForRoot === 'function') _warmReflLiftForRoot(_cl);
+            if (game._hubWater && typeof _swSilWarm === 'function') { try { window.__silWarm = (window.__silWarm || 0) + _swSilWarm(_cl); } catch (_) {} }
           } finally { try { renderer.setRenderTarget(_pRTK); } catch (_) {} }
         }
         try {
@@ -59982,7 +60834,7 @@ async function _prebakeWorldForLaunch() {
       rep.hullGrids = _gn; rep.ms.hullGrid = Math.round(_pbNow() - _tG);
     } catch (_) {}
     if (_wildP && rep.wild == null) {
-      try { _pbSub('waking the wild leviathans'); await Promise.race([_wildP, new Promise((r) => setTimeout(r, 6000))]); rep.wild = 'loaded, not drawn'; } catch (_) {}
+      try { _pbSub('waking the wild leviathans'); await Promise.race([_wildP, new Promise((r) => setTimeout(r, 6000 * _pbCapMul))]); rep.wild = 'loaded, not drawn'; } catch (_) {}
     }
 
     const _tD = _pbNow();
@@ -59994,6 +60846,11 @@ async function _prebakeWorldForLaunch() {
     try {
       if (_carWarmGroup) {
         _carWarmGroup.traverse((o) => { if (o.isSkinnedMesh && o.skeleton) { let w = false; for (let p = o; p; p = p.parent) if (p.userData && p.userData._wildWarm) { w = true; break; } if (w) { try { o.skeleton.dispose(); } catch (_) {} } } });
+        _carWarmGroup.traverse((o) => {
+          const _tw = o.userData && o.userData._treeShadowWarm;
+          if (_tw === 'tree' && typeof o.dispose === 'function') { try { o.dispose(); } catch (_) {} }
+          else if (_tw === 'sep') { try { o.geometry.dispose(); o.material.dispose(); } catch (_) {} }
+        });
         scene.remove(_carWarmGroup); _carWarmGroup = null;
       }
     } catch (_) {}
@@ -60427,6 +61284,11 @@ async function _prebakeGpuPrime() {
       if (typeof player !== 'undefined' && player && player.mesh) _n += _warmReflLiftForRoot(player.mesh);
       for (const _e of (game.entities || [])) { if (_e && _e.mesh) _n += _warmReflLiftForRoot(_e.mesh); }
       try { window.__reflWarm = _n; } catch (_) {}
+    }
+  } catch (_) {}
+  try {
+    if (game._hubWater && typeof _swSilWarm === 'function' && typeof player !== 'undefined' && player && player.mesh) {
+      window.__silWarm = (window.__silWarm || 0) + _swSilWarm(player.mesh);
     }
   } catch (_) {}
   try {
@@ -68648,8 +69510,16 @@ function fireSpread(origin, dir, w) {
     }
 
     let hitBot = false;
+    let _carHit = null, _carD = Infinity;
     for (const bot of game.entities) {
       if (!bot.alive || bot.team === player.team) continue;
+      if ((bot.isOwCarrier && typeof bot.rayDist === 'function') || (bot.isCarrier && typeof _carrierRayDist === 'function')) {
+        let _cd = -1;
+        const _cLim = Math.min(_slRange, levelDist + 24);
+        try { _cd = bot.isOwCarrier ? bot.rayDist(origin, spreadDir, _cLim) : _carrierRayDist(origin, spreadDir, _cLim); } catch (_) {}
+        if (_cd >= 0 && _cd <= levelDist + 24 && _cd < _carD) { _carHit = bot; _carD = _cd; }
+        continue;
+      }
       if (bot.isOwBoss && typeof bot.rayDist === 'function') {   // (v38.90) the leviathan: the pellet meets its body, range to the skin
         const _bd = bot.rayDist(origin, spreadDir, Math.min(_slRange, levelDist));
         if (_bd >= 0) {
@@ -68692,6 +69562,20 @@ function fireSpread(origin, dir, w) {
         hitBot = true;
         break;
       }
+    }
+    if (!hitBot && _carHit && !(bestObst && bestObstDist < _carD)) {
+      const rangeFalloff = Math.max(0.3, 1 - (_carD / _slRange) * 0.7);
+      let finalDmg = w.damage * rangeFalloff;
+      if (player.syphonDmgMult > 1) finalDmg *= player.syphonDmgMult;
+      const _hp = _spColTest.copy(origin).addScaledVector(spreadDir, _carD);
+      const dealt = _carHit.takeDamage(finalDmg, 'player', _hp);
+      if (dealt > 0) {
+        player.damageDealt += dealt;
+        player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
+        showHitMarker();
+        spawnImpactSparks(_hp, 3);
+      }
+      hitBot = true;
     }
 
     if (bestObst && !hitBot) {
@@ -78388,7 +79272,7 @@ function _renderDifficultyPicker() {
 }
 
 let _skinToggleWired = false;
-function _setSkinPanelOpen(open) {
+function _setSkinPanelOpen(open, keepTryOn) {
   const hero = document.getElementById('ship-hero');
   if (!hero) return;
   hero.classList.toggle('skin-open', !!open);   // still drives the toggle button's own styling
@@ -78397,6 +79281,8 @@ function _setSkinPanelOpen(open) {
   const btn = document.getElementById('skin-toggle');
   if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
   if (open) _skinPanelPlace();
+  if (!keepTryOn) { try { _lssCloseBuy(); } catch (_) {} }
+  if (open) { try { lssShopRefresh(); } catch (_) {} }
 }
 function _skinPanelPlace() {
   const panel = document.getElementById('ship-preview-skin');
@@ -78438,23 +79324,34 @@ function _renderSkinPicker() {
   if (typeof player !== 'undefined' && player) player.skinId = curId;
   grid.innerHTML = '';
   for (const [id, sk] of Object.entries(SHIP_SKINS)) {
+    const locked = lssSkinLocked(id);
+    const offer = locked ? lssSkinOffer(id) : null;
     const card = document.createElement('div');
-    card.className = 'perk-card skin-card' + (id === curId ? ' selected' : '');
+    card.className = 'perk-card skin-card' + (id === curId ? ' selected' : '')
+      + (locked ? ' locked' : (lssSkinIsPremium(id) ? ' premium' : ''))
+      + (id === _lssBuyFocus ? ' trying' : '');
     card.dataset.skinId = id;
-    card.title = sk.name + ' — ' + sk.desc;
+    card.title = sk.name + ' — ' + sk.desc + (locked ? (' — premium ' + _lssPriceLabel(offer)) : '');
     const _bg = sk.thumb ? ('url(' + sk.thumb + ') 38% 42% / 420% auto ' + sk.swatch)
       : (sk.swatch2
         ? 'linear-gradient(126deg, ' + sk.swatch + ' 0 52%, ' + sk.swatch2 + ' 52% 100%)'
         : sk.swatch);
-    card.innerHTML = '<span class="skin-sw" style="background:' + _bg + ';"></span>';
+    card.innerHTML = '<span class="skin-sw" style="background:' + _bg + ';"></span>' + (locked ? _LSS_LOCK_SVG : '');
     card.addEventListener('click', (e) => {
       e.stopPropagation();
+      if (lssSkinLocked(id)) {
+        _lssOpenBuy(id);
+        _setSkinPanelOpen(false, true);              // true = keep the try-on
+        try { setShipPreviewSkin(id); } catch (_) {}
+        return;
+      }
+      _lssCloseBuy();
       _setStoredSkinId(id);
       _renderSkinPicker();
       try { setShipPreviewSkin(id); } catch (_) {}
     });
     card.addEventListener('mouseenter', () => {
-      if (desc) desc.textContent = sk.name + ' — ' + sk.desc;
+      if (desc) desc.textContent = sk.name + ' — ' + (locked ? ('premium livery · ' + _lssPriceLabel(offer)) : sk.desc);
     });
     card.addEventListener('mouseleave', () => {
       const c = SHIP_SKINS[_getStoredSkinId()];
@@ -78473,7 +79370,7 @@ function _renderSkinPicker() {
         : cur.swatch);
   }
   if (tgEl && cur) tgEl.title = 'Hull livery — ' + cur.name + ' (click to change)';
-  try { setShipPreviewSkin(curId); } catch (_) {}
+  try { setShipPreviewSkin((_lssBuyFocus && SHIP_SKINS[_lssBuyFocus]) ? _lssBuyFocus : curId); } catch (_) {}
 }
 
 function selectLoadout(key) { commitLoadout(key); }
@@ -80548,6 +81445,32 @@ function _lssToggleNoHud(force) {
   } catch (_) { return false; }
 }
 if (typeof window !== 'undefined') window.__hudHide = _lssToggleNoHud;
+function _lssNextSkin(dir) {
+  try {
+    const ids = Object.keys(SHIP_SKINS);
+    if (ids.length < 2) return null;
+    let i = ids.indexOf(_getStoredSkinId()); if (i < 0) i = 0;
+    const next = ids[((i + ((dir | 0) || 1)) % ids.length + ids.length) % ids.length];
+    const ss = document.getElementById('ship-select');
+    if (ss && ss.classList.contains('active')) {
+      _setStoredSkinId(next);
+      try { _renderSkinPicker(); } catch (_) {}
+      try { setShipPreviewSkin(next); } catch (_) {}
+      try { const d = document.getElementById('skin-desc'), sk = SHIP_SKINS[next]; if (d && sk) d.textContent = sk.name + ' — ' + sk.desc; } catch (_) {}
+      return next;
+    }
+    if (game.state !== 'playing' || typeof player === 'undefined' || !player || !player.mesh || player.shipState === 'dead') return null;
+    const _now = (typeof game.time === 'number') ? game.time : 0;
+    if (_now - (player._lastSkinSwap || -9) < 0.12) return null;   // a held key auto-repeats; one step per press
+    player._lastSkinSwap = _now;
+    _setStoredSkinId(next);
+    player.skinId = next;
+    try { _applyShipSkin(player.mesh, next); } catch (_) {}
+    try { _lssAnnounceLoadout(); } catch (_) {}
+    return next;
+  } catch (_) { return null; }
+}
+if (typeof window !== 'undefined') window.__nextSkin = _lssNextSkin;
 function _lssDispatchBound(k, down) {
   const kb = input.kbBindings;
   if (!kb || !k) return;
@@ -80561,6 +81484,7 @@ function _lssDispatchBound(k, down) {
     if (k === (kb.shipPrev || '[')) { try { cycleHubShip(-1); } catch (_) {} }
     if (k === (kb.shipNext || ']')) { try { cycleHubShip(1); } catch (_) {} }
     if (k === ((kb.hideHud != null) ? kb.hideHud : 'h')) { try { _lssToggleNoHud(); } catch (_) {} }   // (v49.09)
+    if (k === ((kb.skinNext != null) ? kb.skinNext : 'k')) { try { _lssNextSkin(1); } catch (_) {} }   // (v49.52)
   } else {
     if (k === kb.ability0) abilityInputRelease(0);
     if (k === kb.ability1) abilityInputRelease(1);
@@ -80905,6 +81829,7 @@ function _howtoRender(ov) {
     rows.push(['VIEW', tag('view')]);
     rows.push(['HIDE HUD', tag('hideHud')]);   // (v49.09)
     rows.push(['CYCLE SHIP', tag('shipPrev') + ' / ' + tag('shipNext')]);
+    rows.push(['NEXT SKIN', tag('skinNext')]);   // (v49.52)
     rows.push(['SCOREBOARD', tag('scoreboard') + ' (HOLD)']);
     rows.push(['SETTINGS', tag('menu')]);
   }
@@ -81772,6 +82697,7 @@ const KB_ACTION_LABELS = {
   scoreboard: 'Scoreboard (hold)',
   menu:       'Menu / Settings',
   hideHud:    'Hide HUD / Crosshair / Text (toggle)',   // (v49.09)
+  skinNext:   'Next Skin (livery)',                       // (v49.52)
 };
 const KB_DEFAULTS = {
   fire: 'mouse0',
@@ -81782,6 +82708,7 @@ const KB_DEFAULTS = {
   view: 'v', shipPrev: '[', shipNext: ']',
   scoreboard: 'tab', menu: 'escape',
   hideHud: 'h',   // (v49.09)
+  skinNext: 'k',  // (v49.52) see _lssNextSkin - K is otherwise only the replay studio's play/pause, and the studio swallows keys
 };
 
 let settingsOpen = false;
@@ -82127,15 +83054,15 @@ function buildSettingsPage() {
                had something to display, real options do that better, and it carried a live bug -
                it had no stamp test, so EVERY phone on its first-run LOW default was shown
                "set automatically after a GPU crash" having never crashed. -->
-          <option value="low" ${QUALITY.level === 'low' ? 'selected' : ''}>Low (no bloom, 1-octave smoke, fewer particles, 0.65× render)</option>
-          <option value="medium" ${QUALITY.level === 'medium' ? 'selected' : ''}>Medium (no bloom, 2-octave smoke, 0.85× render)</option>
+          <option value="low" ${QUALITY.level === 'low' ? 'selected' : ''}>Low (no bloom, 1-octave smoke, fewer particles, 0.65× render, shorter view, slower reflections)</option>
+          <option value="medium" ${QUALITY.level === 'medium' ? 'selected' : ''}>Medium (no bloom, 2-octave smoke, 0.85× render, shorter view)</option>
           <option value="high" ${QUALITY.level === 'high' ? 'selected' : ''}>High (full bloom + 3-octave smoke) — recommended, incl. phones</option>
           <option value="ultra" ${QUALITY.level === 'ultra' ? 'selected' : ''}>Ultra (4-octave smoke, 1.5× particles, dense basin pools, 1.5× bloom RT)</option>
           <option value="mega" ${QUALITY.level === 'mega' ? 'selected' : ''}>Mega Ultra (2.5x supersample, 8-octave smoke, max particles - high-end GPUs)</option>
         </select>
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">High is the baseline everywhere, phones included. Low and Medium sit below it: they turn bloom off and render the world at 0.65× / 0.85× before it is scaled to your screen — so they trade the glow and some sharpness for fill rate. Try them if the frame rate is poor; the picture gets plainer, not broken. If your GPU has headroom, push to Ultra or Mega. The change applies to newly-spawned effects ; existing smoke plumes keep their settings until they fade out. Quality change applies to clouds + bloom on the next round-start. Window-resize also rebinds bloom RT size to the new tier.</label>
+        <label style="flex:1;">High is the baseline everywhere, phones included. Low and Medium sit below it: they turn bloom off and render the world at 0.65× / 0.85× before it is scaled to your screen — so they trade the glow and some sharpness for fill rate — and in the overworld they also draw a shorter distance (Low refreshes water reflections less often too), which is what helps a slow or battery-throttled CPU. Try them if the frame rate is poor; the picture gets plainer, not broken. If your GPU has headroom, push to Ultra or Mega. The change applies to newly-spawned effects ; existing smoke plumes keep their settings until they fade out. Quality change applies to clouds + bloom on the next round-start. Window-resize also rebinds bloom RT size to the new tier.</label>
       </div>
       <!-- (v49.45) LITE MODE - phone-class graphics on a non-touch device. Boot-time, so a change that
            flips the effective mode reloads. Hidden on touch phones: they are always on this budget. -->

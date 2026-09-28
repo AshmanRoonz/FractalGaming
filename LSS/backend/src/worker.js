@@ -10,13 +10,23 @@
 //   DELETE /room/:code            ; remove a room (host explicitly closes)
 //   GET    /rooms                 ; live room list
 //   DELETE /me                    ; scrub the calling user from the database
+//   (migration 006)
+//   POST   /auth/session          ; trade a Discord token for a long-lived LSS session
+//   POST   /auth/logout           ; end the calling session
+//   GET    /me                    ; identity + owned entitlements (also the "is my session alive" probe)
+//   GET    /shop/catalog          ; what is for sale / premium, and whether checkout is configured
+//   POST   /shop/paypal/create    ; start a PayPal checkout for one sku -> approve_url
+//   POST   /shop/paypal/capture   ; finish it after the buyer approves -> entitlements
+//   POST   /shop/paypal/webhook   ; PayPal -> us (approvals, captures, refunds, chargebacks)
 //
 // Architecture:
 //   - Cloudflare Worker, ES module format.
 //   - D1 database for stats (binding: DB).
 //   - KV namespaces for ephemeral hot data (bindings: ROOMS, CACHE).
-//   - Discord OAuth tokens validated via /users/@me on every authed call.
-//     A small KV cache could be added later to reduce Discord API load.
+//   - Identity: a Discord OAuth token is verified via /users/@me ONCE, at POST /auth/session, and
+//     traded for an LSS session token ('lss_...') that slides forward on use. Every other authed
+//     route accepts that session. Raw Discord tokens are still accepted (older clients), but they
+//     die 7 days after sign-in - which is the whole story of the leaderboard's missing months.
 //   - CORS allowlist driven by env.ALLOWED_ORIGINS (comma-separated).
 
 const DISCORD_API = 'https://discord.com/api/v10';
@@ -94,6 +104,34 @@ const LOBBY_ROOM_TTL_SEC     = 1800;
 const LOBBY_ROOM_MAX_SIZE    = 6;
 const LOBBY_ROOM_CODE_LEN    = 4;
 
+// ⭐⭐⭐ (migration 006) SESSIONS - WHY THE LEADERBOARD HAS A THREE-MONTH HOLE IN IT.
+// Every authed route used to be called with the player's raw Discord access token, and Discord
+// expires those 7 days after sign-in. Nothing refreshed it. So from the eighth day every POST
+// /match answered 401 invalid_token, the client parked the match in its outbox, retried it forty
+// times and threw it away - while the menu went on painting the avatar as signed in, because that
+// is a cached object that never expires. Live D1, 2026-09-27: 221 matches ever; none between
+// Jun 16 and Sep 5; the owner's last accepted request Sep 20; the last match Sep 16. Matches only
+// ever arrived in the week after a sign-in.
+//   The token is now verified ONCE, at POST /auth/session, and traded for our own session token.
+// A session SLIDES: every use pushes expires_at out again, so it only lapses for a player who has
+// not played for the whole window - and then they sign in again, knowingly, because the client
+// now says so instead of silently shredding their matches.
+// (!) The raw token never touches D1 - only its SHA-256. A leaked table is not a list of logins.
+const SESSION_PREFIX         = 'lss_';
+const SESSION_TTL_MS         = 180 * 24 * 3600 * 1000;   // sliding window
+const SESSION_TOUCH_MS       = 6 * 3600 * 1000;          // extend at most this often (write amplification)
+const SESSION_MAX_PER_PLAYER = 20;                       // oldest beyond this are pruned at mint
+
+// (migration 006) THE SHOP. Prices live in D1 `products`, never in the client. A livery's sku is
+// 'skin:<SHIP_SKINS id>'. PayPal is the first (and so far only) payment provider; manual grants go
+// through tools/lss_shop.py. Everything PayPal-shaped is inert until the keys for the CURRENT
+// PAYPAL_ENV exist as Worker secrets (sandbox: PAYPAL_CLIENT_ID/SECRET; live: PAYPAL_LIVE_CLIENT_ID/
+// SECRET - see _paypalCreds) - /shop/catalog then says checkout is off and the
+// create/capture routes answer 503, so deploying this changes nothing a player can see.
+const SKU_RE                  = /^[a-z0-9][a-z0-9_:\-]{0,63}$/;
+const PURCHASE_ABANDON_MS     = 3 * 3600 * 1000;         // an order nobody approved in 3 h is dead
+const PURCHASE_RECONCILE_GAP  = 4 * 60 * 1000;           // don't re-ask PayPal about a row more often
+
 // ---------- CORS / response helpers ----------------------------------
 
 function corsHeaders(env, origin) {
@@ -111,23 +149,41 @@ function corsHeaders(env, origin) {
   };
 }
 
-function jsonResponse(status, body, env, origin) {
+function jsonResponse(status, body, env, origin, extraHeaders) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { ...corsHeaders(env, origin), 'Content-Type': 'application/json' },
+    headers: { ...corsHeaders(env, origin), 'Content-Type': 'application/json', ...(extraHeaders || {}) },
   });
 }
 
 // ---------- Auth ------------------------------------------------------
 
-// Validates the Authorization: Bearer <token> header by hitting Discord's
-// /users/@me endpoint. Returns the Discord user object on success, or
-// throws a Response on failure (caller catches and forwards).
-async function requireAuth(request) {
+// Discord's API base. Overridable ONLY under DEV_MOCKS = '1' (wrangler dev against a local mock),
+// so the whole session flow can be exercised without a real Discord login. Production never sets
+// either variable, and a stray DEV_DISCORD_API without DEV_MOCKS is ignored.
+function _discordApi(env) {
+  return (env && env.DEV_MOCKS === '1' && env.DEV_DISCORD_API) ? env.DEV_DISCORD_API : DISCORD_API;
+}
+
+// Who is calling? Answers with a Discord-user-shaped object { id, username, global_name, avatar }
+// whichever credential arrived, so no route has to care:
+//   'Bearer lss_...'  an LSS session - one D1 read, no Discord round-trip.
+//   'Bearer <other>'  a raw Discord access token, verified against /users/@me. Older clients still
+//                     send these, and POST /auth/session consumes exactly one to mint a session.
+// Throws ApiError(401) on a dead credential; 'session_expired' vs 'invalid_token' tells the client
+// which one died.
+async function requireAuth(request, env) {
   const auth = request.headers.get('Authorization') || '';
   if (!auth.startsWith('Bearer ')) throw new ApiError(401, 'missing_token');
-  const res = await fetch(DISCORD_API + '/users/@me', {
-    headers: { Authorization: auth },
+  const tok = auth.slice(7).trim();
+  if (!tok) throw new ApiError(401, 'missing_token');
+  if (tok.startsWith(SESSION_PREFIX)) return await _sessionUser(env, tok);
+  return await _discordUser(env, tok);
+}
+
+async function _discordUser(env, token) {
+  const res = await fetch(_discordApi(env) + '/users/@me', {
+    headers: { Authorization: 'Bearer ' + token },
   });
   // ⭐ (v4) A DISCORD OUTAGE IS NOT A REVOKED TOKEN. Every non-ok response used to collapse into
   // 401 invalid_token, so a 429 or a 503 from Discord during the thirty seconds after a match ended
@@ -143,6 +199,137 @@ async function requireAuth(request) {
 
 class ApiError extends Error {
   constructor(status, code, detail) { super(code); this.status = status; this.code = code; this.detail = detail; }
+}
+
+// ---------- (migration 006) Sessions ---------------------------------
+
+function _b64url(bytes) {
+  let s = '';
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function _randomToken(nBytes) {
+  const a = new Uint8Array(nBytes);
+  crypto.getRandomValues(a);
+  return _b64url(a);
+}
+async function _sha256hex(s) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+  return Array.from(new Uint8Array(buf), b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// The identity a session stands for, in the same shape Discord's /users/@me returns, read from the
+// players row the mint upserted. A session whose player row is gone (DELETE /me scrubs both) is
+// dead, not anonymous.
+async function _sessionUser(env, token) {
+  const hash = await _sha256hex(token);
+  const now = Date.now();
+  const row = await env.DB.prepare(`
+    SELECT s.discord_id, s.expires_at, s.last_used_at,
+           p.username, p.display_name, p.avatar_hash
+    FROM sessions s JOIN players p ON p.discord_id = s.discord_id
+    WHERE s.token_hash = ?
+  `).bind(hash).first();
+  if (!row || !(Number(row.expires_at) > now)) throw new ApiError(401, 'session_expired');
+  // SLIDE. Written at most once per SESSION_TOUCH_MS: every match post, heartbeat and state push
+  // is an authed call, and a write per call would be write amplification for no information.
+  let expiresAt = Number(row.expires_at);
+  if (now - Number(row.last_used_at || 0) > SESSION_TOUCH_MS) {
+    expiresAt = now + SESSION_TTL_MS;
+    try {
+      await env.DB.prepare('UPDATE sessions SET last_used_at = ?, expires_at = ? WHERE token_hash = ?')
+        .bind(now, expiresAt, hash).run();
+    } catch (_) { expiresAt = Number(row.expires_at); }   // a failed slide costs nothing today
+  }
+  return {
+    id:          String(row.discord_id),
+    username:    row.username || ('player_' + String(row.discord_id).slice(-4)),
+    global_name: row.display_name || null,
+    avatar:      row.avatar_hash || null,
+    _sessionHash: hash,
+    _sessionExpiresAt: expiresAt,
+  };
+}
+
+function _publicUser(user) {
+  return {
+    id:          String(user.id),
+    username:    user.username,
+    global_name: user.global_name || null,
+    avatar:      user.avatar || null,
+  };
+}
+
+async function _ownedSkus(env, discordId) {
+  const r = await env.DB.prepare(
+    'SELECT sku FROM entitlements WHERE discord_id = ? AND revoked_at IS NULL ORDER BY granted_at ASC'
+  ).bind(String(discordId)).all();
+  return (r.results || []).map(x => x.sku);
+}
+
+// ---------- Route: POST /auth/session --------------------------------
+// The ONE place a Discord token is spent. The client calls this straight after the OAuth callback
+// (and once at boot, to upgrade a player who signed in before sessions existed). A Discord token
+// that is already dead answers 401 invalid_token here - which is the client's cue to show SIGN IN
+// AGAIN rather than carrying on as though it were signed in.
+async function handleAuthSession(request, env, origin) {
+  const auth = request.headers.get('Authorization') || '';
+  const tok = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+  if (!tok) throw new ApiError(401, 'missing_token');
+  if (tok.startsWith(SESSION_PREFIX)) throw new ApiError(400, 'already_a_session');
+  const user = await _discordUser(env, tok);
+  if (!user || !user.id) throw new ApiError(401, 'invalid_token');
+  await upsertPlayer(env, user);
+
+  const token = SESSION_PREFIX + _randomToken(32);
+  const hash = await _sha256hex(token);
+  const now = Date.now();
+  const ua = String(request.headers.get('User-Agent') || '').slice(0, 200);
+  await env.DB.batch([
+    env.DB.prepare(`
+      INSERT INTO sessions (token_hash, discord_id, created_at, last_used_at, expires_at, user_agent)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).bind(hash, String(user.id), now, now, now + SESSION_TTL_MS, ua),
+    // Every sign-in mints one, so a player on five devices who signs in weekly would grow without
+    // bound. Keep the most recently USED few; an evicted device just signs in again.
+    env.DB.prepare(`
+      DELETE FROM sessions WHERE discord_id = ? AND token_hash NOT IN (
+        SELECT token_hash FROM sessions WHERE discord_id = ? ORDER BY last_used_at DESC LIMIT ?
+      )
+    `).bind(String(user.id), String(user.id), SESSION_MAX_PER_PLAYER),
+  ]);
+
+  return jsonResponse(200, {
+    ok: true,
+    session: token,
+    expires_at: now + SESSION_TTL_MS,
+    user: _publicUser(user),
+    entitlements: await _ownedSkus(env, user.id),
+  }, env, origin);
+}
+
+// ---------- Route: POST /auth/logout ---------------------------------
+async function handleAuthLogout(request, env, origin) {
+  let user = null;
+  try { user = await requireAuth(request, env); } catch (_) {}
+  if (user && user._sessionHash) {
+    await env.DB.prepare('DELETE FROM sessions WHERE token_hash = ?').bind(user._sessionHash).run();
+  }
+  // Always 200: signing out of a session that is already dead is still signed out.
+  return jsonResponse(200, { ok: true }, env, origin);
+}
+
+// ---------- Route: GET /me -------------------------------------------
+// Identity + what the account owns. Doubles as the cheap "is my login still alive" probe the client
+// runs at boot: a 401 here is how a lapsed session becomes a SIGN IN AGAIN prompt.
+async function handleGetMe(request, env, origin) {
+  const user = await requireAuth(request, env);
+  return jsonResponse(200, {
+    ok: true,
+    user: _publicUser(user),
+    entitlements: await _ownedSkus(env, user.id),
+    session: user._sessionHash ? { expires_at: user._sessionExpiresAt } : null,
+  }, env, origin);
 }
 
 // Upsert the player row with the latest identity from Discord.
@@ -583,15 +770,16 @@ async function invalidateLeaderboardCache(env) {
 // ---------- Route: POST /auth/verify ---------------------------------
 
 async function handleAuthVerify(request, env, origin) {
-  const user = await requireAuth(request);
+  const user = await requireAuth(request, env);
   await upsertPlayer(env, user);
-  return jsonResponse(200, { ok: true, user }, env, origin);
+  // A session user carries internal fields (_sessionHash); only the public shape goes back.
+  return jsonResponse(200, { ok: true, user: user._sessionHash ? _publicUser(user) : user }, env, origin);
 }
 
 // ---------- Route: POST /match ---------------------------------------
 
 async function handlePostMatch(request, env, origin) {
-  const user = await requireAuth(request);
+  const user = await requireAuth(request, env);
   await upsertPlayer(env, user);
 
   let body;
@@ -1000,7 +1188,7 @@ async function handleGetPlayer(env, origin, discordId) {
 // ---------- Routes: rooms (lobby browser) -----------------------------
 
 async function handlePostHeartbeat(request, env, origin) {
-  const user = await requireAuth(request);
+  const user = await requireAuth(request, env);
   let body;
   try { body = await request.json(); } catch (_) { throw new ApiError(400, 'invalid_json'); }
   if (!body.room_code) throw new ApiError(400, 'missing_room_code');
@@ -1020,7 +1208,7 @@ async function handlePostHeartbeat(request, env, origin) {
 }
 
 async function handleDeleteRoom(request, env, origin, code) {
-  const user = await requireAuth(request);
+  const user = await requireAuth(request, env);
   const existing = await env.ROOMS.get('room:' + code, 'json');
   if (!existing) return jsonResponse(404, { error: 'room_not_found' }, env, origin);
   if (existing.host_id !== user.id) return jsonResponse(403, { error: 'not_host' }, env, origin);
@@ -1045,7 +1233,7 @@ async function handleGetRooms(env, origin) {
 // ---------- Route: DELETE /me ----------------------------------------
 
 async function handleDeleteMe(request, env, origin) {
-  const user = await requireAuth(request);
+  const user = await requireAuth(request, env);
   // Scrub the player row + their match participation entries +
   // achievements + per-loadout aggregates. Keep matches themselves
   // (immutable historical records) but our user no longer appears in
@@ -1058,6 +1246,10 @@ async function handleDeleteMe(request, env, origin) {
   await env.DB.prepare('DELETE FROM achievements           WHERE discord_id = ?').bind(user.id).run();
   await env.DB.prepare('DELETE FROM match_participants    WHERE discord_id = ? OR reported_by = ?').bind(user.id, user.id).run();
   await env.DB.prepare('DELETE FROM players                WHERE discord_id = ?').bind(user.id).run();
+  // (migration 006) Every login ends with the data. purchases + entitlements are KEPT on purpose:
+  // they are payment records (refund / chargeback disputes need them), and a player who scrubs their
+  // stats and later signs in again still owns what they paid for.
+  await env.DB.prepare('DELETE FROM sessions               WHERE discord_id = ?').bind(user.id).run();
   await invalidateLeaderboardCache(env);
   return jsonResponse(200, { ok: true, scrubbed: true }, env, origin);
 }
@@ -1112,7 +1304,7 @@ function _mergeAegis(oldA, newA) {
 }
 
 async function handleGetMyState(request, env, origin) {
-  const user = await requireAuth(request);
+  const user = await requireAuth(request, env);
   await upsertPlayer(env, user);
   const row = await env.DB.prepare(
     'SELECT aegis_json, prefs_json, updated_at FROM player_state WHERE discord_id = ?'
@@ -1125,7 +1317,7 @@ async function handleGetMyState(request, env, origin) {
 }
 
 async function handlePutMyState(request, env, origin) {
-  const user = await requireAuth(request);
+  const user = await requireAuth(request, env);
   const body = await request.json().catch(() => null);
   if (!body || typeof body !== 'object') throw new ApiError(400, 'bad_body');
 
@@ -1283,7 +1475,7 @@ function computeLobbyFlags(p) {
 }
 
 async function handleLobbyHeartbeat(request, env, origin) {
-  const user = await requireAuth(request);
+  const user = await requireAuth(request, env);
   let body = {};
   try { body = await request.json(); } catch (_) { throw new ApiError(400, 'invalid_json'); }
 
@@ -1325,7 +1517,7 @@ async function handleLobbyHeartbeat(request, env, origin) {
 }
 
 async function handleLobbyList(request, env, origin) {
-  const user = await requireAuth(request);
+  const user = await requireAuth(request, env);
   const url = new URL(request.url);
   const limit = Math.min(
     Math.max(1, parseInt(url.searchParams.get('limit') || String(LOBBY_LIST_DEFAULT_CAP), 10) || LOBBY_LIST_DEFAULT_CAP),
@@ -1379,7 +1571,7 @@ async function handleLobbyList(request, env, origin) {
 }
 
 async function handleLobbyLeave(request, env, origin) {
-  const user = await requireAuth(request);
+  const user = await requireAuth(request, env);
   await env.ROOMS.delete('presence:' + user.id);
   return jsonResponse(200, { ok: true }, env, origin);
 }
@@ -1395,7 +1587,7 @@ function _newInviteId() {
 }
 
 async function handleLobbyInvite(request, env, origin) {
-  const user = await requireAuth(request);
+  const user = await requireAuth(request, env);
   let body = {};
   try { body = await request.json(); } catch (_) { throw new ApiError(400, 'invalid_json'); }
   const toId = String(body.toId || '');
@@ -1472,7 +1664,7 @@ async function handleLobbyInvite(request, env, origin) {
 }
 
 async function handleLobbyInviteAccept(request, env, origin, inviteId) {
-  const user = await requireAuth(request);
+  const user = await requireAuth(request, env);
   const key  = 'invite:' + user.id + ':' + inviteId;
   const inv  = await env.ROOMS.get(key, 'json');
   if (!inv) {
@@ -1532,7 +1724,7 @@ async function handleLobbyInviteAccept(request, env, origin, inviteId) {
 }
 
 async function handleLobbyInviteIgnore(request, env, origin, inviteId) {
-  const user = await requireAuth(request);
+  const user = await requireAuth(request, env);
   const key  = 'invite:' + user.id + ':' + inviteId;
   // Ignore : delete the invite but DO NOT reset the cooldown. Repeat
   // spammers ramp themselves up the ladder.
@@ -1615,7 +1807,7 @@ async function _roomFindForUser(env, userId) {
 }
 
 async function handleRoomsCreate(request, env, origin) {
-  const user = await requireAuth(request);
+  const user = await requireAuth(request, env);
   let body = {};
   try { body = await request.json(); } catch (_) {}
   const isPublic = body.isPublic !== false; // default public
@@ -1624,7 +1816,7 @@ async function handleRoomsCreate(request, env, origin) {
 }
 
 async function handleRoomsJoin(request, env, origin) {
-  const user = await requireAuth(request);
+  const user = await requireAuth(request, env);
   let body = {};
   try { body = await request.json(); } catch (_) { throw new ApiError(400, 'invalid_json'); }
   const code = String(body.code || '').toUpperCase();
@@ -1640,7 +1832,7 @@ async function handleRoomsJoin(request, env, origin) {
 }
 
 async function handleRoomsQuickmatch(request, env, origin) {
-  const user = await requireAuth(request);
+  const user = await requireAuth(request, env);
   // Find an open public room with seats. Skip rooms the caller is already in.
   const list = await env.ROOMS.list({ prefix: 'lobbyroom:' });
   for (const k of list.keys) {
@@ -1659,7 +1851,7 @@ async function handleRoomsQuickmatch(request, env, origin) {
 }
 
 async function handleRoomsLeave(request, env, origin) {
-  const user = await requireAuth(request);
+  const user = await requireAuth(request, env);
   let body = {};
   try { body = await request.json(); } catch (_) {}
   const code = String(body.code || '').toUpperCase();
@@ -1681,7 +1873,7 @@ async function handleRoomsLeave(request, env, origin) {
 }
 
 async function handleRoomsScoop(request, env, origin, code) {
-  const user = await requireAuth(request);
+  const user = await requireAuth(request, env);
   const room = await env.ROOMS.get('lobbyroom:' + code, 'json');
   if (!room) throw new ApiError(404, 'room_not_found');
   if (room.hostId !== user.id) throw new ApiError(403, 'not_host');
@@ -1712,6 +1904,492 @@ async function handleRoomsScoop(request, env, origin, code) {
   }
   if (scooped > 0) await _roomWrite(env, room);
   return jsonResponse(200, { room, scooped }, env, origin);
+}
+
+// ---------- (migration 006) The shop ---------------------------------
+//
+// ⭐⭐ WHO PAID FOR WHAT IS DECIDED HERE AND NOWHERE ELSE.
+//   - The PRICE comes from D1 `products`. The client names a sku and nothing more; an amount in a
+//     request body would be an amount a player could edit.
+//   - The BUYER is the session that created the order. It is written into the purchase row at
+//     create time and into PayPal's custom_id, and every later step checks the two agree - the
+//     capture route refuses an order that belongs to another account.
+//   - PAID means PayPal says the capture COMPLETED for exactly the amount and currency on the row.
+//     Anything else (PENDING, DECLINED, a mismatched amount) grants nothing.
+// Three paths can finish a purchase and they all call _paypalSettle: the capture route (the
+// buyer came back to the game), the webhook (PayPal told us), and the cron reconcile (neither
+// happened - the tab was closed on PayPal's page). Whichever arrives first wins; the rest no-op.
+
+function _parseGrants(s) {
+  try {
+    const a = JSON.parse(s || '[]');
+    return Array.isArray(a) ? a.filter(x => typeof x === 'string' && SKU_RE.test(x)) : [];
+  } catch (_) { return []; }
+}
+// Everything one product unlocks: its own sku plus a bundle's extras.
+function _productSkus(product) {
+  return [...new Set([String(product.sku), ..._parseGrants(product.grants_json)])];
+}
+
+// The grant for one completed purchase, as batch statements.
+// ⚠ GATED ON THE PURCHASE ROW, INSIDE THE SAME BATCH. The INSERT only fires while the purchase is
+//   'completed' - so a refund that lands between the settle's read and this write cannot be undone
+//   by it, and a grant can never exist for a purchase that is not marked paid.
+// ⚠ A LIVE ROW IS LEFT ALONE. Re-granting something already owned (a bundle that overlaps a skin
+//   the owner gifted) keeps the ORIGINAL source and purchase_id; otherwise refunding the bundle
+//   would revoke the gift along with it. Only a revoked row is re-pointed at the new purchase.
+function _grantStmts(env, discordId, product, purchaseId, now) {
+  return _productSkus(product).map(sku => env.DB.prepare(`
+    INSERT INTO entitlements (discord_id, sku, source, purchase_id, granted_at, revoked_at, note)
+    SELECT ?, ?, 'paypal', ?, ?, NULL, NULL
+    WHERE EXISTS (SELECT 1 FROM purchases WHERE id = ? AND status = 'completed')
+    ON CONFLICT(discord_id, sku) DO UPDATE SET
+      source      = CASE WHEN entitlements.revoked_at IS NULL THEN entitlements.source      ELSE excluded.source      END,
+      purchase_id = CASE WHEN entitlements.revoked_at IS NULL THEN entitlements.purchase_id ELSE excluded.purchase_id END,
+      granted_at  = CASE WHEN entitlements.revoked_at IS NULL THEN entitlements.granted_at  ELSE excluded.granted_at  END,
+      note        = CASE WHEN entitlements.revoked_at IS NULL THEN entitlements.note        ELSE excluded.note        END,
+      revoked_at  = NULL
+  `).bind(String(discordId), sku, purchaseId, now, purchaseId));
+}
+
+function _paypalEnv(env) {
+  return String((env && env.PAYPAL_ENV) || 'sandbox').toLowerCase() === 'live' ? 'live' : 'sandbox';
+}
+// ⭐ SANDBOX AND LIVE KEYS LIVE SIDE BY SIDE, and PAYPAL_ENV picks one set. The first cut had ONE pair
+// of names, so going live meant overwriting the sandbox keys: checkout was broken for whichever
+// window sat between replacing the keys and flipping PAYPAL_ENV (each `secret put` deploys on its
+// own), and a bad live launch could only be undone by re-entering the sandbox keys. Now the owner adds
+// PAYPAL_LIVE_* whenever convenient - nothing changes while PAYPAL_ENV says sandbox - and the switch,
+// and any rollback, is one var and one deploy.
+// ⚠ STRICT, NO FALLBACK: live never borrows the sandbox names (sandbox keys against the live API just
+//   fail auth, and a silent mix would be worse than an obvious "checkout unavailable").
+function _paypalCreds(env) {
+  if (!env) return { id: null, secret: null, webhook: null };
+  return (_paypalEnv(env) === 'live')
+    ? { id: env.PAYPAL_LIVE_CLIENT_ID, secret: env.PAYPAL_LIVE_CLIENT_SECRET, webhook: env.PAYPAL_LIVE_WEBHOOK_ID }
+    : { id: env.PAYPAL_CLIENT_ID,      secret: env.PAYPAL_CLIENT_SECRET,      webhook: env.PAYPAL_WEBHOOK_ID };
+}
+function _paypalConfigured(env) {
+  const c = _paypalCreds(env);
+  return !!(c.id && c.secret);
+}
+function _paypalBase(env) {
+  if (env.DEV_MOCKS === '1' && env.DEV_PAYPAL_API) return env.DEV_PAYPAL_API;
+  return _paypalEnv(env) === 'live' ? 'https://api-m.paypal.com' : 'https://api-m.sandbox.paypal.com';
+}
+
+// A PayPal REST client for ONE invocation. The OAuth token lives on this closure, not at module
+// scope: isolates are reused across requests and module-level mutable state is the pattern the
+// platform warns against (it would also let a sandbox token outlive a switch to live). A purchase
+// talks to PayPal a handful of times, so one token fetch per request costs nothing.
+function _paypalClient(env) {
+  const base = _paypalBase(env);
+  const creds = _paypalCreds(env);
+  let token = null;
+  async function auth() {
+    if (token) return token;
+    const res = await fetch(base + '/v1/oauth2/token', {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Basic ' + btoa(creds.id + ':' + creds.secret),
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: 'grant_type=client_credentials',
+    });
+    if (!res.ok) throw new ApiError(502, 'paypal_auth_failed', 'paypal oauth ' + res.status);
+    const j = await res.json();
+    if (!j || !j.access_token) throw new ApiError(502, 'paypal_auth_failed', 'no token');
+    token = j.access_token;
+    return token;
+  }
+  return async function call(method, path, body, headers) {
+    const t = await auth();
+    const res = await fetch(base + path, {
+      method,
+      headers: { 'Authorization': 'Bearer ' + t, 'Content-Type': 'application/json', ...(headers || {}) },
+      body: body == null ? undefined : (typeof body === 'string' ? body : JSON.stringify(body)),
+    });
+    // PayPal responses are small JSON documents (an order is a few KB).
+    const text = await res.text();
+    let json = null;
+    try { json = text ? JSON.parse(text) : null; } catch (_) {}
+    return { status: res.status, ok: res.ok, json, text };
+  };
+}
+
+// Where PayPal sends the buyer back. Only ever an origin from ALLOWED_ORIGINS - a return_url built
+// from whatever the request claimed would make this Worker an open redirect with PayPal's name on it.
+function _returnOrigin(env, requested) {
+  const allowed = (env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (requested && allowed.includes(requested)) return requested;
+  return allowed[0] || 'https://lss.fractalreality.ca';
+}
+
+function _centsOf(v) { const n = Number(v); return Number.isFinite(n) ? Math.round(n * 100) : NaN; }
+
+async function _touchPurchase(env, id, status, note) {
+  const now = Date.now();
+  if (status) {
+    await env.DB.prepare(`
+      UPDATE purchases SET status = ?, updated_at = ?, note = COALESCE(?, note)
+      WHERE id = ? AND status IN ('created', 'pending')
+    `).bind(status, now, note || null, id).run();
+  } else {
+    await env.DB.prepare('UPDATE purchases SET updated_at = ? WHERE id = ?').bind(now, id).run();
+  }
+}
+
+// ---------- Route: GET /shop/catalog ---------------------------------
+// Public. Every premium product, including RETIRED ones (on_sale false): a retired livery is still
+// locked to everyone who never bought it, so the client has to know it exists.
+async function handleShopCatalog(request, env, origin) {
+  const rows = await env.DB.prepare(`
+    SELECT sku, kind, title, price_cents, currency, active, grants_json, sort
+    FROM products ORDER BY sort ASC, sku ASC
+  `).all();
+  const products = (rows.results || []).map(p => ({
+    sku:         p.sku,
+    kind:        p.kind,
+    title:       p.title,
+    price_cents: p.price_cents,
+    currency:    p.currency,
+    on_sale:     !!p.active,
+    grants:      _productSkus(p),
+  }));
+  return jsonResponse(200, {
+    products,
+    checkout: { paypal: _paypalConfigured(env), env: _paypalEnv(env) },
+  }, env, origin, { 'Cache-Control': 'public, max-age=60' });
+}
+
+// ---------- Route: POST /shop/paypal/create --------------------------
+async function handlePaypalCreate(request, env, origin) {
+  if (!_paypalConfigured(env)) throw new ApiError(503, 'checkout_unavailable');
+  const user = await requireAuth(request, env);
+  const body = await request.json().catch(() => null);
+  const sku = String((body && body.sku) || '');
+  if (!SKU_RE.test(sku)) throw new ApiError(400, 'bad_sku');
+  const product = await env.DB.prepare('SELECT * FROM products WHERE sku = ?').bind(sku).first();
+  if (!product || !product.active) throw new ApiError(404, 'not_for_sale');
+  const price = Math.floor(Number(product.price_cents));
+  if (!(price > 0)) throw new ApiError(404, 'not_for_sale');
+  const currency = String(product.currency || 'USD').toUpperCase();
+  // Owning EVERYTHING a product unlocks makes buying it pointless. Owning part of a bundle does not.
+  const owned = new Set(await _ownedSkus(env, user.id));
+  if (_productSkus(product).every(s => owned.has(s))) throw new ApiError(409, 'already_owned');
+  await upsertPlayer(env, user);
+
+  const base = _returnOrigin(env, body && typeof body.origin === 'string' ? body.origin : origin);
+  const purchaseId = 'pur_' + _randomToken(12);
+  const money = { currency_code: currency, value: (price / 100).toFixed(2) };
+  const title = String(product.title || sku).slice(0, 120);
+  const pp = _paypalClient(env);
+  const order = await pp('POST', '/v2/checkout/orders', {
+    intent: 'CAPTURE',
+    purchase_units: [{
+      reference_id: sku,
+      custom_id:    String(user.id),
+      invoice_id:   purchaseId,
+      description:  (title + ' - Last Ship Sailing').slice(0, 127),
+      amount:       { ...money, breakdown: { item_total: money } },
+      items: [{ name: title, quantity: '1', unit_amount: money, category: 'DIGITAL_GOODS', sku: sku.slice(0, 127) }],
+    }],
+    // application_context is deprecated in Orders v2; experience_context is where these live now.
+    payment_source: { paypal: { experience_context: {
+      brand_name:          'Last Ship Sailing',
+      shipping_preference: 'NO_SHIPPING',
+      user_action:         'PAY_NOW',
+      return_url:          base + '/shop_return.html',
+      cancel_url:          base + '/shop_return.html?cancel=1',
+    } } },
+  }, { 'PayPal-Request-Id': purchaseId });
+  if (!order.ok || !order.json || !order.json.id) {
+    console.error('[lss-shop] order create failed', order.status, String(order.text || '').slice(0, 400));
+    throw new ApiError(502, 'paypal_order_failed', 'paypal ' + order.status);
+  }
+  // 'payer-action' when experience_context is used (status PAYER_ACTION_REQUIRED); 'approve' on the
+  // older shape. Either is the page the buyer has to visit.
+  const link = (order.json.links || []).find(l => l && (l.rel === 'payer-action' || l.rel === 'approve'));
+  if (!link || !link.href) throw new ApiError(502, 'paypal_no_approve_link');
+
+  const now = Date.now();
+  await env.DB.prepare(`
+    INSERT INTO purchases (id, discord_id, sku, provider, provider_order, provider_capture, status,
+                           amount_cents, currency, created_at, updated_at, completed_at, note)
+    VALUES (?, ?, ?, 'paypal', ?, NULL, 'created', ?, ?, ?, ?, NULL, NULL)
+  `).bind(purchaseId, String(user.id), sku, String(order.json.id), price, currency, now, now).run();
+
+  return jsonResponse(200, {
+    ok: true, purchase_id: purchaseId, order_id: order.json.id, approve_url: link.href,
+  }, env, origin);
+}
+
+// ---------- The settle -----------------------------------------------
+function _firstCapture(order) {
+  for (const pu of (order && order.purchase_units) || []) {
+    const caps = (pu && pu.payments && pu.payments.captures) || [];
+    if (caps.length) return caps[0];
+  }
+  return null;
+}
+
+// THE ONE FUNCTION THAT MOVES A PAYPAL PURCHASE FORWARD. Safe to run concurrently and repeatedly:
+//   - the capture carries PayPal-Request-Id, so a second capture call replays the first answer
+//     instead of charging again;
+//   - every status write is a CAS on ('created', 'pending'), so only one caller completes a row;
+//   - the grant is gated on the row being 'completed' inside the same batch (_grantStmts).
+async function _paypalSettle(env, pur, pp) {
+  if (!pur) return { status: 'missing' };
+  if (pur.status !== 'created' && pur.status !== 'pending') return { status: pur.status };
+  pp = pp || _paypalClient(env);
+  const oid = encodeURIComponent(String(pur.provider_order || ''));
+  let o = await pp('GET', '/v2/checkout/orders/' + oid);
+  if (o.status === 404) { await _touchPurchase(env, pur.id, 'abandoned', 'order not found'); return { status: 'abandoned' }; }
+  if (!o.ok || !o.json) throw new ApiError(502, 'paypal_lookup_failed', 'paypal ' + o.status);
+  let order = o.json;
+
+  if (order.status === 'APPROVED') {
+    const c = await pp('POST', '/v2/checkout/orders/' + oid + '/capture', {}, { 'PayPal-Request-Id': 'cap_' + pur.id });
+    if (c.ok && c.json && c.json.status) {
+      order = c.json;
+    } else {
+      // A 422 is usually a concurrent path having captured it first - believe the order, not the error.
+      const o2 = await pp('GET', '/v2/checkout/orders/' + oid);
+      if (o2.ok && o2.json) order = o2.json;
+      if (order.status === 'APPROVED') {
+        // Still only approved: the buyer's funding failed (INSTRUMENT_DECLINED and friends). PayPal
+        // wants them back on its page; the row stays 'created' and the client can offer a retry.
+        await _touchPurchase(env, pur.id);
+        const issue = c.json && c.json.details && c.json.details[0] && c.json.details[0].issue;
+        return { status: 'created', detail: issue || ('capture ' + c.status) };
+      }
+    }
+  }
+
+  if (order.status === 'COMPLETED') {
+    const cap = _firstCapture(order);
+    if (!cap) { await _touchPurchase(env, pur.id); return { status: 'created', detail: 'no_capture' }; }
+    const capId = String(cap.id || '');
+    const capStatus = String(cap.status || '');
+    if (capStatus === 'COMPLETED') {
+      // Paid - but grant only for the money we asked for, from the account we sold to.
+      const amtOk = !!cap.amount && String(cap.amount.currency_code) === String(pur.currency)
+                 && _centsOf(cap.amount.value) === Number(pur.amount_cents);
+      const whoOk = !cap.custom_id || String(cap.custom_id) === String(pur.discord_id);
+      const invOk = !cap.invoice_id || String(cap.invoice_id) === String(pur.id);
+      if (!(amtOk && whoOk && invOk)) {
+        await env.DB.prepare(`
+          UPDATE purchases SET status = 'review', provider_capture = ?, updated_at = ?, note = ?
+          WHERE id = ? AND status IN ('created', 'pending')
+        `).bind(capId, Date.now(), ('capture mismatch ' + JSON.stringify({ amount: cap.amount, custom_id: cap.custom_id, invoice_id: cap.invoice_id })).slice(0, 500), pur.id).run();
+        console.error('[lss-shop] capture mismatch - NOT granted', pur.id, capId);
+        return { status: 'review' };
+      }
+      const product = await env.DB.prepare('SELECT * FROM products WHERE sku = ?').bind(pur.sku).first()
+        || { sku: pur.sku, grants_json: '[]' };   // retired or deleted mid-checkout: still deliver what was bought
+      const now = Date.now();
+      await env.DB.batch([
+        env.DB.prepare(`
+          UPDATE purchases SET status = 'completed', provider_capture = ?, completed_at = ?, updated_at = ?
+          WHERE id = ? AND status IN ('created', 'pending')
+        `).bind(capId, now, now, pur.id),
+        ..._grantStmts(env, pur.discord_id, product, pur.id, now),
+      ]);
+      return { status: 'completed' };
+    }
+    if (capStatus === 'PENDING') {
+      // PayPal is holding the money (eCheck, review...). The webhook or the sweep finishes it later.
+      await env.DB.prepare(`
+        UPDATE purchases SET status = 'pending', provider_capture = ?, updated_at = ?
+        WHERE id = ? AND status IN ('created', 'pending')
+      `).bind(capId, Date.now(), pur.id).run();
+      return { status: 'pending' };
+    }
+    await env.DB.prepare(`
+      UPDATE purchases SET status = 'failed', provider_capture = ?, updated_at = ?, note = ?
+      WHERE id = ? AND status IN ('created', 'pending')
+    `).bind(capId, Date.now(), 'capture ' + capStatus, pur.id).run();
+    return { status: 'failed' };
+  }
+
+  if (order.status === 'VOIDED') { await _touchPurchase(env, pur.id, 'abandoned', 'order voided'); return { status: 'abandoned' }; }
+
+  // CREATED / SAVED / PAYER_ACTION_REQUIRED: the buyer has not approved it (yet).
+  if (Date.now() - Number(pur.created_at || 0) > PURCHASE_ABANDON_MS) {
+    await _touchPurchase(env, pur.id, 'abandoned', 'never approved');
+    return { status: 'abandoned' };
+  }
+  await _touchPurchase(env, pur.id);
+  return { status: 'created' };
+}
+
+// A refund or chargeback takes back exactly what THAT purchase granted - entitlements from gifts or
+// other purchases carry a different purchase_id and are untouched.
+async function _revokePurchase(env, pur, status, note) {
+  const now = Date.now();
+  await env.DB.batch([
+    env.DB.prepare('UPDATE purchases SET status = ?, updated_at = ?, note = ? WHERE id = ?')
+      .bind(status, now, String(note || status).slice(0, 500), pur.id),
+    env.DB.prepare(`
+      UPDATE entitlements SET revoked_at = ?, note = ?
+      WHERE discord_id = ? AND purchase_id = ? AND revoked_at IS NULL
+    `).bind(now, String(note || status).slice(0, 500), String(pur.discord_id), pur.id),
+  ]);
+}
+
+// ---------- Route: POST /shop/paypal/capture -------------------------
+// The buyer is back from PayPal. Idempotent: calling it for a finished purchase just reports it.
+async function handlePaypalCapture(request, env, origin) {
+  if (!_paypalConfigured(env)) throw new ApiError(503, 'checkout_unavailable');
+  const user = await requireAuth(request, env);
+  const body = await request.json().catch(() => null);
+  const orderId = String((body && body.order_id) || '');
+  if (!/^[A-Za-z0-9\-]{5,64}$/.test(orderId)) throw new ApiError(400, 'bad_order_id');
+  const pur = await env.DB.prepare(
+    "SELECT * FROM purchases WHERE provider = 'paypal' AND provider_order = ?"
+  ).bind(orderId).first();
+  if (!pur) throw new ApiError(404, 'no_such_order');
+  if (String(pur.discord_id) !== String(user.id)) throw new ApiError(403, 'not_your_order');
+  const r = await _paypalSettle(env, pur);
+  return jsonResponse(200, {
+    ok: true, status: r.status, detail: r.detail || null, sku: pur.sku,
+    entitlements: await _ownedSkus(env, user.id),
+  }, env, origin);
+}
+
+// ---------- Route: POST /shop/paypal/webhook -------------------------
+// Configured in the PayPal developer dashboard (see backend/README.md). Needs PAYPAL_WEBHOOK_ID;
+// without it the route does not exist. Without a webhook everything still works except automatic
+// revocation on refunds/chargebacks - tools/lss_shop.py revoke covers that by hand.
+async function _purchaseByOrder(env, orderId) {
+  if (!orderId) return null;
+  return await env.DB.prepare(
+    "SELECT * FROM purchases WHERE provider = 'paypal' AND provider_order = ?"
+  ).bind(String(orderId)).first();
+}
+async function _purchaseForCaptureResource(env, res) {
+  const inv = res && res.invoice_id ? String(res.invoice_id) : '';
+  if (inv.startsWith('pur_')) {
+    const p = await env.DB.prepare('SELECT * FROM purchases WHERE id = ?').bind(inv).first();
+    if (p) return p;
+  }
+  const rel = res && res.supplementary_data && res.supplementary_data.related_ids;
+  if (rel && rel.order_id) {
+    const p = await _purchaseByOrder(env, rel.order_id);
+    if (p) return p;
+  }
+  // A capture event's resource IS the capture; a refund's points `up` at the capture it refunds.
+  const ids = [];
+  for (const l of (res && res.links) || []) {
+    const m = l && l.rel === 'up' ? String(l.href || '').match(/\/captures\/([^/?#]+)/) : null;
+    if (m) ids.push(m[1]);
+  }
+  if (res && res.id) ids.push(String(res.id));
+  for (const id of ids) {
+    const p = await env.DB.prepare(
+      "SELECT * FROM purchases WHERE provider = 'paypal' AND provider_capture = ?"
+    ).bind(id).first();
+    if (p) return p;
+  }
+  return null;
+}
+
+async function handlePaypalWebhook(request, env, origin) {
+  const whId = _paypalCreds(env).webhook;   // sandbox or live webhook id, per PAYPAL_ENV
+  if (!_paypalConfigured(env) || !whId) {
+    return jsonResponse(404, { error: 'not_found', path: '/shop/paypal/webhook' }, env, origin);
+  }
+  // Webhook bodies are small event documents; cap anyway so a hostile sender can't stream megabytes.
+  const raw = await request.text();
+  if (raw.length > 256 * 1024) throw new ApiError(413, 'too_large');
+  let event;
+  try { event = JSON.parse(raw); } catch (_) { throw new ApiError(400, 'invalid_json'); }
+  const h = (n) => request.headers.get(n) || '';
+  // ⚠ PayPal: the event must be posted back EXACTLY as received - parsing and re-serialising it can
+  //   change key order or number formatting and fail verification. So the raw text is spliced in.
+  const verifyBody = '{'
+    + '"auth_algo":'         + JSON.stringify(h('paypal-auth-algo'))         + ','
+    + '"cert_url":'          + JSON.stringify(h('paypal-cert-url'))          + ','
+    + '"transmission_id":'   + JSON.stringify(h('paypal-transmission-id'))   + ','
+    + '"transmission_sig":'  + JSON.stringify(h('paypal-transmission-sig'))  + ','
+    + '"transmission_time":' + JSON.stringify(h('paypal-transmission-time')) + ','
+    + '"webhook_id":'        + JSON.stringify(String(whId)) + ','
+    + '"webhook_event":'     + raw
+    + '}';
+  const pp = _paypalClient(env);
+  const v = await pp('POST', '/v1/notifications/verify-webhook-signature', verifyBody);
+  if (!v.ok || !v.json || v.json.verification_status !== 'SUCCESS') {
+    console.warn('[lss-shop] webhook signature rejected', v.status, event && event.event_type);
+    throw new ApiError(400, 'bad_signature');
+  }
+
+  const type = String(event.event_type || '');
+  const res = event.resource || {};
+  let pur = null;
+  if (type === 'CHECKOUT.ORDER.APPROVED' || type === 'CHECKOUT.ORDER.COMPLETED') {
+    // Approved but the buyer never came back: capture it now rather than waiting for the sweep.
+    pur = await _purchaseByOrder(env, res.id);
+    if (pur) await _paypalSettle(env, pur, pp);
+  } else if (type.startsWith('PAYMENT.CAPTURE.')) {
+    pur = await _purchaseForCaptureResource(env, res);
+    if (pur) {
+      if (type === 'PAYMENT.CAPTURE.REVERSED') {
+        await _revokePurchase(env, pur, 'reversed', 'reversal/chargeback ' + (res.id || ''));
+      } else if (type === 'PAYMENT.CAPTURE.REFUNDED') {
+        // Full refunds take the livery back; a partial refund (a goodwill discount) is only noted.
+        const bd = res.seller_payable_breakdown && res.seller_payable_breakdown.total_refunded_amount;
+        const refunded = _centsOf((bd && bd.value) || (res.amount && res.amount.value));
+        if (refunded >= Number(pur.amount_cents)) {
+          await _revokePurchase(env, pur, 'refunded', 'refund ' + (res.id || ''));
+        } else {
+          await env.DB.prepare('UPDATE purchases SET note = ?, updated_at = ? WHERE id = ?')
+            .bind(('partial refund ' + (res.id || '') + ' ' + refunded + 'c').slice(0, 500), Date.now(), pur.id).run();
+        }
+      } else {
+        // COMPLETED / PENDING / DENIED: the settle reads the order and applies the same rules as ever.
+        await _paypalSettle(env, pur, pp);
+      }
+    }
+  }
+  if (!pur) console.log('[lss-shop] webhook ' + type + ' matched no purchase');
+  // 200 even when nothing matched: a non-2xx makes PayPal retry for days, and an event about a
+  // transaction this shop never created will never match.
+  return jsonResponse(200, { ok: true, handled: !!pur, type }, env, origin);
+}
+
+// ---------- The purchase sweep (cron) --------------------------------
+// Finishes what the buyer walked away from: approved on PayPal, tab closed before the return page.
+// Bounded per run - every row costs one to three PayPal calls - and rows are only re-asked about
+// once per PURCHASE_RECONCILE_GAP.
+async function reconcilePurchases(env, limit) {
+  if (!_paypalConfigured(env)) return { examined: 0, completed: 0, errors: 0 };
+  const now = Date.now();
+  const rows = await env.DB.prepare(`
+    SELECT * FROM purchases
+    WHERE provider = 'paypal' AND status IN ('created', 'pending')
+      AND updated_at < ? AND created_at > ?
+    ORDER BY created_at ASC LIMIT ?
+  `).bind(now - PURCHASE_RECONCILE_GAP, now - 30 * 24 * 3600 * 1000,
+          Math.max(1, Math.min(20, limit || 10))).all();
+  const list = rows.results || [];
+  if (!list.length) return { examined: 0, completed: 0, errors: 0 };
+  const pp = _paypalClient(env);
+  let completed = 0, errors = 0;
+  for (const pur of list) {
+    try {
+      const r = await _paypalSettle(env, pur, pp);
+      if (r.status === 'completed') completed++;
+    } catch (err) {
+      errors++;
+      console.warn('[lss-shop] reconcile failed', pur.id, String(err && err.message || err));
+      try { await _touchPurchase(env, pur.id); } catch (_) {}
+    }
+  }
+  return { examined: list.length, completed, errors };
+}
+
+async function pruneSessions(env) {
+  await env.DB.prepare('DELETE FROM sessions WHERE expires_at < ?').bind(Date.now()).run();
 }
 
 // ---------- The sweep ------------------------------------------------
@@ -1756,12 +2434,20 @@ async function sweepPendingMatches(env, limit) {
 //     wrangler secret put ADMIN_KEY
 // and send it as `Authorization: Bearer <key>`. If ADMIN_KEY is unset both routes 404 as though
 // they do not exist, so deploying this cannot expose anything on its own.
-function _adminOk(request, env) {
+// (migration 006) Compared in constant time. `===` on a secret returns at the first differing byte,
+// which leaks how much of a guess was right; hashing both sides first also makes the lengths equal,
+// which timingSafeEqual requires.
+async function _adminOk(request, env) {
   try {
     const key = env.ADMIN_KEY;
     if (!key) return false;                                  // unset = routes do not exist
     const h = request.headers.get('Authorization') || '';
-    return h === 'Bearer ' + key;
+    const enc = new TextEncoder();
+    const [a, b] = await Promise.all([
+      crypto.subtle.digest('SHA-256', enc.encode(h)),
+      crypto.subtle.digest('SHA-256', enc.encode('Bearer ' + key)),
+    ]);
+    return crypto.subtle.timingSafeEqual(a, b);
   } catch (_) { return false; }
 }
 
@@ -1775,7 +2461,7 @@ function _adminRefuse(request, env, origin) {
 
 // READ-ONLY. Counts what a revalidation would touch, and changes nothing. Run this first.
 async function handleAdminAudit(request, env, origin) {
-  if (!_adminOk(request, env)) return _adminRefuse(request, env, origin);
+  if (!(await _adminOk(request, env))) return _adminRefuse(request, env, origin);
   const rows = await env.DB.prepare(`
     SELECT validated, mode, game_mode, COUNT(*) AS n
     FROM matches GROUP BY validated, mode, game_mode
@@ -1833,7 +2519,7 @@ async function handleAdminAudit(request, env, origin) {
 // `?limit=N` bounds one call. The ceiling is deliberately low: the binding constraint is the Worker
 // subrequest cap, not CPU, and a run that dies mid-loop is the messiest state this file can reach.
 async function handleAdminRevalidate(request, env, origin) {
-  if (!_adminOk(request, env)) return _adminRefuse(request, env, origin);
+  if (!(await _adminOk(request, env))) return _adminRefuse(request, env, origin);
   const url = new URL(request.url);
   // parseInt('abc') is NaN, and Math.max(1, NaN) is NaN - the floor does not catch it, so it is
   // tested for rather than leaned on.
@@ -1881,6 +2567,14 @@ export default {
     ctx.waitUntil(sweepPendingMatches(env).catch(err => {
       console.error('[lss-backend] sweep failed:', err && err.stack || err);
     }));
+    // (migration 006) Lapsed sessions are dead weight in the lookup index, and a purchase the buyer
+    // approved and then walked away from is captured here rather than never.
+    ctx.waitUntil(pruneSessions(env).catch(err => {
+      console.error('[lss-backend] session prune failed:', err && err.stack || err);
+    }));
+    ctx.waitUntil(reconcilePurchases(env).catch(err => {
+      console.error('[lss-shop] purchase sweep failed:', err && err.stack || err);
+    }));
   },
 
   async fetch(request, env) {
@@ -1897,6 +2591,14 @@ export default {
     try {
       // --- Routes ---
       if (request.method === 'POST'   && path === '/auth/verify')  return await handleAuthVerify(request, env, origin);
+      // (migration 006) sessions + shop
+      if (request.method === 'POST'   && path === '/auth/session') return await handleAuthSession(request, env, origin);
+      if (request.method === 'POST'   && path === '/auth/logout')  return await handleAuthLogout(request, env, origin);
+      if (request.method === 'GET'    && path === '/me')           return await handleGetMe(request, env, origin);
+      if (request.method === 'GET'    && path === '/shop/catalog') return await handleShopCatalog(request, env, origin);
+      if (request.method === 'POST'   && path === '/shop/paypal/create')  return await handlePaypalCreate(request, env, origin);
+      if (request.method === 'POST'   && path === '/shop/paypal/capture') return await handlePaypalCapture(request, env, origin);
+      if (request.method === 'POST'   && path === '/shop/paypal/webhook') return await handlePaypalWebhook(request, env, origin);
       if (request.method === 'POST'   && path === '/match')        return await handlePostMatch(request, env, origin);
       if (request.method === 'GET'    && path.startsWith('/match/')) {
         const id = decodeURIComponent(path.slice('/match/'.length));
@@ -1943,7 +2645,12 @@ export default {
 
       // Health check (handy for monitoring + verifying deploys).
       if (request.method === 'GET' && path === '/health') {
-        return jsonResponse(200, { ok: true, ts: Date.now() }, env, origin);
+        // (migration 006) `sessions` says this deploy mints sessions; `shop` says whether checkout
+        // is live and against which PayPal. Both answer "did the deploy take" from a browser.
+        return jsonResponse(200, {
+          ok: true, ts: Date.now(), sessions: true,
+          shop: { paypal: _paypalConfigured(env), env: _paypalEnv(env) },
+        }, env, origin);
       }
 
       return jsonResponse(404, { error: 'not_found', path }, env, origin);
