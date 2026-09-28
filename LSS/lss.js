@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "49.69";
+const LSS_BUILD = "49.71";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -5773,7 +5773,8 @@ const CAMP_ART = {
   near: 3500,        // how close before the Summoners notice (waveA)
   waveA: 4, waveB: 4,
   risers: 6, riseEvery: 3.2, riseCap: 200, freedAlive: 16,   // (v49.54) cap 26 -> 60: 26 were all up in ~32 s and the storm then thinned them out; (v49.58) -> 200 for the 1M giant's ~4 min fight
-  runIn: 380, runOut: 2300, runPref: 1500,   // strafing runs: skin + runIn .. skin + runOut; see _campArtFreedTick
+  runIn: 380, runOut: 2300, runPref: 1500,   // (the v49.52 strafing runs - retired for the wing in v49.71)
+  wingGap: 150, wingFirst: 170, wingBack: 35, wingUp: 70, wingHold: 260, wingRange: 3400,
   beaconH: 6000,
 };
 let _campArtGltf = null, _campArtLoadP = null, _campArtLive = null, _campArtFadeT = null;
@@ -6053,7 +6054,8 @@ function _campArtFree(bot, born) {
   bot.team = player.team;
   bot._acquireCombatTarget = _campArtFreedAcquire;   // instance override: the prototype (and PvP) is untouched
   bot.combatTarget = null; bot.aiTimer = 0; bot.aiRetreating = false;
-  bot.aiRangePreference = Math.max(bot.aiRangePreference || 0, CAMP_ART.runPref);
+  bot.aiRangePreference = Math.max(bot.aiRangePreference || 0, CAMP_ART.wingRange);
+  bot._wingHold = CAMP_ART.wingHold; bot._wingFaceDir = new THREE.Vector3(0, 0, -1); bot._wingVel = player.velocity;
   bot._cfA = Math.random() * Math.PI * 2; bot._cfH = -0.15 + Math.random() * 0.7; bot._cfIn = !born;
   if (!bot._formationTarget) bot._formationTarget = new THREE.Vector3();
   bot._formationTarget.copy(bot.position);
@@ -6112,17 +6114,33 @@ function _campArtRise(g, n) {
     };
   });
 }
+const _cwgF = new THREE.Vector3(), _cwgR = new THREE.Vector3();
+const _cwgWing = [];
 function _campArtFreedTick(A, g, dt) {
-  const K = CAMP_ART, colR = g.colR || 2000, gx = g.position.x, gz = g.position.z, hh = g.halfH || 3000;
-  let alive = 0;
-  for (const b of game.entities) {
-    if (!b || !b.alive || !b._campFreed || !b._formationTarget) continue;
-    alive++;
-    const d = Math.hypot(b.position.x - gx, b.position.z - gz);
-    if (b._cfIn && d < colR + K.runIn + 160) { b._cfIn = false; b._cfA += 0.5 + Math.random() * 0.6; }
-    else if (!b._cfIn && d > colR + K.runOut - 260) b._cfIn = true;
-    const r = colR + (b._cfIn ? K.runIn : K.runOut);
-    b._formationTarget.set(gx + Math.cos(b._cfA) * r, g.position.y + hh * b._cfH, gz + Math.sin(b._cfA) * r);
+  const K = CAMP_ART;
+  _cwgWing.length = 0;
+  for (const b of game.entities) if (b && b.alive && b._campFreed && b._formationTarget) _cwgWing.push(b);
+  const alive = _cwgWing.length;
+  _cwgWing.sort((a, b) => (a.id | 0) - (b.id | 0));
+  if (alive && player && player.position && player.shipState !== 'dead') {
+    const P = player.position, yaw = (player.euler ? player.euler.y : 0);
+    _cwgF.set(-Math.sin(yaw), 0, -Math.cos(yaw));   // the pilot's heading, level (euler YXZ: yaw pi faces +z)
+    _cwgR.set(Math.cos(yaw), 0, -Math.sin(yaw));
+    let inRange = false;
+    try { inRange = g && g.alive && (typeof g.surfaceDist === 'function' ? g.surfaceDist(P) : P.distanceTo(g.position)) < K.wingRange; } catch (_) {}
+    for (let i = 0; i < alive; i++) {
+      const b = _cwgWing[i];
+      const rank = (i >> 1), side = (i & 1) ? 1 : -1;
+      const lat = side * (K.wingFirst + rank * K.wingGap);
+      const aft = 40 + rank * K.wingBack;
+      const up = ((rank % 3) - 1) * K.wingUp;
+      b._formationTarget.set(P.x + _cwgR.x * lat - _cwgF.x * aft, P.y + up, P.z + _cwgR.z * lat - _cwgF.z * aft);
+      b._formationActive = true;
+      b._wingVel = player.velocity;
+      if (!b._wingFaceDir) b._wingFaceDir = new THREE.Vector3();
+      if (inRange) { b._wingFaceDir.copy(g.position).sub(b.position); if (b._wingFaceDir.lengthSq() > 1) b._wingFaceDir.normalize(); else b._wingFaceDir.copy(_cwgF); }
+      else b._wingFaceDir.copy(_cwgF);
+    }
   }
   A.freedAlive = alive;
   if (A.riseLeft > 0 && alive < K.freedAlive) {
@@ -6172,7 +6190,7 @@ function _campArtGiantDown(G) {
   const A = G && G.art; if (!A) return;
   _campArtLock(A, false); _campArtOrbit(A, false);
   _campArtUpHud(A, false); _campArtMark(A, false);
-  for (const b of game.entities) if (b && b._campFreed) b._formationActive = false;
+  for (const b of game.entities) if (b && b._campFreed) { b._formationActive = false; b._wingHold = 0; b._wingHolding = false; }
   if (A.beam) for (const b of A.beam) b.visible = false;
   if (A.ring) A.ring.visible = false;
   if (A.phase !== 'freed') A.phase = 'done';
@@ -6355,6 +6373,7 @@ function _campEscStart(G) {
   for (const b of game.entities) {
     if (!b || !b.alive || !b._campFreed) continue;
     b._campHomeT = K.homeMin + Math.random() * (K.homeMax - K.homeMin);
+    b._wingHold = 0; b._wingHolding = false;   // (v49.71) off the wing: they fly home
     let gy = 0; try { gy = _stGroundYCarved(b.position.x, b.position.z, game.sandwichTerrain); } catch (_) {}
     if (!b._formationTarget) b._formationTarget = new THREE.Vector3();
     b._formationTarget.set(b.position.x, (isFinite(gy) ? gy : 0) + 40, b.position.z);
@@ -45983,7 +46002,12 @@ class Bot {
       moveDir = this._tempVec3a.subVectors(_goal, this.position);
       const _rd = moveDir.length();
       if (_rd > 0.001) moveDir.multiplyScalar(1 / _rd);
-      this.targetDir.lerp(moveDir, dt * (_latOwned ? 4 : 2));   // (v47.81) lattice turns: see _latCap
+      let _wFace = null;
+      if (this._wingHold) {
+        this._wingHolding = !_arenaVia && _rd < this._wingHold && !!this._wingFaceDir;
+        if (this._wingHolding) _wFace = this._wingFaceDir;
+      }
+      this.targetDir.lerp(_wFace || moveDir, dt * (_latOwned ? 4 : (_wFace ? 4 : 2)));   // (v47.81) lattice turns: see _latCap
       this.targetDir.normalize();
     } else if (this.aiTarget) {
       const toTarget = this._tempVec3a.subVectors(this.aiTarget, this.position);
@@ -46052,9 +46076,19 @@ class Bot {
       ? (this.chassis.acceleration * dt * 0.3)
       : (this.chassis.acceleration * dt);
     if (this.arcSlowTimer > 0) this.arcSlowTimer -= dt;
+    if (this._wingHolding && this._formationActive && this._formationTarget) {
+      const _wv = this._wingVel, _sk = 2.5, _f = 1 - Math.exp(-dt * 4);
+      const _dx = (this._formationTarget.x - this.position.x) * _sk + (_wv ? _wv.x : 0);
+      const _dy = (this._formationTarget.y - this.position.y) * _sk + (_wv ? _wv.y : 0);
+      const _dz = (this._formationTarget.z - this.position.z) * _sk + (_wv ? _wv.z : 0);
+      this.velocity.x += (_dx - this.velocity.x) * _f;
+      this.velocity.y += (_dy - this.velocity.y) * _f;
+      this.velocity.z += (_dz - this.velocity.z) * _f;
+    } else {
     this.velocity.x += this.targetDir.x * accelK;
     this.velocity.y += this.targetDir.y * accelK;
     this.velocity.z += this.targetDir.z * accelK;
+    }
 
     this._botDashActiveT = (this._botDashActiveT || 0) - dt;
     if (this.dashActive && this._botDashActiveT <= 0) this.dashActive = false;
@@ -95017,6 +95051,8 @@ const PHI_REST_BASE = 69;
 const PHI_SPEED_BASE = 144; 
 const PHI_BEAT_STRENGTH = 0.25; 
 const PHI_BEAT = PHI * PHI_BEAT_STRENGTH; 
+const _SND_PEAK = { engine: PHI_REST_BASE * PHI, rail: 1 / PHI };
+try { if (typeof window !== 'undefined') window.__sndPeak = _SND_PEAK; } catch (_) {}
 
 function startAmbientBed() {
   if (ambientStarted || !audio.ctx) return;
@@ -95180,7 +95216,8 @@ function updateAmbientBed() {
   const targetVol = baseVol * audio.userVol.ambient * audio.duckFactor * tremorFactor;
   audio.ambientGain.gain.value += (targetVol - audio.ambientGain.gain.value) * 0.02;
 
-  const currentBase = PHI_REST_BASE + t * (PHI_SPEED_BASE - PHI_REST_BASE);
+  const _pk = (+_SND_PEAK.engine > 0) ? +_SND_PEAK.engine : PHI_SPEED_BASE;
+  const currentBase = PHI_REST_BASE + t * (_pk - PHI_REST_BASE);
 
   if (audio.phiLayers) {
     for (const layer of audio.phiLayers) {
@@ -101218,7 +101255,11 @@ function reloadDefaultSoundLibrary() {
 if (typeof window !== 'undefined') window.reloadDefaultSoundLibrary = reloadDefaultSoundLibrary;
 
 const _RAIL_FREQ_START = [69, 63, 60];
-const _RAIL_FREQ_END   = [490, 430, 400];   
+const _RAIL_FREQ_END   = [490, 430, 400];   // the v36-era peaks; _railPeakHz scales them (v49.70)
+function _railPeakHz(i) {
+  const k = (+_SND_PEAK.rail > 0) ? +_SND_PEAK.rail : 1;
+  return Math.max(_RAIL_FREQ_START[i] * 1.5, _RAIL_FREQ_END[i] * k);   // never a sweep that falls
+}
 function _startRailgunChargeSound(initialCharge) {
   if (!audio || !audio.initialized || !audio.ctx) return null;
   resumeAudio();
@@ -101236,7 +101277,7 @@ function _startRailgunChargeSound(initialCharge) {
     const osc = ctx.createOscillator();
     osc.type = 'sine';
     osc.frequency.setValueAtTime(
-      _RAIL_FREQ_START[i] + (_RAIL_FREQ_END[i] - _RAIL_FREQ_START[i]) * c0, t0);
+      _RAIL_FREQ_START[i] + (_railPeakHz(i) - _RAIL_FREQ_START[i]) * c0, t0);
     const g = ctx.createGain();
     g.gain.setValueAtTime(0.0001, t0);
     g.gain.linearRampToValueAtTime(finalVol, t0 + attack);
@@ -101254,7 +101295,7 @@ function _startRailgunChargeSound(initialCharge) {
       for (let i = 0; i < 3; i++) {
         try {
           this.oscs[i].frequency.setTargetAtTime(
-            _RAIL_FREQ_START[i] + (_RAIL_FREQ_END[i] - _RAIL_FREQ_START[i]) * c, t, 0.03);
+            _RAIL_FREQ_START[i] + (_railPeakHz(i) - _RAIL_FREQ_START[i]) * c, t, 0.03);
         } catch (_) {}
       }
       const want = (c >= 0.995) ? this.baseVol * 0.45 : this.baseVol;
