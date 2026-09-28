@@ -42,7 +42,7 @@ EXCLUDE_DIRS = [".git", ".claude", "backups", "old_versions", "old_plans",
 # ECONNRESET three times in a row, always at 389/392, i.e. on exactly the
 # changed big files. Dropping these more than halves the changed-byte payload.
 # (/MIR means robocopy also DELETES them from the staging dir on the next run.)
-EXCLUDE_FILES = ["index-working.html", "lss.map.md"]
+EXCLUDE_FILES = ["index-working.html", "lss.map.md", "CAMPAIGN_STORY.md"]   # (v49.72) the story bible is all spoilers
 
 # (2026-08-16) LINK ROT FIX. The v36.09 restructure made LSS/ the deploy root,
 # which silently took labs/ and the standalone root games OFF the live site.

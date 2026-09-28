@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "49.71";
+const LSS_BUILD = "49.72";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -92065,7 +92065,7 @@ window.announceMultikill     = announceMultikill;
 })();
 
 const CAMP_LINES = {
-  op_groan:    { who: 'pilot', text: 'Nnngh...' },
+  op_groan:    { who: 'pilot', text: 'Arrgh... Ughhhhh...' },   // (v49.72) the owner's rewrite
   op_real:     { who: 'summoners', text: 'Nothing here is real...' },
   op_light:    { who: 'summoners', text: 'Take this light. It will show you the way through the illusion...' },
   op_fly:      { who: 'xorzo', text: 'Would you like to fly one of these beauties?' },
@@ -92074,7 +92074,7 @@ const CAMP_LINES = {
   op_view:     { who: 'xorzo', text: 'Which perspective do you prefer? First person or third - you can switch any time.' },
   op_remember: { who: 'summoners', text: 'Remember, pilot... nothing here is real...' },
   op_hear:     { who: 'pilot', text: 'Did you hear that voice?' },
-  op_train:    { who: 'xorzo', text: 'This is your training ground. You can do whatever you want here. Go ahead... ~K-k-kill~ something.' },
+  op_train:    { who: 'xorzo', text: '~A-access den-denied.~ This is your training ground. You can do whatever you want here. Go ahead... ~K-k-kill~ something.' },   // (v49.72) the owner's rewrite
   leg0_a:  { who: 'summoners', text: 'Our pets are hungry, pilot. Show us what you can do.' },
   leg0_b:  { who: 'xorzo', text: 'Hostile contacts ahead. ~D-d-destroy~ them all.' },
   leg1_a:  { who: 'xorzo', text: 'Nothing here is r~-r-r~... Proceed. Proceed to the arena.' },
