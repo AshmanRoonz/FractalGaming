@@ -27,7 +27,14 @@ EXCLUDE_DIRS = [".git", ".claude", "backups", "old_versions", "old_plans",
                 # source/scratch images (28 MB) were 19% of the deploy for something the ghost
                 # seat view replaced. The mock *.json geometry the circumpunct HUD still fetches
                 # stays where it is - only the images moved.
-                "old_files"]
+                "old_files",
+                # (v49.57) THE BACKEND WAS PUBLIC. LSS/backend/ is the Cloudflare Worker's source
+                # tree, not part of the site - but nothing excluded it, so every deploy published
+                # it: lss.fractalreality.ca/backend/src/worker.js, wrangler.toml, and .wrangler/
+                # (the account cache and a local dev D1 .sqlite) all answered 200, verified
+                # 2026-09-27. No secrets were in it, but the Worker now handles payments, and its
+                # dev state has no business on a CDN.
+                "backend"]
 # Dev-only files that live in LSS/ but have no business on the live site.
 # index-working.html is the commented SOURCE (4.2 MB) that strip.py turns into
 # the shipped index.html; lss.map.md is the internal architecture map. Together
@@ -81,6 +88,13 @@ for f in EXCLUDE_FILES:
     if os.path.exists(p):
         os.remove(p)
         print("purged from staging:", f)
+# (v49.57) ...and the same is true of an /XD DIRECTORY: excluded from the copy AND from the purge,
+# so a dir added to EXCLUDE_DIRS after it was first staged (backend/) would ride along forever.
+for d in EXCLUDE_DIRS:
+    p = os.path.join(STAGE, d)
+    if os.path.isdir(p):
+        shutil.rmtree(p, ignore_errors=True)
+        print("purged from staging:", d + "/")
 
 # Repo-root extras -> staging root. Each EXTRA_DIRS entry gets its own /MIR
 # (safe: it owns its subdir). The loose files are copied WITHOUT /MIR — a /MIR

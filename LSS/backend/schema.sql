@@ -190,3 +190,64 @@ CREATE TABLE IF NOT EXISTS player_state (
 );
 
 CREATE INDEX IF NOT EXISTS idx_player_state_updated ON player_state(updated_at);
+
+-- ----------------------------------------------------------------------
+-- (migration 006) Durable sign-in sessions + the shop. The WHY lives in
+-- migration_006_sessions_and_shop.sql; the shapes are repeated here so a fresh
+-- database built from this file alone is complete.
+-- ----------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS sessions (
+  token_hash    TEXT PRIMARY KEY,
+  discord_id    TEXT NOT NULL,
+  created_at    INTEGER NOT NULL,
+  last_used_at  INTEGER NOT NULL,
+  expires_at    INTEGER NOT NULL,
+  user_agent    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_player  ON sessions(discord_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+
+CREATE TABLE IF NOT EXISTS products (
+  sku          TEXT PRIMARY KEY,
+  kind         TEXT NOT NULL DEFAULT 'skin',
+  title        TEXT NOT NULL,
+  price_cents  INTEGER NOT NULL,
+  currency     TEXT NOT NULL DEFAULT 'USD',
+  active       INTEGER NOT NULL DEFAULT 1,
+  grants_json  TEXT NOT NULL DEFAULT '[]',
+  sort         INTEGER NOT NULL DEFAULT 0,
+  created_at   INTEGER NOT NULL,
+  updated_at   INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS purchases (
+  id               TEXT PRIMARY KEY,
+  discord_id       TEXT NOT NULL,
+  sku              TEXT NOT NULL,
+  provider         TEXT NOT NULL,
+  provider_order   TEXT,
+  provider_capture TEXT,
+  status           TEXT NOT NULL,
+  amount_cents     INTEGER NOT NULL,
+  currency         TEXT NOT NULL,
+  created_at       INTEGER NOT NULL,
+  updated_at       INTEGER NOT NULL,
+  completed_at     INTEGER,
+  note             TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_purchases_player  ON purchases(discord_id);
+CREATE INDEX IF NOT EXISTS idx_purchases_status  ON purchases(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_purchases_capture ON purchases(provider_capture);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_purchases_order ON purchases(provider, provider_order);
+
+CREATE TABLE IF NOT EXISTS entitlements (
+  discord_id   TEXT NOT NULL,
+  sku          TEXT NOT NULL,
+  source       TEXT NOT NULL,
+  purchase_id  TEXT,
+  granted_at   INTEGER NOT NULL,
+  revoked_at   INTEGER,
+  note         TEXT,
+  PRIMARY KEY (discord_id, sku)
+);
+CREATE INDEX IF NOT EXISTS idx_entitlements_sku ON entitlements(sku);

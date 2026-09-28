@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "49.56";
+const LSS_BUILD = "49.57";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -110,7 +110,17 @@ const LSS = {
   INSANE_SPEED: false,
 };
 
-const LSS_API_BASE = 'https://lss-backend.ashroney.workers.dev';
+const LSS_API_BASE = (function () {
+  const prod = 'https://lss-backend.ashroney.workers.dev';
+  try {
+    const h = String(location.hostname || '');
+    if (h === 'localhost' || h === '127.0.0.1') {
+      const o = localStorage.getItem('lss_api_base');
+      if (o && /^http:\/\/(localhost|127\.0\.0\.1):\d{2,5}$/.test(o)) return o;
+    }
+  } catch (_) {}
+  return prod;
+})();
 if (typeof window !== 'undefined') window.LSS_API_BASE = LSS_API_BASE;
 
 const LSS_DISCORD = {
@@ -487,12 +497,13 @@ const SHIP_SKIN_DEFAULT = 'factory';
 function _getStoredSkinId() {
   try {
     const s = localStorage.getItem('lss_ship_skin');
-    if (s && SHIP_SKINS[s]) return s;
+    if (s && SHIP_SKINS[s] && !lssSkinLocked(s)) return s;
   } catch (_) {}
   return SHIP_SKIN_DEFAULT;
 }
 function _setStoredSkinId(id) {
   if (!SHIP_SKINS[id]) return;
+  if (lssSkinLocked(id)) return;   // (v49.57) a locked livery goes through the buy bar, never the equip path
   try { localStorage.setItem('lss_ship_skin', id); } catch (_) {}
   if (typeof player !== 'undefined' && player) player.skinId = id;
 }
@@ -1000,6 +1011,7 @@ async function _handleDiscordCallback() {
     localStorage.setItem(LSS_DISCORD.STORAGE_TOKEN, tokenRes.access_token);
     localStorage.setItem(LSS_DISCORD.STORAGE_USER,  JSON.stringify(user));
     sessionStorage.removeItem(LSS_DISCORD.STORAGE_VERIFIER);
+    try { _lssSessionWrite(null); _lssClearAuthExpired(); } catch (_) {}
     const cleanUrl = window.location.origin + window.location.pathname;
     window.history.replaceState({}, document.title, cleanUrl);
     _discordRenderIdentity();
@@ -1013,10 +1025,19 @@ async function _handleDiscordCallback() {
 }
 
 function discordSignout() {
+  try {
+    const s = _lssSessionRead();
+    if (s && s.token) {
+      fetch(LSS_API_BASE + '/auth/logout', { method: 'POST', headers: { 'Authorization': 'Bearer ' + s.token }, keepalive: true })
+        .catch(() => {});
+    }
+  } catch (_) {}
+  try { _lssSessionWrite(null); _lssClearAuthExpired(); } catch (_) {}
   localStorage.removeItem(LSS_DISCORD.STORAGE_TOKEN);
   localStorage.removeItem(LSS_DISCORD.STORAGE_USER);
   _discordRenderIdentity();
   _lssAuthNotifyChange();
+  try { _renderSkinPicker(); } catch (_) {}   // premium liveries lock again for a signed-out pilot
 }
 
 const _lssAuthListeners = new Set();
@@ -1868,7 +1889,7 @@ window.LSS_AUTH = {
       id:          u.id,
       username:    u.global_name || u.username,
       avatar:      _discordAvatarUrlFor(u, 64),
-      accessToken: t,
+      accessToken: lssAuthToken() || t,
     };
   },
   signIn() {
@@ -1895,6 +1916,117 @@ function discordCurrentToken() {
   return localStorage.getItem(LSS_DISCORD.STORAGE_TOKEN) || null;
 }
 
+const _LSS_SESSION_KEY = 'lss_session';        // { token, discord_id, expires_at, at }
+const _LSS_EXPIRED_KEY = 'lss_auth_expired';   // '1' while SIGN IN AGAIN is showing
+let _lssAuthExpired = false;
+try { _lssAuthExpired = localStorage.getItem(_LSS_EXPIRED_KEY) === '1'; } catch (_) {}
+let _lssSessionMinting = null;
+
+function _lssSessionRead() {
+  try {
+    const s = JSON.parse(localStorage.getItem(_LSS_SESSION_KEY) || 'null');
+    return (s && typeof s.token === 'string' && s.token.indexOf('lss_') === 0 && s.discord_id) ? s : null;
+  } catch (_) { return null; }
+}
+function _lssSessionWrite(s) {
+  try {
+    if (s) localStorage.setItem(_LSS_SESSION_KEY, JSON.stringify(s));
+    else localStorage.removeItem(_LSS_SESSION_KEY);
+  } catch (_) {}
+}
+function lssAuthToken() {
+  if (_lssAuthExpired) return null;
+  const u = discordCurrentUser();
+  if (!u || !u.id) return null;
+  const s = _lssSessionRead();
+  if (s && String(s.discord_id) === String(u.id)) return s.token;
+  return discordCurrentToken() || null;
+}
+function _lssClearAuthExpired() {
+  _lssAuthExpired = false;
+  try { localStorage.removeItem(_LSS_EXPIRED_KEY); } catch (_) {}
+}
+function _lssMarkAuthExpired(why) {
+  _lssSessionWrite(null);
+  if (_lssAuthExpired) return;
+  _lssAuthExpired = true;
+  try { localStorage.setItem(_LSS_EXPIRED_KEY, '1'); } catch (_) {}
+  console.warn('[lss-auth] sign-in expired (' + (why || '?') + ') ; matches stay queued until you sign in again');
+  try { _discordRenderIdentity(); } catch (_) {}
+  try {
+    const st = (typeof game !== 'undefined' && game) ? game.state : 'select';
+    if (st !== 'playing' && st !== 'warmup' && st !== 'roundEnd') {
+      const me = discordCurrentUser();
+      const n = _lssOutboxRead().filter(e => !e.who || (me && String(e.who) === String(me.id))).length;
+      _lssNotice('DISCORD SIGN-IN EXPIRED', n
+        ? ('Sign in again to upload ' + n + ' finished match' + (n === 1 ? '' : 'es') + ' to the leaderboard.')
+        : 'Sign in again to keep recording your matches.', 'warn');
+    }
+  } catch (_) {}
+}
+function _lssAuthRejected(tokenUsed) {
+  const s = _lssSessionRead();
+  if (s && tokenUsed && tokenUsed === s.token) {
+    _lssSessionWrite(null);
+    lssEnsureSession();
+    return;
+  }
+  _lssMarkAuthExpired('401');
+}
+function lssEnsureSession() {
+  const u = discordCurrentUser();
+  if (!u || !u.id || _lssAuthExpired) return Promise.resolve(null);
+  const s = _lssSessionRead();
+  if (s && String(s.discord_id) === String(u.id)) return Promise.resolve(s.token);
+  const dt = discordCurrentToken();
+  if (!dt) { _lssMarkAuthExpired('no discord token'); return Promise.resolve(null); }
+  if (_lssSessionMinting) return _lssSessionMinting;
+  const p = (async () => {
+    try {
+      const res = await fetch(LSS_API_BASE + '/auth/session', {
+        method: 'POST', headers: { 'Authorization': 'Bearer ' + dt },
+      });
+      if (res.status === 401) { _lssMarkAuthExpired('discord token rejected'); return null; }
+      if (!res.ok) return null;          // 404 = a Worker without sessions; 5xx = try again later
+      const j = await res.json().catch(() => null);
+      if (!j || typeof j.session !== 'string') return null;
+      const id = String((j.user && j.user.id) || u.id);
+      _lssSessionWrite({ token: j.session, discord_id: id, expires_at: j.expires_at || 0, at: Date.now() });
+      _lssClearAuthExpired();
+      if (Array.isArray(j.entitlements)) { try { _lssShopSetOwned(id, j.entitlements); } catch (_) {} }
+      console.log('[lss-auth] session minted for ' + id);
+      return j.session;
+    } catch (_) {
+      return null;                       // offline: the Discord token keeps working until it lapses
+    }
+  })();
+  _lssSessionMinting = p;
+  p.finally(() => { if (_lssSessionMinting === p) _lssSessionMinting = null; });
+  return p;
+}
+function _lssNotice(title, sub, kind) {
+  try {
+    const host = _lobbyToastContainer();
+    const col = kind === 'warn' ? '#ffb347' : (kind === 'ok' ? '#7dffa8' : '#8fd0ff');
+    const el = document.createElement('div');
+    el.className = 'lss-notice';
+    el.style.cssText = 'pointer-events:auto;background:rgba(12,16,28,0.95);border:1px solid ' + col + ';'
+      + 'border-left:4px solid ' + col + ';border-radius:8px;padding:10px 14px;max-width:320px;color:#dfeaff;'
+      + "font-family:'Rajdhani','Orbitron',sans-serif;box-shadow:0 6px 24px rgba(0,0,0,0.5);cursor:pointer;";
+    el.innerHTML = '<div style="font-weight:700;letter-spacing:1.5px;font-size:12px;color:' + col + '"></div>'
+      + '<div style="font-size:13px;margin-top:3px;line-height:1.35"></div>';
+    el.children[0].textContent = title || '';
+    el.children[1].textContent = sub || '';
+    el.addEventListener('click', () => { try { el.remove(); } catch (_) {} });
+    host.appendChild(el);
+    setTimeout(() => { try { el.remove(); } catch (_) {} }, kind === 'warn' ? 14000 : 8000);
+  } catch (_) {}
+}
+try {
+  window.lssAuth = { token: lssAuthToken, ensure: lssEnsureSession, session: _lssSessionRead,
+                     expired: () => _lssAuthExpired };
+} catch (_) {}
+
 function _discordAvatarUrlFor(user, size) {
   if (!user || !user.id) return null;
   const sz = size || 64;
@@ -1914,7 +2046,26 @@ function _discordRenderIdentity() {
   const avatarEl  = document.getElementById('discord-avatar');
   const nameEl    = document.getElementById('discord-name');
   const hintEl = document.getElementById('btn-discord-signin-hint');
+  const labelEl = document.getElementById('btn-discord-signin-label');
   if (!signinBtn || !signedIn) return;
+  if (user && _lssAuthExpired) {
+    signinBtn.style.display = 'flex';
+    signedIn.style.display  = 'none';
+    let n = 0;
+    try { n = _lssOutboxRead().filter(e => !e.who || String(e.who) === String(user.id)).length; } catch (_) {}
+    if (labelEl) labelEl.textContent = n
+      ? ('SIGN IN AGAIN · ' + n + ' MATCH' + (n === 1 ? '' : 'ES') + ' WAITING') : 'SIGN IN AGAIN';
+    signinBtn.classList.add('lss-auth-expired');
+    signinBtn.title = (user.global_name || user.username) + ': your Discord sign-in expired. '
+      + (n ? (n + ' finished match' + (n === 1 ? ' is' : 'es are') + ' saved on this device and upload the moment you sign in.')
+           : 'Sign in to keep recording your matches.');
+    if (hintEl) hintEl.textContent = signinBtn.title;
+    return;
+  }
+  signinBtn.classList.remove('lss-auth-expired');
+  signinBtn.title = '';
+  if (labelEl) labelEl.textContent = 'SIGN IN WITH DISCORD';
+  if (hintEl) hintEl.textContent = 'for ID, leaderboard, stats, and the multiplayer lobby';
   if (user) {
     signinBtn.style.display = 'none';
     signedIn.style.display  = 'flex';
@@ -1935,15 +2086,19 @@ function _discordRenderIdentity() {
 
 (async function _discordBootInit() {
   await _handleDiscordCallback();
+  try { await lssEnsureSession(); } catch (_) {}
   _discordRenderIdentity();
+  try { lssShopRefresh(); } catch (_) {}      // what is premium + what this account owns (GET /me = liveness probe)
+  try { _lssPaypalResume(); } catch (_) {}    // a checkout that came back through a full-page redirect
 })();
 
 
 let _lastPostedMatchId = null;
 
 const _LSS_OUTBOX_KEY = 'lss_match_outbox';
-const _LSS_OUTBOX_MAX = 24;          // a hard cap; the oldest fall off rather than filling storage
-const _LSS_OUTBOX_TRIES = 40;        // ...and a bad entry cannot retry forever
+const _LSS_OUTBOX_MAX = 100;         // (v49.57, was 24) ~2 KB each; the oldest fall off beyond this
+const _LSS_OUTBOX_TRIES = 200;       // (v49.57, was 40) TRANSIENT failures only - auth never counts
+const _LSS_OUTBOX_MAX_AGE_MS = 60 * 24 * 3600 * 1000;
 
 function _lssOutboxRead() {
   try {
@@ -1958,7 +2113,9 @@ function _lssOutboxWrite(list) {
 function _lssOutboxPut(payload) {
   const list = _lssOutboxRead();
   const i = list.findIndex(e => e.payload.match_id === payload.match_id);
-  const entry = { payload, tries: 0, queuedAt: Date.now() };
+  let who = null;
+  try { const u = discordCurrentUser(); who = (u && u.id) ? String(u.id) : null; } catch (_) {}
+  const entry = { payload, tries: 0, queuedAt: Date.now(), who };
   if (i >= 0) list[i] = entry; else list.push(entry);
   _lssOutboxWrite(list);
 }
@@ -1981,11 +2138,12 @@ async function _lssPostMatchPayload(payload, token) {
       });
     } finally { clearTimeout(t); }
     if (res.ok) return 'ok';
+    if (res.status === 401) return 'auth';              // (v49.57) the CREDENTIAL died, not the match
     if (res.status === 400 || res.status === 403 || res.status === 413) {
       console.warn('[lss-outbox] permanent rejection', res.status, payload.match_id);
       return 'permanent';
     }
-    return 'transient';                                 // 401 / 429 / 5xx - try again later
+    return 'transient';                                 // 429 / 5xx - try again later
   } catch (_) {
     return 'transient';                                 // offline, DNS, abort, CORS
   }
@@ -1996,21 +2154,30 @@ async function _lssOutboxFlush() {
   if (_lssOutboxFlushing) return;
   _lssOutboxFlushing = true;
   try {
-    const token = (typeof discordCurrentToken === 'function') && discordCurrentToken();
-    if (!token) return;                                 // signed out: hold everything, lose nothing
+    const me = (typeof discordCurrentUser === 'function') && discordCurrentUser();
+    if (!me || !me.id) return;                          // signed out: hold everything, lose nothing
+    try { await lssEnsureSession(); } catch (_) {}      // (v49.57) prefer the durable session
+    const token = lssAuthToken();
+    if (!token) return;                                 // expired: hold everything until SIGN IN AGAIN
+    const now = Date.now();
     for (const entry of _lssOutboxRead()) {
+      if (entry.who && String(entry.who) !== String(me.id)) continue;
+      if (now - (entry.queuedAt || now) > _LSS_OUTBOX_MAX_AGE_MS) { _lssOutboxDrop(entry.payload.match_id); continue; }
       const r = await _lssPostMatchPayload(entry.payload, token);
       if (r === 'ok' || r === 'permanent') { _lssOutboxDrop(entry.payload.match_id); continue; }
+      if (r === 'auth') { _lssAuthRejected(token); break; }   // never counted against the match
       const list = _lssOutboxRead();
       const i = list.findIndex(e => e.payload.match_id === entry.payload.match_id);
       if (i >= 0) {
-        list[i].tries = (list[i].tries | 0) + 1;
-        if (list[i].tries >= _LSS_OUTBOX_TRIES) list.splice(i, 1);
+        const e = list.splice(i, 1)[0];
+        e.tries = (e.tries | 0) + 1;
+        if (e.tries < _LSS_OUTBOX_TRIES) list.push(e);
         _lssOutboxWrite(list);
       }
       break;
     }
   } finally { _lssOutboxFlushing = false; }
+  try { _discordRenderIdentity(); } catch (_) {}      // keeps the "N waiting" count honest
 }
 
 try {
@@ -2021,7 +2188,7 @@ try {
     });
     setTimeout(() => { _lssOutboxFlush(); }, 4000);     // after boot settles + auth is readable
     setInterval(() => { _lssOutboxFlush(); }, 120000);
-    window.lssOutbox = { read: _lssOutboxRead, flush: _lssOutboxFlush, drop: _lssOutboxDrop };
+    window.lssOutbox = { read: _lssOutboxRead, flush: _lssOutboxFlush, drop: _lssOutboxDrop, put: _lssOutboxPut };
   }
 } catch (_) {}
 
@@ -2124,11 +2291,11 @@ let _roomHeartbeatTimer = null;
 
 async function _fireRoomHeartbeat() {
   if (!net || !net.active || !net.roomCode) return;
-  const token = discordCurrentToken();
+  const token = lssAuthToken();                    // (v49.57) the session, not the 7-day Discord token
   if (!token) return;
   try {
     const peerCount = (net.peers && net.peers.size) || 0;
-    await fetch(LSS_API_BASE + '/heartbeat', {
+    const res = await fetch(LSS_API_BASE + '/heartbeat', {
       method:  'POST',
       headers: {
         'Authorization': 'Bearer ' + token,
@@ -2141,6 +2308,7 @@ async function _fireRoomHeartbeat() {
         version:      'v10',
       }),
     });
+    if (res && res.status === 401) _lssAuthRejected(token);
   } catch (err) {
     console.warn('[lss-backend] heartbeat failed:', err);
   }
@@ -2158,7 +2326,7 @@ function stopRoomHeartbeat() {
     _roomHeartbeatTimer = null;
   }
   if (net && net.roomCode) {
-    const token = discordCurrentToken();
+    const token = lssAuthToken();                  // (v49.57)
     const code  = net.roomCode;
     if (token) {
       fetch(LSS_API_BASE + '/room/' + encodeURIComponent(code), {
@@ -2242,9 +2410,10 @@ function _lssCollectAccountPrefs() {
 
 async function lssPullAccountState() {
   try {
-    const token = (typeof discordCurrentToken === 'function') && discordCurrentToken();
+    const token = lssAuthToken();                  // (v49.57) the session, not the 7-day Discord token
     if (!token) return null;
     const res = await fetch(LSS_API_BASE + '/me/state', { headers: { 'Authorization': 'Bearer ' + token } });
+    if (res.status === 401) { _lssAuthRejected(token); return null; }
     if (!res.ok) return null;
     const remote = await res.json();
 
@@ -2289,7 +2458,7 @@ function lssPushAccountStateSoon(delayMs) {
 
 async function lssPushAccountState() {
   try {
-    const token = (typeof discordCurrentToken === 'function') && discordCurrentToken();
+    const token = lssAuthToken();                  // (v49.57)
     if (!token) return;
     let aegis = {};
     try { aegis = JSON.parse(localStorage.getItem('lss_aegis') || '{}') || {}; } catch (_) {}
@@ -2298,6 +2467,7 @@ async function lssPushAccountState() {
       headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
       body: JSON.stringify({ aegis, prefs: _lssCollectAccountPrefs() }),
     });
+    if (res.status === 401) { _lssAuthRejected(token); return; }
     if (!res.ok) { console.warn('[lss-backend] state push failed', res.status); return; }
     const merged = await res.json().catch(() => null);
     if (merged && merged.aegis && !(Object.keys(merged.aegis).length === 0 && Object.keys(aegis).length > 0)) {
@@ -2322,6 +2492,334 @@ try {
   if (window.LSS_AUTH && window.LSS_AUTH.isSignedIn && window.LSS_AUTH.isSignedIn()) {
     lssPullAccountState();
   }
+} catch (_) {}
+
+const _LSS_CATALOG_KEY = 'lss_shop_catalog';   // { products, checkout, at }
+const _LSS_OWNED_KEY   = 'lss_shop_owned';     // { discord_id, skus, at }
+const _lssShop = { products: [], premium: new Map(), checkout: false, ownedFor: null, owned: new Set(), at: 0, meAt: 0 };
+
+function _lssShopSetCatalog(j, fromCache) {
+  const products = (j && Array.isArray(j.products)) ? j.products.filter(p => p && typeof p.sku === 'string') : [];
+  const premium = new Map();
+  for (const p of products) {
+    for (const s of (Array.isArray(p.grants) && p.grants.length ? p.grants : [p.sku])) {
+      if (!premium.has(s) || s === p.sku) premium.set(s, p);
+    }
+  }
+  _lssShop.products = products;
+  _lssShop.premium = premium;
+  _lssShop.checkout = !!(j && j.checkout && j.checkout.paypal);
+  _lssShop.at = fromCache ? 0 : Date.now();
+  if (!fromCache) {
+    try { localStorage.setItem(_LSS_CATALOG_KEY, JSON.stringify({ products, checkout: j.checkout || null, at: Date.now() })); } catch (_) {}
+  }
+}
+function _lssShopSetOwned(discordId, skus) {
+  _lssShop.ownedFor = String(discordId);
+  _lssShop.owned = new Set((skus || []).filter(s => typeof s === 'string'));
+  try { localStorage.setItem(_LSS_OWNED_KEY, JSON.stringify({ discord_id: String(discordId), skus: [..._lssShop.owned], at: Date.now() })); } catch (_) {}
+}
+(function _lssShopLoadCache() {
+  try { const c = JSON.parse(localStorage.getItem(_LSS_CATALOG_KEY) || 'null'); if (c) _lssShopSetCatalog(c, true); } catch (_) {}
+  try {
+    const o = JSON.parse(localStorage.getItem(_LSS_OWNED_KEY) || 'null');
+    if (o && o.discord_id && Array.isArray(o.skus)) { _lssShop.ownedFor = String(o.discord_id); _lssShop.owned = new Set(o.skus); }
+  } catch (_) {}
+})();
+
+function lssSkinOffer(id) { try { return _lssShop.premium.get('skin:' + id) || null; } catch (_) { return null; } }
+function lssSkinIsPremium(id) { return !!lssSkinOffer(id); }
+function lssSkinOwned(id) {
+  try {
+    const u = discordCurrentUser();
+    return !!(u && u.id && _lssShop.ownedFor === String(u.id) && _lssShop.owned.has('skin:' + id));
+  } catch (_) { return false; }
+}
+function lssSkinLocked(id) {
+  try {
+    if (!id || id === SHIP_SKIN_DEFAULT) return false;
+    return _lssShop.premium.has('skin:' + id) && !lssSkinOwned(id);
+  } catch (_) { return false; }
+}
+function _lssPriceLabel(p) {
+  if (!p) return '';
+  const v = (Number(p.price_cents) / 100).toFixed(2);
+  return (String(p.currency || 'USD').toUpperCase() === 'USD') ? ('$' + v) : (v + ' ' + p.currency);
+}
+
+async function lssShopLoadCatalog(force) {
+  if (!force && Date.now() - _lssShop.at < 60000) return;
+  try {
+    const res = await fetch(LSS_API_BASE + '/shop/catalog');
+    if (!res.ok) return;                             // 404 = a Worker without the shop: keep the cache
+    const j = await res.json();
+    _lssShopSetCatalog(j, false);
+    _lssShopAfterChange();
+  } catch (_) {}
+}
+async function lssRefreshMe(force) {
+  const u = discordCurrentUser();
+  if (!u || !u.id) return null;
+  if (!force && Date.now() - _lssShop.meAt < 30000) return null;
+  const tok = lssAuthToken();
+  if (!tok) return null;
+  _lssShop.meAt = Date.now();
+  try {
+    const res = await fetch(LSS_API_BASE + '/me', { headers: { 'Authorization': 'Bearer ' + tok } });
+    if (res.status === 401) { _lssAuthRejected(tok); return null; }
+    if (!res.ok) return null;                        // 404 = a Worker without /me
+    const j = await res.json();
+    if (j && j.user && Array.isArray(j.entitlements)) { _lssShopSetOwned(j.user.id, j.entitlements); _lssShopAfterChange(); }
+    if (j && j.session && j.session.expires_at) {
+      const s = _lssSessionRead();
+      if (s && s.token === tok) { s.expires_at = j.session.expires_at; _lssSessionWrite(s); }
+    }
+    return j;
+  } catch (_) { return null; }
+}
+function lssShopRefresh(force) { lssShopLoadCatalog(force); lssRefreshMe(force); }
+function _lssShopAfterChange() {
+  try { _renderSkinPicker(); } catch (_) {}
+  try { if (_lssBuyFocus) _lssOpenBuy(_lssBuyFocus, true); } catch (_) {}
+}
+
+let _lssBuyFocus = null;
+const _LSS_LOCK_SVG = '<svg class="skin-lock" viewBox="0 0 10 12" width="9" height="11" aria-hidden="true">'
+  + '<path d="M3 5V3.4a2 2 0 0 1 4 0V5" fill="none" stroke="#ffc439" stroke-width="1.4"/>'
+  + '<rect x="1" y="5" width="8" height="6.5" rx="1.2" fill="#ffc439"/></svg>';
+function _lssBuyPlace() {
+  const bar = document.getElementById('skin-buy');
+  const ss = document.getElementById('ship-select');
+  if (!bar || !ss || !bar.classList.contains('open')) return;
+  const sr = ss.getBoundingClientRect();
+  const bh = bar.offsetHeight || 36;
+  const perks = document.getElementById('ship-preview-perks');
+  const pr = (perks && getComputedStyle(perks).display !== 'none') ? perks.getBoundingClientRect() : null;
+  if (pr && pr.height > 0 && pr.top - sr.top > 260) {
+    bar.style.top = Math.round(pr.top - sr.top - bh - 12) + 'px';
+    return;
+  }
+  const hero = document.getElementById('ship-hero');
+  const hr = hero ? hero.getBoundingClientRect() : null;
+  if (hr && hr.width > 0 && hr.height > 0) bar.style.top = Math.round(hr.bottom - sr.top + 6) + 'px';
+}
+let _lssBuyResizeWired = false;
+function _lssOpenBuy(id, refreshOnly) {
+  const body = document.getElementById('ship-select-body');
+  const sk = SHIP_SKINS[id];
+  if (!body || !sk) return;
+  if (refreshOnly && !lssSkinLocked(id)) { _lssCloseBuy(); return; }   // it just got unlocked
+  if (refreshOnly && _lssBuyFocus !== id) return;
+  let bar = document.getElementById('skin-buy');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'skin-buy';
+    bar.addEventListener('click', (e) => e.stopPropagation());
+    body.appendChild(bar);
+  }
+  if (!_lssBuyResizeWired) {
+    _lssBuyResizeWired = true;
+    try { window.addEventListener('resize', _lssBuyPlace); } catch (_) {}
+  }
+  _lssBuyFocus = id;
+  const offer = lssSkinOffer(id);
+  const u = discordCurrentUser();
+  const pend = _lssPaypalPendingRead();
+  const waiting = !!(pend && pend.skin === id && Date.now() - (pend.at || 0) < 3 * 3600 * 1000);
+  let action;
+  if (!offer || !offer.on_sale)             action = '<span class="skb-note">NOT FOR SALE</span>';
+  else if (!u || !u.id || _lssAuthExpired)  action = '<button type="button" class="skb-pay" data-act="signin">SIGN IN TO BUY</button>';
+  else if (!_lssShop.checkout)              action = '<span class="skb-note">SHOP OPENING SOON</span>';
+  else if (waiting)                         action = '<button type="button" class="skb-pay" data-act="check">I’VE PAID — CHECK</button>';
+  else                                      action = '<button type="button" class="skb-pay" data-act="buy"></button>';
+  bar.innerHTML = '<span class="skb-title">' + _LSS_LOCK_SVG + '<span class="skb-name"></span>'
+    + '<span class="skb-price"></span></span>' + action
+    + '<button type="button" class="skb-x" data-act="close" title="Close" aria-label="Close">×</button>'
+    + '<div class="skb-status"></div>';
+  bar.querySelector('.skb-name').textContent = sk.name;
+  bar.querySelector('.skb-price').textContent = offer ? _lssPriceLabel(offer) : '';
+  const buyBtn = bar.querySelector('[data-act="buy"]');
+  if (buyBtn) buyBtn.textContent = 'BUY WITH PAYPAL';
+  const st = bar.querySelector('.skb-status');
+  if (waiting) st.textContent = 'Finish paying in the PayPal window — it unlocks here the moment PayPal confirms.';
+  bar.title = (offer && offer.on_sale) ? ('Premium livery · yours on every device you sign into with Discord') : '';
+  for (const b of bar.querySelectorAll('button[data-act]')) {
+    b.addEventListener('click', () => {
+      const act = b.getAttribute('data-act');
+      if (act === 'close')  _lssCloseBuy();
+      if (act === 'signin') discordSignin();
+      if (act === 'buy')    lssBuySkin(id);
+      if (act === 'check')  _lssPaypalCapture(null, false, true);
+    });
+  }
+  bar.classList.add('open');
+  _lssBuyPlace();
+}
+function _lssCloseBuy() {
+  const had = _lssBuyFocus;
+  _lssBuyFocus = null;
+  const bar = document.getElementById('skin-buy');
+  if (bar) bar.classList.remove('open');
+  if (had) { try { setShipPreviewSkin(_getStoredSkinId()); } catch (_) {} }   // the preview was a try-on
+}
+function _lssBuyStatus(text) {
+  try { const st = document.querySelector('#skin-buy .skb-status'); if (st) st.textContent = text; } catch (_) {}
+}
+
+function _lssPaypalPending(p) {
+  try { if (p) localStorage.setItem('lss_paypal_pending', JSON.stringify(p)); else localStorage.removeItem('lss_paypal_pending'); } catch (_) {}
+}
+function _lssPaypalPendingRead() {
+  try {
+    const p = JSON.parse(localStorage.getItem('lss_paypal_pending') || 'null');
+    if (p && p.order_id && Date.now() - (p.at || 0) < 3 * 3600 * 1000) return p;   // PayPal drops unapproved orders
+    if (p) localStorage.removeItem('lss_paypal_pending');
+  } catch (_) {}
+  return null;
+}
+async function lssBuySkin(id) {
+  const offer = lssSkinOffer(id);
+  if (!offer || !offer.on_sale || !_lssShop.checkout) return;
+  const u = discordCurrentUser();
+  if (!u || !u.id || _lssAuthExpired) { discordSignin(); return; }
+  let pop = null;
+  try { pop = window.open('', 'lss_paypal', 'width=520,height=760'); } catch (_) {}
+  try {
+    if (pop && pop.document) {
+      pop.document.write('<title>PayPal</title><body style="background:#05070d;color:#cfe3ff;font:15px system-ui;'
+        + 'display:grid;place-items:center;height:100vh;margin:0">Opening PayPal…</body>');
+    }
+  } catch (_) {}
+  _lssBuyStatus('Opening PayPal…');
+  try {
+    await lssEnsureSession();
+    const tok = lssAuthToken();
+    if (!tok) throw new Error('sign-in expired');
+    const res = await fetch(LSS_API_BASE + '/shop/paypal/create', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sku: offer.sku, origin: location.origin }),
+    });
+    if (res.status === 401) { _lssAuthRejected(tok); throw new Error('sign-in expired'); }
+    const j = await res.json().catch(() => null);
+    if (res.status === 409) { try { if (pop) pop.close(); } catch (_) {} lssRefreshMe(true); return; }   // already owned
+    if (!res.ok || !j || !j.approve_url) throw new Error((j && j.error) || ('HTTP ' + res.status));
+    _lssPaypalPending({ order_id: j.order_id, sku: offer.sku, skin: id, at: Date.now() });
+    if (pop && !pop.closed) {
+      try { localStorage.setItem('lss_paypal_mode', 'popup'); } catch (_) {}
+      pop.location.href = j.approve_url;
+      _lssOpenBuy(id, true);                         // flips the bar to "I'VE PAID - CHECK"
+    } else {
+      try { localStorage.setItem('lss_paypal_mode', 'redirect'); } catch (_) {}
+      location.href = j.approve_url;
+    }
+  } catch (e) {
+    try { if (pop && !pop.closed) pop.close(); } catch (_) {}
+    _lssBuyStatus('Checkout could not start: ' + String((e && e.message) || e));
+  }
+}
+let _lssCapturing = false;
+const _lssCapturedOrders = new Set();
+let _lssLastCaptureTry = 0;
+async function _lssPaypalCapture(orderId, cancelled, manual) {
+  const pend = _lssPaypalPendingRead();
+  if (!orderId && pend) orderId = pend.order_id;
+  if (!orderId || _lssCapturing || _lssCapturedOrders.has(orderId)) return;
+  if (cancelled) {
+    _lssPaypalPending(null);
+    _lssBuyStatus('Checkout cancelled — nothing was charged.');
+    if (_lssBuyFocus) _lssOpenBuy(_lssBuyFocus, true);
+    return;
+  }
+  if (!manual && Date.now() - _lssLastCaptureTry < 4000) return;   // focus/storage/broadcast can all fire at once
+  _lssLastCaptureTry = Date.now();
+  _lssCapturing = true;
+  try {
+    await lssEnsureSession();
+    const tok = lssAuthToken();
+    if (!tok) return;
+    if (manual) _lssBuyStatus('Checking with PayPal…');
+    const res = await fetch(LSS_API_BASE + '/shop/paypal/capture', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ order_id: orderId }),
+    });
+    if (res.status === 401) { _lssAuthRejected(tok); return; }
+    const j = await res.json().catch(() => null);
+    if (!res.ok || !j) { if (manual) _lssBuyStatus('PayPal could not be reached — try again in a moment.'); return; }
+    const u = discordCurrentUser();
+    if (u && u.id && Array.isArray(j.entitlements)) _lssShopSetOwned(u.id, j.entitlements);
+    if (j.status === 'completed') {
+      _lssCapturedOrders.add(orderId);
+      _lssPaypalPending(null);
+      const skin = (pend && pend.order_id === orderId && pend.skin)
+        || (typeof j.sku === 'string' && j.sku.indexOf('skin:') === 0 ? j.sku.slice(5) : null);
+      _lssCloseBuy();
+      if (skin && SHIP_SKINS[skin]) {
+        _setStoredSkinId(skin);                      // wear what you just bought
+        try { setShipPreviewSkin(skin); } catch (_) {}
+        try { lssPushAccountStateSoon(500); } catch (_) {}   // ...on every device
+      }
+      _lssShopAfterChange();
+      _lssNotice('LIVERY UNLOCKED', ((skin && SHIP_SKINS[skin] && SHIP_SKINS[skin].name) || j.sku)
+        + ' is yours on every device you sign into.', 'ok');
+    } else if (j.status === 'pending') {
+      _lssBuyStatus('Payment pending at PayPal — it unlocks by itself when it clears.');
+    } else if (j.status === 'created') {
+      if (manual) _lssBuyStatus(j.detail ? ('PayPal says: ' + j.detail + ' — finish or retry in the PayPal window.')
+                                         : 'Not paid yet — finish in the PayPal window, then check again.');
+    } else {
+      _lssCapturedOrders.add(orderId);
+      _lssPaypalPending(null);
+      _lssBuyStatus('Payment ' + j.status + ' — nothing was unlocked or kept.');
+      if (_lssBuyFocus) _lssOpenBuy(_lssBuyFocus, true);
+    }
+  } catch (_) {
+  } finally { _lssCapturing = false; }
+}
+try {
+  const _bc = new BroadcastChannel('lss_shop');
+  _bc.onmessage = (ev) => {
+    const m = ev && ev.data;
+    if (m && m.type === 'lss_paypal_return') _lssPaypalCapture(m.order_id, !!m.cancel, true);
+  };
+} catch (_) {}
+try {
+  window.addEventListener('message', (ev) => {
+    const m = ev && ev.data;
+    if (ev.origin === location.origin && m && m.type === 'lss_paypal_return') _lssPaypalCapture(m.order_id, !!m.cancel, true);
+  });
+  window.addEventListener('storage', (ev) => {
+    if (ev.key !== 'lss_paypal_return' || !ev.newValue) return;
+    try { const m = JSON.parse(ev.newValue); _lssPaypalCapture(m.order_id, !!m.cancel, true); } catch (_) {}
+  });
+  window.addEventListener('focus', () => { if (_lssPaypalPendingRead()) _lssPaypalCapture(); });
+} catch (_) {}
+function _lssPaypalResume() {
+  let order = null, cancel = false;
+  try {
+    const q = new URLSearchParams(location.search);
+    if (q.get('paypal_order')) {
+      order = q.get('paypal_order');
+      cancel = q.get('paypal_cancel') === '1';
+      q.delete('paypal_order'); q.delete('paypal_cancel');
+      const rest = q.toString();
+      history.replaceState({}, document.title, location.pathname + (rest ? '?' + rest : '') + location.hash);
+    }
+  } catch (_) {}
+  if (!order) {
+    try {
+      const m = JSON.parse(localStorage.getItem('lss_paypal_return') || 'null');
+      if (m && m.order_id && Date.now() - (m.at || 0) < 3 * 3600 * 1000) { order = m.order_id; cancel = !!m.cancel; }
+    } catch (_) {}
+  }
+  try { localStorage.removeItem('lss_paypal_return'); } catch (_) {}
+  if (order) _lssPaypalCapture(order, cancel, true);
+  else if (_lssPaypalPendingRead()) _lssPaypalCapture(null, false, true);   // left open when the tab closed
+}
+try {
+  window.lssShop = { state: _lssShop, refresh: lssShopRefresh, locked: lssSkinLocked, owned: lssSkinOwned,
+                     buy: lssBuySkin, capture: _lssPaypalCapture, pending: _lssPaypalPendingRead };
 } catch (_) {}
 
 async function postMatchResultToBackend() {
@@ -77796,7 +78294,7 @@ function _renderDifficultyPicker() {
 }
 
 let _skinToggleWired = false;
-function _setSkinPanelOpen(open) {
+function _setSkinPanelOpen(open, keepTryOn) {
   const hero = document.getElementById('ship-hero');
   if (!hero) return;
   hero.classList.toggle('skin-open', !!open);   // still drives the toggle button's own styling
@@ -77805,6 +78303,8 @@ function _setSkinPanelOpen(open) {
   const btn = document.getElementById('skin-toggle');
   if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
   if (open) _skinPanelPlace();
+  if (!keepTryOn) { try { _lssCloseBuy(); } catch (_) {} }
+  if (open) { try { lssShopRefresh(); } catch (_) {} }
 }
 function _skinPanelPlace() {
   const panel = document.getElementById('ship-preview-skin');
@@ -77846,23 +78346,34 @@ function _renderSkinPicker() {
   if (typeof player !== 'undefined' && player) player.skinId = curId;
   grid.innerHTML = '';
   for (const [id, sk] of Object.entries(SHIP_SKINS)) {
+    const locked = lssSkinLocked(id);
+    const offer = locked ? lssSkinOffer(id) : null;
     const card = document.createElement('div');
-    card.className = 'perk-card skin-card' + (id === curId ? ' selected' : '');
+    card.className = 'perk-card skin-card' + (id === curId ? ' selected' : '')
+      + (locked ? ' locked' : (lssSkinIsPremium(id) ? ' premium' : ''))
+      + (id === _lssBuyFocus ? ' trying' : '');
     card.dataset.skinId = id;
-    card.title = sk.name + ' — ' + sk.desc;
+    card.title = sk.name + ' — ' + sk.desc + (locked ? (' — premium ' + _lssPriceLabel(offer)) : '');
     const _bg = sk.thumb ? ('url(' + sk.thumb + ') 38% 42% / 420% auto ' + sk.swatch)
       : (sk.swatch2
         ? 'linear-gradient(126deg, ' + sk.swatch + ' 0 52%, ' + sk.swatch2 + ' 52% 100%)'
         : sk.swatch);
-    card.innerHTML = '<span class="skin-sw" style="background:' + _bg + ';"></span>';
+    card.innerHTML = '<span class="skin-sw" style="background:' + _bg + ';"></span>' + (locked ? _LSS_LOCK_SVG : '');
     card.addEventListener('click', (e) => {
       e.stopPropagation();
+      if (lssSkinLocked(id)) {
+        _lssOpenBuy(id);
+        _setSkinPanelOpen(false, true);              // true = keep the try-on
+        try { setShipPreviewSkin(id); } catch (_) {}
+        return;
+      }
+      _lssCloseBuy();
       _setStoredSkinId(id);
       _renderSkinPicker();
       try { setShipPreviewSkin(id); } catch (_) {}
     });
     card.addEventListener('mouseenter', () => {
-      if (desc) desc.textContent = sk.name + ' — ' + sk.desc;
+      if (desc) desc.textContent = sk.name + ' — ' + (locked ? ('premium livery · ' + _lssPriceLabel(offer)) : sk.desc);
     });
     card.addEventListener('mouseleave', () => {
       const c = SHIP_SKINS[_getStoredSkinId()];
@@ -77881,7 +78392,7 @@ function _renderSkinPicker() {
         : cur.swatch);
   }
   if (tgEl && cur) tgEl.title = 'Hull livery — ' + cur.name + ' (click to change)';
-  try { setShipPreviewSkin(curId); } catch (_) {}
+  try { setShipPreviewSkin((_lssBuyFocus && SHIP_SKINS[_lssBuyFocus]) ? _lssBuyFocus : curId); } catch (_) {}
 }
 
 function selectLoadout(key) { commitLoadout(key); }
