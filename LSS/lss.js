@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "49.50";
+const LSS_BUILD = "49.55";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -390,6 +390,69 @@ const SHIP_SKINS = {
     desc: 'Black and white stripes. Subtle it is not.',
     pattern: 'image', image: 'skins/zebra.webp', imageMean: 0xb7b6b7, patScale: 1.5,
     shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.3,
+    metalness: 0.20, roughness: 0.55, envMapIntensity: 0.25, emissive: 0x000000,
+  },
+  img_fractal_shoreline: {
+    id: 'img_fractal_shoreline', name: 'FRACTAL SHORELINE', swatch: '#767e69', thumb: 'skins/fractal_shoreline.webp',
+    desc: 'Teal shallows and sand along an endless fractal coast.',
+    pattern: 'image', image: 'skins/fractal_shoreline.webp', imageMean: 0x767e69, patScale: 1.4,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.1,
+    metalness: 0.20, roughness: 0.55, envMapIntensity: 0.25, emissive: 0x000000,
+  },
+  img_carbon_fiber: {
+    id: 'img_carbon_fiber', name: 'CARBON FIBER', swatch: '#333333', thumb: 'skins/carbon_fiber.webp',
+    desc: 'Woven carbon under a gloss coat. Light, stiff and fast.',
+    pattern: 'image', image: 'skins/carbon_fiber.webp', imageMean: 0x333333, patScale: 2.2,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.2,
+    metalness: 0.25, roughness: 0.35, envMapIntensity: 0.45, emissive: 0x000000,
+  },
+  img_chromium: {
+    id: 'img_chromium', name: 'CHROMIUM', swatch: '#b1b5bb', thumb: 'skins/chromium.webp',
+    desc: 'Brushed chromium plate. It wears the sky.',
+    pattern: 'image', image: 'skins/chromium.webp', imageMean: 0xb1b5bb, patScale: 1.2,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.1,
+    metalness: 0.40, roughness: 0.30, envMapIntensity: 0.55, emissive: 0x000000,
+  },
+  img_radioactive: {
+    id: 'img_radioactive', name: 'RADIOACTIVE', swatch: '#4d8318', thumb: 'skins/radioactive.webp',
+    desc: 'Glowing green ooze over black circuitry. Handle with care.',
+    pattern: 'image', image: 'skins/radioactive.webp', imageMean: 0x4d8318, patScale: 1.5,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.1,
+    metalness: 0.20, roughness: 0.55, envMapIntensity: 0.25, emissive: 0x000000,
+  },
+  img_emerald: {
+    id: 'img_emerald', name: 'EMERALD', swatch: '#2a6f3d', thumb: 'skins/emerald.webp',
+    desc: 'Cut emerald, deep green with light caught inside.',
+    pattern: 'image', image: 'skins/emerald.webp', imageMean: 0x2a6f3d, patScale: 1.8,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.15,
+    metalness: 0.25, roughness: 0.30, envMapIntensity: 0.45, emissive: 0x000000,
+  },
+  img_diamond: {
+    id: 'img_diamond', name: 'DIAMOND', swatch: '#bccddf', thumb: 'skins/diamond.webp',
+    desc: 'Brilliant-cut diamond. Every facet throws the light back.',
+    pattern: 'image', image: 'skins/diamond.webp', imageMean: 0xbccddf, patScale: 1.8,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.1,
+    metalness: 0.25, roughness: 0.30, envMapIntensity: 0.45, emissive: 0x000000,
+  },
+  img_ruby: {
+    id: 'img_ruby', name: 'RUBY', swatch: '#8e2b2c', thumb: 'skins/ruby.webp',
+    desc: 'Blood-red ruby with fire in the cuts.',
+    pattern: 'image', image: 'skins/ruby.webp', imageMean: 0x8e2b2c, patScale: 1.8,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.15,
+    metalness: 0.25, roughness: 0.30, envMapIntensity: 0.45, emissive: 0x000000,
+  },
+  img_nebula: {
+    id: 'img_nebula', name: 'NEBULA', swatch: '#7b49c6', thumb: 'skins/nebula.webp',
+    desc: 'A slice of deep space: magenta gas and blue starlight.',
+    pattern: 'image', image: 'skins/nebula.webp', imageMean: 0x7b49c6, patScale: 1.3,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.1,
+    metalness: 0.20, roughness: 0.55, envMapIntensity: 0.25, emissive: 0x000000,
+  },
+  img_vortex: {
+    id: 'img_vortex', name: 'VORTEX SWIRL', swatch: '#3646ae', thumb: 'skins/vortex.webp',
+    desc: 'A blue whirlpool of light spiralling into the dark.',
+    pattern: 'image', image: 'skins/vortex.webp', imageMean: 0x3646ae, patScale: 1.2,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.1,
     metalness: 0.20, roughness: 0.55, envMapIntensity: 0.25, emissive: 0x000000,
   },
 };
@@ -788,6 +851,7 @@ const input = {
     scoreboard: 'tab',
     menu:       'escape',
     hideHud:    'h',        // (v49.09) hide the HUD / crosshair / text (toggle)
+    skinNext:   'k',
   },
 };
 
@@ -20842,6 +20906,43 @@ float _lssSunVisW(vec3 wp) {
   return 1.0 - smoothstep(uSunTopK.y, uSunTopK.y + uSunTopK.z, d);
 }
 `;
+const _SW_HULLCUT_GLSL = `
+uniform float uHullCutOn; uniform sampler2D uHullCutBot; uniform sampler2D uHullCutTop;
+uniform mat3 uHullCutRot; uniform vec3 uHullCutPos; uniform vec4 uHullCutRect; uniform vec4 uHullCutY; uniform vec4 uHullCutK;
+float _swHullCutB(ivec2 ij, int n) { return texelFetch(uHullCutBot, clamp(ij, ivec2(0), ivec2(n - 1)), 0).r; }
+// 1 = inside the hull (cut). The rest only matter to the debug paint: 0.5 = over a hull column but above or below
+// it, 0.25 = a hull column the erosion spared, 0.1 = inside the hull's rect with no hull under it.
+float _swHullCut(vec3 wp) {
+  if (uHullCutOn < 0.5) return 0.0;
+  vec3 l = uHullCutRot * (wp - uHullCutPos);
+  vec2 uv = vec2((l.x - uHullCutRect.x) / (uHullCutRect.y - uHullCutRect.x), (l.z - uHullCutRect.z) / (uHullCutRect.w - uHullCutRect.z));
+  if (uv.x <= 0.0 || uv.y <= 0.0 || uv.x >= 1.0 || uv.y >= 1.0) return 0.0;
+  int n = int(uHullCutY.w + 0.5);
+  ivec2 ij = ivec2(uv * uHullCutY.w);
+  float b = _swHullCutB(ij, n);
+  if (b < 0.5 / 255.0) return 0.1;
+  if (uHullCutK.x > 0.5) {
+    float e = min(min(_swHullCutB(ij + ivec2(1, 0), n), _swHullCutB(ij - ivec2(1, 0), n)),
+                  min(_swHullCutB(ij + ivec2(0, 1), n), _swHullCutB(ij - ivec2(0, 1), n)));
+    if (e < 0.5 / 255.0) return 0.25;
+  }
+  ivec2 ijT = (uHullCutK.z > 0.5) ? ivec2(n - 1 - ij.x, ij.y) : ij;
+  float t = texelFetch(uHullCutTop, clamp(ijT, ivec2(0), ivec2(n - 1)), 0).r;
+  float bot = uHullCutY.x + (1.0 - b) * uHullCutY.y;
+  float top = uHullCutY.x + uHullCutY.y - (1.0 - t) * uHullCutY.y;
+  return (l.y > bot + uHullCutY.z && l.y < top - uHullCutY.z) ? 1.0 : 0.5;
+}
+// window.__water.hullCutDebug = 1 paints instead of cutting: magenta = cut, yellow = over/under a hull column,
+// cyan = spared by the erosion, dark blue = inside the rect off the hull. Anything water-coloured in the cabin
+// then is NOT the slab's doing.
+vec4 _swHullCutPaint(float c) {
+  return (c > 0.75) ? vec4(1.0, 0.0, 1.0, 1.0) : (c > 0.4) ? vec4(1.0, 0.9, 0.0, 1.0) : (c > 0.2) ? vec4(0.0, 1.0, 1.0, 1.0) : vec4(0.1, 0.1, 0.6, 1.0);
+}
+`;
+const _swHullCutU = { uHullCutOn: { value: 0 }, uHullCutBot: { value: null }, uHullCutTop: { value: null },
+  uHullCutRot: { value: new THREE.Matrix3() }, uHullCutPos: { value: new THREE.Vector3() },
+  uHullCutRect: { value: new THREE.Vector4(0, 1, 0, 1) }, uHullCutY: { value: new THREE.Vector4(0, 1, 0, 64) },
+  uHullCutK: { value: new THREE.Vector4(1, 0, 0, 0) } };
 function _sunTopPars() {
   if (_SUNTOP.pars) return _SUNTOP.pars;
   const c = THREE.ShaderChunk.lights_pars_begin, a = 'light.color = directionalLight.color;';
@@ -23209,9 +23310,11 @@ function _swWaterReflectShader() {
       'uniform vec3 uSnellTint; uniform vec3 uDeepTint; uniform float uSubmerge; uniform vec3 uEye; uniform float uUnderMirror; uniform float uUnderDeep; uniform float uUnderThru; uniform sampler2D uAboveTex; uniform float uAboveOn; uniform float uAboveMix; uniform float uReflLive; uniform float uFlipFace;',   
       'uniform vec3 uShallowTint; uniform float uShoreSoft; uniform float uFoamThresh;',
       'uniform vec3 uSunDir;',   // (v49.39) the real sun (was the literal (0.29, 0.86, 0.43) twice below)
-      _SUNTOP_GLSL,   // (v49.40) the baked mountain shadow   
+      _SUNTOP_GLSL,   // (v49.40) the baked mountain shadow
+      _SW_HULLCUT_GLSL,   // (v49.54) no water inside the ship
       'varying vec4 vUv;', 'varying vec3 vWP;', 'varying vec4 vUvAbove;', '#include <fog_pars_fragment>',
       'void main(){',
+      '  { float _hc = _swHullCut(vWP); if (uHullCutK.y > 0.5 && _hc > 0.05) { gl_FragColor = _swHullCutPaint(_hc); return; } if (_hc > 0.75) discard; }',   // (v49.54) see _SW_HULLCUT_GLSL
       '  float t = uTime; vec2 q = vWP.xz;',
       '  float dist = length(vWP - uCam);',
       '  float fade = clamp(1.0 - (dist - 500.0) / 5000.0, 0.05, 1.0);',
@@ -23707,18 +23810,18 @@ function _swSilSweep() {
     if (C.size <= _swSil.max) break;
     if (_swSilInUse(rec)) continue;
     C.delete(k); rec._cached = false;
-    try { rec.rt.dispose(); } catch (_) {}
+    _swSilFree(rec);   // (v49.55) + its top and cut maps
   }
   for (const rec of _swSil.orphans) {    // dropped by a flush while still bound; free them once they are not
     if (_swSilInUse(rec)) continue;
     _swSil.orphans.delete(rec);
-    try { rec.rt.dispose(); } catch (_) {}
+    _swSilFree(rec);
   }
 }
 function _swSilFlush() {
   for (const rec of _swSil.cache.values()) {
     rec._cached = false;
-    if (_swSilInUse(rec)) _swSil.orphans.add(rec); else { try { rec.rt.dispose(); } catch (_) {} }
+    if (_swSilInUse(rec)) _swSil.orphans.add(rec); else _swSilFree(rec);
   }
   _swSil.cache.clear(); _swSil.empty.clear();
 }
@@ -23726,7 +23829,7 @@ function _swSilAssign(sn, rec, slot) {
   const R = _swRipple, old = R[sn];
   R[sn] = rec;
   if (old && old !== rec && !old._cached) {
-    if (_swSilInUse(old)) _swSil.orphans.add(old); else { try { old.rt.dispose(); } catch (_) {} }
+    if (_swSilInUse(old)) _swSil.orphans.add(old); else _swSilFree(old);
   }
   try { if (!slot) window.__hullSil = R.hullSil; } catch (_) {}
 }
@@ -23780,6 +23883,57 @@ function _swSilWarm(root) {
 }
 if (typeof window !== 'undefined') window.__silCache = () => ({ size: _swSil.cache.size, builds: _swSil.builds, hits: _swSil.hits,
   empty: _swSil.emptyN, orphans: _swSil.orphans.size, keys: Array.from(_swSil.cache.keys()).map(k => k.slice(0, 8)) });
+function _swHullCutMaps(sc, frame, all, y0, range) {
+  if (typeof renderer === 'undefined' || !renderer || !_swSil.mat) return null;
+  const W = window.__water || {};
+  const res = Math.max(64, Math.min(1024, (W.hullCutRes != null) ? (+W.hullCutRes | 0) : 256));
+  const mg = 2;
+  const x0 = all.min.x - mg, x1 = all.max.x + mg, z0 = all.min.z - mg, z1 = all.max.z + mg;
+  const camB = new THREE.OrthographicCamera(x0, x1, z1, z0, 0, range);
+  camB.position.set(0, y0, 0); camB.up.set(0, 0, 1); camB.lookAt(0, y0 + 1, 0);
+  const camT = new THREE.OrthographicCamera(-x1, -x0, z1, z0, 0, range);
+  camT.position.set(0, y0 + range, 0); camT.up.set(0, 0, 1); camT.lookAt(0, y0 + range - 1, 0);
+  for (const c of [camB, camT]) {
+    c.updateMatrix(); c.matrixAutoUpdate = false;
+    c.matrixWorld.multiplyMatrices(frame, c.matrix); c.matrixWorldNeedsUpdate = false;
+    c.matrixWorldInverse.copy(c.matrixWorld).invert();
+  }
+  const mk = () => {
+    const rt = new THREE.WebGLRenderTarget(res, res, { minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+      format: THREE.RGBAFormat, type: THREE.UnsignedByteType, depthBuffer: true, stencilBuffer: false, generateMipmaps: false });
+    rt.texture.wrapS = rt.texture.wrapT = THREE.ClampToEdgeWrapping;
+    return rt;
+  };
+  const bot = mk(), top = mk();
+  const prevRT = renderer.getRenderTarget();
+  const prevClear = new THREE.Color(); renderer.getClearColor(prevClear); const prevAlpha = renderer.getClearAlpha();
+  const prevAuto = renderer.autoClear;
+  const _xrOn = !!(renderer.xr && renderer.xr.enabled);
+  const _shAuto = renderer.shadowMap ? renderer.shadowMap.autoUpdate : undefined;
+  sc.overrideMaterial = _swSil.mat;
+  try {
+    if (_xrOn) renderer.xr.enabled = false;
+    if (renderer.shadowMap) renderer.shadowMap.autoUpdate = false;
+    renderer.setClearColor(0x000000, 1); renderer.autoClear = true;
+    renderer.setRenderTarget(bot); renderer.render(sc, camB);
+    renderer.setRenderTarget(top); renderer.render(sc, camT);
+  } catch (e) {
+    try { bot.dispose(); top.dispose(); } catch (_) {}
+    return null;
+  } finally {
+    if (_xrOn) renderer.xr.enabled = true;
+    if (renderer.shadowMap && _shAuto !== undefined) renderer.shadowMap.autoUpdate = _shAuto;
+    renderer.setRenderTarget(prevRT); renderer.setClearColor(prevClear, prevAlpha); renderer.autoClear = prevAuto;
+    sc.overrideMaterial = null;
+  }
+  return { bot, top, x0, x1, z0, z1, res };
+}
+function _swSilFree(rec) {
+  if (!rec) return;
+  try { if (rec.rt) rec.rt.dispose(); } catch (_) {}
+  try { if (rec.topTex) rec.topTex.dispose(); } catch (_) {}
+  if (rec.cut) { try { rec.cut.bot.dispose(); rec.cut.top.dispose(); } catch (_) {} rec.cut = null; }
+}
 function _swHullSilhouette(mesh, slot) {
   const R = _swRipple;
   if (!mesh) return null;
@@ -23942,8 +24096,11 @@ function _swHullSilhouette(mesh, slot) {
         slab = { bot, top, n: _nIn, topTex: _tt };
       } catch (_) { slab = null; } finally { if (_rtT) { try { _rtT.dispose(); } catch (_) {} } }
     }
+    let _cut = null;
+    try { _cut = _swHullCutMaps(sc, frame, all, y0, range); } catch (_) { _cut = null; }
     const rec = { key, rt, tex: rt.texture, x0, x1, z0, z1, zMin: all.min.z, zMax: all.max.z, y0, range, beam, len, rimR, res, cnt, fill: +_fill.toFixed(4), _cached: true, slab,
-                  topTex: slab ? slab.topTex : null };   // (v48.65)
+                  topTex: slab ? slab.topTex : null,   // (v48.65)
+                  cut: _cut };   // (v49.55)
     _swSil.empty.delete(key);
     _swSil.cache.set(key, rec);
     _swSilAssign(_sn, rec, slot);
@@ -23992,6 +24149,45 @@ function _swSlabIn(T, x, y, z) {
   return ly >= S.bot[k] - T.mg && ly <= S.top[k] + T.mg;
 }
 if (typeof window !== 'undefined') window.__hullDropKills = function () { return _swSlabT.kills; };
+const _swHCq = new THREE.Quaternion(), _swHCp = new THREE.Vector3(), _swHCs = new THREE.Vector3(), _swHCm = new THREE.Matrix4();
+function _swHullCutBind() {
+  const U = _swHullCutU;
+  let on = 0;
+  try {
+    const W = window.__water || {};
+    const rec = (W.hullCut === 0 || typeof _swRipple === 'undefined' || !_swRipple) ? null : _swRipple.hullSil;
+    const m = (typeof player !== 'undefined' && player) ? player.mesh : null;
+    if (rec && rec.slab && rec.tex && rec.topTex && m && player.shipState !== 'dead') {
+      let hull = null;
+      for (let i = 0; i < m.children.length; i++) { const c = m.children[i]; if (c && c.userData && c.userData.bboxSize) { hull = c; break; } }
+      if (!hull) hull = m;
+      if (rec.key && rec.key.indexOf(hull.uuid + ':') === 0) {
+        m.matrixWorld.decompose(_swHCp, _swHCq, _swHCs);
+        _swHCm.makeRotationFromQuaternion(_swHCq);
+        U.uHullCutRot.value.setFromMatrix4(_swHCm).transpose();
+        U.uHullCutPos.value.copy(_swHCp);
+        const C = (W.hullCutFine === 0) ? null : rec.cut;
+        if (C) U.uHullCutRect.value.set(C.x0, C.x1, C.z0, C.z1); else U.uHullCutRect.value.set(rec.x0, rec.x1, rec.z0, rec.z1);
+        U.uHullCutY.value.set(rec.y0, rec.range, (W.hullCutMargin != null) ? +W.hullCutMargin : 0, C ? C.res : rec.res);
+        U.uHullCutK.value.x = (W.hullCutErode != null) ? (W.hullCutErode ? 1 : 0) : (C ? 0 : 1);
+        U.uHullCutK.value.y = W.hullCutDebug ? 1 : 0;
+        U.uHullCutK.value.z = C ? 1 : 0;   // the top camera's own image is mirrored in x
+        U.uHullCutBot.value = C ? C.bot.texture : rec.tex; U.uHullCutTop.value = C ? C.top.texture : rec.topTex;
+        on = 1;
+      }
+    }
+  } catch (_) { on = 0; }
+  U.uHullCutOn.value = on;
+  if (!on) { U.uHullCutBot.value = null; U.uHullCutTop.value = null; }
+  return on;
+}
+if (typeof window !== 'undefined') window.__hullCut = function () {
+  const U = _swHullCutU, rec = (typeof _swRipple !== 'undefined' && _swRipple) ? _swRipple.hullSil : null;
+  return { on: U.uHullCutOn.value, key: rec ? String(rec.key).slice(0, 8) : null, res: U.uHullCutY.value.w, fine: !!(rec && rec.cut), fill: rec ? rec.fill : 0,
+    debug: U.uHullCutK.value.y, flipTop: U.uHullCutK.value.z,
+    rect: U.uHullCutRect.value.toArray().map((v) => +v.toFixed(1)), y0: +U.uHullCutY.value.x.toFixed(1), range: +U.uHullCutY.value.y.toFixed(1),
+    erode: U.uHullCutK.value.x, margin: U.uHullCutY.value.z };
+};
 let _swSurfEnds = 0;   // (v49.08) drops ended / bubbles popped at the surface - see WATER ENDS AT THE WATER
 if (typeof window !== 'undefined') window.__dropSurfEnds = function () { return _swSurfEnds; };
 const _swSlabShipTs = [];   // pooled frames for the other hulls (yours is _swSlabT)
@@ -28423,6 +28619,7 @@ function _swBuildHubWaterDispGet(WL) {
     fragmentShader: [
       'uniform vec3 uSunDir;',   // (v49.39) the real sun - the diffuse, specular and all three foam-light terms below read it
       _SUNTOP_GLSL,   // (v49.40) the baked mountain shadow (G = the shadow-top height, compared with this surface)
+      _SW_HULLCUT_GLSL,   // (v49.54) no water inside the ship
       'uniform vec3 uCam; uniform vec3 color; uniform float uTime; uniform float uSprayBreak; uniform float uMist; uniform float uPeakLo; uniform float uSprayFreq; uniform float uFoamSlope; uniform float uSteepFoam;',
       'uniform float uPeakHi; uniform float uCapLo; uniform float uCapHi; uniform float uCapStr; uniform float uCapSteep; uniform float uCapFreq; uniform float uCapBright;',
       'uniform float uCapFoamLo; uniform float uCapFoamHi; uniform float uFoamMatte;',   // (v41.53/41.54)
@@ -28483,6 +28680,7 @@ function _swBuildHubWaterDispGet(WL) {
       '}',
       'float _swShapeF(float hh){ float sq = hh * (1.0 + uCrestQ * abs(hh)); float x = sq * uGain / max(uDispScale, 0.01); return uDispScale * (x / (1.0 + abs(x))); }',
       'void main(){',
+      '  { float _hc = _swHullCut(vWP); if (uHullCutK.y > 0.5 && _hc > 0.05) { gl_FragColor = _swHullCutPaint(_hc); return; } if (_hc > 0.75) discard; }',   // (v49.54) no water inside the ship - see _SW_HULLCUT_GLSL
       '  vec3 _dbgSeen = vec3(0.0); float _dbgCap = 0.0;',
       '  vec3 V = normalize(uCam - vWP);',
       '  vec3 N = normalize(vN);',
@@ -28706,6 +28904,7 @@ function _swBuildHubWaterDispGet(WL) {
   mesh.userData = { isHubWater: true, WL: WL };
   scene.add(mesh);
   mesh.onBeforeRender = function (rnd, scn, cam) {
+    try { _swHullCutBind(); } catch (_) {}   // (v49.54) the pose being drawn - see _swHullCutBind
     try {
       const _w = game._hubWater, _u = mesh.material.uniforms;
       if (_w && _w._reflWorldN > 0 && _u && _u.uReflLive && _u.uReflLive.value > 0.0) {
@@ -28719,6 +28918,7 @@ function _swBuildHubWaterDispGet(WL) {
   mesh.onAfterRender = function () { try { const u = mesh.material.uniforms; if (u && u.uRefract) u.uRefract.value = 0.0; } catch (_) {} };
   _hubWaterDisp = mesh;
   try { mat.uniforms.uSunDir = _swU.uSunDir; } catch (_) {}   // (v49.39) one sun (see the Reflector)
+  try { for (const _k in _swHullCutU) mat.uniforms[_k] = _swHullCutU[_k]; } catch (_) {}   // (v49.54) shared, see _SW_HULLCUT_GLSL
   try { mat.uniforms.uSunTop = _swU.uSunTop; mat.uniforms.uSunTopBox = _swU.uSunTopBox; mat.uniforms.uSunTopK = _swU.uSunTopK; } catch (_) {}   // (v49.40)
   try { game._hubWaterDispMat = mat; } catch (_) {}
   try {
@@ -28762,7 +28962,8 @@ function _swBuildHubWater(T) {
     mesh.material.uniforms.uTime = _swU.uTime;   
     mesh.material.uniforms.uCam = _swU.uCam;
     mesh.material.uniforms.uSunDir = _swU.uSunDir;   // (v49.39) one sun: _wxFrame writes it from _WX.sunDir
-    mesh.material.uniforms.uSunTop = _swU.uSunTop; mesh.material.uniforms.uSunTopBox = _swU.uSunTopBox; mesh.material.uniforms.uSunTopK = _swU.uSunTopK;   // (v49.40)      
+    mesh.material.uniforms.uSunTop = _swU.uSunTop; mesh.material.uniforms.uSunTopBox = _swU.uSunTopBox; mesh.material.uniforms.uSunTopK = _swU.uSunTopK;   // (v49.40)
+    for (const _k in _swHullCutU) mesh.material.uniforms[_k] = _swHullCutU[_k];   // (v49.54) shared, see _SW_HULLCUT_GLSL
     mesh.material.transparent = true;
     mesh.material.depthWrite = false;
     mesh.material.fog = true;
@@ -28925,6 +29126,7 @@ function _swBuildHubWater(T) {
     const _reflNrm = new THREE.Vector3(), _reflRot = new THREE.Matrix4();
     const _reflRP = new THREE.Vector3(), _reflCP = new THREE.Vector3();
     mesh.onBeforeRender = function (rnd, scn, cam, geo2, mat2, grp) {
+      try { _swHullCutBind(); } catch (_) {}
       if (game && game._reflBenchOff) return;
 
 
@@ -79754,6 +79956,32 @@ function _lssToggleNoHud(force) {
   } catch (_) { return false; }
 }
 if (typeof window !== 'undefined') window.__hudHide = _lssToggleNoHud;
+function _lssNextSkin(dir) {
+  try {
+    const ids = Object.keys(SHIP_SKINS);
+    if (ids.length < 2) return null;
+    let i = ids.indexOf(_getStoredSkinId()); if (i < 0) i = 0;
+    const next = ids[((i + ((dir | 0) || 1)) % ids.length + ids.length) % ids.length];
+    const ss = document.getElementById('ship-select');
+    if (ss && ss.classList.contains('active')) {
+      _setStoredSkinId(next);
+      try { _renderSkinPicker(); } catch (_) {}
+      try { setShipPreviewSkin(next); } catch (_) {}
+      try { const d = document.getElementById('skin-desc'), sk = SHIP_SKINS[next]; if (d && sk) d.textContent = sk.name + ' — ' + sk.desc; } catch (_) {}
+      return next;
+    }
+    if (game.state !== 'playing' || typeof player === 'undefined' || !player || !player.mesh || player.shipState === 'dead') return null;
+    const _now = (typeof game.time === 'number') ? game.time : 0;
+    if (_now - (player._lastSkinSwap || -9) < 0.12) return null;   // a held key auto-repeats; one step per press
+    player._lastSkinSwap = _now;
+    _setStoredSkinId(next);
+    player.skinId = next;
+    try { _applyShipSkin(player.mesh, next); } catch (_) {}
+    try { _lssAnnounceLoadout(); } catch (_) {}
+    return next;
+  } catch (_) { return null; }
+}
+if (typeof window !== 'undefined') window.__nextSkin = _lssNextSkin;
 function _lssDispatchBound(k, down) {
   const kb = input.kbBindings;
   if (!kb || !k) return;
@@ -79767,6 +79995,7 @@ function _lssDispatchBound(k, down) {
     if (k === (kb.shipPrev || '[')) { try { cycleHubShip(-1); } catch (_) {} }
     if (k === (kb.shipNext || ']')) { try { cycleHubShip(1); } catch (_) {} }
     if (k === ((kb.hideHud != null) ? kb.hideHud : 'h')) { try { _lssToggleNoHud(); } catch (_) {} }   // (v49.09)
+    if (k === ((kb.skinNext != null) ? kb.skinNext : 'k')) { try { _lssNextSkin(1); } catch (_) {} }   // (v49.52)
   } else {
     if (k === kb.ability0) abilityInputRelease(0);
     if (k === kb.ability1) abilityInputRelease(1);
@@ -80111,6 +80340,7 @@ function _howtoRender(ov) {
     rows.push(['VIEW', tag('view')]);
     rows.push(['HIDE HUD', tag('hideHud')]);   // (v49.09)
     rows.push(['CYCLE SHIP', tag('shipPrev') + ' / ' + tag('shipNext')]);
+    rows.push(['NEXT SKIN', tag('skinNext')]);   // (v49.52)
     rows.push(['SCOREBOARD', tag('scoreboard') + ' (HOLD)']);
     rows.push(['SETTINGS', tag('menu')]);
   }
@@ -80978,6 +81208,7 @@ const KB_ACTION_LABELS = {
   scoreboard: 'Scoreboard (hold)',
   menu:       'Menu / Settings',
   hideHud:    'Hide HUD / Crosshair / Text (toggle)',   // (v49.09)
+  skinNext:   'Next Skin (livery)',                       // (v49.52)
 };
 const KB_DEFAULTS = {
   fire: 'mouse0',
@@ -80988,6 +81219,7 @@ const KB_DEFAULTS = {
   view: 'v', shipPrev: '[', shipNext: ']',
   scoreboard: 'tab', menu: 'escape',
   hideHud: 'h',   // (v49.09)
+  skinNext: 'k',  // (v49.52) see _lssNextSkin - K is otherwise only the replay studio's play/pause, and the studio swallows keys
 };
 
 let settingsOpen = false;
