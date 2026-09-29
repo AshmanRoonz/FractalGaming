@@ -26,7 +26,7 @@ A package marks itself with `?store=<id>` in its start URL. The page reads that 
 - A Google Play TWA arrives with the referrer `android-app://ca.fractalreality.lss`.
 - The Microsoft Store sends the documented referrer `app-info://platform/microsoft-store` on its first navigation.
 
-**Why it hides the shop.** Outside the US, UK and EEA, Google Play requires Play Billing for in-game items. Microsoft Store policy 10.8.1(a) requires Microsoft's commerce for **games** in every market. Both stores allow "consumption-only": using items bought elsewhere, as long as the app has no purchase path. The PayPal checkout that went live on 2026-09-28 therefore stays on the web.
+**Why it hides the shop.** Outside the US, UK and EEA, Google Play requires Play Billing for in-game items. Microsoft Store policy 10.8.1(a) requires Microsoft's commerce for **games** (the policy text names no regional exception). Both stores allow "consumption-only": using items bought elsewhere, as long as the app has no purchase path. The PayPal checkout that went live on 2026-09-28 therefore stays on the web.
 
 **To test it on the web:** open `https://lss.fractalreality.ca/?store=play`. DONATE and unowned premium liveries disappear. Open `?store=off` to turn store mode off again.
 
