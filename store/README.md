@@ -6,7 +6,7 @@ Version: 1.0
 
 The store versions of Last Ship Sailing are **the live site, opened full screen by a thin store package**. Nothing is copied into the package, so every `tools/deploy_cf.py` reaches store players at the same moment it reaches the web. A new store upload is needed only when the name, icon, start URL or package settings change.
 
-This folder sits at the repo root, so it is never deployed. The web side of the kit lives in `LSS/` and shipped in build v49.88 (see `LSS/lss.map.md`, entry v49.88).
+This folder sits at the repo root, so it is never deployed. The web side of the kit lives in `LSS/` and shipped in build v49.88 (see `LSS/lss.map.md`, entry v49.88). The plan for the other games, the labs and the Fractal_Reality pages is in [`PLAN.md`](PLAN.md).
 
 ## What is already in place (v49.88)
 
