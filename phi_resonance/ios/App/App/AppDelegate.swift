@@ -1,4 +1,5 @@
 import UIKit
+import AVFoundation
 import Capacitor
 
 @UIApplicationMain
@@ -7,7 +8,15 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     var window: UIWindow?
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
-        // Override point for customization after application launch.
+        // Phi Resonance: a .playback audio session, so sessions play with the silent switch on and,
+        // with UIBackgroundModes audio in Info.plist, keep playing with the screen locked. The page
+        // also asks WebKit for the same thing (navigator.audioSession.type = 'playback' in
+        // www/app-bridge.js); both are needed, since the web audio runs inside WKWebView.
+        do {
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
+        } catch {
+            print("Phi Resonance: could not set the audio session category: \(error)")
+        }
         return true
     }
 
