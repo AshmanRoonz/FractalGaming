@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "49.85";
+const LSS_BUILD = "49.86";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -464,6 +464,13 @@ const SHIP_SKINS = {
     pattern: 'image', image: 'skins/vortex.webp', imageMean: 0x3646ae, patScale: 1.2,
     shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.1,
     metalness: 0.20, roughness: 0.55, envMapIntensity: 0.25, emissive: 0x000000,
+  },
+  img_oil: {
+    id: 'img_oil', name: 'OIL SLICK', swatch: '#426178', thumb: 'skins/oil.webp',
+    desc: 'Iridescent petrol swirling teal and violet over black.',
+    pattern: 'image', image: 'skins/oil.webp', imageMean: 0x426178, patScale: 1.4,
+    shade: 'ratio', patKeep: 0.85, patFloor: 0.05, patCap: 1.35, patFlat: 0.1,
+    metalness: 0.25, roughness: 0.30, envMapIntensity: 0.45, emissive: 0x000000,
   },
 };
 const _SKIN_TUNE_HEX = { c0: 1, c1: 1, c2: 1, emissive: 1 };
