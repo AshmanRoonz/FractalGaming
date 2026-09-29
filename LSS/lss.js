@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "49.86";
+const LSS_BUILD = "49.87";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -81942,7 +81942,7 @@ function _lssToggleNoHud(force) {
 if (typeof window !== 'undefined') window.__hudHide = _lssToggleNoHud;
 function _lssNextSkin(dir) {
   try {
-    const ids = Object.keys(SHIP_SKINS);
+    const ids = Object.keys(SHIP_SKINS).filter((id) => !lssSkinLocked(id));
     if (ids.length < 2) return null;
     let i = ids.indexOf(_getStoredSkinId()); if (i < 0) i = 0;
     const next = ids[((i + ((dir | 0) || 1)) % ids.length + ids.length) % ids.length];
