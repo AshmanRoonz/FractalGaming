@@ -3,7 +3,12 @@
 <head>
 <meta charset="UTF-8">
 <title>Last Ship Sailing</title>
-<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v35.18","short_name":"LSS%20v35.18","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
+<!-- (v49.88) THE MANIFEST IS A FILE NOW. It was an inline data: URI with no icons and a name frozen at
+     "v35.18", and a manifest without 192 and 512 px icons is not installable: Chrome never offered
+     the install, and the store packagers (PWABuilder, Bubblewrap) could not fetch it by URL.
+     manifest.webmanifest + icons/ carry it now; sw.js adds the offline screen. See store/README.md. -->
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <meta name="theme-color" content="#0a0520">
 <meta name="application-name" content="Last Ship Sailing">
 <meta name="mobile-web-app-capable" content="yes">
@@ -16,6 +21,53 @@
      so the full game can never boot in there. Same-origin script = allowed by
      the client's script-src 'self' (inline scripts are not). No-op elsewhere. -->
 <script src="activity/redirect.js"></script>
+<!-- (v49.88) STORE BUILDS AND THE SERVICE WORKER. The Google Play and Microsoft Store packages are
+     this same page opened full screen, so the page has to know when it is one: each package launches
+     with ?store=<id> in its start URL (store/README.md), and two launch signals back that up in case a
+     package is ever built without it (a Play TWA arrives with the android-app:// referrer of its own
+     package, ca.fractalreality.lss unless store/README.md says otherwise; the Microsoft Store marks its
+     launches with the app-info://platform/microsoft-store referrer). The flag lives in sessionStorage,
+     so it lasts for the app session and never leaks into an ordinary browser tab, and ?store= is
+     dropped from the address so an invite copied inside a store build is a plain link.
+     window.LSS_STORE is read by _lssStoreBuild() (Jump: STORE BUILDS SELL NOTHING).
+     The worker registers after load, on https only, never inside Discord; sw.js says what it does and
+     does not do (it caches nothing the game runs on). ?nosw skips it for a test. -->
+<script>
+(function () {
+  try {
+    var q = new URLSearchParams(location.search), s = q.get('store') || '';
+    var ref = String(document.referrer || '');
+    if (!s && /^android-app:\/\/ca\.fractalreality\.lss(\/|$)/.test(ref)) s = 'play';
+    if (!s && ref.indexOf('app-info://platform/microsoft-store') === 0) s = 'msstore';
+    s = String(s).toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 24);
+    if (s === 'off' || s === 'web') sessionStorage.removeItem('lss_store');   // ?store=off ends a test
+    else if (s) sessionStorage.setItem('lss_store', s);
+    if (q.has('store')) {
+      q.delete('store');
+      var qs = q.toString();
+      history.replaceState(history.state, '', location.pathname + (qs ? '?' + qs : '') + location.hash);
+    }
+    window.LSS_STORE = sessionStorage.getItem('lss_store') || '';
+  } catch (_) { window.LSS_STORE = window.LSS_STORE || ''; }
+  try { if (window.LSS_STORE) document.documentElement.classList.add('lss-store'); } catch (_) {}
+  // Jump: SERVICE WORKER REGISTRATION
+  try {
+    if ('serviceWorker' in navigator && location.protocol === 'https:'
+        && !/\.discordsays\.com$/.test(location.hostname) && !/[?&]nosw\b/.test(location.search)) {
+      window.addEventListener('load', function () {
+        navigator.serviceWorker.register('sw.js').catch(function () {});
+      });
+    }
+  } catch (_) {}
+})();
+</script>
+<style>
+/* (v49.88) STORE BUILDS: the lobby DONATE link pays the developer through PayPal, the kind of payment
+   outside the store billing that Play and App Store review both police (tips to a developer are not a
+   charity exemption). Hidden in store packages only; html.lss-store is set by the script above.
+   !important because the link carries an inline display. */
+html.lss-store #btn-donate { display: none !important; }
+</style>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <!-- (v38.60) the engine itself comes from jsdelivr; open that connection as early as the font one. -->
@@ -7239,7 +7291,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "49.87";
+const LSS_BUILD = "49.88";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -10886,8 +10938,20 @@ function lssSkinLocked(id) {
     return _lssShop.premium.has('skin:' + id) && !lssSkinOwned(id);
   } catch (_) { return false; }
 }
+// (v49.88) STORE BUILDS SELL NOTHING. Google Play (and Apple, when there is an App Store build) require
+// their own billing for digital items bought inside an app, outside the few markets where a court or a
+// regulator says otherwise, and a PayPal button in a Play build is the textbook violation that gets an
+// app pulled. So when the page is running as a store package (window.LSS_STORE, set in <head> from the
+// package's ?store= start URL or its launch referrer) the shop offers nothing: unowned premium liveries
+// are not shown at all (a padlocked swatch with no way to buy it here would be an advert for a checkout
+// the app may not mention), the buy bar never opens, and no price is ever printed. What a player
+// already OWNS still comes from GET /me and still paints their hull: using an entitlement bought
+// elsewhere is allowed everywhere. The web build is untouched (LSS_STORE is '' there).
+// To sell inside a store build later, the path is the store's own billing (Play: the Digital Goods API
+// in a TWA), not relaxing this gate.
+function _lssStoreBuild() { try { return String(window.LSS_STORE || ''); } catch (_) { return ''; } }
 function _lssPriceLabel(p) {
-  if (!p) return '';
+  if (!p || _lssStoreBuild()) return '';
   const v = (Number(p.price_cents) / 100).toFixed(2);
   return (String(p.currency || 'USD').toUpperCase() === 'USD') ? ('$' + v) : (v + ' ' + p.currency);
 }
@@ -10970,6 +11034,7 @@ function _lssOpenBuy(id, refreshOnly) {
   const body = document.getElementById('ship-select-body');
   const sk = SHIP_SKINS[id];
   if (!body || !sk) return;
+  if (_lssStoreBuild()) return;                                          // (v49.88) no checkout in a store build
   if (refreshOnly && !lssSkinLocked(id)) { _lssCloseBuy(); return; }   // it just got unlocked
   if (refreshOnly && _lssBuyFocus !== id) return;
   let bar = document.getElementById('skin-buy');
@@ -11045,6 +11110,7 @@ function _lssPaypalPendingRead() {
   return null;
 }
 async function lssBuySkin(id) {
+  if (_lssStoreBuild()) return;                      // (v49.88) STORE BUILDS SELL NOTHING
   const offer = lssSkinOffer(id);
   if (!offer || !offer.on_sale || !_lssShop.checkout) return;
   const u = discordCurrentUser();
@@ -123761,6 +123827,7 @@ function _renderSkinPicker() {
     // (v49.57) PREMIUM: a locked livery keeps its swatch (the livery IS the advert) under a padlock;
     // clicking it tries it on the hero and opens the buy bar instead of equipping it.
     const locked = lssSkinLocked(id);
+    if (locked && _lssStoreBuild()) continue;        // (v49.88) STORE BUILDS SELL NOTHING: no padlocked advert
     const offer = locked ? lssSkinOffer(id) : null;
     const card = document.createElement('div');
     card.className = 'perk-card skin-card' + (id === curId ? ' selected' : '')

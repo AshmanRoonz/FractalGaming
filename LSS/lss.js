@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "49.87";
+const LSS_BUILD = "49.88";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -2548,8 +2548,9 @@ function lssSkinLocked(id) {
     return _lssShop.premium.has('skin:' + id) && !lssSkinOwned(id);
   } catch (_) { return false; }
 }
+function _lssStoreBuild() { try { return String(window.LSS_STORE || ''); } catch (_) { return ''; } }
 function _lssPriceLabel(p) {
-  if (!p) return '';
+  if (!p || _lssStoreBuild()) return '';
   const v = (Number(p.price_cents) / 100).toFixed(2);
   return (String(p.currency || 'USD').toUpperCase() === 'USD') ? ('$' + v) : (v + ' ' + p.currency);
 }
@@ -2615,6 +2616,7 @@ function _lssOpenBuy(id, refreshOnly) {
   const body = document.getElementById('ship-select-body');
   const sk = SHIP_SKINS[id];
   if (!body || !sk) return;
+  if (_lssStoreBuild()) return;                                          // (v49.88) no checkout in a store build
   if (refreshOnly && !lssSkinLocked(id)) { _lssCloseBuy(); return; }   // it just got unlocked
   if (refreshOnly && _lssBuyFocus !== id) return;
   let bar = document.getElementById('skin-buy');
@@ -2685,6 +2687,7 @@ function _lssPaypalPendingRead() {
   return null;
 }
 async function lssBuySkin(id) {
+  if (_lssStoreBuild()) return;                      // (v49.88) STORE BUILDS SELL NOTHING
   const offer = lssSkinOffer(id);
   if (!offer || !offer.on_sale || !_lssShop.checkout) return;
   const u = discordCurrentUser();
@@ -79817,6 +79820,7 @@ function _renderSkinPicker() {
   grid.innerHTML = '';
   for (const [id, sk] of Object.entries(SHIP_SKINS)) {
     const locked = lssSkinLocked(id);
+    if (locked && _lssStoreBuild()) continue;        // (v49.88) STORE BUILDS SELL NOTHING: no padlocked advert
     const offer = locked ? lssSkinOffer(id) : null;
     const card = document.createElement('div');
     card.className = 'perk-card skin-card' + (id === curId ? ' selected' : '')

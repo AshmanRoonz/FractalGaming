@@ -1,8 +1,8 @@
 # FractalGaming
 
 Created: 2026-04-28
-Last updated: 2026-08-02
-Version: 1.3
+Last updated: 2026-09-29
+Version: 1.5
 
 Games and game engines built on the Circumpunct Framework by Ashman Roonz. The framework treats every whole as a circumpunct (⊙ = Φ(•, ○)) at some scale, with parts that are themselves circumpuncts; the games here put that structure on screen, sometimes literally (the dimensional ladder maps to engine layers in Microverse Megabattle), sometimes through theme and feel (ship classes as constraint-archetypes in Last Ship Sailing).
 
@@ -36,12 +36,14 @@ FractalGaming/
 │   ├── LSS_SOUND.json                spatial sound library
 │   ├── LSS_WALLS.json                wall pattern data
 │   ├── sound_lab.html                sound design utility
-│   └── wall_pattern_lab.html         wall pattern editor
+│   ├── wall_pattern_lab.html         wall pattern editor
+│   └── manifest.webmanifest, sw.js   installable-app files (icons/, offline.html; LSS v49.88)
 ├── microverse_megabattle/            Microverse Megabattle (active)
 │   ├── v5.html                       current build
 │   ├── microverse_architecture_layers.md
 │   ├── circumpunct_particle_taxonomy.md
 │   └── microverse_element_dna.md
+├── store/                            store kit: how to package LSS for Microsoft Store, Google Play, Quest (not deployed)
 ├── LSS_old/                          earlier LSS iterations and experiments
 └── microverse/                       earliest MMB prototype
 ```
@@ -101,3 +103,4 @@ Framework: Circumpunct Framework by Ashman Roonz (companion repository: Fractal_
 - 2026-08-02 v1.3: repository restructure (LSS v36.09) — the game, its satellite pages, `activity/`, `campaign_media/`, and `_headers` moved from the repo root into `LSS/`, which is now the deployed site root; asset URLs lost their `LSS/` prefix; build tooling stays at the repo root. Other root projects (goopling, baseball_blitz, labs/…) no longer deploy to lss.fractalreality.ca
 - 2026-08-16 v1.4: link-rot fix for the above — `labs/`, `goopling.html`, `table_legends.html` and `baseball_blitz.html` are staged alongside `LSS/` again (`EXTRA_DIRS`/`EXTRA_FILES` in `tools/deploy_cf.py`), so the lab links on fractalreality.ca and the old `ashmanroonz.github.io/FractalGaming/...` URLs resolve instead of silently loading the game
 - 2026-05-29 v1.2: current LSS build bumped to v27, now served as `index.html`. This release adds multiplayer netcode hardening (validated/clamped peer damage, state-gated round + timer sync, round-end and Outline-perk fixes), per-frame performance optimizations, and moves spatial-audio and reverb occlusion from full-mesh raycasts to the SDF ray-march (~15% of combat CPU reclaimed). Also: default Nexus map/theme now applies on the ship-select screen, an optional FPS/CPU counter under Settings > Performance, and the gamepad indicator removed
+- 2026-09-29 v1.5: store kit. LSS is an installable app as of v49.88 (real manifest, icons, offline-only service worker) with a store mode that keeps the PayPal shop and DONATE out of store builds; `store/README.md` has the packaging steps per store
