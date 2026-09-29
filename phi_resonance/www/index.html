@@ -4,7 +4,12 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#0a0a1a">
-<title>φ-Entrainment | Sound Laboratory</title>
+<!-- [PHI-APP] This file is the Phi Resonance app's copy of Fractal_Reality/docs/phi_resonance.html
+     (Fractal_Reality commit 874ff34). Every app change is marked [PHI-APP]; the web page itself is
+     not changed. See ../README.md. -->
+<!-- [PHI-APP] The app's name. The web page's "Entrainment" reads as a claim to change the body,
+     which store health rules treat as a medical claim (see ../README.md, "Positioning"). -->
+<title>Phi Resonance</title>
 <style>
   :root {
     --gold: #ffd700;
@@ -796,7 +801,7 @@
   <!-- HERO -->
   <header class="hero col-span-2 col-span-3">
     <div class="phi-symbol">⊙</div>
-    <h1 class="title">φ-ENTRAINMENT</h1>
+    <h1 class="title">φ RESONANCE</h1><!-- [PHI-APP] was φ-ENTRAINMENT -->
     <div class="sub">Sound lab: binaural, isochronic, monaural, drone, harmonic, cascade, noise, chord</div>
   </header>
 
@@ -1083,6 +1088,11 @@
     <div class="info">
       <strong>Headphones recommended</strong> for binaural and φ-cascade modes (stereo separation matters). Drone, harmonic, chord, monaural, and noise modes play fine on any speaker. Start at low volume and raise slowly; if anything becomes uncomfortable, lower the beat rate, reverb, and volume.
     </div>
+    <!-- [PHI-APP] Google Play's Health Content and Services policy asks health-adjacent apps that are
+         not medical devices to say so; the same words go in both store descriptions. -->
+    <div class="info" style="margin-top:10px;">
+      Phi Resonance is a sound tool for relaxation, focus and exploration. It is not a medical device and does not diagnose, treat, cure, or prevent any medical condition. For any health concern, talk to a healthcare professional.
+    </div>
   </section>
 
   <!-- BREATH LEAD (full-width) -->
@@ -1242,15 +1252,21 @@
 
 <footer>
   <div style="font-size:1.4rem; color:var(--gold);">⊙</div>
+  <!-- [PHI-APP] The web page links these relatively; the app bundles only this page, so they point
+       at fractalreality.ca and open in the phone's browser. Privacy is bundled (Apple 5.1.1(i) wants
+       the policy reachable inside the app). -->
   <p style="margin-top:8px;">
-    <a href="circumpunct_consciousness_theory.html">Consciousness Theory</a> ·
-    <a href="attune.html">Attune</a> ·
-    <a href="hemispheric_resonance.html">Hemispheric Resonance</a> ·
-    <a href="how_reality_is_built.html">How Reality Is Built</a>
+    <a href="https://fractalreality.ca/circumpunct_consciousness_theory.html" target="_blank" rel="noopener">Consciousness Theory</a> ·
+    <a href="https://fractalreality.ca/attune.html" target="_blank" rel="noopener">Attune</a> ·
+    <a href="https://fractalreality.ca/hemispheric_resonance.html" target="_blank" rel="noopener">Hemispheric Resonance</a> ·
+    <a href="https://fractalreality.ca/how_reality_is_built.html" target="_blank" rel="noopener">How Reality Is Built</a>
   </p>
+  <p style="margin-top:6px;"><a href="privacy.html">Privacy</a></p>
   <p style="margin-top:6px; color:#666;">The Circumpunct Framework · Ashman Roonz · 2026</p>
 </footer>
 
+<!-- [PHI-APP] Screen-off audio, lock-screen controls, native export (see the file's header). -->
+<script src="app-bridge.js"></script>
 <script>
 (() => {
   'use strict';
@@ -1358,9 +1374,11 @@
     wetGain: null,
     dryGain: null,
     filter: null,
+    gate: null,          // [PHI-APP] output gate: the session timer's fade-out runs on it
     timer: 0,
     timerInt: null,
     timerTarget: 0,
+    timerStartedAt: 0,   // [PHI-APP] wall-clock start of the session timer (ms)
     currentPreset: 'phibeat',
     mode: 'binaural',
     layerCount: 6,
@@ -1482,8 +1500,12 @@
     state.masterGain.connect(state.dryGain);
     state.masterGain.connect(state.convolver);
     state.convolver.connect(state.wetGain);
-    state.dryGain.connect(ctx.destination);
-    state.wetGain.connect(ctx.destination);
+    // [PHI-APP] dry + wet now meet in a gate before the speakers (was: each to ctx.destination), so
+    // the timer can fade the whole session on the audio clock (scheduleTimerFade).
+    state.gate = ctx.createGain();
+    state.gate.connect(ctx.destination);
+    state.dryGain.connect(state.gate);
+    state.wetGain.connect(state.gate);
 
     // Build layers based on mode
     const N = state.layerCount;
@@ -1529,6 +1551,8 @@
     renderLayers();
     renderLayerMixChips();
     startTimer();
+    scheduleTimerFade();                                   // [PHI-APP]
+    if (window.PhiApp) window.PhiApp.sessionStarted();     // [PHI-APP] foreground service, lock screen
   }
 
   function stopSession() {
@@ -1548,11 +1572,43 @@
     if (state.convolver) { try { state.convolver.disconnect(); } catch(e){} state.convolver = null; }
     if (state.wetGain) { try { state.wetGain.disconnect(); } catch(e){} state.wetGain = null; }
     if (state.dryGain) { try { state.dryGain.disconnect(); } catch(e){} state.dryGain = null; }
+    if (state.gate) { try { state.gate.disconnect(); } catch(e){} state.gate = null; }   // [PHI-APP]
 
     state.playing = false;
     $('playBtn').textContent = '▶ BEGIN SESSION';
     $('playBtn').classList.remove('playing');
     stopTimer();
+    if (window.PhiApp) window.PhiApp.sessionStopped();     // [PHI-APP]
+  }
+
+  // [PHI-APP] The session timer's end, scheduled on the audio clock as well as the page's timer.
+  // With the screen locked a phone may slow or pause page timers, but the audio clock keeps running:
+  // the gate fades the sound out over the last few seconds before the chosen time whatever the page
+  // is doing, and stopSession() tidies up as soon as the page's timer runs again. Called when a
+  // session starts and when a timer button changes the target mid-session.
+  function scheduleTimerFade() {
+    const g = state.gate, ctx = state.ctx;
+    if (!g || !ctx) return;
+    const now = ctx.currentTime;
+    g.gain.cancelScheduledValues(now);
+    g.gain.setValueAtTime(1, now);
+    if (state.timerTarget > 0) {
+      const remaining = Math.max(0, state.timerTarget * 60 - (Date.now() - state.timerStartedAt) / 1000);
+      const end = now + remaining;
+      const fade = Math.min(8, Math.max(0.05, remaining));
+      g.gain.setValueAtTime(1, end - fade);
+      g.gain.linearRampToValueAtTime(0, end);
+    }
+  }
+
+  // [PHI-APP] One line for the lock screen and the Android notification.
+  function describeSession() {
+    const names = { binaural: 'Binaural', isochronic: 'Isochronic', monaural: 'Monaural', drone: 'Drone',
+                    harmonic: 'Harmonic', cascade: 'φ-Cascade', noise: 'Noise', chord: 'Chord' };
+    const p = state.params;
+    const beatModes = { binaural: 1, isochronic: 1, monaural: 1, cascade: 1 };
+    const beat = beatModes[state.mode] ? ' · ' + Number(p.beat).toFixed(3).replace(/\.?0+$/, '') + ' Hz beat' : '';
+    return (names[state.mode] || state.mode) + ' · ' + Number(p.base) + ' Hz' + beat;
   }
 
   // ----- waveform builders -----
@@ -1971,9 +2027,12 @@
   function startTimer() {
     stopTimer();
     state.timer = 0;
+    state.timerStartedAt = Date.now();   // [PHI-APP]
     updateTimerDisplay();
     state.timerInt = setInterval(() => {
-      state.timer++;
+      // [PHI-APP] Elapsed time from the clock, not a count of ticks (was state.timer++): a locked
+      // phone skips ticks, and a count would let the session outlast its timer.
+      state.timer = Math.floor((Date.now() - state.timerStartedAt) / 1000);
       updateTimerDisplay();
       if (state.timerTarget > 0 && state.timer >= state.timerTarget * 60) {
         stopSession();
@@ -2266,6 +2325,7 @@
       document.querySelectorAll('.tbtn').forEach(x => x.classList.remove('active'));
       b.classList.add('active');
       state.timerTarget = parseInt(b.dataset.time, 10);
+      scheduleTimerFade();   // [PHI-APP] move the audio-clock fade to the new end (no-op when stopped)
     });
   });
 
@@ -2418,10 +2478,12 @@
     const all = getSaved();
     const payload = { version: 1, kind: 'phi_resonance_states', exportedAt: new Date().toISOString(), states: all };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    // [PHI-APP] inside the app, a.download does nothing: hand the file to the share sheet instead
+    if (window.PhiApp && window.PhiApp.saveFile(blob, 'phi-resonance-states-' + stamp + '.json')) return;
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
     a.download = 'phi-resonance-states-' + stamp + '.json';
     document.body.appendChild(a);
     a.click();
@@ -2565,6 +2627,7 @@
   }
 
   function downloadBlob(blob, filename) {
+    if (window.PhiApp && window.PhiApp.saveFile(blob, filename)) return;   // [PHI-APP] share sheet
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -3372,6 +3435,18 @@
   };
   document.addEventListener('touchstart', unlock, { once: true });
   document.addEventListener('click', unlock, { once: true });
+
+  // [PHI-APP] Hand the session controls to the app bridge (app-bridge.js): notification and
+  // lock-screen controls, resuming after the screen wakes. A no-op in a browser.
+  if (window.PhiApp) {
+    window.PhiApp.attach({
+      start: startSession,
+      stop: stopSession,
+      isPlaying: () => state.playing,
+      getContext: () => state.ctx,
+      describe: describeSession
+    });
+  }
 
 })();
 </script>
