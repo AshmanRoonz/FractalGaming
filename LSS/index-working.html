@@ -7239,7 +7239,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "49.78";
+const LSS_BUILD = "49.84";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -39159,6 +39159,13 @@ const _swU = { uTime:{value:0}, uYMid:{value:0}, uAMP:{value:1}, uSnow:{value:0.
                uTexRock:{value:_swTexWhite}, uTexGRock:{value:_swTexWhite},
                uTexMeanR:{value:new THREE.Vector3(1,1,1)}, uTexMeanGR:{value:new THREE.Vector3(1,1,1)},
                uTexK2:{value:new THREE.Vector4(0,0,0,64)}, uTexK3:{value:new THREE.Vector4(48,600,3000,0)},
+               // (v49.79) WHERE the tiles may show, per map: (grass, rock, grassy rock, ceiling rock) - _SW_TEX_MAPS
+               uTexBio:{value:new THREE.Vector4(0,0,0,0)},
+               // (v49.83) three more tiles: the SNOW caps (snow, or ash), MOSS patches, LAKE BEDS. uTexK4 = their strengths
+               // (on with their first image), uTexT4.x = the snow tile (triplanar), uTexBio2 = where, per map (_SW_TEX_MAPS).
+               uTexSnow:{value:_swTexWhite}, uTexMoss:{value:_swTexWhite}, uTexBed:{value:_swTexWhite},
+               uTexMeanSn:{value:new THREE.Vector3(1,1,1)}, uTexMeanMo:{value:new THREE.Vector3(1,1,1)}, uTexMeanBd:{value:new THREE.Vector3(1,1,1)},
+               uTexK4:{value:new THREE.Vector4(0,0,0,0)}, uTexT4:{value:new THREE.Vector4(80,0,0,0)}, uTexBio2:{value:new THREE.Vector4(0,0,0,0)},
                uSunDir:{value:new THREE.Vector3(0.29,0.86,0.43)},   // (v44.45) world sun, kept in step with _WX.sunDir
                // (v49.40) the baked sun shadow: RG16F (R = shadow depth above the baked ground, G = shadow-top
                // height), world xz -> uv, and K = (on, bias, soft width, -). window.__sunShadow = { on, bias, soft }.
@@ -39303,6 +39310,53 @@ function _volcSync(cx, cz) {
 }
 try { window.__volc = () => ({ n: _swU.uVolcN.value, list: _swU.uVolc.value.slice(0, _swU.uVolcN.value).map(v => [Math.round(v.x), Math.round(v.z), Math.round(v.z), Math.round(v.w)]) }); } catch (_) {}
 
+// ⭐ (v49.79) THE TILES IN THE CAVERNS. Owner: "are the caverns using our new textures/shaders? we have rock, grass,
+// grassy rock, etc..." - they were not. Every chunk shares one floor + one ceiling material with the hub, and all five
+// tiles even LOADED underground (measured in The Approach: loaded x5, strengths 0.75-0.9), but the shader multiplied
+// every tile by step(0.5,uMossy) - the HUB's biome flag - and the ceiling branch never sampled one at all.
+// uMossy cannot simply go on underground: it also drives hub-only looks (mossy rock sides, the dirt / overgrowth /
+// rubble patches, the beaches). So the tiles get their own switch, uTexBio = (grass, rock, grassy rock, ceiling rock).
+// Owner: "start with the approach and verdant pass, only changing the areas that have those new textures":
+//   camp_approach  rock on the faces + the rock roof, nothing else. Its flats are grey gravel (rocky tGrass 0x7c8794)
+//                  and no tile is gravel, so they stay as they were. Chroma 0: the photo brings light and shade, the
+//                  leg keeps its own colour.
+//   camp_grassy    the hub heartland's set - grass on the flats, rock on the faces, grassy rock across the mid-slopes
+//                  where rock meets grass - + the rock roof. Chroma 1, the photos' own hue, as in the heartland.
+// Mud and sand stay hub-only: their areas (the dirt patches, the beaches) exist only in the hub. Keyed by MAP, not by
+// biome - 'rocky' and 'grassy' also dress arena maps, the endless roulette and the rift caverns, which nobody asked
+// to change. The hub's own row is exactly what the gate was (grass + rock + grassy rock, no roof), so it is unchanged.
+// Live: __terrTex({ bio: [grass, rock, grassyRock, ceil] }) - [0,0,0,0] is the before.
+// ⭐ (v49.80) + THE APPROACH'S FLOORS. Owner: "just added into concept/shaders gravel.png and rockyfloor.png which could
+// be used for some of the floors in the caverns". The Approach's flats ARE grey gravel (rocky tGrass 0x7c8794) - the one
+// area v49.79 had to leave bare - so GRAVEL takes its ground slot, and ROCKY FLOOR its mid-slope band: gravel flats,
+// broken rock where the ground starts to climb (scree), rock on the faces. Same slots, same taps (_SW_TEX_SLOTS).
+// Rows: ground / rock / band / roof = uTexBio's four switches; groundTex / bandTex = what fills the slots (default
+// grass / grassy rock). Live: __terrTex({ groundTex: 'rockyFloor', bandTex: 'gravel' }) to try them the other way.
+const _SW_TEX_HUB = { ground: 1, rock: 1, band: 1, roof: 0, snow: 1, moss: 1, bed: 1, chroma: null };   // chroma: the hub's zone tick owns it
+// (v49.81) + Molten Core and The Golden Deep. Owner: "use rocky floor for molten core and golden deep too" - their FLOORS
+// only: walls, roof, the lava glow and the gold veins (both emissive, added on top) stay as they were. Chroma 1: both
+// palettes are warm (volcanic tGrass 0x6e5a4a, goldmine 0x9c7c3c), the photo is a warm brown, so its own variation
+// (grey slabs in brown grit) sits right on them - The Approach's cold purple-blue is why that one is brightness-only.
+// ⭐ (v49.83) THE OWNER'S EIGHT, placed as proposed: SNOW on Frozen Reach's floors + the snow caps (hub mountains,
+// Verdant Pass and The Approach peaks, Frozen Reach), ASH as Molten Core's caps (the same slot), FROZEN ROCK / BASALT /
+// SANDSTONE / BLUE ROCK on the walls + roof of Frozen Reach / Molten Core / The Golden Deep / The Crystal Caverns (blue
+// rock on its floor too), MOSS on the moss patches (hub + Verdant Pass), PEBBLES on the hub's lake beds. Fields: ground /
+// rock / band / roof = uTexBio, snow / moss / bed = uTexBio2 (0 when absent); groundTex / bandTex / rockTex / snowTex
+// fill the slots (defaults grass / grassy rock / rock / snow). Chroma 0 on the cold palettes (The Approach, Crystal).
+const _SW_TEX_MAPS = {
+  camp_approach:    { ground: 1, rock: 1, band: 1, roof: 1, snow: 1, chroma: 0, groundTex: 'gravel', bandTex: 'rockyFloor' },
+  camp_grassy:      { ground: 1, rock: 1, band: 1, roof: 1, snow: 1, moss: 1, chroma: 1 },
+  // (v49.84) Frozen Reach: PLAIN rock on the walls + roof, brightness only - owner on the frozen rock: "the snowy caverns
+  // looked bad" / "it looks too patterny", then on this: "that's better" / "yep, good". Its white frost drips against dark
+  // cracks are too graphic to tile a whole cave: at the 5 m rock tile they became static all over the bright snow-biome
+  // roof, at 12.5-15.6 m the drips read as a repeating pattern (compared in one frame: shipped / walls-only .4 @160 /
+  // plain rock / .35 @200). frozenRock stays in _SW_TERR_TEX for the knob; nothing uses it.
+  camp_snow:        { ground: 1, rock: 1, roof: 1, snow: 1, chroma: 0, groundTex: 'snow' },
+  camp_volcanic:    { ground: 1, rock: 1, roof: 1, snow: 1, chroma: 1, groundTex: 'rockyFloor', rockTex: 'volcanicRock', snowTex: 'ash' },
+  camp_goldmine:    { ground: 1, rock: 1, roof: 1, chroma: 1, groundTex: 'rockyFloor', rockTex: 'sandstone' },
+  camp_crystalcave: { ground: 1, rock: 1, roof: 1, chroma: 0, groundTex: 'blueRock', rockTex: 'blueRock' },
+};
+let _swTexCaveChroma = false;   // a leg set uTexChroma: put the default back when it is left
 function _swSyncFX() {
   const T = game.sandwichTerrain; if (!T) return;
   _swU.uYMid.value = T.YMID; _swU.uAMP.value = T.AMP; _swU.uSnow.value = T.snowLine || 0.7;
@@ -39321,6 +39375,29 @@ function _swSyncFX() {
   _swU.uGold.value = (T.biome === 'goldmine') ? ((_SW_BIOME_LOOK.goldmine && _SW_BIOME_LOOK.goldmine.veins) || 1) : 0;      
   _swU.uCrystal.value = (T.biome === 'crystalcave') ? ((_SW_BIOME_LOOK.crystalcave && _SW_BIOME_LOOK.crystalcave.veins) || 1) : 0; 
   _swU.uMossy.value = (T.biome === 'mossy') ? 1 : 0;          
+  // (v49.79) where the ground tiles may show - by map, see _SW_TEX_MAPS
+  try {
+    const _tm = (T.biome === 'mossy') ? _SW_TEX_HUB : (_SW_TEX_MAPS[game.selectedMap] || null);
+    const _t = _tm || {};
+    _swU.uTexBio.value.set(_t.ground || 0, _t.rock || 0, _t.band || 0, _t.roof || 0);
+    _swU.uTexBio2.value.set(_t.snow || 0, _t.moss || 0, _t.bed || 0, 0);   // (v49.83)
+    if (_tm) {   // (v49.80) what fills the slots here (a map without tiles leaves them alone - nothing shows them)
+      // (v49.81) only a slot this map SHOWS - no load for one it has switched off
+      const _want = {
+        ground: _t.ground ? (_t.groundTex || ((_SW_TERR_TEX._grassWhich === 'thick') ? 'grassThick' : 'grass')) : null,
+        band: _t.band ? (_t.bandTex || 'grassyRock') : null,
+        rock: (_t.rock || _t.roof) ? (_t.rockTex || 'rock') : null,   // (v49.83) the roof shares the rock slot
+        snow: _t.snow ? (_t.snowTex || 'snow') : null,
+        moss: _t.moss ? 'moss' : null,
+        bed: _t.bed ? 'pebbles' : null,
+      };
+      for (const _k in _want) { if (_want[_k] && _SW_TEX_SLOTS[_k].want !== _want[_k]) _swTerrSlot(_k, _want[_k]); }
+    }
+    if (_SW_TERR_TEX._chromaPin == null) {
+      if (_tm && _tm.chroma != null) { _swU.uTexChroma.value = _tm.chroma; _swTexCaveChroma = true; }
+      else if (_swTexCaveChroma) { _swU.uTexChroma.value = 1; _swTexCaveChroma = false; }
+    }
+  } catch (_) {}
   { const _ag = window.__aerial || {}; const _at = ((typeof isStandaloneQuest==='function' && isStandaloneQuest()) || (typeof _LSS_IS_MOBILE!=='undefined' && _LSS_IS_MOBILE)) ? 0.6 : 1.0;   
     if (T.biome === 'mossy') {
       _swU.uAerial.value = (_ag.strength != null ? _ag.strength : 0.55 * _at);
@@ -39438,7 +39515,60 @@ const _SW_TERR_TEX = {
   grass: { url: 'tex/terr_grass.webp', mean: [0.0842, 0.18, 0.0158], k: 0.75 },
   mud:   { url: 'tex/terr_grass_mud.webp', mean: [0.1101, 0.1059, 0.0269], k: 0.9 },
   sand:  { url: 'tex/terr_sand.webp', mean: [0.6835, 0.4757, 0.2738], k: 0.9 },
+  // (v49.80) the owner's cavern floors: "gravel.png and rockyfloor.png which could be used for some of the floors
+  // in the caverns". gravel had a visible wrap seam (edge jump 2.16 / 1.70 x a normal pixel step) and rocky floor a
+  // mild one (1.45 / 1.27) - both MIN-CUT to 1.16 / 1.01 and 1.04 / 1.02 (scratchpad terrtex_prep.py: the tile's end
+  // and start overlap by 128 px, a DP path picks where one hands over to the other; pebbles are cut around, never
+  // feathered), then 1024 px WebP q85 with the LINEAR mean measured on the encoded file.
+  gravel:     { url: 'tex/terr_gravel.webp', mean: [0.2587, 0.2086, 0.1687], k: 0.75 },   // (v49.83) k = what it rendered at (the ground slot's 0.75)
+  rockyFloor: { url: 'tex/terr_rockyfloor.webp', mean: [0.187, 0.1409, 0.1008], k: 0.75 },
+  // ⭐ (v49.83) THE OWNER'S EIGHT. Asked "what other textures should i make?", then: "all 8 textures are in the shaders
+  // folder". Same pipeline (min-cut seams, 1024 WebP q85, linear mean on the encoded file). k IS CALIBRATED PER TILE:
+  // the shader applies a tile as a ratio around its own mean, so a dark photo's highlights become huge ratios - relative
+  // contrast (CV of linear luminance) measured: rock .53 (the hub's reference, k .9), snow .14, sandstone .47,
+  // pebbles .79, frozen rock .83, basalt 1.06, moss 1.07, ash 1.29, blue rock 1.74 (p99 ratio 9x). k ~ .5-.65 / CV
+  // puts every tile near the effective contrast the existing ones render at (grass .68, grassy rock .68, rock .48).
+  snow:         { url: 'tex/terr_snow.webp', mean: [0.6547, 0.7041, 0.7897], k: 1.0 },
+  frozenRock:   { url: 'tex/terr_frozen_rock.webp', mean: [0.177, 0.2105, 0.2635], k: 0.75 },
+  volcanicRock: { url: 'tex/terr_volcanic_rock.webp', mean: [0.0349, 0.0325, 0.0314], k: 0.6 },
+  sandstone:    { url: 'tex/terr_sandstone.webp', mean: [0.5589, 0.2189, 0.0645], k: 0.95 },
+  blueRock:     { url: 'tex/terr_blue_rock.webp', mean: [0.0264, 0.0322, 0.0418], k: 0.35 },
+  ash:          { url: 'tex/terr_ash.webp', mean: [0.0631, 0.0577, 0.056], k: 0.45 },
+  moss:         { url: 'tex/terr_moss.webp', mean: [0.0781, 0.1337, 0.0092], k: 0.6 },
+  pebbles:      { url: 'tex/terr_pebbles.webp', mean: [0.097, 0.078, 0.0478], k: 0.8 },
 };
+// ⭐ (v49.80) TWO SWAPPABLE SLOTS. The shader samples the GROUND tile (uTexGrass, flats) and the BAND tile (uTexGRock,
+// triplanar, the mid-slope band + the hub's mossy sides) - what is IN them is now a per-map choice (_SW_TEX_MAPS
+// groundTex / bandTex; defaults grass / grassy rock), so a cavern gets its own floors with no new sampler and no new
+// tap. The texture and its mean are swapped TOGETHER when the image is in (a mean without its image is a brightness
+// flash - the v49.27 'strength stays 0 until the image arrives' rule), and a later swap always wins over a slow load.
+// Each slot's STRENGTH is the slot's (grass 0.75 / grassy rock 0.9 + the band 0.6), turned on by its first image.
+const _SW_TEX_SLOTS = {
+  ground: { tex: 'uTexGrass', mean: 'uTexMeanG', k: ['uTexK', 'x'], dflt: 'grass', want: null, on: false },
+  band:   { tex: 'uTexGRock', mean: 'uTexMeanGR', k: ['uTexK2', 'y'], dflt: 'grassyRock', want: null, on: false },
+  // (v49.83) the faces + roof tile per leg, and the three new ones
+  rock:   { tex: 'uTexRock', mean: 'uTexMeanR', k: ['uTexK2', 'x'], dflt: 'rock', want: null, on: false },
+  snow:   { tex: 'uTexSnow', mean: 'uTexMeanSn', k: ['uTexK4', 'x'], dflt: 'snow', want: null, on: false },
+  moss:   { tex: 'uTexMoss', mean: 'uTexMeanMo', k: ['uTexK4', 'y'], dflt: 'moss', want: null, on: false },
+  bed:    { tex: 'uTexBed', mean: 'uTexMeanBd', k: ['uTexK4', 'z'], dflt: 'pebbles', want: null, on: false },
+};
+function _swTerrSlot(slot, key) {
+  const S = _SW_TEX_SLOTS[slot], d = _SW_TERR_TEX[key]; if (!S || !d || !d.url) return;
+  S.want = key;
+  _swTerrTexGet(d, (t) => {
+    if (S.want !== key) return;   // a later swap won
+    _swU[S.tex].value = t;
+    _swU[S.mean].value.set(d.mean[0], d.mean[1], d.mean[2]);
+    // (v49.83) the strength follows the TEXTURE now (each tile's k is calibrated to its own contrast - see _SW_TERR_TEX)
+    const mob = (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE);
+    _swU[S.k[0]].value[S.k[1]] = d.k * (mob ? 0.8 : 1);
+    if (!S.on) {
+      S.on = true;
+      const d0 = _SW_TERR_TEX[S.dflt];
+      if (slot === 'band') _swU.uTexK2.value.z = (d0.band != null ? d0.band : 0.6);   // (v49.30) the mid-slope band rides this slot
+    }
+  });
+}
 function _swTerrTexLoad() {
   if (_swTerrTexLoad._started) return;
   _swTerrTexLoad._started = true;
@@ -39450,14 +39580,13 @@ function _swTerrTexLoad() {
     _swTerrTexGet(d, (t) => {
       uTex.value = t;
       kVec.value[comp] = d.k * (mob ? 0.8 : 1);
-      if (key === 'grassyRock') kVec.value.z = (d.band != null ? d.band : 0.6);   // (v49.30) the mid-slope band rides the grassy-rock tile
     });
   };
-  one('grass', _swU.uTexGrass, _swU.uTexMeanG, _swU.uTexK, 'x');
+  _swTerrSlot('ground', _SW_TEX_SLOTS.ground.want || ((_SW_TERR_TEX._grassWhich === 'thick') ? 'grassThick' : 'grass'));   // (v49.80) a slot
   one('mud', _swU.uTexMud, _swU.uTexMeanM, _swU.uTexK, 'y');
   one('sand', _swU.uTexSand, _swU.uTexMeanS, _swU.uTexK, 'z');
-  one('rock', _swU.uTexRock, _swU.uTexMeanR, _swU.uTexK2, 'x');           // (v49.30)
-  one('grassyRock', _swU.uTexGRock, _swU.uTexMeanGR, _swU.uTexK2, 'y');   // (v49.30)
+  _swTerrSlot('rock', _SW_TEX_SLOTS.rock.want || 'rock');   // (v49.30) + (v49.83) a slot - each leg its own rock
+  _swTerrSlot('band', _SW_TEX_SLOTS.band.want || 'grassyRock');   // (v49.30) + (v49.80) a slot
 }
 // one load per tile per session (cached on the table entry), set up the same way for every terrain tile
 function _swTerrTexGet(d, cb) {
@@ -39479,15 +39608,14 @@ function _swTerrTexGet(d, cb) {
 }
 // (v49.30) the grass tile, swappable live (GRASS THICK is the owner's longer-grass experiment)
 function _swTerrGrassTex(which) {
-  const d = (which === 'thick') ? _SW_TERR_TEX.grassThick : _SW_TERR_TEX.grass;
   _SW_TERR_TEX._grassWhich = (which === 'thick') ? 'thick' : 'grass';
-  _swTerrTexGet(d, (t) => {
-    if (_SW_TERR_TEX._grassWhich !== ((d === _SW_TERR_TEX.grassThick) ? 'thick' : 'grass')) return;   // a later switch won
-    _swU.uTexGrass.value = t;
-    _swU.uTexMeanG.value.set(d.mean[0], d.mean[1], d.mean[2]);
-  });
+  const w = _SW_TEX_SLOTS.ground.want;   // (v49.80) only where the ground slot holds grass - a cavern's gravel keeps it
+  if (!w || w === 'grass' || w === 'grassThick') _swTerrSlot('ground', (which === 'thick') ? 'grassThick' : 'grass');
 }
 // __terrTex({ grass, mud, sand, tile, fade:[a,b], chroma, taps, beachAll }) - any subset, live
+// (v49.79/80) + bio: [ground, rock, band, roof] (where tiles may show) and groundTex / bandTex: a tile key for either slot
+// (v49.83) + bio2: [snow caps, moss, lake beds], rockTex / snowTex (e.g. rockTex: 'sandstone', snowTex: 'ash')
+// ('grass', 'grassThick', 'gravel', 'rockyFloor', 'grassyRock', 'rock', ...)
 if (typeof window !== 'undefined') window.__terrTex = function (o) {
   const K = _swU.uTexK.value;
   if (o) {
@@ -39503,16 +39631,29 @@ if (typeof window !== 'undefined') window.__terrTex = function (o) {
     const K2 = _swU.uTexK2.value, K3 = _swU.uTexK3.value;
     if (o.rock != null) K2.x = +o.rock;
     if (o.grassyRock != null) K2.y = +o.grassyRock;
-    if (o.band != null) K2.z = +o.band;
+    if (o.band != null && isFinite(+o.band)) K2.z = +o.band;   // (v49.82) a number only - v49.80's slot option collided with this key (NaN band)
     if (o.rockTile != null) K2.w = Math.max(1, +o.rockTile);
     if (o.grassyRockTile != null) K3.x = Math.max(1, +o.grassyRockTile);
     if (o.faceFade) { K3.y = +o.faceFade[0]; K3.z = +o.faceFade[1]; }
     if (o.grassTex != null) _swTerrGrassTex(o.grassTex);
+    if (Array.isArray(o.bio)) _swU.uTexBio.value.set(+o.bio[0] || 0, +o.bio[1] || 0, +o.bio[2] || 0, +o.bio[3] || 0);   // (v49.79)
+    // (v49.80) a tile for either SLOT: 'gravel' | 'rockyFloor' | 'grass' | 'grassThick' | 'grassyRock' | ...
+    // (v49.82) groundTex / bandTex, NOT ground / band: 'band' was already the band STRENGTH (K2.z) - v49.80 named its
+    // slot option 'band' too, so band: 'gravel' set K2.z = NaN, and the returned object carried two 'band' keys.
+    if (o.groundTex != null && _SW_TERR_TEX[o.groundTex]) _swTerrSlot('ground', o.groundTex);
+    if (o.bandTex != null && _SW_TERR_TEX[o.bandTex]) _swTerrSlot('band', o.bandTex);
+    if (o.rockTex != null && _SW_TERR_TEX[o.rockTex]) _swTerrSlot('rock', o.rockTex);   // (v49.83)
+    if (o.snowTex != null && _SW_TERR_TEX[o.snowTex]) _swTerrSlot('snow', o.snowTex);
+    if (Array.isArray(o.bio2)) _swU.uTexBio2.value.set(+o.bio2[0] || 0, +o.bio2[1] || 0, +o.bio2[2] || 0, 0);   // [snow caps, moss, lake beds]
   }
   return { grass: K.x, mud: K.y, sand: K.z, tile: K.w, fade: [_swU.uTexFade.value.x, _swU.uTexFade.value.y],
            chroma: _swU.uTexChroma.value, taps: _swU.uTexTaps.value, beachAll: _swU.uBeachAll.value,
            rock: _swU.uTexK2.value.x, grassyRock: _swU.uTexK2.value.y, band: _swU.uTexK2.value.z, rockTile: _swU.uTexK2.value.w,
            grassyRockTile: _swU.uTexK3.value.x, faceFade: [_swU.uTexK3.value.y, _swU.uTexK3.value.z], grassTex: _SW_TERR_TEX._grassWhich || 'grass',
+           bio: [_swU.uTexBio.value.x, _swU.uTexBio.value.y, _swU.uTexBio.value.z, _swU.uTexBio.value.w],
+           groundTex: _SW_TEX_SLOTS.ground.want, bandTex: _SW_TEX_SLOTS.band.want,
+           rockTex: _SW_TEX_SLOTS.rock.want, snowTex: _SW_TEX_SLOTS.snow.want,   // (v49.83)
+           bio2: [_swU.uTexBio2.value.x, _swU.uTexBio2.value.y, _swU.uTexBio2.value.z], k4: [_swU.uTexK4.value.x, _swU.uTexK4.value.y, _swU.uTexK4.value.z],
            loaded: [_swU.uTexGrass.value !== _swTexWhite, _swU.uTexMud.value !== _swTexWhite, _swU.uTexSand.value !== _swTexWhite,
                     _swU.uTexRock.value !== _swTexWhite, _swU.uTexGRock.value !== _swTexWhite] };
 };
@@ -39533,6 +39674,10 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
     sh.uniforms.uTexMeanG=_swU.uTexMeanG; sh.uniforms.uTexMeanM=_swU.uTexMeanM; sh.uniforms.uTexMeanS=_swU.uTexMeanS;
     sh.uniforms.uTexK=_swU.uTexK; sh.uniforms.uTexFade=_swU.uTexFade; sh.uniforms.uTexChroma=_swU.uTexChroma; sh.uniforms.uTexTaps=_swU.uTexTaps; sh.uniforms.uBeachAll=_swU.uBeachAll;
     sh.uniforms.uTexRock=_swU.uTexRock; sh.uniforms.uTexGRock=_swU.uTexGRock; sh.uniforms.uTexMeanR=_swU.uTexMeanR; sh.uniforms.uTexMeanGR=_swU.uTexMeanGR; sh.uniforms.uTexK2=_swU.uTexK2; sh.uniforms.uTexK3=_swU.uTexK3;   // (v49.30)
+    sh.uniforms.uTexBio=_swU.uTexBio;   // (v49.79)
+    sh.uniforms.uTexSnow=_swU.uTexSnow; sh.uniforms.uTexMoss=_swU.uTexMoss; sh.uniforms.uTexBed=_swU.uTexBed;   // (v49.83)
+    sh.uniforms.uTexMeanSn=_swU.uTexMeanSn; sh.uniforms.uTexMeanMo=_swU.uTexMeanMo; sh.uniforms.uTexMeanBd=_swU.uTexMeanBd;
+    sh.uniforms.uTexK4=_swU.uTexK4; sh.uniforms.uTexT4=_swU.uTexT4; sh.uniforms.uTexBio2=_swU.uTexBio2;
     sh.uniforms.uColGrass=_swU.uColGrass; sh.uniforms.uColRock=_swU.uColRock;
     sh.uniforms.uColSnow=_swU.uColSnow; sh.uniforms.uColMoss=_swU.uColMoss;
     sh.uniforms.uSlopeGrass=_swU.uSlopeGrass; sh.uniforms.uSlopeRock=_swU.uSlopeRock; sh.uniforms.uRocky=_swU.uRocky;
@@ -39690,7 +39835,8 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
       // (v49.30) TRIPLANAR for the mountain faces: a flat XZ projection smears a cliff into vertical streaks, so each
       // face takes the projections its normal faces (pow-4 weights, a projection under 3 % skipped), each plane
       // offset so the three never line up; the same ratio-around-the-mean result as _tDet
-      +'uniform sampler2D uTexRock,uTexGRock; uniform vec3 uTexMeanR,uTexMeanGR; uniform vec4 uTexK2,uTexK3;\n'
+      +'uniform sampler2D uTexRock,uTexGRock; uniform vec3 uTexMeanR,uTexMeanGR; uniform vec4 uTexK2,uTexK3,uTexBio;\n'
+      +'uniform sampler2D uTexSnow,uTexMoss,uTexBed; uniform vec3 uTexMeanSn,uTexMeanMo,uTexMeanBd; uniform vec4 uTexK4,uTexT4,uTexBio2;\n'
       +'vec3 _tTri(sampler2D t, vec3 mn, vec3 wp, vec3 n, vec3 gx, vec3 gy, float tile, float k){ if(k<0.001) return vec3(1.0); vec3 w=pow(abs(n),vec3(4.0)); w/=max(w.x+w.y+w.z,1e-4); float s=1.0/tile; vec3 c=vec3(0.0); float ws=0.0; if(w.x>0.03){ c+=w.x*textureGrad(t,wp.zy*s+vec2(0.31,0.17),gx.zy*s,gy.zy*s).rgb; ws+=w.x; } if(w.y>0.03){ c+=w.y*textureGrad(t,wp.xz*s,gx.xz*s,gy.xz*s).rgb; ws+=w.y; } if(w.z>0.03){ c+=w.z*textureGrad(t,wp.xy*s+vec2(0.59,0.43),gx.xy*s,gy.xy*s).rgb; ws+=w.z; } c/=max(ws,1e-4); vec3 W=vec3(0.2126,0.7152,0.0722); float lr=dot(c,W)/max(dot(mn,W),1e-3); vec3 r=c/max(mn,vec3(1e-3)); return mix(vec3(1.0),mix(vec3(lr),r,uTexChroma),k); }\n'
       +'vec3 _tDet(sampler2D t, vec3 mn, vec2 wp, vec2 gx, vec2 gy, float mx, float k){ if(k<0.001) return vec3(1.0); float s=1.0/uTexK.w; vec3 c=textureGrad(t,wp*s,gx*s,gy*s).rgb; if(uTexTaps>1.5){ float s2=s/3.7; mat2 R=mat2(0.8,0.6,-0.6,0.8); vec3 b=textureGrad(t,R*(wp*s2)+vec2(0.37,0.61),R*(gx*s2),R*(gy*s2)).rgb; c=mix(c,b,mx); } vec3 W=vec3(0.2126,0.7152,0.0722); float lr=dot(c,W)/max(dot(mn,W),1e-3); vec3 r=c/max(mn,vec3(1e-3)); return mix(vec3(1.0),mix(vec3(lr),r,uTexChroma),k); }\n'
       +'float _thsh(vec2 p){return fract(sin(p.x*127.1+p.y*311.7)*43758.5453);}\n'
@@ -39711,7 +39857,7 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
     sh.fragmentShader=sh.fragmentShader.replace('#include <lights_pars_begin>', _sunTopPars());
     // ground surface: grass on gentle slopes, bare rock on steep faces, snow on peaks, with a mossy mottle
     sh.fragmentShader=sh.fragmentShader.replace('#include <color_fragment>',
-      '#include <color_fragment>\n if(uCeil<0.5){\n vec3 fn = uSmooth>0.5 ? normalize(vSN) : normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n float fl=clamp((abs(fn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0);\n float pc=_tpatch(vWPos.xz);\n float _mD=length(uCam.xz-vWPos.xz);\n vec3 _tgx3=dFdx(vWPos),_tgy3=dFdy(vWPos); vec2 _tgx=_tgx3.xz,_tgy=_tgy3.xz;\n float _tF2=(1.0-smoothstep(uTexK3.y,uTexK3.z,_mD))*step(0.5,uMossy);\n float _tF=(1.0-smoothstep(uTexFade.x,uTexFade.y,_mD))*step(0.5,uMossy);\n float _tMix=smoothstep(0.30,0.70,0.5+0.5*_tvn(vWPos.xz*0.0021+vec2(3.3,7.7)));\n float _tkG=clamp(uTexK.x*_tF,0.0,1.0);\n float _mW=(1.0-smoothstep(240.0,950.0,_mD))*uGrassD*(1.0-0.6*_tkG);\n float _mN=0.0;\n if(_mW>0.001){ float _ma=_tvn(vWPos.xz*0.009)*3.1416; vec2 _md=vec2(cos(_ma),sin(_ma)); vec2 _mp=vec2(dot(vWPos.xz,_md),dot(vWPos.xz,vec2(-_md.y,_md.x))); _mN=_tvn(vec2(_mp.x*0.055,_mp.y*0.165))*0.46+_tvn(vec2(_mp.x*0.145,_mp.y*0.430)+vec2(11.0,4.0))*0.34+_tvn(vec2(_mp.x*0.360,_mp.y*1.050)+vec2(3.0,19.0))*0.20; _mN*=0.45+0.95*clamp(0.5+0.5*_tvn(vWPos.xz*0.018+vec2(27.0,6.0)),0.0,1.0); }\n vec3 grass=mix(uColMoss,uColGrass,smoothstep(0.32,0.72,pc));\n float moss1=_tvn(vWPos.xz*0.07);\n float moss2=_tvn(vWPos.xz*0.19+vec2(7.0,3.0));\n float mott=clamp(0.5+0.5*(moss1*0.62+moss2*0.38),0.0,1.0);\n grass*=(0.78+0.34*mott);\n grass*=_tDet(uTexGrass,uTexMeanG,vWPos.xz,_tgx,_tgy,_tMix,_tkG);\n grass=mix(grass,uColMoss*(0.7+0.4*mott),(1.0-smoothstep(0.28,0.62,pc))*0.6);\n float rkA=_tvn(vWPos.xz*0.045+vec2(vWPos.y*0.03));\n float rkB=_tvn(vWPos.xz*0.12+vec2(13.0,7.0));\n float rkC=_tvn(vWPos.xz*0.30+vec2(vWPos.y*0.05,0.0));\n float rockMott=clamp(0.5+0.5*(rkA*0.55+rkB*0.3+rkC*0.15),0.0,1.0);\n float strata=0.5+0.5*sin(vWPos.y*0.05+_tvn(vWPos.xz*0.025)*3.0);\n float _tkR=clamp(uTexK2.x*_tF2,0.0,1.0)*step(0.001,1.0-fl);\n vec3 rock=uColRock*(0.70+0.55*mix(rockMott,0.5,_tkR*0.85))*(1.0-uStrata*0.57+uStrata*strata);\n rock*=_tTri(uTexRock,uTexMeanR,vWPos,fn,_tgx3,_tgy3,uTexK2.w,_tkR);\n float _tkGR=clamp(uTexK2.y*_tF2,0.0,1.0)*step(0.001,1.0-fl);\n vec3 _grCol=mix(uColMoss,uColRock,0.40)*1.30*_tTri(uTexGRock,uTexMeanGR,vWPos,fn,_tgx3,_tgy3,uTexK3.x,step(0.001,_tkGR));\n if(uMossy>0.5){ vec2 _mq=mix(vWPos.xz,vec2(vWPos.x+vWPos.z,vWPos.y*1.6),(1.0-abs(fn.y))*step(0.001,_tkGR)); float mc=_tvn(_mq*0.022+vec2(vWPos.y*0.015,0.0))*0.55+_tvn(_mq*0.06+vec2(9.0,4.0))*0.45; float mossSide=smoothstep(0.5,0.82,0.5+0.5*mc)*(1.0-fl); rock=mix(rock,mix(uColMoss*(0.62+0.5*mott),_grCol,_tkGR),mossSide*0.72); }\n rock=mix(rock,_grCol,clamp(fl*(1.0-fl)*4.0*uTexK2.z,0.0,1.0)*_tkGR);\n vec3 terr=mix(rock,grass,fl);\n if(uMossy>0.5 && uSat>0.001){ float _gl=dot(grass,vec3(0.299,0.587,0.114)); vec3 _gd=mix(grass,vec3(_gl),uSat*0.85); float _dry=_tpatch(vWPos.xz*1.7+vec2(31.0,12.0)); float _dirt=clamp(0.5+0.5*_tvn(vWPos.xz*0.011+vec2(4.0,8.0)),0.0,1.0); _gd=mix(_gd,_gd*mix(vec3(1.0),vec3(0.46,0.42,0.20)*2.2,smoothstep(0.62,0.86,_dry)),uSat*0.55); _gd=mix(_gd,_gd*mix(vec3(1.0),vec3(0.27,0.20,0.12)*2.6,1.0-smoothstep(0.18,0.42,_dirt)),uSat*0.45); grass=mix(grass,_gd,clamp(uSat*1.4,0.0,1.0)); terr=mix(rock,grass,fl); }\n'
+      '#include <color_fragment>\n if(uCeil<0.5){\n vec3 fn = uSmooth>0.5 ? normalize(vSN) : normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n float fl=clamp((abs(fn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0);\n float pc=_tpatch(vWPos.xz);\n float _mD=length(uCam.xz-vWPos.xz);\n vec3 _tgx3=dFdx(vWPos),_tgy3=dFdy(vWPos); vec2 _tgx=_tgx3.xz,_tgy=_tgy3.xz;\n float _tF2=1.0-smoothstep(uTexK3.y,uTexK3.z,_mD);\n float _tF0=1.0-smoothstep(uTexFade.x,uTexFade.y,_mD);\n float _tF=_tF0*step(0.5,uMossy);\n float _tMix=smoothstep(0.30,0.70,0.5+0.5*_tvn(vWPos.xz*0.0021+vec2(3.3,7.7)));\n float _tkG=clamp(uTexK.x*_tF0*uTexBio.x,0.0,1.0);\n float _mW=(1.0-smoothstep(240.0,950.0,_mD))*uGrassD*(1.0-0.6*_tkG);\n float _mN=0.0;\n if(_mW>0.001){ float _ma=_tvn(vWPos.xz*0.009)*3.1416; vec2 _md=vec2(cos(_ma),sin(_ma)); vec2 _mp=vec2(dot(vWPos.xz,_md),dot(vWPos.xz,vec2(-_md.y,_md.x))); _mN=_tvn(vec2(_mp.x*0.055,_mp.y*0.165))*0.46+_tvn(vec2(_mp.x*0.145,_mp.y*0.430)+vec2(11.0,4.0))*0.34+_tvn(vec2(_mp.x*0.360,_mp.y*1.050)+vec2(3.0,19.0))*0.20; _mN*=0.45+0.95*clamp(0.5+0.5*_tvn(vWPos.xz*0.018+vec2(27.0,6.0)),0.0,1.0); }\n vec3 grass=mix(uColMoss,uColGrass,smoothstep(0.32,0.72,pc));\n float moss1=_tvn(vWPos.xz*0.07);\n float moss2=_tvn(vWPos.xz*0.19+vec2(7.0,3.0));\n float mott=clamp(0.5+0.5*(moss1*0.62+moss2*0.38),0.0,1.0);\n grass*=(0.78+0.34*mott);\n grass*=_tDet(uTexGrass,uTexMeanG,vWPos.xz,_tgx,_tgy,_tMix,_tkG);\n float _tkMo=clamp(uTexK4.y*_tF0*uTexBio2.y,0.0,1.0);\n vec3 _mossC=uColMoss*(0.7+0.4*mott);\n if(_tkMo>0.001) _mossC*=_tDet(uTexMoss,uTexMeanMo,vWPos.xz,_tgx,_tgy,_tMix,_tkMo);\n grass=mix(grass,_mossC,(1.0-smoothstep(0.28,0.62,pc))*0.6);\n float rkA=_tvn(vWPos.xz*0.045+vec2(vWPos.y*0.03));\n float rkB=_tvn(vWPos.xz*0.12+vec2(13.0,7.0));\n float rkC=_tvn(vWPos.xz*0.30+vec2(vWPos.y*0.05,0.0));\n float rockMott=clamp(0.5+0.5*(rkA*0.55+rkB*0.3+rkC*0.15),0.0,1.0);\n float strata=0.5+0.5*sin(vWPos.y*0.05+_tvn(vWPos.xz*0.025)*3.0);\n float _tkR=clamp(uTexK2.x*_tF2*uTexBio.y,0.0,1.0)*step(0.001,1.0-fl);\n vec3 rock=uColRock*(0.70+0.55*mix(rockMott,0.5,_tkR*0.85))*(1.0-uStrata*0.57+uStrata*strata);\n rock*=_tTri(uTexRock,uTexMeanR,vWPos,fn,_tgx3,_tgy3,uTexK2.w,_tkR);\n float _tkGR=clamp(uTexK2.y*_tF2*uTexBio.z,0.0,1.0)*step(0.001,1.0-fl);\n vec3 _grCol=mix(uColMoss,uColRock,0.40)*1.30*_tTri(uTexGRock,uTexMeanGR,vWPos,fn,_tgx3,_tgy3,uTexK3.x,step(0.001,_tkGR));\n if(uMossy>0.5){ vec2 _mq=mix(vWPos.xz,vec2(vWPos.x+vWPos.z,vWPos.y*1.6),(1.0-abs(fn.y))*step(0.001,_tkGR)); float mc=_tvn(_mq*0.022+vec2(vWPos.y*0.015,0.0))*0.55+_tvn(_mq*0.06+vec2(9.0,4.0))*0.45; float mossSide=smoothstep(0.5,0.82,0.5+0.5*mc)*(1.0-fl); rock=mix(rock,mix(uColMoss*(0.62+0.5*mott),_grCol,_tkGR),mossSide*0.72); }\n rock=mix(rock,_grCol,clamp(fl*(1.0-fl)*4.0*uTexK2.z,0.0,1.0)*_tkGR);\n vec3 terr=mix(rock,grass,fl);\n if(uMossy>0.5 && uSat>0.001){ float _gl=dot(grass,vec3(0.299,0.587,0.114)); vec3 _gd=mix(grass,vec3(_gl),uSat*0.85); float _dry=_tpatch(vWPos.xz*1.7+vec2(31.0,12.0)); float _dirt=clamp(0.5+0.5*_tvn(vWPos.xz*0.011+vec2(4.0,8.0)),0.0,1.0); _gd=mix(_gd,_gd*mix(vec3(1.0),vec3(0.46,0.42,0.20)*2.2,smoothstep(0.62,0.86,_dry)),uSat*0.55); _gd=mix(_gd,_gd*mix(vec3(1.0),vec3(0.27,0.20,0.12)*2.6,1.0-smoothstep(0.18,0.42,_dirt)),uSat*0.45); grass=mix(grass,_gd,clamp(uSat*1.4,0.0,1.0)); terr=mix(rock,grass,fl); }\n'
       // (v35.26) SURFACE PATCHES. The existing uSat block above is a global
       // GRADING — it tints everything slightly browner. This is different: it
       // paints discrete, edged areas of bare dirt, loose rubble and dark
@@ -39721,13 +39867,13 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
       // always sit next to bare earth). Rubble is slope-biased: it collects on
       // the steeper grass near rock, the way scree actually does.
       +' if(uMossy>0.5){\n float _sA=_tvn(vWPos.xz*0.0030*uPatchScale+vec2(21.0,9.0));\n float _sB=_tvn(vWPos.xz*0.0105*uPatchScale+vec2(3.0,17.0));\n float _sC=_tvn(vWPos.xz*0.0330*uPatchScale+vec2(9.0,2.0));\n float _sN=_sA*0.55+_sB*0.32+_sC*0.13;\n float _rN=_tvn(vWPos.xz*0.0062*uPatchScale+vec2(41.0,-13.0))*0.62+_tvn(vWPos.xz*0.0210*uPatchScale+vec2(7.0,29.0))*0.38;\n float _spk=clamp(0.5+0.5*_tvn(vWPos.xz*1.15),0.0,1.0);\n float _grit=clamp(0.5+0.5*_tvn(vWPos.xz*0.42+vec2(5.0,23.0)),0.0,1.0);\n float _mE=_mN*0.085*_mW;\n float _tkM=clamp(uTexK.y*_tF,0.0,1.0);\n float _dirtM=smoothstep(0.16-0.10*_tkM,0.46,_sN+_mE)*uPatchMix.x;\n float _ovgM=smoothstep(0.14,0.44,-_sN+_mE)*uPatchMix.z;\n float _rubM=smoothstep(0.20,0.52,_rN+_mE)*uPatchMix.y*(0.45+0.55*(1.0-fl));\n vec3 _dirtC=uColDirt*(1.55+1.45*_grit);\n if(_tkM>0.001) _dirtC=mix(_dirtC,uColDirt*2.275*_tDet(uTexMud,uTexMeanM,vWPos.xz,_tgx,_tgy,_tMix,1.0),_tkM);\n vec3 _rubC=uColRock*(0.70+1.05*_spk);\n vec3 _ovgC=mix(uColMoss,uColGrass,0.30)*(0.46+0.32*mott);\n grass=mix(grass,_ovgC,clamp(_ovgM,0.0,0.80));\n grass=mix(grass,_dirtC,clamp(_dirtM,0.0,0.90));\n grass=mix(grass,_rubC,clamp(_rubM,0.0,0.78));\n terr=mix(rock,grass,fl);\n }\n'
-      +' if(_mW>0.001){\n  terr*=1.0+_mN*0.33*_mW;\n  terr*=1.0-clamp(-_mN,0.0,1.0)*0.26*_mW;\n  vec3 _mh=mix(vec3(0.84,0.95,0.88),vec3(1.16,1.05,0.66),clamp(0.5+0.5*_mN,0.0,1.0));\n  terr=mix(terr,terr*_mh,fl*_mW*0.75);\n }\n float th=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _sl=uSnow+_swSW*uSnowVary+(1.0-fl)*uSnowSlope;\n float snow=smoothstep(_sl,_sl+0.10+0.07*(1.0-fl),th);\n terr=mix(terr,uColSnow,snow*max(fl,0.30));\n if(uAO>0.001 && _mD<2200.0){ float _aoCav=mix(0.62,1.0,smoothstep(uSlopeRock,1.0,clamp(fn.y,0.0,1.0))); float _aoDet=mix(0.74,1.06,clamp(0.5+0.5*_detN(vWPos.xz),0.0,1.0)); _aoDet=mix(_aoDet,1.0,(1.0-fl)*_tkR); float _aoVal=mix(0.80,1.0,th); float _aoBlob=mix(0.86,1.04,_tpatch(vWPos.xz*0.6+vec2(17.0,5.0))); float _aoRaw=clamp(_aoCav*_aoDet*_aoVal*_aoBlob,0.45,1.08); float _aoFade=1.0-smoothstep(900.0,2200.0,length(uCam.xz-vWPos.xz)); float _ao=mix(1.0,_aoRaw,uAO*_aoFade*(1.0-snow*0.6)); terr*=_ao; }\n if(uRelief>0.001 && uCeil<0.5){ float _rD=length(uCam.xz-vWPos.xz); float _rW=(1.0-smoothstep(700.0,2400.0,_rD))*uRelief; if(_rW>0.001){ float _e2=9.0; float _c0=_detN(vWPos.xz); float _cx=_detN(vWPos.xz+vec2(_e2,0.0))+_detN(vWPos.xz-vec2(_e2,0.0)); float _cz=_detN(vWPos.xz+vec2(0.0,_e2))+_detN(vWPos.xz-vec2(0.0,_e2)); float _curv=(_cx+_cz)*0.25-_c0; float _cav=clamp(-_curv*9.0,0.0,1.0); float _ridge=clamp(_curv*7.0,0.0,1.0); vec2 _sg=vec2(_detN(vWPos.xz+vec2(_e2,0.0))-_c0,_detN(vWPos.xz+vec2(0.0,_e2))-_c0); float _sunFace=clamp(0.5-dot(normalize(_sg+vec2(1e-5)),normalize(uSunDir.xz+vec2(1e-5)))*0.5,0.0,1.0); float _shade=1.0-(_cav*(0.30+0.22*_sunFace))*_rW+_ridge*0.10*_rW; terr*=clamp(_shade,0.45,1.15); } }\n if(uMossy>0.5 && (uArch.z>1.0 || uBeachAll>0.001) && uWaterY>-1e8){ float _aD=length(vWPos.xz-uArch.xy); float _aw=max(uArch.z>1.0 ? 1.0-smoothstep(uArch.z-uArchRamp,uArch.z+600.0,_aD) : 0.0, uBeachAll); if(_aw>0.001){ float _bh=vWPos.y-uWaterY; float _bn=_tvn(vWPos.xz*0.031)*7.0; float _beach=(1.0-smoothstep(12.0+_bn,38.0+_bn,_bh))*smoothstep(-60.0,-4.0,_bh); vec3 _sand=uArchSand*(0.84+0.28*clamp(0.5+0.5*_tvn(vWPos.xz*0.085),0.0,1.0)); float _tkS=clamp(uTexK.z*_tF,0.0,1.0); if(_tkS>0.001) _sand=mix(_sand,uArchSand*_tDet(uTexSand,uTexMeanS,vWPos.xz,_tgx,_tgy,_tMix,1.0),_tkS); terr=mix(terr,_sand,_beach*_aw*max(fl,0.35)); } }\n if(uAerial>0.001){ float _camD=length(uCam.xz-vWPos.xz); float _ap=smoothstep(uAerialStart,uAerialFar,_camD)*uAerial; _ap*=(1.0-clamp((vWY-(uYMid-uAMP*0.2))/(uAMP*1.4),0.0,1.0)*0.55); terr=mix(terr,uAerialColor,clamp(_ap,0.0,0.85)); }\n  if(uWaterOn>0.001 && vWPos.y<uWaterY){ float _cdp=uWaterY-vWPos.y; float _cf=(1.0-smoothstep(80.0,1100.0,_cdp))*smoothstep(0.0,30.0,_cdp)*uWaterOn; vec2 _cq=vWPos.xz*0.021; float _c1=sin(_cq.x*2.3+_cq.y*1.1+uTime*1.35)*sin(_cq.y*1.9-_cq.x*1.3-uTime*1.05); float _c2=sin((_cq.x+_cq.y)*1.45+uTime*0.85)*sin((_cq.x-_cq.y*0.7)*1.7-uTime*0.65); float _cc=pow(clamp(0.5+0.5*(_c1*0.6+_c2*0.4),0.0,1.0),3.5); terr*=1.0+_cf*_cc*1.15*clamp(fn.y,0.0,1.0); }\n diffuseColor.rgb=terr;\n }\n if(uCeil>0.5){ float _cm1=_tvn(vWPos.xz*0.045+vec2(vWPos.y*0.03));\n float _cm2=_tvn(vWPos.xz*0.12+vec2(13.0,7.0));\n float _cmott=clamp(0.5+0.5*(_cm1*0.6+_cm2*0.4),0.0,1.0);\n float _cstr=0.5+0.5*sin(vWPos.y*0.05+_tvn(vWPos.xz*0.025)*3.0);\n diffuseColor.rgb*=(0.80+0.36*_cmott)*(1.0-uStrata*0.57+uStrata*_cstr);\n if(uAO>0.001){ vec3 _cn2=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n float _cao=mix(0.68,1.0,smoothstep(0.0,0.85,abs(_cn2.y)));\n float _caoD=mix(0.80,1.05,clamp(0.5+0.5*_detN(vWPos.xz),0.0,1.0));\n diffuseColor.rgb*=mix(1.0,clamp(_cao*_caoD,0.5,1.05),uAO); }\n if(uAerial>0.001){ float _cad=length(uCam.xz-vWPos.xz);\n float _cap=smoothstep(uAerialStart,uAerialFar,_cad)*uAerial;\n diffuseColor.rgb=mix(diffuseColor.rgb,uAerialColor,clamp(_cap,0.0,0.85)); }\n }\n if(uRim>0.001){ vec3 _rn=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n vec3 _rv=normalize(uCam-vWPos);\n float _rf=pow(1.0-abs(dot(_rn,_rv)),3.0);\n diffuseColor.rgb=mix(diffuseColor.rgb,uAerialColor*1.25,_rf*uRim); }\n if(uGlitch>0.5 && uCeil>0.5){ float zone=_tpatch(vWPos.xz+vec2(uTime*2.5,0.0)); vec2 gid=floor(vWPos.xz/240.0); float r=_thsh(gid+floor(uTime*0.8)); float r2=_thsh(gid*1.93+floor(uTime*1.5)); if(zone>0.62 && r>0.45) discard; if(zone>0.5){ if(r2>0.55) diffuseColor.rgb=diffuseColor.rgb.gbr; diffuseColor.rgb*=mix(0.75,1.25,r2); } }');
+      +' if(_mW>0.001){\n  terr*=1.0+_mN*0.33*_mW;\n  terr*=1.0-clamp(-_mN,0.0,1.0)*0.26*_mW;\n  vec3 _mh=mix(vec3(0.84,0.95,0.88),vec3(1.16,1.05,0.66),clamp(0.5+0.5*_mN,0.0,1.0));\n  terr=mix(terr,terr*_mh,fl*_mW*0.75);\n }\n float th=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _sl=uSnow+_swSW*uSnowVary+(1.0-fl)*uSnowSlope;\n float snow=smoothstep(_sl,_sl+0.10+0.07*(1.0-fl),th);\n vec3 _snC=uColSnow; float _tkSn=clamp(uTexK4.x*_tF2*uTexBio2.x,0.0,1.0);\n if(_tkSn>0.001 && snow>0.001) _snC*=_tTri(uTexSnow,uTexMeanSn,vWPos,fn,_tgx3,_tgy3,uTexT4.x,_tkSn);\n terr=mix(terr,_snC,snow*max(fl,0.30));\n if(uTexBio2.z>0.001 && vWPos.y<uWaterY+2.0){ float _bdW=smoothstep(-2.0,14.0,uWaterY-vWPos.y)*max(fl,0.5)*clamp(uTexK4.z*_tF0*uTexBio2.z,0.0,1.0); if(_bdW>0.001){ vec3 _bed=uTexMeanBd*_tDet(uTexBed,uTexMeanBd,vWPos.xz,_tgx,_tgy,_tMix,1.0); terr=mix(terr,_bed,_bdW); } }\n if(uAO>0.001 && _mD<2200.0){ float _aoCav=mix(0.62,1.0,smoothstep(uSlopeRock,1.0,clamp(fn.y,0.0,1.0))); float _aoDet=mix(0.74,1.06,clamp(0.5+0.5*_detN(vWPos.xz),0.0,1.0)); _aoDet=mix(_aoDet,1.0,(1.0-fl)*_tkR); float _aoVal=mix(0.80,1.0,th); float _aoBlob=mix(0.86,1.04,_tpatch(vWPos.xz*0.6+vec2(17.0,5.0))); float _aoRaw=clamp(_aoCav*_aoDet*_aoVal*_aoBlob,0.45,1.08); float _aoFade=1.0-smoothstep(900.0,2200.0,length(uCam.xz-vWPos.xz)); float _ao=mix(1.0,_aoRaw,uAO*_aoFade*(1.0-snow*0.6)); terr*=_ao; }\n if(uRelief>0.001 && uCeil<0.5){ float _rD=length(uCam.xz-vWPos.xz); float _rW=(1.0-smoothstep(700.0,2400.0,_rD))*uRelief; if(_rW>0.001){ float _e2=9.0; float _c0=_detN(vWPos.xz); float _cx=_detN(vWPos.xz+vec2(_e2,0.0))+_detN(vWPos.xz-vec2(_e2,0.0)); float _cz=_detN(vWPos.xz+vec2(0.0,_e2))+_detN(vWPos.xz-vec2(0.0,_e2)); float _curv=(_cx+_cz)*0.25-_c0; float _cav=clamp(-_curv*9.0,0.0,1.0); float _ridge=clamp(_curv*7.0,0.0,1.0); vec2 _sg=vec2(_detN(vWPos.xz+vec2(_e2,0.0))-_c0,_detN(vWPos.xz+vec2(0.0,_e2))-_c0); float _sunFace=clamp(0.5-dot(normalize(_sg+vec2(1e-5)),normalize(uSunDir.xz+vec2(1e-5)))*0.5,0.0,1.0); float _shade=1.0-(_cav*(0.30+0.22*_sunFace))*_rW+_ridge*0.10*_rW; terr*=clamp(_shade,0.45,1.15); } }\n if(uMossy>0.5 && (uArch.z>1.0 || uBeachAll>0.001) && uWaterY>-1e8){ float _aD=length(vWPos.xz-uArch.xy); float _aw=max(uArch.z>1.0 ? 1.0-smoothstep(uArch.z-uArchRamp,uArch.z+600.0,_aD) : 0.0, uBeachAll); if(_aw>0.001){ float _bh=vWPos.y-uWaterY; float _bn=_tvn(vWPos.xz*0.031)*7.0; float _beach=(1.0-smoothstep(12.0+_bn,38.0+_bn,_bh))*smoothstep(-60.0,-4.0,_bh); vec3 _sand=uArchSand*(0.84+0.28*clamp(0.5+0.5*_tvn(vWPos.xz*0.085),0.0,1.0)); float _tkS=clamp(uTexK.z*_tF,0.0,1.0); if(_tkS>0.001) _sand=mix(_sand,uArchSand*_tDet(uTexSand,uTexMeanS,vWPos.xz,_tgx,_tgy,_tMix,1.0),_tkS); terr=mix(terr,_sand,_beach*_aw*max(fl,0.35)); } }\n if(uAerial>0.001){ float _camD=length(uCam.xz-vWPos.xz); float _ap=smoothstep(uAerialStart,uAerialFar,_camD)*uAerial; _ap*=(1.0-clamp((vWY-(uYMid-uAMP*0.2))/(uAMP*1.4),0.0,1.0)*0.55); terr=mix(terr,uAerialColor,clamp(_ap,0.0,0.85)); }\n  if(uWaterOn>0.001 && vWPos.y<uWaterY){ float _cdp=uWaterY-vWPos.y; float _cf=(1.0-smoothstep(80.0,1100.0,_cdp))*smoothstep(0.0,30.0,_cdp)*uWaterOn; vec2 _cq=vWPos.xz*0.021; float _c1=sin(_cq.x*2.3+_cq.y*1.1+uTime*1.35)*sin(_cq.y*1.9-_cq.x*1.3-uTime*1.05); float _c2=sin((_cq.x+_cq.y)*1.45+uTime*0.85)*sin((_cq.x-_cq.y*0.7)*1.7-uTime*0.65); float _cc=pow(clamp(0.5+0.5*(_c1*0.6+_c2*0.4),0.0,1.0),3.5); terr*=1.0+_cf*_cc*1.15*clamp(fn.y,0.0,1.0); }\n diffuseColor.rgb=terr;\n }\n if(uCeil>0.5){ float _cm1=_tvn(vWPos.xz*0.045+vec2(vWPos.y*0.03));\n float _cm2=_tvn(vWPos.xz*0.12+vec2(13.0,7.0));\n float _cmott=clamp(0.5+0.5*(_cm1*0.6+_cm2*0.4),0.0,1.0);\n float _cstr=0.5+0.5*sin(vWPos.y*0.05+_tvn(vWPos.xz*0.025)*3.0);\n vec3 _cgx3=dFdx(vWPos),_cgy3=dFdy(vWPos);\n float _tkRC=clamp(uTexK2.x*uTexBio.w*(1.0-smoothstep(uTexK3.y,uTexK3.z,length(uCam.xz-vWPos.xz))),0.0,1.0);\n diffuseColor.rgb*=(0.80+0.36*mix(_cmott,0.5,_tkRC*0.85))*(1.0-uStrata*0.57+uStrata*_cstr);\n if(_tkRC>0.001) diffuseColor.rgb*=_tTri(uTexRock,uTexMeanR,vWPos,normalize(cross(_cgx3,_cgy3)),_cgx3,_cgy3,uTexK2.w,_tkRC);\n if(uAO>0.001){ vec3 _cn2=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n float _cao=mix(0.68,1.0,smoothstep(0.0,0.85,abs(_cn2.y)));\n float _caoD=mix(0.80,1.05,clamp(0.5+0.5*_detN(vWPos.xz),0.0,1.0));\n diffuseColor.rgb*=mix(1.0,clamp(_cao*_caoD,0.5,1.05),uAO); }\n if(uAerial>0.001){ float _cad=length(uCam.xz-vWPos.xz);\n float _cap=smoothstep(uAerialStart,uAerialFar,_cad)*uAerial;\n diffuseColor.rgb=mix(diffuseColor.rgb,uAerialColor,clamp(_cap,0.0,0.85)); }\n }\n if(uRim>0.001){ vec3 _rn=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n vec3 _rv=normalize(uCam-vWPos);\n float _rf=pow(1.0-abs(dot(_rn,_rv)),3.0);\n diffuseColor.rgb=mix(diffuseColor.rgb,uAerialColor*1.25,_rf*uRim); }\n if(uGlitch>0.5 && uCeil>0.5){ float zone=_tpatch(vWPos.xz+vec2(uTime*2.5,0.0)); vec2 gid=floor(vWPos.xz/240.0); float r=_thsh(gid+floor(uTime*0.8)); float r2=_thsh(gid*1.93+floor(uTime*1.5)); if(zone>0.62 && r>0.45) discard; if(zone>0.5){ if(r2>0.55) diffuseColor.rgb=diffuseColor.rgb.gbr; diffuseColor.rgb*=mix(0.75,1.25,r2); } }');
     sh.fragmentShader=sh.fragmentShader.replace('#include <roughnessmap_fragment>',
       '#include <roughnessmap_fragment>\n float _tr=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _rsl=uSnow+_swSW*uSnowVary;\n float _snow=smoothstep(_rsl,_rsl+0.12,_tr);\n roughnessFactor=mix(roughnessFactor,uSnowRough,_snow);');
     // lava: glowing icing on the peaks + drips running down (volcanic biome, ground only)
     sh.fragmentShader=sh.fragmentShader.replace('#include <emissivemap_fragment>',
       '#include <emissivemap_fragment>\n if(uLava>0.02 && uCeil<0.5){\n float _h=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float capStart=0.66;\n float cap=smoothstep(capStart,capStart+0.12,_h);\n float c1=_tvn(vWPos.xz*0.020);\n float c2=_tvn(vWPos.xz*0.055+vec2(13.0,5.0));\n float colId=clamp(0.5+0.5*(c1*0.6+c2*0.4),0.0,1.0);\n float dripCols=smoothstep(0.50,0.74,colId);\n float dripLen=0.14+0.32*colId;\n float dripBot=capStart-dripLen;\n float wob=0.03*_tvn(vWPos.xz*0.12);\n float band=smoothstep(dripBot+wob,dripBot+wob+0.05,_h)*(1.0-smoothstep(capStart-0.02,capStart+0.04,_h));\n float tip=smoothstep(dripBot+wob,dripBot+wob+0.025,_h)*(1.0-smoothstep(dripBot+wob+0.025,dripBot+wob+0.09,_h));\n float drips=(band+tip*0.8)*dripCols;\n float pool=(1.0-smoothstep(0.04,0.17,_h)); float poolN=_tvn(vWPos.xz*0.012)*0.6+_tvn(vWPos.xz*0.03+vec2(9.0,4.0))*0.4; float poolMask=smoothstep(0.12,0.5,0.5+0.5*poolN); float poolGlow=pool*poolMask;\n float _pulse=0.72+0.28*sin(uTime*1.6+vWY*0.02);\n float glow=clamp(cap+drips+poolGlow*1.15,0.0,1.7)*_pulse;\n vec3 lavaCol=mix(vec3(1.2,0.08,0.0),vec3(1.7,0.5,0.08),smoothstep(0.0,0.08,_h)); float emInt=glow*mix(0.78,1.0,smoothstep(0.0,0.08,_h)); totalEmissiveRadiance+=lavaCol*emInt*uLavaGlow*clamp(uLava,0.0,1.0);\n }\n if(uRocky>0.02 && uCeil<0.5){ vec3 ffn = uSmooth>0.5 ? normalize(vSN) : normalize(cross(dFdx(vWPos),dFdy(vWPos))); float ffl=clamp((abs(ffn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0); float fA=_tvn(vWPos.xz*0.02)*0.55+_tvn(vWPos.xz*0.05+vec2(19.0,7.0))*0.30+_tvn(vWPos.xz*0.11+vec2(3.0,11.0))*0.15; float fung=smoothstep(0.60,0.78,0.5+0.5*fA); float spore=smoothstep(0.82,0.97,0.5+0.5*_tvn(vWPos.xz*0.6)); float breathe=0.6+0.4*sin(uTime*0.7+fA*6.0+vWPos.x*0.012); vec3 glowCol=mix(vec3(0.16,0.95,0.55),vec3(0.20,0.70,1.0),0.5+0.5*_tvn(vWPos.xz*0.03)); float fglow=fung*(0.18+spore*1.2)*breathe*(1.0-ffl); totalEmissiveRadiance+=glowCol*fglow*clamp(uRocky,0.0,1.0); }if(uGold>0.02){vec3 gfn = uSmooth>0.5 ? normalize(vSN) : normalize(cross(dFdx(vWPos),dFdy(vWPos)));float gfl=clamp((abs(gfn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0);float gA=_tvn(vWPos.xz*0.016+vec2(vWPos.y*0.05,3.0))*0.55+_tvn(vWPos.xz*0.044+vec2(17.0,9.0))*0.30+_tvn(vWPos.xz*0.11+vec2(5.0,13.0))*0.15;float vein=smoothstep(0.56,0.72,0.5+0.5*gA);float glint=smoothstep(0.86,0.985,0.5+0.5*_tvn(vWPos.xz*0.9+vec2(vWPos.y*0.2,0.0)));float shimmer=0.82+0.18*sin(uTime*1.1+gA*7.0+vWPos.y*0.03);vec3 goldCol=mix(vec3(1.0,0.72,0.18),vec3(1.5,1.18,0.6),0.4+0.6*glint);float gglow=(vein*0.30+glint*1.2*vein)*shimmer*(1.0-gfl*0.7);totalEmissiveRadiance+=goldCol*gglow*uGold;}if(uCrystal>0.02){vec3 cfn = uSmooth>0.5 ? normalize(vSN) : normalize(cross(dFdx(vWPos),dFdy(vWPos)));float cfl=clamp((abs(cfn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0);float cA=_tvn(vWPos.xz*0.02+vec2(vWPos.y*0.06,4.0))*0.5+_tvn(vWPos.xz*0.05+vec2(13.0,17.0))*0.3+_tvn(vWPos.xz*0.12+vec2(5.0,9.0))*0.2;float cryst=smoothstep(0.62,0.82,0.5+0.5*cA);float facet=smoothstep(0.80,0.97,0.5+0.5*_tvn(vWPos.xz*0.7+vec2(vWPos.y*0.15,0.0)));float twinkle=0.6+0.4*sin(uTime*1.6+cA*9.0+vWPos.y*0.04);vec3 crysCol=mix(vec3(0.25,0.85,1.2),vec3(0.7,0.4,1.3),0.5+0.5*sin(uTime*0.5+cA*4.0+vWPos.x*0.01));float cglow=(cryst*0.30+facet*1.3*cryst)*twinkle*(1.0-cfl*0.6);totalEmissiveRadiance+=crysCol*cglow*uCrystal;}\n if(uGlitch>0.5 && uCeil>0.5){ float gz=_tpatch(vWPos.xz+vec2(uTime*2.5,0.0)); float scan=step(0.92,fract(vWPos.y*0.04+uTime*1.5)); totalEmissiveRadiance+=vec3(0.45,0.12,0.85)*scan*step(0.45,gz)*0.7; }\n if(uVolcN>0.5 && uCeil<0.5){ float vm=0.0,vr=2.0,vu=0.0,va=0.0; for(int i=0;i<4;i++){ if(float(i)>=uVolcN) break; vec4 V=uVolc[i];   float d=length(vWPos.xz-V.xy)/max(V.z,1.0);   float mm=1.0-smoothstep(0.62,1.20,d);   if(mm>vm){ vm=mm; vr=d; vu=clamp((vWY-V.w)/max(uVolcH[i],1.0),0.0,1.0); va=atan(vWPos.z-V.y,vWPos.x-V.x); } } if(vm>0.004){   float basalt=vm*smoothstep(1.05,0.55,vr);   diffuseColor.rgb=mix(diffuseColor.rgb,diffuseColor.rgb*vec3(0.32,0.27,0.26)+vec3(0.012,0.008,0.008),basalt*0.88);   float crat=1.0-smoothstep(0.045,0.145,vr);   float chN=_tvn(vWPos.xz*0.0007);   float ch=0.5+0.5*sin(va*(9.0+7.0*chN)+chN*6.0);   ch=smoothstep(0.70,0.97,ch)*smoothstep(0.05,0.19,vr)*(1.0-smoothstep(0.42,0.86,vr))*smoothstep(0.26,0.72,vu);   float pulse=0.74+0.26*sin(uTime*1.25+vr*8.0);   float glow=(crat*2.3+ch*1.15)*pulse*vm;   vec3 lc=mix(vec3(1.9,0.26,0.02),vec3(2.3,1.00,0.22),crat);   totalEmissiveRadiance+=lc*glow*uLavaGlow; } }');
-    sh.fragmentShader=sh.fragmentShader.replace('#include <normal_fragment_begin>','#include <normal_fragment_begin>\n if(uCeil<0.5 && uSmooth>0.5){ vec3 _bn=normalize(vSN); float _dC=length(uCam.xz-vWPos.xz); float _ds=uDetail*(1.0-smoothstep(900.0,2600.0,_dC)); float _flN=clamp((abs(_bn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0); _ds*=mix(1.0,_flN,clamp(uTexK2.x,0.0,1.0)*step(0.5,uMossy)); if(_ds>0.001){ float _e=2.5; float _d0=_detN(vWPos.xz); float _gx=_detN(vWPos.xz+vec2(_e,0.0))-_d0; float _gz=_detN(vWPos.xz+vec2(0.0,_e))-_d0; _bn=normalize(_bn - vec3(_gx,0.0,_gz)*(_ds*3.0/_e)); if(uRelief>0.001){ float _fw=(1.0-smoothstep(260.0,900.0,_dC))*uRelief; if(_fw>0.001){ float _fe=0.7; float _f0=_tvn(vWPos.xz*0.55); float _fx=_tvn((vWPos.xz+vec2(_fe,0.0))*0.55)-_f0; float _fz=_tvn((vWPos.xz+vec2(0.0,_fe))*0.55)-_f0; _bn=normalize(_bn - vec3(_fx,0.0,_fz)*(_fw*0.9/_fe)); } }\n if(uGrassD>0.001){ float _gw=(1.0-smoothstep(120.0,520.0,_dC))*uGrassD; if(_gw>0.001){ float _ge=1.1; float _g0=_tvn(vWPos.xz*0.42); float _gx=_tvn((vWPos.xz+vec2(_ge,0.0))*0.42)-_g0; float _gz=_tvn((vWPos.xz+vec2(0.0,_ge))*0.42)-_g0; _bn=normalize(_bn - vec3(_gx,0.0,_gz)*(_gw*0.85/_ge)); } } } normal = normalize((viewMatrix * vec4(_bn,0.0)).xyz); }');
+    sh.fragmentShader=sh.fragmentShader.replace('#include <normal_fragment_begin>','#include <normal_fragment_begin>\n if(uCeil<0.5 && uSmooth>0.5){ vec3 _bn=normalize(vSN); float _dC=length(uCam.xz-vWPos.xz); float _ds=uDetail*(1.0-smoothstep(900.0,2600.0,_dC)); float _flN=clamp((abs(_bn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0); _ds*=mix(1.0,_flN,clamp(uTexK2.x,0.0,1.0)*uTexBio.y); if(_ds>0.001){ float _e=2.5; float _d0=_detN(vWPos.xz); float _gx=_detN(vWPos.xz+vec2(_e,0.0))-_d0; float _gz=_detN(vWPos.xz+vec2(0.0,_e))-_d0; _bn=normalize(_bn - vec3(_gx,0.0,_gz)*(_ds*3.0/_e)); if(uRelief>0.001){ float _fw=(1.0-smoothstep(260.0,900.0,_dC))*uRelief; if(_fw>0.001){ float _fe=0.7; float _f0=_tvn(vWPos.xz*0.55); float _fx=_tvn((vWPos.xz+vec2(_fe,0.0))*0.55)-_f0; float _fz=_tvn((vWPos.xz+vec2(0.0,_fe))*0.55)-_f0; _bn=normalize(_bn - vec3(_fx,0.0,_fz)*(_fw*0.9/_fe)); } }\n if(uGrassD>0.001){ float _gw=(1.0-smoothstep(120.0,520.0,_dC))*uGrassD; if(_gw>0.001){ float _ge=1.1; float _g0=_tvn(vWPos.xz*0.42); float _gx=_tvn((vWPos.xz+vec2(_ge,0.0))*0.42)-_g0; float _gz=_tvn((vWPos.xz+vec2(0.0,_ge))*0.42)-_g0; _bn=normalize(_bn - vec3(_gx,0.0,_gz)*(_gw*0.85/_ge)); } } } normal = normalize((viewMatrix * vec4(_bn,0.0)).xyz); }');
   };
   return m;
 }
