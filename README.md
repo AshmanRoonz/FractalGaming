@@ -43,6 +43,7 @@ FractalGaming/
 │   ├── circumpunct_particle_taxonomy.md
 │   └── microverse_element_dna.md
 ├── labs/                             the 42 public R&D labs; index.html + manifest make them the "Fractal Reality Labs" app
+├── phi_resonance/                    Phi Resonance, the φ sound lab as a paid Android + iPhone app (Capacitor; not deployed)
 ├── store/                            app store plan and packaging kit for the web apps and labs (not deployed)
 ├── LSS_old/                          earlier LSS iterations and experiments
 └── microverse/                       earliest MMB prototype
@@ -103,4 +104,4 @@ Framework: Circumpunct Framework by Ashman Roonz (companion repository: Fractal_
 - 2026-08-02 v1.3: repository restructure (LSS v36.09) — the game, its satellite pages, `activity/`, `campaign_media/`, and `_headers` moved from the repo root into `LSS/`, which is now the deployed site root; asset URLs lost their `LSS/` prefix; build tooling stays at the repo root. Other root projects (goopling, baseball_blitz, labs/…) no longer deploy to lss.fractalreality.ca
 - 2026-08-16 v1.4: link-rot fix for the above — `labs/`, `goopling.html`, `table_legends.html` and `baseball_blitz.html` are staged alongside `LSS/` again (`EXTRA_DIRS`/`EXTRA_FILES` in `tools/deploy_cf.py`), so the lab links on fractalreality.ca and the old `ashmanroonz.github.io/FractalGaming/...` URLs resolve instead of silently loading the game
 - 2026-05-29 v1.2: current LSS build bumped to v27, now served as `index.html`. This release adds multiplayer netcode hardening (validated/clamped peer damage, state-gated round + timer sync, round-end and Outline-perk fixes), per-frame performance optimizations, and moves spatial-audio and reverb occlusion from full-mesh raycasts to the SDF ray-march (~15% of combat CPU reclaimed). Also: default Nexus map/theme now applies on the ship-select screen, an optional FPS/CPU counter under Settings > Performance, and the gamepad indicator removed
-- 2026-09-29 v1.5: `store/` added: the plan for getting the web apps and labs into app stores (`PLAN.md`) and the per-app packaging kit (`README.md`). Last Ship Sailing stays web-only by owner decision. `labs/` gained an app home screen, manifest, icons, offline worker and privacy page (Fractal Reality Labs, Microsoft Store first)
+- 2026-09-29 v1.5: `store/` added: the plan for getting the web apps and labs into app stores (`PLAN.md`) and the per-app packaging kit (`README.md`). Last Ship Sailing stays web-only by owner decision. `labs/` gained an app home screen, manifest, icons, offline worker and privacy page (Fractal Reality Labs, Microsoft Store first). `phi_resonance/` holds the Phi Resonance app (a Capacitor copy of the phi resonance page)
