@@ -2,7 +2,7 @@
 
 Created: 2026-09-29
 Last updated: 2026-09-29
-Version: 1.1
+Version: 1.2
 
 **Owner's question:** *"I have so many html apps and labs... It's silly I don't have any of them in any app store."*
 
@@ -16,21 +16,48 @@ Version: 1.1
 
 ## The candidates
 
-### Fractal Labs: one app, curated (the labs)
+### Fractal Reality Labs: one app, curated (the labs), BUILT
 
-The Labs page on fractalreality.ca lists 42 labs, served from `lss.fractalreality.ca/labs/`. None of them link into LSS. Together they make one strong "interactive simulations" app. Separately they would be 42 thin ones.
+The Labs page on fractalreality.ca lists 42 labs, served from `lss.fractalreality.ca/labs/`. Together they make one strong "interactive simulations" app. Separately they would be 42 thin ones. None of them link into LSS.
 
-To-do:
+**Built 2026-09-29 (in `labs/`, deployed by the next `tools/deploy_cf.py`):**
 
-- A home screen at `labs/index.html`: cards, a WebGPU check, and a clear message on devices without WebGPU. The current index lives on fractalreality.ca, not beside the labs.
-- A manifest scoped to `/labs/`, with its own icons.
-- Curation. Leave out development probes and duplicates:
-  - `ao_spike`, `branchwork_probe`, `webgpu_rt_poison_repro` and `mesh_inference`.
-  - The `* - legacy.html` copies.
-  - The LSS prototypes `fire_cloud_lab`, `fractal_lab`, `fractal_arena` and `fractal_deep`.
-- Input. Most labs are "fly with WASD and the mouse". Only eight listen for touch or pointer events at all: `city_generator_webgpu`, `emergence`, `modal-lab`, `recursive_webgpu_emergence_engine_v2`, `rule_zero`, `seeds_ladder`, `wind-routing` and `wind-tank`. So the **Microsoft Store is the first target**. Play comes after the fly-through labs get touch or gamepad controls.
-- WebGPU on Android needs Chrome 121+ on Android 12+ (ARM, Qualcomm or Intel GPUs). A TWA can open in a browser other than Chrome, so keep the WebGL paths where they exist.
-- Dependencies. Three.js and other libraries load from cdn.jsdelivr.net and esm.sh. That is fine for store packages that open the live site; an Apple build that bundles everything would have to include local copies.
+| File | What it is |
+|---|---|
+| `labs/index.html` | The app's home screen. It has the same 42 labs, four sections and descriptions as fractalreality.ca/labs.html, without the LSS mentions. Each lab opens in the same window, and Back returns to the home screen. It checks for WebGPU: without it, a notice appears and the 28 labs built for WebGPU are dimmed. |
+| `labs/manifest.webmanifest` | "Fractal Reality Labs" (launcher name "Fractal Labs"), scoped to `/labs/`. The display mode is `minimal-ui`, so installed desktop windows get Back and Reload buttons; it falls back to `standalone`. |
+| `labs/icons/` | A gold ⊙ on the Labs page's dark background: any and maskable versions, 192 and 512 px, plus the Apple touch icon. |
+| `labs/sw.js`, `labs/offline.html` | The offline screen only, scoped to `/labs/`. It caches nothing the labs load, and its kill switch is written in its header. |
+| `labs/privacy.html` | The privacy policy for the store listings. Every claim was checked against the lab sources. |
+
+**Tested in headless Chromium 141:**
+
+- 42 cards, and all links return 200.
+- No page errors.
+- Chrome reports no manifest or installability errors.
+- No horizontal scrolling on a phone.
+- The worker's scope is `/labs/`, and it caches only `offline.html`.
+- An offline lab navigation shows the offline page.
+
+**Not tested:** the labs themselves on real WebGPU hardware, because this sandbox has no GPU and blocks the CDNs. The lab files are unchanged.
+
+**Measured facts behind the hub:**
+
+- WebGPU. 14 labs call WebGPU directly. Another 14 use three.js's WebGPURenderer, which tries WebGL2 when WebGPU is missing; those compute-heavy labs may still need WebGPU. The remaining 14 labs use canvas 2D or WebGL.
+- Input. Only eight labs listen for touch or pointer events: `city_generator_webgpu`, `emergence`, `modal-lab`, `recursive_webgpu_emergence_engine_v2`, `rule_zero`, `seeds_ladder`, `wind-routing` and `wind-tank`. So the **Microsoft Store is the first target**. Play comes after the fly-through labs get touch or gamepad controls.
+- WebGPU on Android needs Chrome 121+ on Android 12+, and a TWA can open in a browser other than Chrome.
+- Networking. Three labs (World Navigator, Field and Particle Join, Particle Break World) join a peer-to-peer room only when the user presses Connect, and share only the flyer's position, speed and view direction.
+- Device access. Rule 0 uses the camera and microphone only when the user switches them on, and keeps them on the device.
+- Dependencies. The labs load three.js and other libraries from cdn.jsdelivr.net and esm.sh. That is fine for store packages that open the live site; an Apple build that bundles everything would need local copies.
+- Left out of the app: `ao_spike`, `branchwork_probe`, `webgpu_rt_poison_repro`, `mesh_inference`, the `* - legacy.html` copies, and the LSS prototypes `fire_cloud_lab`, `fractal_lab`, `fractal_arena` and `fractal_deep`.
+
+**Draft Microsoft Store listing (edit freely):**
+
+- **Name:** Fractal Reality Labs
+- **Category:** Education (Entertainment would also fit)
+- **Description:** Fractal Reality Labs is a collection of 42 live experiments in simulation and emergence: Navier-Stokes fluids and smoke, volumetric clouds and full-sky weather, matter that breaks, joins and reforms, procedurally generated worlds and cities you can fly through, cellular automata, and the cymatics of water. Every lab runs in real time on your device. Most are built on WebGPU, and the fly-through labs use the keyboard and mouse. Three labs let friends share a world by typing the same room code. No accounts, no ads, no analytics.
+- **Privacy policy:** `https://lss.fractalreality.ca/labs/privacy.html`
+- **Screenshots:** capture 4 to 6 labs on a WebGPU machine at 1920x1080 or larger. Sky Weather Sim, City Genome, Fluid 3D, World Navigator, Matter 3D and Modal Water Lab show the range.
 
 ### Goopling: the best phone game
 
@@ -78,11 +105,13 @@ These counts exclude backups, old versions and `.git`.
 
 ## Next
 
-1. Choose which of the candidates go first.
-2. For each chosen app, build its store files: a manifest, icons, an offline screen, and store mode if the app shows any payment or donate link. The steps are in `store/README.md`.
-3. Open a Microsoft Partner Center account (free). Open a Google Play developer account (US$25) and line up 12 testers.
+1. Deploy (`tools/deploy_cf.py`). Then open `https://lss.fractalreality.ca/labs/` in Chrome or Edge, and check that the address bar offers **Install** and that the privacy page loads.
+2. Open a Microsoft Partner Center account (free, individual), reserve "Fractal Reality Labs", and package `https://lss.fractalreality.ca/labs/` in PWABuilder (steps in `store/README.md`).
+3. Take 4 to 6 screenshots on a WebGPU machine and submit with the listing above.
+4. Choose the next app: Goopling for phones, the Circumpunct app, or one of the smaller tools.
 
 ## Revision history
 
+- 2026-09-29 v1.2: the Labs app is built (hub, manifest, icons, offline worker, privacy page, tested); draft Microsoft Store listing added
 - 2026-09-29 v1.1: LSS removed (owner's decision) and its store work reverted before merge; the labs are now the lead candidate; added DEADDROP and the hosting notes
 - 2026-09-29 v1.0: initial plan; inventory of both repos, four waves, exclusions, next actions
