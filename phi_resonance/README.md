@@ -2,7 +2,7 @@
 
 Created: 2026-09-29
 Last updated: 2026-09-29
-Version: 1.0
+Version: 1.1
 
 The φ-Entrainment sound lab from fractalreality.ca, packaged as a paid app for Google Play and the Apple App Store with [Capacitor 8](https://capacitorjs.com/). The whole app runs on the device: it makes no network requests, collects nothing, and works offline.
 
@@ -110,10 +110,11 @@ Full notes and sources: `../store/PLAN.md`, section "φ Resonance".
 - **Privacy:**
   - Apple's privacy label: *Data Not Collected*.
   - Play's Data safety: no data collected, none shared.
-  - The policy text is `www/privacy.html`. It also has to be published at a public URL for both listings; it is not on fractalreality.ca yet.
+  - Privacy policy URL for both listings: `https://fractalreality.ca/phi_resonance_privacy.html` (Fractal_Reality `docs/phi_resonance_privacy.html`). It goes live when that repo's branch is merged into `main`. The app bundles the same text as `www/privacy.html`; keep the two in step.
 - **Play foreground-service declaration:** Play Console > App content > Foreground service permissions: media playback, "user-started sound sessions that keep playing with the screen off". Play may ask for a short video.
 - **Price:** paid upfront; the store handles payment, so there is no billing code. Enroll in Apple's Small Business Program and Google's 15% tier. See `../store/PLAN.md` for the tax and address requirements, including that Google shows a selling developer's address publicly.
 
 ## Revision history
 
+- 2026-09-29 v1.1: privacy policy published on fractalreality.ca (phi_resonance_privacy.html); bundled copy links to it
 - 2026-09-29 v1.0: initial app: verbatim copy of the web page, Capacitor 8 scaffold, app changes (screen-off audio, timer on the audio clock, share-sheet export, disclaimer), Android media foreground service and iOS background audio, icons, tests, listing drafts
