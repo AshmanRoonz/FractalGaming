@@ -2,7 +2,7 @@
 
 Created: 2026-09-29
 Last updated: 2026-09-29
-Version: 1.2
+Version: 1.3
 
 **Owner's question:** *"I have so many html apps and labs... It's silly I don't have any of them in any app store."*
 
@@ -59,6 +59,62 @@ The Labs page on fractalreality.ca lists 42 labs, served from `lss.fractalrealit
 - **Privacy policy:** `https://lss.fractalreality.ca/labs/privacy.html`
 - **Screenshots:** capture 4 to 6 labs on a WebGPU machine at 1920x1080 or larger. Sky Weather Sim, City Genome, Fluid 3D, World Navigator, Matter 3D and Modal Water Lab show the range.
 
+### φ Resonance: a paid Android and iPhone app (owner's idea, 2026-09-29)
+
+`Fractal_Reality/docs/phi_resonance.html` ("φ-Entrainment | Sound Laboratory") is the strongest single app in either repo:
+
+- Eight sound engines: binaural, isochronic, monaural, drone, harmonic, φ-cascade, noise and chord.
+- Presets and saved states, a session timer up to 2 hours, a breathing pacer, and a full-screen visual beat that already carries a photosensitivity warning.
+- Serum 2 wavetable export.
+- It loads nothing from other servers, so it can be bundled inside an app and work offline.
+- It makes no health claims today. The page itself says "not a medical claim", and its presets describe only frequencies and modes.
+
+**Positioning: wellness or sound tool, not "therapy"** (checked 2026-09-29):
+
+- **Apple.**
+  - 1.4.1 puts apps "that could be used for diagnosing or treating patients" under greater scrutiny and asks for regulatory clearance.
+  - 2.3.1 makes misleading marketing grounds for removal and account termination.
+  - 2.3.7 bans unverifiable claims in the subtitle.
+  - 5.1.1(ix) says healthcare services should come from a legal entity, not an individual.
+  - Developer forums report relaxation, anxiety and insomnia apps being rejected under 1.4.1 in 2025.
+  - Source: <https://developer.apple.com/app-store/review/guidelines/>
+- **Google Play, Health Content and Services policy.** A health app that is not a cleared medical device must say in its description that it is "not a medical device and does not diagnose, treat, cure, or prevent any medical condition", and must advise users to consult a healthcare professional. Every developer must also complete the Health apps declaration. The fitting categories are Sleep Management or Stress Management & Mental Wellness.
+  - Sources: <https://support.google.com/googleplay/android-developer/answer/16679511>, <https://support.google.com/googleplay/android-developer/answer/14738291>
+- **Regulators.**
+  - FDA: the General Wellness guidance, revised 2026-01-06, treats "relaxation or stress management", "mental acuity" and "sleep management" as wellness claims. Treating an anxiety disorder or insomnia is a medical-device claim. The existing "therapy apps", such as SleepioRx and DaylightRx, are cleared prescription devices. Source: <https://www.fda.gov/regulatory-information/search-fda-guidance-documents/general-wellness-policy-low-risk-devices>
+  - Health Canada: software is a device when its represented use is medical.
+  - Competition Bureau and FTC: a performance or health claim needs adequate testing before it is made. For health claims, the FTC generally expects randomized controlled trials.
+- **Evidence.**
+  - Binaural-beat brainwave entrainment is inconsistent: a 2023 review found 5 of 14 EEG studies supportive. <https://www.ncbi.nlm.nih.gov/pmc/articles/PMC10198548/>
+  - Modest anxiety effects show up mostly around medical procedures: a 2019 meta-analysis found g = 0.45. <https://pubmed.ncbi.nlm.nih.gov/30073406/>
+  - There are no trials of golden-ratio tones.
+- **Conclusion.** Market it for relaxation, focus, sleep wind-down, meditation and sound exploration. Keep "therapy" and "treats X" out of the name, subtitle, keywords and screenshots, and add Google's required disclaimer. The store name should be "Phi Resonance" rather than "φ-Entrainment", because "entrainment" reads as a claim to change the body. A clinical "therapy" product would mean a company, clinical trials and regulatory clearance: a different project.
+
+**Build: a Capacitor app for both platforms, not a web wrapper.**
+
+- **iPhone.** Apple wants a bundled, self-contained app for 4.2 and 2.5.2.
+  - Screen-off playback needs `UIBackgroundModes audio` and `navigator.audioSession.type = 'playback'` (iOS 16.4+).
+  - WebKit bug 261554, which suspended the AudioContext in the background, is fixed, but WKWebView hosts still interrupt the context. Resume it on `visibilitychange`, test on a real device, and keep a native audio plugin as the fallback.
+- **Android.** Android 17 requires a visible activity or a `mediaPlayback` foreground service for screen-off audio; otherwise playback "fails silently". That needs native code, which a TWA does not have. Source: <https://developer.android.com/about/versions/17/changes/bg-audio>
+- **Web-side changes:**
+  - Media Session controls on the lock screen.
+  - Resume audio on `visibilitychange`.
+  - Share-sheet export in place of `a.download`, for preset JSON and the Serum files.
+  - The Google disclaimer in the About screen.
+
+**Selling:**
+
+- **Model:** paid upfront. The store handles payment, so there is no billing code.
+- **Apple:**
+  - Enroll in the Small Business Program for a 15% commission.
+  - The Paid Apps agreement is irreversible and needs banking and tax details.
+  - Canadian developers must give a GST/HST number; it is unconfirmed whether a small supplier without one can proceed.
+  - Selling in the EU makes you a DSA "trader", which shows an address, phone and email on EU product pages.
+- **Google:**
+  - 15% on the first US$1M; enroll in the 15% tier.
+  - A payments profile with a legal street address is required, and **Google displays the full address publicly for accounts that sell**.
+- **Web version:** the page is free on fractalreality.ca today. Keep it as a free lite version, or retire it, before launch.
+
 ### Goopling: the best phone game
 
 `goopling.html` is a single 120 KB file, and it was built for touch: hold and drag to slosh, pinch to zoom, double-tap to pulse. It has peer-to-peer "join" through trystero, mutation choices and goopling trading, and no payments or outbound links. It fits Google Play and the Microsoft Store.
@@ -74,7 +130,7 @@ To-do:
 
 The framework site is mostly essays. Essays are a website, and the books belong in book stores. There is also a smaller set of interactive pieces that could make one "Circumpunct" app:
 
-- **Audio and visual:** `the_staggered_octave_heard`, `helix_audio`, `phi_resonance`, `binaural_beats_51`, `attune`.
+- **Audio and visual:** `the_staggered_octave_heard`, `helix_audio`, `attune`. φ Resonance is its own app (above), and `binaural_beats_51` could become one of its modes.
 - **Simulations:** `simulations/` (Genesis, The Tree That Dreams, The Living Creature, the framework shaders, Dancing Cosmos, Record Player, Kernel Explorer), `circumpunct_explorer`, `the_pole_gap_live`, `staggered_tqc`.
 - **Guided practices:** `rephase_meditation`, `reclaim_stress_meditation`.
 
@@ -112,6 +168,7 @@ These counts exclude backups, old versions and `.git`.
 
 ## Revision history
 
+- 2026-09-29 v1.3: φ Resonance added as a paid Android and iPhone app (owner's idea); wellness positioning, store and regulatory rules with sources, build and selling notes
 - 2026-09-29 v1.2: the Labs app is built (hub, manifest, icons, offline worker, privacy page, tested); draft Microsoft Store listing added
 - 2026-09-29 v1.1: LSS removed (owner's decision) and its store work reverted before merge; the labs are now the lead candidate; added DEADDROP and the hosting notes
 - 2026-09-29 v1.0: initial plan; inventory of both repos, four waves, exclusions, next actions
