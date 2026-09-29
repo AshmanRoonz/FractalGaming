@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "49.84";
+const LSS_BUILD = "49.85";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -22727,7 +22727,7 @@ const _swU = { uTime:{value:0}, uYMid:{value:0}, uAMP:{value:1}, uSnow:{value:0.
                uTexBio:{value:new THREE.Vector4(0,0,0,0)},
                uTexSnow:{value:_swTexWhite}, uTexMoss:{value:_swTexWhite}, uTexBed:{value:_swTexWhite},
                uTexMeanSn:{value:new THREE.Vector3(1,1,1)}, uTexMeanMo:{value:new THREE.Vector3(1,1,1)}, uTexMeanBd:{value:new THREE.Vector3(1,1,1)},
-               uTexK4:{value:new THREE.Vector4(0,0,0,0)}, uTexT4:{value:new THREE.Vector4(80,0,0,0)}, uTexBio2:{value:new THREE.Vector4(0,0,0,0)},
+               uTexK4:{value:new THREE.Vector4(0,0,0,0)}, uTexT4:{value:new THREE.Vector4(240,0,0,0)}, uTexBio2:{value:new THREE.Vector4(0,0,0,0)},
                uSunDir:{value:new THREE.Vector3(0.29,0.86,0.43)},   // (v44.45) world sun, kept in step with _WX.sunDir
                uSunTop:{value:null}, uSunTopBox:{value:new THREE.Vector4(0,0,0,0)}, uSunTopK:{value:new THREE.Vector4(0,2,36,0)},
                uBendFlat:{value:0},
@@ -23045,6 +23045,7 @@ if (typeof window !== 'undefined') window.__terrTex = function (o) {
     if (o.rockTex != null && _SW_TERR_TEX[o.rockTex]) _swTerrSlot('rock', o.rockTex);   // (v49.83)
     if (o.snowTex != null && _SW_TERR_TEX[o.snowTex]) _swTerrSlot('snow', o.snowTex);
     if (Array.isArray(o.bio2)) _swU.uTexBio2.value.set(+o.bio2[0] || 0, +o.bio2[1] || 0, +o.bio2[2] || 0, 0);   // [snow caps, moss, lake beds]
+    if (o.snowTile != null && isFinite(+o.snowTile)) _swU.uTexT4.value.x = Math.max(1, +o.snowTile);   // (v49.85)
   }
   return { grass: K.x, mud: K.y, sand: K.z, tile: K.w, fade: [_swU.uTexFade.value.x, _swU.uTexFade.value.y],
            chroma: _swU.uTexChroma.value, taps: _swU.uTexTaps.value, beachAll: _swU.uBeachAll.value,
@@ -23052,7 +23053,7 @@ if (typeof window !== 'undefined') window.__terrTex = function (o) {
            grassyRockTile: _swU.uTexK3.value.x, faceFade: [_swU.uTexK3.value.y, _swU.uTexK3.value.z], grassTex: _SW_TERR_TEX._grassWhich || 'grass',
            bio: [_swU.uTexBio.value.x, _swU.uTexBio.value.y, _swU.uTexBio.value.z, _swU.uTexBio.value.w],
            groundTex: _SW_TEX_SLOTS.ground.want, bandTex: _SW_TEX_SLOTS.band.want,
-           rockTex: _SW_TEX_SLOTS.rock.want, snowTex: _SW_TEX_SLOTS.snow.want,   // (v49.83)
+           rockTex: _SW_TEX_SLOTS.rock.want, snowTex: _SW_TEX_SLOTS.snow.want, snowTile: _swU.uTexT4.value.x,   // (v49.83/85)
            bio2: [_swU.uTexBio2.value.x, _swU.uTexBio2.value.y, _swU.uTexBio2.value.z], k4: [_swU.uTexK4.value.x, _swU.uTexK4.value.y, _swU.uTexK4.value.z],
            loaded: [_swU.uTexGrass.value !== _swTexWhite, _swU.uTexMud.value !== _swTexWhite, _swU.uTexSand.value !== _swTexWhite,
                     _swU.uTexRock.value !== _swTexWhite, _swU.uTexGRock.value !== _swTexWhite] };
