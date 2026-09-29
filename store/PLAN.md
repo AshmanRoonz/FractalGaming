@@ -2,7 +2,7 @@
 
 Created: 2026-09-29
 Last updated: 2026-09-29
-Version: 1.5
+Version: 1.6
 
 **Owner's question:** *"I have so many html apps and labs... It's silly I don't have any of them in any app store."*
 
@@ -63,7 +63,7 @@ The Labs page on fractalreality.ca lists 42 labs, served from `lss.fractalrealit
 
 **Project: `phi_resonance/` (built 2026-09-29).** It is a Capacitor 8 app for Android and iOS, and `docs/phi_resonance.html` itself stays unchanged. Its README has the build steps, what was verified, the device checklist and the draft store listing.
 
-**Privacy policy URL for both listings:** `https://fractalreality.ca/phi_resonance_privacy.html` (Fractal_Reality `docs/phi_resonance_privacy.html`). It goes live when that repo's branch is merged into `main`.
+**Privacy policy URL for both listings:** `https://fractalreality.ca/phi_resonance_privacy.html` (Fractal_Reality `docs/phi_resonance_privacy.html`). Merged into that repo's `main` on 2026-09-29 (Fractal_Reality PR #773); GitHub Pages publishes `docs/` on every push to `main`.
 
 `Fractal_Reality/docs/phi_resonance.html` ("φ-Entrainment | Sound Laboratory") is the strongest single app in either repo:
 
@@ -172,6 +172,7 @@ These counts exclude backups, old versions and `.git`.
 
 ## Revision history
 
+- 2026-09-29 v1.6: φ Resonance privacy page merged into Fractal_Reality `main` (PR #773)
 - 2026-09-29 v1.5: φ Resonance privacy policy added to fractalreality.ca
 - 2026-09-29 v1.4: φ Resonance app project created (`phi_resonance/`)
 - 2026-09-29 v1.3: φ Resonance added as a paid Android and iPhone app (owner's idea); wellness positioning, store and regulatory rules with sources, build and selling notes
