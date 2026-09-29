@@ -90,6 +90,7 @@ The campaign's storyline, Xorzo and the Summoners, as Ashman told it (2026-09-28
   - Each ship's stats and abilities show above it, like the ship selection screen.
   - The pilot perk is chosen after the ship.
   - The second fractal moment is "just a flicker", not a screen.
+  - The fractals are "cyberpunk colors, pink and blue", and sharp (the first version "looks very low resolution").
 - **A gentle start.** "The start of the campaign is a little overwhelming with the number of ships": The Approach sends one ship, then two, then threes.
 - **No antivirus readout.** "It gives away the story... plus it really doesn't do anything." The antivirus is told in Xorzo's words.
 - **The giant.**
@@ -113,7 +114,7 @@ The campaign's storyline, Xorzo and the Summoners, as Ashman told it (2026-09-28
 | `video9.mp4` | **The final video.** After Xorzo's closing lines, before TO BE CONTINUED. |
 | `video2`–`video8` | One per cavern leg (see Open). |
 | `voice/<line id>.mp3` | A voiced version of any dialogue line. List the id in `campaign_media/media.json`. |
-| `fractal_frame.png` | The flicker of fractals in the opening. Not supplied yet; a generated fractal stands in. |
+| `fractal_frame.png` | The flicker of fractals in the opening. Not supplied yet; a generated pink-and-blue fractal stands in. |
 
 ---
 

@@ -454,6 +454,15 @@ body.vr-active #fps-counter { display: none !important; }
    round beats lives in JS instead: updateRoundSystem's `_ffHubCD` / `_ffHub` gates, plus a belt
    inside _cdRound so it holds even for a future caller of Overlays.countdown. */
 body.lss-freeflight #round-info { display: none !important; }
+/* (v49.74) ...and the campaign. Owner: "Fleet A fleet B round 1, that text doesn't need to be on screen in the campaign".
+   The campaign is one endless journey on one side - there are no rounds to count and no Fleet B score to keep.
+   (The finale runs in free flight, which the rule above already covers.)
+   This is the words' ONLY door in a campaign - both suspects checked (v49.75/76), so do not add belts for them:
+   the arena-side 3-2-1 that paints "ROUND n" under its digits can never fire there (CampaignMode runs
+   testMode, and updateRoundSystem force-zeroes warmupTimer BEFORE it reads `prev`, so `prev > n` is never
+   true - measured over two leg-to-leg roundEnd -> warmup cycles: the only paint was FIGHT, subtitle ''), and
+   the VR panel that also draws FLEET A / B / ROUND n (_xrDrawAuxHud) has no caller. */
+body.lss-campaign #round-info { display: none !important; }
 
 body.lss-thirdperson #cockpit-frame,
 body.lss-thirdperson #gun-layer,
@@ -2309,9 +2318,12 @@ html.lss-touch #camp-dialogue .cd-text { font-size: 12.5px; line-height: 1.25; }
   -webkit-mask-image: radial-gradient(circle, #000 28%, transparent 68%);
           mask-image: radial-gradient(circle, #000 28%, transparent 68%);
 }
+/* (v49.77) No hue-rotate on the layers any more (was +70deg / -60deg): the fractal is PINK AND BLUE now
+   (CampOpening cfg.fxPink / fxBlue), and any real rotation of those two lands on orange, green or teal. A
+   shift is still a knob (cfg.fxHue2 / fxHue3, written inline by _fxPrep) - it defaults to 0. */
 #camp-open-veil .co-l1 { animation: coSpin 46s linear infinite; }
-#camp-open-veil .co-l2 { animation: coSpin 31s linear infinite reverse; filter: hue-rotate(70deg); opacity: 0.7; }
-#camp-open-veil .co-l3 { animation: coSpinZ 23s ease-in-out infinite alternate; filter: hue-rotate(-60deg); opacity: 0.55; }
+#camp-open-veil .co-l2 { animation: coSpin 31s linear infinite reverse; opacity: 0.7; }
+#camp-open-veil .co-l3 { animation: coSpinZ 23s ease-in-out infinite alternate; opacity: 0.55; }
 #camp-open-veil:not(.on) .co-l { animation-play-state: paused; }
 /* "Strange fractals appear around the ship. Morphing." - a hole in the veil over the chosen hull: the
    fractal rises around it and the hole closes over it (launch), then opens out of the cavern (arrival).
@@ -7227,7 +7239,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "49.73";
+const LSS_BUILD = "49.78";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -12006,7 +12018,10 @@ const NULL_MODE = Object.freeze({
 });
 const CampaignMode = {
   onStart(ctx) {  },
-  onBuildWorld(seed) { try { this._campStartScene(seed); } catch (e) { console.warn('[campaign] onBuildWorld', e); } },
+  onBuildWorld(seed) {
+    try { document.body.classList.add('lss-campaign'); } catch (_) {}   // (v49.74) no FLEET A / B, no ROUND n
+    try { this._campStartScene(seed); } catch (e) { console.warn('[campaign] onBuildWorld', e); }
+  },
   // Start (or restart) a scene : clear leftover hoard bots (campaign skips
   // spawnBots, the normal Bot recycler, so it must recycle its own), reset the
   // wave counters, and arm the first wave. The wave itself is spawned lazily on
@@ -12047,6 +12062,7 @@ const CampaignMode = {
   update(dt) {
     const c = game.campaign;
     if (!c || game.state !== 'playing') return;
+    if (!document.body.classList.contains('lss-campaign')) document.body.classList.add('lss-campaign');   // (v49.74) a reconnect / swap cannot bring it back
     // (v49.48) The Summoners' portal + flagship run on EVERY live frame, dead or alive - they do not
     // wait for your respawn (measured: a death at the arena froze the ring at 92% for as long as the
     // re-entry picker was up). Die there and they are through before you are back; the ring they
@@ -12363,9 +12379,10 @@ game._xzScanFlare = 0;
       game.raceNoTimer = false;
       LSS.MODE = 'classic';
     } catch (_) {}
+    try { document.body.classList.remove('lss-campaign'); } catch (_) {}   // (v49.74)
   },
 };
-// (v33.00) FREE-FLIGHT / OVERWORLD HUB mode. The open mossy world is the campaign's
+// (v33.00) FREE-FLIGHT / OVERWORLD HUB mode.The open mossy world is the campaign's
 // start + end point AND a standalone fly-anywhere mode. Endless (game.testMode +
 // raceNoTimer, like campaign) but with NO enemies, NO bots, NO round-end. update() /
 // onWaveStart get the rift loop in P1b ; for now they're stubs. onTeardown MUST clear
@@ -140712,7 +140729,7 @@ const CAMP_SEQS = {
 // At launch the veil rises OVER the loading cover and keeps turning while the leg builds; the leg's
 // first live frame (CampaignMode) calls arrive(), which zooms through it into the cavern and plays the
 // last three lines instead of the leg's own beat.
-// Probe: window.__campOpening = { start, reset, state, arrive, stage, tick, onConfirm, blockPreview, cfg }.
+// Probe: window.__campOpening = { start, reset, state, arrive, stage, tick, onConfirm, blockPreview, cfg, look }.
 // reset() forgets campaign progress so the next CAMPAIGN press plays this again.
 (function () {
   const cfg = {
@@ -140724,18 +140741,82 @@ const CAMP_SEQS = {
     beamOp: 0.07, headBeamOp: 0.11,                              // the visible light shafts
     orbFree: 2.2, sweep: 3.2, failsafe: 60,                      // orb size while free; sweep seconds; launch failsafe
     fractalImg: '',   // campaign_media/<file> to use instead of the generated Julia set (e.g. 'fractal_frame.png')
+    // ⭐ (v49.77) CYBERPUNK PINK AND BLUE. Owner: "Can we make that fractal screen more cyberpunk colors, pink and
+    // blue". The Julia set was coloured by a three-phase cosine ramp (a rainbow: orange, teal, magenta, blue) and two
+    // of the three layers were hue-rotated +70 / -60 on top. Now every band is a blend of TWO inks along the escape
+    // count - the outer halo always blue, the filaments alternating - and the filaments nearest the set burn toward
+    // white. Picked from four mock-ups in the pane: a deep blue (25,110,255) screen-blends into violet over pink and
+    // stops reading as blue at all; azure keeps the two apart, and where they overlap the screen blend makes the
+    // lavender that belongs to the palette anyway. Live: edit these, then __campOpening.look().
+    fxPink: [255, 30, 150], fxBlue: [0, 140, 255],   // the two inks, RGB
+    fxBands: 2.4,        // pink/blue alternations along the escape count (1.7 was the old ramp's cycle count)
+    fxWhite: 0.2,        // how far the filaments nearest the set burn toward white
+    fxHue2: 0, fxHue3: 0,   // extra hue shift (deg) on the 2nd / 3rd spinning layer; 0 = pure pink + blue
   };
   const O = { on: false, tok: 0, phase: '', st: null, key: null, focus: 3, viewHi: 'tp', t: 0, last: 0,
               orbOn: false, orbA: 0, headOn: false, headA: 0, spotOn: [], spotA: [], sweepT: -1, fuseT: -1,
               fuseFrom: null, camP: null, camL: null, fractal: null, buildP: null, failT: 0,
-              _getIn: null, _viewPick: null, wired: false };
+              _getIn: null, _viewPick: null, wired: false,
+              fxGen: 0, fxHiP: null, fxHiUrl: null, fxImg: null, fxInfo: null };   // (v49.78) the sharp fractal, _fxHiRes
   const $ = (id) => document.getElementById(id);
   const wait = (sec) => new Promise((r) => setTimeout(r, sec * 1000));
   const snd = (k) => { try { if (typeof playSound === 'function') playSound(k); } catch (_) {} };
   const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3();
   const _m4 = new THREE.Matrix4(), _q = new THREE.Quaternion(), _UP = new THREE.Vector3(0, 1, 0), _DOWN = new THREE.Vector3(0, -1, 0);
 
-  // ---- the fractal: one Julia set, generated once (or the owner's image when cfg.fractalImg is set) ----
+  // ---- the fractal: one Julia set (or the owner's image when cfg.fractalImg is set) ----
+  // ⭐ (v49.78) SHARP. Owner: "the fractals looks very low resolution". It was ONE 384 px image stretched over
+  // layers 150vmax wide - 7.5 CSS px per image pixel at 1920x1080, more than twice that in device pixels on a
+  // 225 % display, and co-l3 zooms a further 1.6x. The 384 is only the PLACEHOLDER now (sync, a few ms, so a
+  // flicker always has something to show). The real image is sized to the screen - 1.5 x the long side x dpr /
+  // 1.25, in 768..2560 (1536 on phone-class) - computed AND encoded in a Worker (OffscreenCanvas -> WebP; raw
+  // pixels back to an async main-thread toBlob where the worker has no OffscreenCanvas), pre-decoded, and
+  // swapped onto the three layers as a blob: URL long before the first flicker (~2.5 s in). The old
+  // toDataURL('image/png') at that size would be a multi-hundred-ms main-thread encode and a ~10 MB string on
+  // three style attributes. A Julia set is point-symmetric (f(-z) = f(z)), so only half the pixels are
+  // iterated: the other half is the same colour mirrored through the centre. Measured (desktop, the pane,
+  // iteration alone): 6 ms @384, 18 @1024, 71 @2048; a mean of 14.8 iterations a pixel, 8.9 % inside the set.
+  // ⚠ _fxJulia must stay PURE - its toString() IS the worker's code (one generator, two threads).
+  function _fxJulia(p) {
+    const N = p.N, S = p.S, cr = p.cr, ci = p.ci, MAXI = p.MAXI;
+    const PK = p.pink, BL = p.blue, BANDS = p.bands, WH = p.white;
+    const d = new Uint8ClampedArray(N * N * 4);
+    const half = (N + 1) >> 1;
+    for (let y = 0; y < half; y++) {
+      for (let x = 0; x < N; x++) {
+        let zx = ((x + 0.5) / N * 2 - 1) * S, zy = ((y + 0.5) / N * 2 - 1) * S, i = 0, m = 0;
+        for (; i < MAXI; i++) { const xx = zx * zx, yy = zy * zy; m = xx + yy; if (m > 16) break; zy = 2 * zx * zy + ci; zx = xx - yy + cr; }
+        let r = 0, g = 0, b = 0;   // inside the set: black
+        if (i < MAXI) {
+          const t = (i + 1 - Math.log(Math.log(Math.sqrt(m))) / Math.LN2) / MAXI;   // smooth escape count
+          const br = Math.pow(Math.min(1, t * 2.2), 0.55);
+          const w = 0.5 - 0.5 * Math.cos(6.2832 * t * BANDS);   // 0 = blue (the whole outer halo), 1 = pink
+          const hot = Math.pow(Math.min(1, t * 1.6), 3) * WH;     // the rim of the set burns toward white
+          r = BL[0] + (PK[0] - BL[0]) * w; r = (r + (255 - r) * hot) * br;
+          g = BL[1] + (PK[1] - BL[1]) * w; g = (g + (255 - g) * hot) * br;
+          b = BL[2] + (PK[2] - BL[2]) * w; b = (b + (255 - b) * hot) * br;
+        }
+        const k = (y * N + x) * 4, k2 = ((N - 1 - y) * N + (N - 1 - x)) * 4;   // pixel centres: k2 is exactly -z
+        d[k] = d[k2] = r; d[k + 1] = d[k2 + 1] = g; d[k + 2] = d[k2 + 2] = b; d[k + 3] = d[k2 + 3] = 255;
+      }
+    }
+    return d;
+  }
+  function _fxParams(N) {
+    const rgb = (a, dflt) => (Array.isArray(a) && a.length >= 3) ? [+a[0] || 0, +a[1] || 0, +a[2] || 0] : dflt;
+    return { N: N, S: 1.55, cr: -0.8, ci: 0.156, MAXI: 90,
+             pink: rgb(cfg.fxPink, [255, 30, 150]), blue: rgb(cfg.fxBlue, [0, 140, 255]),
+             bands: +cfg.fxBands || 2.4, white: Math.max(0, +cfg.fxWhite || 0) };
+  }
+  // the sharp one's size: ~1.25 device px per image pixel across the 150vmax layer, within the caps
+  function _fxSize() {
+    let W = 1280, H = 720, dpr = 1, phone = false;
+    try { W = innerWidth || W; H = innerHeight || H; dpr = Math.min(3, window.devicePixelRatio || 1); } catch (_) {}
+    try { phone = !!_LSS_IS_MOBILE; } catch (_) {}
+    const want = 1.5 * Math.max(W, H) * dpr / 1.25;
+    return Math.max(768, Math.min(phone ? 1536 : 2560, Math.round(want / 64) * 64));
+  }
+  // the PLACEHOLDER (or the owner's image); _fxHiRes brings the sharp one
   function _fractalURL() {
     if (O.fractal != null) return O.fractal;
     if (cfg.fractalImg) {
@@ -140744,32 +140825,105 @@ const CAMP_SEQS = {
     }
     try {
       const N = 384, cv = document.createElement('canvas'); cv.width = cv.height = N;
-      const g = cv.getContext('2d'), img = g.createImageData(N, N), d = img.data;
-      const cr = -0.8, ci = 0.156, MAXI = 90, S = 1.55;
-      for (let y = 0; y < N; y++) {
-        for (let x = 0; x < N; x++) {
-          let zx = (x / N * 2 - 1) * S, zy = (y / N * 2 - 1) * S, i = 0, m = 0;
-          for (; i < MAXI; i++) { const xx = zx * zx, yy = zy * zy; m = xx + yy; if (m > 16) break; zy = 2 * zx * zy + ci; zx = xx - yy + cr; }
-          const k = (y * N + x) * 4;
-          d[k + 3] = 255;
-          if (i >= MAXI) continue;   // inside the set: black
-          const t = (i + 1 - Math.log(Math.log(Math.sqrt(m))) / Math.LN2) / MAXI;   // smooth escape count
-          const b = Math.pow(Math.min(1, t * 2.2), 0.55);
-          d[k]     = 255 * b * (0.5 + 0.5 * Math.cos(6.2832 * (t * 1.7 + 0.62)));
-          d[k + 1] = 255 * b * (0.5 + 0.5 * Math.cos(6.2832 * (t * 1.7 + 0.30)));
-          d[k + 2] = 255 * b * (0.5 + 0.5 * Math.cos(6.2832 * (t * 1.7 + 0.12)));
-        }
-      }
-      g.putImageData(img, 0, 0);
+      cv.getContext('2d').putImageData(new ImageData(_fxJulia(_fxParams(N)), N, N), 0, 0);
       O.fractal = cv.toDataURL('image/png');
     } catch (_) { O.fractal = ''; }
     return O.fractal;
+  }
+  let _fxWSrc = null;
+  function _fxHiRes() {
+    if (O.fxHiP) return O.fxHiP;
+    const gen = O.fxGen, N = _fxSize(), p = _fxParams(N), t0 = performance.now();
+    O.fxHiP = new Promise((resolve) => {
+      let w = null, wurl = null, settled = false;
+      const fin = (url) => {
+        if (settled) { if (url) { try { URL.revokeObjectURL(url); } catch (_) {} } return; }
+        settled = true;
+        try { if (w) w.terminate(); } catch (_) {}
+        try { if (wurl) URL.revokeObjectURL(wurl); } catch (_) {}
+        resolve(url);
+      };
+      const fromBlob = (blob) => { try { fin(URL.createObjectURL(blob)); } catch (_) { fin(null); } };
+      const fromPixels = (buf) => {   // that worker had no OffscreenCanvas: encode here (toBlob is async)
+        try {
+          const cv = document.createElement('canvas'); cv.width = cv.height = N;
+          cv.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(buf), N, N), 0, 0);
+          cv.toBlob((bl) => { if (bl) fromBlob(bl); else fin(null); }, 'image/webp', 0.92);
+        } catch (_) { fin(null); }
+      };
+      try {
+        if (!_fxWSrc) {
+          _fxWSrc = _fxJulia.toString() +
+            '\nself.onmessage = async function (e) {\n' +
+            '  const p = e.data; let d;\n' +
+            '  try { d = _fxJulia(p); } catch (err) { self.postMessage({ err: String(err) }); return; }\n' +
+            '  try {\n' +
+            '    if (typeof OffscreenCanvas !== "undefined") {\n' +
+            '      const oc = new OffscreenCanvas(p.N, p.N);\n' +
+            '      oc.getContext("2d").putImageData(new ImageData(d, p.N, p.N), 0, 0);\n' +
+            '      self.postMessage({ blob: await oc.convertToBlob({ type: "image/webp", quality: 0.92 }) });\n' +
+            '      return;\n' +
+            '    }\n' +
+            '  } catch (_) {}\n' +
+            '  self.postMessage({ buf: d.buffer }, [d.buffer]);\n' +
+            '};\n';
+        }
+        wurl = URL.createObjectURL(new Blob([_fxWSrc], { type: 'application/javascript' }));
+        w = new Worker(wurl);
+        w.onmessage = (e) => { const m = e.data || {}; if (m.blob) fromBlob(m.blob); else if (m.buf) fromPixels(m.buf); else fin(null); };
+        w.onerror = () => fin(null);
+        w.postMessage(p);
+      } catch (_) { fin(null); }
+      setTimeout(() => fin(null), 20000);   // a worker that never answers must not strand the caller
+    }).then((url) => {
+      if (!url) return null;
+      // pre-decode: the first 420 ms flicker must not be the frame the decoder is still busy with
+      const img = new Image(); img.src = url;
+      return Promise.resolve(img.decode ? img.decode() : null).catch(() => {})
+        .then(() => ({ url: url, img: img, N: N, gen: gen, ms: Math.round(performance.now() - t0) }));
+    });
+    return O.fxHiP;
+  }
+  function _fxApply(url) {
+    const v = $('camp-open-veil'); if (!v || !url) return;
+    v.querySelectorAll('.co-l').forEach((l) => { l.style.backgroundImage = 'url("' + url + '")'; });
   }
   // ---- the veil: black / fractal, fades by WAAPI (never a class-keyed one-shot, v48.50) ----
   function _fxPrep() {
     const url = _fractalURL(); if (!url) return;
     const v = $('camp-open-veil'); if (!v) return;
-    v.querySelectorAll('.co-l').forEach((l) => { l.style.backgroundImage = 'url("' + url + '")'; });
+    _fxApply(url);
+    // (v49.77) the layers' hue shifts moved here from the stylesheet, as knobs (0 = none)
+    const _hue = (sel, deg) => { const l = v.querySelector(sel); if (l) l.style.filter = deg ? ('hue-rotate(' + deg + 'deg)') : ''; };
+    _hue('.co-l2', +cfg.fxHue2 || 0); _hue('.co-l3', +cfg.fxHue3 || 0);
+    if (cfg.fractalImg || (O.fxHiUrl && O.fractal === O.fxHiUrl)) return;   // the owner's image / the sharp one is on
+    _fxHiRes().then((r) => {
+      if (!r) return;   // no worker, or it failed: the placeholder stays
+      if (r.gen !== O.fxGen) { try { URL.revokeObjectURL(r.url); } catch (_) {} return; }   // a newer palette won
+      const old = O.fxHiUrl;
+      O.fxHiUrl = r.url; O.fxImg = r.img; O.fractal = r.url; O.fxInfo = { N: r.N, ms: r.ms };
+      _fxApply(r.url);
+      if (old && old !== r.url) { try { URL.revokeObjectURL(old); } catch (_) {} }
+    });
+  }
+  // (v49.77) LIVE LOOK for the palette knobs: set __campOpening.cfg.fxPink / fxBlue / fxBands / fxWhite /
+  // fxHue2 / fxHue3, then __campOpening.look() regenerates the fractal and holds it on screen for `sec`
+  // seconds, over everything (co-top, as at launch). Refused while the opening itself is running.
+  // (v49.78) It waits for the sharp image before showing, so what you judge is what the opening shows.
+  function look(sec) {
+    if (O.on) return 'the opening is running - try again after it';
+    const v = $('camp-open-veil'); if (!v) return 'no veil';
+    O.fxGen++; O.fractal = null; O.fxHiP = null;   // the current knobs; the old blob is revoked when the new one lands
+    _fxPrep();
+    const s = (+sec > 0) ? +sec : 5;
+    const show = () => {
+      if (O.on) return;
+      _veilShow(true, 0.2); _fx(1, 0.3);
+      setTimeout(() => { if (!O.on) _veilHide(0.4); }, s * 1000);
+    };
+    if (cfg.fractalImg || !O.fxHiP) { show(); return 'showing the fractal for ' + s + ' s'; }
+    O.fxHiP.then(show, show);
+    return 'rendering ' + _fxSize() + ' px, then showing it for ' + s + ' s';
   }
   function _anim(el, frames, sec, end) {
     if (!el) return;
@@ -141249,8 +141403,9 @@ const CAMP_SEQS = {
   }
   const state = () => ({ on: O.on, phase: O.phase, key: O.key, focus: O.focus, stage: !!O.st,
                          ships: O.st ? O.st.ships.map((s) => s.key) : null, viewHi: O.viewHi,
-                         spots: O.spotA.map((a) => +a.toFixed(2)), head: +O.headA.toFixed(2), orb: +O.orbA.toFixed(2) });
-  try { window.__campOpening = { start, reset, state, arrive, stage, tick, onConfirm, blockPreview, cfg }; } catch (_) {}
+                         spots: O.spotA.map((a) => +a.toFixed(2)), head: +O.headA.toFixed(2), orb: +O.orbA.toFixed(2),
+                         fx: O.fxInfo });
+  try { window.__campOpening = { start, reset, state, arrive, stage, tick, onConfirm, blockPreview, cfg, look }; } catch (_) {}
 })();
 
 function _lssUnlockAnnouncerAudio() {
