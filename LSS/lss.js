@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "49.87";
+const LSS_BUILD = "49.89";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -28525,7 +28525,7 @@ function _swRippleTick(dt) {
     {
       const _hp = (W3.hullPress != null) ? +W3.hullPress : 1.25;
       let _ok = false;
-      if (_hp > 0 && _hm && player.mesh && keelA < _skHOf(fp, DR) && keelA > -DR * 6) {
+      if (_hp > 0 && _hm && player.mesh && player.shipState !== 'dead' && keelA < _skHOf(fp, DR) && keelA > -DR * 6) {
         const sil = _swHullSilhouette(player.mesh);
         if (sil) {
           player.mesh.matrixWorld.decompose(_swHPv, _swHPq, _swHPs);
@@ -28713,7 +28713,7 @@ function _swRippleTick(dt) {
         } else if (R.wingT) R.wingT = 0;
       } else if (R.wingT) R.wingT = 0;
     }
-    if (touching && sp <= 8) {
+    if (touching && sp <= 8 && player.shipState !== 'dead') {
       R.bobT = (R.bobT || 0) + dt;
       if (R.bobT > 0.33) { R.bobT = 0; _swFxN('rest'); _swRippleSeed(px, pz, Math.max(60, (fp.LEN + fp.BEAM) * 0.55), 0.018 * (fp.DRAFT / 13.5) * fp.heft * mass); }
     }
@@ -46493,6 +46493,7 @@ class Bot {
       proj.isCluster = true;
       proj.clusterDmg = 500;
       proj.clusterDuration = 5;
+      if (this.mesh) proj.fadeInDist = 0;   // (v49.89) from the gun marker: visible on the barrel, no 80 u fade-in
       proj.sizeMult = 3.0;
       proj.smokeTrail = true;
       proj.ownerTeam = this.team; proj.ownerRef = this;
@@ -46572,6 +46573,7 @@ class Bot {
       const range = 1500;
       const reach = Math.min(range, losDist);
       const beamEnd = this._tempVec3c.copy(this.position).addScaledVector(aim, reach);
+      try { const _bw = _wallBlockSegment(this.position, beamEnd, this.team); if (_bw) beamEnd.set(_bw.x, _bw.y, _bw.z); } catch (_) {}
       spawnTracer(this.position, beamEnd, 0x66ddff, 1.4);
       if (dist > 0 && dist < range) {
         const closest = this._tempVec3d.copy(this.position).addScaledVector(aim, dist);
@@ -46675,7 +46677,9 @@ class Bot {
       try { if (typeof spawnDynamicLight === 'function') spawnDynamicLight(this.position, LSS.CLASS_COLORS.SYPHON, 2.5, 450, 0.3); } catch (_) {}
     } else if (ability.name === 'Sonar Pulse') {
       const vel = this._tempVec3b.copy(aim).multiplyScalar(2400);
-      const proj = new Projectile(this.position, vel, 0, 0, 'bot', LSS.CLASS_COLORS.TRACKER);
+      let _bspO = this.position;
+      try { if (this.mesh) _bspO = shipMuzzleWorld(this.mesh, 0, this._tempVec3c); } catch (_) {}
+      const proj = new Projectile(_bspO, vel, 0, 0, 'bot', LSS.CLASS_COLORS.TRACKER);
       proj.isSonar = true;
       proj.lifetime = 4.0;
       proj.sizeMult = 0.5;
@@ -46712,7 +46716,12 @@ class Bot {
       try { if (typeof spawnDashBoosters === 'function') spawnDashBoosters(this.mesh, this.targetDir, 0xffaa33); } catch (_) {}
     } else if (n === 'Energy Syphon') {
       const t = this.combatTarget;
-      if (t && t.position && this.position.distanceTo(t.position) < 1500) {
+      const _bsw = (t && t.position && this.position.distanceTo(t.position) < 1500)
+        ? _syphonWallGate(this.position, t.position, this.team, 600) : null;
+      if (_bsw) {
+        this.shield = Math.min(this.maxShield, this.shield + _bsw.drained);
+        try { if (typeof spawnLightningBolt === 'function') spawnLightningBolt(new THREE.Vector3(_bsw.x, _bsw.y, _bsw.z), this.position, 0x66ddaa, 0.3, 2, 1.6); } catch (_) {}
+      } else if (t && t.position && this.position.distanceTo(t.position) < 1500) {
         const steal = 600;
         if (t === player) player.shield = Math.max(0, player.shield - steal);
         else if (typeof t.shield === 'number') t.shield = Math.max(0, t.shield - steal);
@@ -46777,6 +46786,7 @@ class Bot {
     const vel = this._tempVec3b.copy(dir).multiplyScalar(cfg.speed || 800);
     const proj = new Projectile(origin, vel, cfg.damage || 700, cfg.splash || 100, 'bot', cfg.color || 0xffaa00);
     proj.smokeTrail = !!cfg.smokeTrail;
+    if (this.mesh) proj.fadeInDist = 0;   // (v49.89) out of the tube, not 80 u past it
     proj.ownerTeam = this.team; proj.ownerRef = this;
     if (cfg.sizeMult) proj.sizeMult = cfg.sizeMult;
     if (cfg.lifetime) proj.lifetime = cfg.lifetime;
@@ -48665,8 +48675,11 @@ class Projectile {
         const _trailLenMult = Math.max(0.25, Math.min(3.0,
           (typeof this.smokeTrailLengthMult === 'number') ? this.smokeTrailLengthMult : 2.0
         ));
-        const _coneLen = Math.min(560, Math.max(120, _spd * 0.20 * _trailLenMult)) * _szMC;
-        const _coneRad = 18 * _szMC;
+        const _coneFull = Math.min(560, Math.max(120, _spd * 0.20 * _trailLenMult)) * _szMC;
+        const _coneFlown = this.spawnOrigin
+          ? Math.sqrt(_smokeConeForward.subVectors(this.position, this.spawnOrigin).lengthSq()) : _coneFull;
+        const _coneLen = Math.max(4 * _szMC, Math.min(_coneFull, _coneFlown));
+        const _coneRad = 18 * _szMC * Math.max(0.4, Math.min(1, _coneLen / _coneFull));
         const _f = _smokeConeForward.set(this.velocity.x, this.velocity.y, this.velocity.z);
         if (_f.lengthSq() < 0.01 && this.mesh) {
           _f.set(0, 0, -1).applyQuaternion(this.mesh.quaternion);
@@ -69429,6 +69442,14 @@ function _wallAbsorbSegment(from, to, shooterTeam, amount) {
   }
   return amount;
 }
+function _syphonWallGate(from, to, team, amount) {
+  if (!from || !to) return null;
+  const hit = _wallBlockSegment(from, to, team);
+  if (!hit || !hit.eff) return null;
+  const hx = hit.x, hy = hit.y, hz = hit.z;   // copy before the absorb re-runs the scratch test
+  const left = _wallAbsorbSegment(from, to, team, amount);
+  return { x: hx, y: hy, z: hz, drained: Math.max(0, amount - left) };
+}
 function _wallBlockSegment(from, to, shooterTeam) {
   if (typeof game === 'undefined' || !game.worldEffects || game.worldEffects.length === 0) return null;
   if (!_wallKnobs().on) return null;
@@ -70554,17 +70575,17 @@ function executeAbility(slot, ability) {
       try { playSound('cluster_missile_fire'); } catch (_) {}
       let _cmOrigin = player.position.clone();
       let _cmDir = forward.clone();
-      let _cmGp = null;
+      let _cmGp = null, _cmFromGun = false;
       try {
         const _cmNodes = player.mesh && player.mesh.userData && player.mesh.userData.muzzleNodes;
-        if (_cmNodes && _cmNodes.length) _cmGp = shipMuzzleWorld(player.mesh, 0, new THREE.Vector3());
+        if (_cmNodes && _cmNodes.length) { _cmGp = shipMuzzleWorld(player.mesh, 0, new THREE.Vector3()); _cmFromGun = true; }
       } catch (_) {}
       if (!_cmGp && typeof _computeScreenMuzzleWorld === 'function') {
         _cmGp = _computeScreenMuzzleWorld(0.644, 0.638);   // legacy painted-frame fallback
       }
       if (_cmGp) {
         _cmDir = player.position.clone().addScaledVector(forward, 1200).sub(_cmGp).normalize();
-        _cmOrigin = _cmGp.addScaledVector(_cmDir, 40);
+        _cmOrigin = _cmFromGun ? _cmGp : _cmGp.addScaledVector(_cmDir, 40);
       }
       const vel = _cmDir.multiplyScalar(1000);
       const proj = new Projectile(_cmOrigin, vel, 800, 250, 'player', LSS.CLASS_COLORS.PUNCTURE);
@@ -70573,10 +70594,7 @@ function executeAbility(slot, ability) {
       proj.isCluster = true; 
       proj.clusterDmg = 500; 
       proj.clusterDuration = 5; 
-      
-      
-      
-      
+      if (_cmFromGun) proj.fadeInDist = 0;   // (v49.89) visible from the barrel, see above
       proj.sizeMult = 3.0;
       if (proj._baseOpacityCore  !== undefined) proj._baseOpacityCore  = 1.0;
       if (proj._baseOpacityGlow  !== undefined) proj._baseOpacityGlow  = 0.95;
@@ -70594,6 +70612,7 @@ function executeAbility(slot, ability) {
         proj2.isCluster = true;
         proj2.clusterDmg = 500;
         proj2.clusterDuration = 5;
+        if (_cmFromGun) proj2.fadeInDist = 0;
         proj2.sizeMult = 3.0;
         game.projectiles.push(proj2);
         broadcastAbilityProjectile(proj2);
@@ -70727,10 +70746,31 @@ function executeAbility(slot, ability) {
           bestMon = null; bestBot = null;
         }
       } catch (_) {}
+      let _sConsumed = false;   // (v49.88) the tether / a mine took the beam; the wall test below must not re-fire it
       try {
         const _mq = _mineShotProbe(player.position, forward, Math.min(1500, bestDist), player.team);
-        if (_mq) { if (_mq.obj.takeDamage(800) > 0) showHitMarker(); bestMon = null; bestBot = null; }
+        if (_mq) { if (_mq.obj.takeDamage(800) > 0) showHitMarker(); bestMon = null; bestBot = null; _sConsumed = true; }
       } catch (_) {}
+      if (!_sConsumed) {
+        try {
+          const _sEnd = player.position.clone().addScaledVector(forward, (bestBot || bestMon) ? Math.min(1500, bestDist) : 1500);
+          const _sw = _syphonWallGate(player.position, _sEnd, player.team, 800);
+          if (_sw) {
+            bestMon = null; bestBot = null;
+            const _sp = new THREE.Vector3(_sw.x, _sw.y, _sw.z);
+            if (_sw.drained > 0) { player.shield = Math.min(player.maxShield, player.shield + _sw.drained); showHitMarker(); }
+            const _so = (typeof getPlayerForwardOrigin === 'function') ? getPlayerForwardOrigin(forward, 90, new THREE.Vector3()) : player.position.clone();
+            try { spawnSiphonHelix(_so, _sp, LSS.CLASS_COLORS.SYPHON, 1.0); } catch (_) {}
+            try {
+              if (typeof playSpatialSound === 'function') playSpatialSound('siphon_hit', _sp.clone());
+              else playSound('siphon_hit');
+            } catch (_) {}
+            if (net && net.active && net.sendEvent) {
+              net.sendEvent({ type: 'siphon_beam', ax: _so.x, ay: _so.y, az: _so.z, bx: _sp.x, by: _sp.y, bz: _sp.z });
+            }
+          }
+        } catch (_) {}
+      }
       if (bestMon) {
         const _md = bestMon.takeDamage(800, 'player', bestMon.position);
         _monSlow(bestMon, 2.0);
@@ -71154,8 +71194,13 @@ function executeAbility(slot, ability) {
       const beaconSpeed = 2400;
       let _spOrigin = player.position.clone();
       let _spDir = forward.clone();
-      if (typeof _computeScreenMuzzleWorld === 'function') {
-        const _sgp = _computeScreenMuzzleWorld(0.71, 0.71);
+      {
+        let _sgp = null;
+        try {
+          const _spNodes = player.mesh && player.mesh.userData && player.mesh.userData.muzzleNodes;
+          if (_spNodes && _spNodes.length) _sgp = shipMuzzleWorld(player.mesh, 0, new THREE.Vector3());
+        } catch (_) {}
+        if (!_sgp && typeof _computeScreenMuzzleWorld === 'function') _sgp = _computeScreenMuzzleWorld(0.71, 0.71);
         if (_sgp) {
           _spDir = player.position.clone().addScaledVector(forward, 1200).sub(_sgp).normalize();
           _spOrigin = _sgp.addScaledVector(_spDir, 40);
@@ -72156,14 +72201,15 @@ function _drainStaggeredRocketSalvo(dt) {
     trackTarget = null;
   }
   let origin = null;
+  let _fromGun = false;
   if (cfg.originMuzzle != null && typeof shipMuzzleWorld === 'function' && player.mesh) {
-    try { origin = shipMuzzleWorld(player.mesh, cfg.originMuzzle, new THREE.Vector3()); } catch (_) { origin = null; }
+    try { origin = shipMuzzleWorld(player.mesh, cfg.originMuzzle, new THREE.Vector3()); _fromGun = !!origin; } catch (_) { origin = null; }
   }
   if (!origin && cfg.originFrac && typeof _computeScreenMuzzleWorld === 'function') {
     origin = _computeScreenMuzzleWorld(cfg.originFrac.x, cfg.originFrac.y);
   }
   if (!origin) origin = player.position.clone();
-  if (typeof cfg.originAdvance === 'number' && cfg.originAdvance > 0) {
+  if (!_fromGun && typeof cfg.originAdvance === 'number' && cfg.originAdvance > 0) {
     const _af = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
     origin.addScaledVector(_af, cfg.originAdvance);
   }
@@ -72182,6 +72228,7 @@ function _drainStaggeredRocketSalvo(dt) {
     cfg.color
   );
   if (cfg.smokeTrail) proj.smokeTrail = true;
+  if (_fromGun) proj.fadeInDist = 0;   // (v49.89) visible leaving the tube
   if (typeof cfg.smokeTrailLengthMult === 'number' && cfg.smokeTrailLengthMult > 0) {
     proj.smokeTrailLengthMult = cfg.smokeTrailLengthMult;
   }

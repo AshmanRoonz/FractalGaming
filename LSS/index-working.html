@@ -7239,7 +7239,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "49.87";
+const LSS_BUILD = "49.89";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -48577,7 +48577,14 @@ function _swRippleTick(dt) {
       // (v46.80) the ceiling is `_skHOf()` now, not a literal 60 - the gate and the skim's own
       // reach have to be the same number or the pull is cut off by a constant that knows nothing
       // about it. See the SKIM note below.
-      if (_hp > 0 && _hm && player.mesh && keelA < _skHOf(fp, DR) && keelA > -DR * 6) {
+      // ⭐ (v49.88) NOT WHILE DEAD. Owner (The Delta, elimination): "a patch that was a circular cutout,
+      // but the water above it was missing... around the circular area the water level was up". After
+      // playerDie the hull is only HIDDEN - it sits at the death spot for the rest of the round - and this
+      // tick had no shipState check, so it re-posted a FRESH R.hullP every tick (the 300 ms staleness
+      // switch never fired) and the patch + hull lid held a hull-shaped hole with its displaced rim at
+      // the wreck until the round ended. _swHullCutBind / _swSlabIn already skip a dead player; this
+      // now does too, and the stale record switches the patch off by itself.
+      if (_hp > 0 && _hm && player.mesh && player.shipState !== 'dead' && keelA < _skHOf(fp, DR) && keelA > -DR * 6) {
         const sil = _swHullSilhouette(player.mesh);
         if (sil) {
           player.mesh.matrixWorld.decompose(_swHPv, _swHPq, _swHPs);
@@ -48957,7 +48964,8 @@ function _swRippleTick(dt) {
     }
     // (2) BUOYANT REST : a static bowl sized to the WATERPLANE + DRAFT (gentle, wide, time-spaced = no "X").
     //     Strict gate sp<=8 (mutually exclusive with planing sp>8) per the budget proof.
-    if (touching && sp <= 8) {
+    // (v49.88) + not while dead: a zero-speed wreck re-seeded this round bowl every 0.33 s at the death spot
+    if (touching && sp <= 8 && player.shipState !== 'dead') {
       R.bobT = (R.bobT || 0) + dt;
       // (v41.03) back to 0.018 - v41.02 raised this to compensate for a global scale that is gone.
       if (R.bobT > 0.33) { R.bobT = 0; _swFxN('rest'); _swRippleSeed(px, pz, Math.max(60, (fp.LEN + fp.BEAM) * 0.55), 0.018 * (fp.DRAFT / 13.5) * fp.heft * mass); }
@@ -74901,6 +74909,7 @@ class Bot {
       proj.isCluster = true;
       proj.clusterDmg = 500;
       proj.clusterDuration = 5;
+      if (this.mesh) proj.fadeInDist = 0;   // (v49.89) from the gun marker: visible on the barrel, no 80 u fade-in
       proj.sizeMult = 3.0;
       proj.smokeTrail = true;
       proj.ownerTeam = this.team; proj.ownerRef = this;
@@ -75015,6 +75024,9 @@ class Bot {
       const range = 1500;
       const reach = Math.min(range, losDist);
       const beamEnd = this._tempVec3c.copy(this.position).addScaledVector(aim, reach);
+      // (v49.88) The DAMAGE below is already stopped by the victim-side wall gate (it carries this bot
+      // as its origin); this only stops the beam being DRAWN through an enemy Plasma Shield.
+      try { const _bw = _wallBlockSegment(this.position, beamEnd, this.team); if (_bw) beamEnd.set(_bw.x, _bw.y, _bw.z); } catch (_) {}
       spawnTracer(this.position, beamEnd, 0x66ddff, 1.4);
       if (dist > 0 && dist < range) {
         const closest = this._tempVec3d.copy(this.position).addScaledVector(aim, dist);
@@ -75178,7 +75190,10 @@ class Bot {
       // system, and bot-vs-bot has no lock bookkeeping (see the v37.05 note in _tryUseOffensive), so
       // the honest bot version is the beacon and its tell, not an invented damage effect.
       const vel = this._tempVec3b.copy(aim).multiplyScalar(2400);
-      const proj = new Projectile(this.position, vel, 0, 0, 'bot', LSS.CLASS_COLORS.TRACKER);
+      // (v49.88) from G1 like the bot Cluster Missile, not the hull centre (Projectile clones origin)
+      let _bspO = this.position;
+      try { if (this.mesh) _bspO = shipMuzzleWorld(this.mesh, 0, this._tempVec3c); } catch (_) {}
+      const proj = new Projectile(_bspO, vel, 0, 0, 'bot', LSS.CLASS_COLORS.TRACKER);
       proj.isSonar = true;
       proj.lifetime = 4.0;
       proj.sizeMult = 0.5;
@@ -75237,7 +75252,14 @@ class Bot {
     } else if (n === 'Energy Syphon') {
       // Leech the combat target's shield into ours.
       const t = this.combatTarget;
-      if (t && t.position && this.position.distanceTo(t.position) < 1500) {
+      // ⭐ (v49.88) an enemy Plasma Shield between us eats the leech (see _syphonWallGate): the bot
+      // keeps what it drained from the wall, the ship behind it loses nothing.
+      const _bsw = (t && t.position && this.position.distanceTo(t.position) < 1500)
+        ? _syphonWallGate(this.position, t.position, this.team, 600) : null;
+      if (_bsw) {
+        this.shield = Math.min(this.maxShield, this.shield + _bsw.drained);
+        try { if (typeof spawnLightningBolt === 'function') spawnLightningBolt(new THREE.Vector3(_bsw.x, _bsw.y, _bsw.z), this.position, 0x66ddaa, 0.3, 2, 1.6); } catch (_) {}
+      } else if (t && t.position && this.position.distanceTo(t.position) < 1500) {
         const steal = 600;
         if (t === player) player.shield = Math.max(0, player.shield - steal);
         else if (typeof t.shield === 'number') t.shield = Math.max(0, t.shield - steal);
@@ -75362,6 +75384,7 @@ class Bot {
     const vel = this._tempVec3b.copy(dir).multiplyScalar(cfg.speed || 800);
     const proj = new Projectile(origin, vel, cfg.damage || 700, cfg.splash || 100, 'bot', cfg.color || 0xffaa00);
     proj.smokeTrail = !!cfg.smokeTrail;
+    if (this.mesh) proj.fadeInDist = 0;   // (v49.89) out of the tube, not 80 u past it
     proj.ownerTeam = this.team; proj.ownerRef = this;
     if (cfg.sizeMult) proj.sizeMult = cfg.sizeMult;
     if (cfg.lifetime) proj.lifetime = cfg.lifetime;
@@ -77979,8 +78002,19 @@ class Projectile {
         const _trailLenMult = Math.max(0.25, Math.min(3.0,
           (typeof this.smokeTrailLengthMult === 'number') ? this.smokeTrailLengthMult : 2.0
         ));
-        const _coneLen = Math.min(560, Math.max(120, _spd * 0.20 * _trailLenMult)) * _szMC;
-        const _coneRad = 18 * _szMC;
+        const _coneFull = Math.min(560, Math.max(120, _spd * 0.20 * _trailLenMult)) * _szMC;
+        // ⭐ (v49.88) THE PLUME CANNOT BE LONGER THAN THE FLIGHT. Owner: "puncture's cluster missile
+        // rocket trail goes really far back when it's originally launched, it doesn't look like it
+        // comes out of the G1 spot". The missile DID spawn at G1 (shipMuzzleWorld) - but the cone was
+        // sized from speed alone, so on frame one a 1000 u/s x2 x sizeMult 3 Cluster drew ~1200 u of
+        // smoke reaching back through the hull and far behind it. Clamp to the distance actually
+        // flown from spawnOrigin, so the wide end stays pinned on the launcher until the plume has
+        // grown to full length (every smokeTrail rocket: cluster, salvos, tracker rockets).
+        const _coneFlown = this.spawnOrigin
+          ? Math.sqrt(_smokeConeForward.subVectors(this.position, this.spawnOrigin).lengthSq()) : _coneFull;
+        const _coneLen = Math.max(4 * _szMC, Math.min(_coneFull, _coneFlown));
+        // width grows in with it (from 40%) so a short young plume is not a fat disc on the barrel
+        const _coneRad = 18 * _szMC * Math.max(0.4, Math.min(1, _coneLen / _coneFull));
         // Forward direction = velocity normalized ; if stationary, point
         // along the projectile mesh's facing (best-effort fallback).
         const _f = _smokeConeForward.set(this.velocity.x, this.velocity.y, this.velocity.z);
@@ -108372,6 +108406,23 @@ function _wallAbsorbSegment(from, to, shooterTeam, amount) {
   }
   return amount;
 }
+// ⭐ (v49.88) ENERGY SYPHON vs PLASMA SHIELD. Owner: "double check if syphon's energy syphon can go
+// through tracker's plasma shield, it shouldn't be able to" - it could, all three versions of it.
+// The Syphon deals no DAMAGE: it writes the target's shield pool directly (player ability, bot
+// defensive leech), so the victim-side gates in playerTakeDamage / Bot.takeDamage - the catch-all
+// every other ability leans on - never see it. Same blind spot as any future "drain"/"steal"
+// effect: a direct pool write must ask the wall itself. Returns null when nothing blocks; otherwise
+// drains `amount` from the wall and returns where the conduit lands plus what it drained (a Plasma
+// Shield IS a shield, so the Syphon may keep what it pulled - the ability still pays, it just pays
+// out of the wall instead of the ship hiding behind it).
+function _syphonWallGate(from, to, team, amount) {
+  if (!from || !to) return null;
+  const hit = _wallBlockSegment(from, to, team);
+  if (!hit || !hit.eff) return null;
+  const hx = hit.x, hy = hit.y, hz = hit.z;   // copy before the absorb re-runs the scratch test
+  const left = _wallAbsorbSegment(from, to, team, amount);
+  return { x: hx, y: hy, z: hz, drained: Math.max(0, amount - left) };
+}
 function _wallBlockSegment(from, to, shooterTeam) {
   if (typeof game === 'undefined' || !game.worldEffects || game.worldEffects.length === 0) return null;
   if (!_wallKnobs().on) return null;
@@ -110021,17 +110072,23 @@ function executeAbility(slot, ability) {
       //   get the anchor (see the v47.24 charge shot), projectiles do not (see the Stun Bolt below).
       let _cmOrigin = player.position.clone();
       let _cmDir = forward.clone();
-      let _cmGp = null;
+      let _cmGp = null, _cmFromGun = false;
       try {
         const _cmNodes = player.mesh && player.mesh.userData && player.mesh.userData.muzzleNodes;
-        if (_cmNodes && _cmNodes.length) _cmGp = shipMuzzleWorld(player.mesh, 0, new THREE.Vector3());
+        if (_cmNodes && _cmNodes.length) { _cmGp = shipMuzzleWorld(player.mesh, 0, new THREE.Vector3()); _cmFromGun = true; }
       } catch (_) {}
       if (!_cmGp && typeof _computeScreenMuzzleWorld === 'function') {
         _cmGp = _computeScreenMuzzleWorld(0.644, 0.638);   // legacy painted-frame fallback
       }
       if (_cmGp) {
         _cmDir = player.position.clone().addScaledVector(forward, 1200).sub(_cmGp).normalize();
-        _cmOrigin = _cmGp.addScaledVector(_cmDir, 40);
+        // ⭐ (v49.89) Owner: "the cluster missile doesn't look like it comes out of the weapon, it looks
+        // like it appears in front of the weapon". Two painted-cockpit leftovers stacked: this +40 u
+        // advance, then the Projectile's 80 u muzzle FADE-IN (invisible at spawn) - so the missile
+        // materialised ~120 u past the barrel. Both existed to hide a spawn point that was a screen
+        // guess near the camera; from the real gun marker the rocket should be visible ON the barrel.
+        // The painted fallback keeps the old advance (and the fade, below).
+        _cmOrigin = _cmFromGun ? _cmGp : _cmGp.addScaledVector(_cmDir, 40);
       }
       const vel = _cmDir.multiplyScalar(1000);
       const proj = new Projectile(_cmOrigin, vel, 800, 250, 'player', LSS.CLASS_COLORS.PUNCTURE);
@@ -110040,10 +110097,7 @@ function executeAbility(slot, ability) {
       proj.isCluster = true; 
       proj.clusterDmg = 500; 
       proj.clusterDuration = 5; 
-      
-      
-      
-      
+      if (_cmFromGun) proj.fadeInDist = 0;   // (v49.89) visible from the barrel, see above
       proj.sizeMult = 3.0;
       if (proj._baseOpacityCore  !== undefined) proj._baseOpacityCore  = 1.0;
       if (proj._baseOpacityGlow  !== undefined) proj._baseOpacityGlow  = 0.95;
@@ -110068,6 +110122,7 @@ function executeAbility(slot, ability) {
         proj2.isCluster = true;
         proj2.clusterDmg = 500;
         proj2.clusterDuration = 5;
+        if (_cmFromGun) proj2.fadeInDist = 0;
         proj2.sizeMult = 3.0;
         game.projectiles.push(proj2);
         broadcastAbilityProjectile(proj2);
@@ -110265,10 +110320,35 @@ function executeAbility(slot, ability) {
         }
       } catch (_) {}
       // (v48.91) ...and an enemy's Plasma Mine orb nearer than the target sets its group off
+      let _sConsumed = false;   // (v49.88) the tether / a mine took the beam; the wall test below must not re-fire it
       try {
         const _mq = _mineShotProbe(player.position, forward, Math.min(1500, bestDist), player.team);
-        if (_mq) { if (_mq.obj.takeDamage(800) > 0) showHitMarker(); bestMon = null; bestBot = null; }
+        if (_mq) { if (_mq.obj.takeDamage(800) > 0) showHitMarker(); bestMon = null; bestBot = null; _sConsumed = true; }
       } catch (_) {}
+      // ⭐ (v49.88) ...and an ENEMY PLASMA SHIELD on the beam stops it dead (see _syphonWallGate - the
+      // drain below is a direct shield write, so no victim-side wall gate ever saw it and the Syphon
+      // reached straight through TRACKER's wall). With a target the segment runs to it; with none it
+      // runs the full 1500 u, so aiming at a bare wall drains the wall - the Syphon is the shield-eater.
+      if (!_sConsumed) {
+        try {
+          const _sEnd = player.position.clone().addScaledVector(forward, (bestBot || bestMon) ? Math.min(1500, bestDist) : 1500);
+          const _sw = _syphonWallGate(player.position, _sEnd, player.team, 800);
+          if (_sw) {
+            bestMon = null; bestBot = null;
+            const _sp = new THREE.Vector3(_sw.x, _sw.y, _sw.z);
+            if (_sw.drained > 0) { player.shield = Math.min(player.maxShield, player.shield + _sw.drained); showHitMarker(); }
+            const _so = (typeof getPlayerForwardOrigin === 'function') ? getPlayerForwardOrigin(forward, 90, new THREE.Vector3()) : player.position.clone();
+            try { spawnSiphonHelix(_so, _sp, LSS.CLASS_COLORS.SYPHON, 1.0); } catch (_) {}
+            try {
+              if (typeof playSpatialSound === 'function') playSpatialSound('siphon_hit', _sp.clone());
+              else playSound('siphon_hit');
+            } catch (_) {}
+            if (net && net.active && net.sendEvent) {
+              net.sendEvent({ type: 'siphon_beam', ax: _so.x, ay: _so.y, az: _so.z, bx: _sp.x, by: _sp.y, bz: _sp.z });
+            }
+          }
+        } catch (_) {}
+      }
       if (bestMon) {
         const _md = bestMon.takeDamage(800, 'player', bestMon.position);
         // (v47.71) "Energy Syphon slows enemies" - the bot branch a few lines down has always set
@@ -110872,10 +110952,20 @@ function executeAbility(slot, ability) {
     else if (ability.name === 'Sonar Pulse') {
       const beaconSpeed = 2400;
       // (v30.88) Fire from the bottom-right sonar launcher (measured).
+      // ⭐ (v49.88) ...of the old PAINTED cockpit. Owner: "tracker's sonar pulse looks like it deploys
+      // from a space under the ship, not G1". _computeScreenMuzzleWorld only reads the GLB markers
+      // while game._cockpit3dLive; otherwise it returns a camera-relative point at screen (0.71, 0.71),
+      // which in third person is empty air below and ahead of the hull. G1 first (the Cluster
+      // Missile's pattern), the screen point only as the legacy fallback.
       let _spOrigin = player.position.clone();
       let _spDir = forward.clone();
-      if (typeof _computeScreenMuzzleWorld === 'function') {
-        const _sgp = _computeScreenMuzzleWorld(0.71, 0.71);
+      {
+        let _sgp = null;
+        try {
+          const _spNodes = player.mesh && player.mesh.userData && player.mesh.userData.muzzleNodes;
+          if (_spNodes && _spNodes.length) _sgp = shipMuzzleWorld(player.mesh, 0, new THREE.Vector3());
+        } catch (_) {}
+        if (!_sgp && typeof _computeScreenMuzzleWorld === 'function') _sgp = _computeScreenMuzzleWorld(0.71, 0.71);
         if (_sgp) {
           _spDir = player.position.clone().addScaledVector(forward, 1200).sub(_sgp).normalize();
           _spOrigin = _sgp.addScaledVector(_spDir, 40);
@@ -112253,8 +112343,9 @@ function _drainStaggeredRocketSalvo(dt) {
   // cockpit and a point in the sky above the hull in third person (owner: "syphon's rockets seem
   // to come from above the ship"). Every hull carries real gunN markers now, so those win; the
   // painted fractions stay as the fallback for a model without them.
+  let _fromGun = false;
   if (cfg.originMuzzle != null && typeof shipMuzzleWorld === 'function' && player.mesh) {
-    try { origin = shipMuzzleWorld(player.mesh, cfg.originMuzzle, new THREE.Vector3()); } catch (_) { origin = null; }
+    try { origin = shipMuzzleWorld(player.mesh, cfg.originMuzzle, new THREE.Vector3()); _fromGun = !!origin; } catch (_) { origin = null; }
   }
   if (!origin && cfg.originFrac && typeof _computeScreenMuzzleWorld === 'function') {
     origin = _computeScreenMuzzleWorld(cfg.originFrac.x, cfg.originFrac.y);
@@ -112262,7 +112353,10 @@ function _drainStaggeredRocketSalvo(dt) {
   if (!origin) origin = player.position.clone();
   // (v30.84) Optional pop-in : advance the spawn along the live aim so the
   // rocket first appears inside the HUD circle instead of at the camera.
-  if (typeof cfg.originAdvance === 'number' && cfg.originAdvance > 0) {
+  // ⭐ (v49.89) ...but NOT from a real gun marker. Owner: "syphon's rockets ... look like [they]
+  // appear in front of the weapon": the +50 advance plus the Projectile's 80 u fade-in made every
+  // rocket materialise ~130 u past the tube. The advance was for the painted screen launcher only.
+  if (!_fromGun && typeof cfg.originAdvance === 'number' && cfg.originAdvance > 0) {
     const _af = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
     origin.addScaledVector(_af, cfg.originAdvance);
   }
@@ -112284,6 +112378,7 @@ function _drainStaggeredRocketSalvo(dt) {
     cfg.color
   );
   if (cfg.smokeTrail) proj.smokeTrail = true;
+  if (_fromGun) proj.fadeInDist = 0;   // (v49.89) visible leaving the tube
   if (typeof cfg.smokeTrailLengthMult === 'number' && cfg.smokeTrailLengthMult > 0) {
     proj.smokeTrailLengthMult = cfg.smokeTrailLengthMult;
   }
