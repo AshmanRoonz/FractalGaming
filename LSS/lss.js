@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "49.89";
+const LSS_BUILD = "49.91";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -25603,8 +25603,9 @@ function _swRippleInit() {
     _swRipple.center.set((player && player.position) ? player.position.x : 0, (player && player.position) ? player.position.z : 0);
     _swRipple.scale = 64;   
     _swRippleBakeMask();    
-    { const _ftex = _SW_FARMASK_BOUNDS / _SW_FARMASK_RES; _swRipple.farCenter.set(Math.round(_swRipple.center.x / _ftex) * _ftex, Math.round(_swRipple.center.y / _ftex) * _ftex); }   
-    _swRippleBakeFarMask();   
+    { const _ftex = _SW_FARMASK_BOUNDS / _SW_FARMASK_RES; _swRipple.farCenter.set(Math.round(_swRipple.center.x / _ftex) * _ftex, Math.round(_swRipple.center.y / _ftex) * _ftex); }
+    _swRippleBakeFarMask();
+    try { _swRipple._maskSigT = game._hubWaterT; _swRipple._maskSig = _swMaskSig(game._hubWaterT); _swRipple._maskDirty = 0; } catch (_) {}
     
     
     
@@ -27179,6 +27180,32 @@ window.__waterAt = function (x, z) {
   const WL = w.userData.WL, gy = window.__groundY(x, z);
   return { WL: WL, groundY: Math.round(gy), depth: Math.round(WL - gy), water: (gy < WL) };
 };
+window.__maskAudit = function (deep) {
+  const R = _swRipple, T = game && game._hubWaterT;
+  if (!T || !R.maskData) return { err: 'no water mask' };
+  const WL = (typeof game._hubWaterWL === 'number') ? game._hubWaterWL : (T.WL || 0);
+  const need = Math.max(0.02, ((deep != null) ? +deep : 40) / 400);
+  const lane = (data, cx, cz, RES, B) => {
+    const fresh = new Float32Array(RES * RES * 4);
+    for (let j = 0; j < RES; j++) _swRippleBakeMaskRow(fresh, cx, cz, j, RES, B, T, WL, false);
+    let holes = 0, ghost = 0; const at = [];
+    for (let j = 0; j < RES; j++) for (let i = 0; i < RES; i++) {
+      const k = (j * RES + i) * 4 + 1, was = data[k], now = fresh[k];
+      if (was < 0.02 && now >= need) {
+        holes++;
+        if (at.length < 8) at.push([Math.round(cx + ((i + 0.5) / RES - 0.5) * B), Math.round(cz + ((j + 0.5) / RES - 0.5) * B), Math.round(now * 400)]);
+      } else if (now < 0.02 && was >= need) ghost++;
+    }
+    return { centre: [Math.round(cx), Math.round(cz)], holes, ghost, at };
+  };
+  return {
+    WL, sameT: T === game.sandwichTerrain, map: game.selectedMap,
+    player: (typeof player !== 'undefined' && player) ? [Math.round(player.position.x), Math.round(player.position.z)] : null,
+    near: lane(R.maskData, R.center.x, R.center.y, _SW_MASK_RES, _SW_RIPPLE_BOUNDS),
+    far: R.farData ? lane(R.farData, R.farCenter.x, R.farCenter.y, _SW_FARMASK_RES, _SW_FARMASK_BOUNDS) : null,
+    jobs: { near: !!R._maskJob, far: !!R._farJob },
+  };
+};
 window.__waterFX = function (reset) {
   const out = {};
   for (const k in _SW_FXN) out[k] = _SW_FXN[k];
@@ -27539,6 +27566,27 @@ function _swRippleMaskJobTick(cine) {
     if (R.farTex) R.farTex.needsUpdate = true;
     R._farJob = null;
   }
+}
+let _swMaskSigSeq = 0;
+function _swMaskSig(T) {
+  if (!T) return 0;
+  if (!T._maskSigId) T._maskSigId = ++_swMaskSigSeq;
+  let h = T._maskSigId | 0;
+  const S = game.levelSpheres || _ST_EMPTY, C = game.levelCylinders || _ST_EMPTY;
+  for (let i = 0; i < S.length; i++) {
+    const s = S[i];
+    h = Math.imul(h ^ (s.cx | 0), 16777619); h = Math.imul(h ^ (s.cz | 0), 16777619);
+    h = Math.imul(h ^ (s.cy | 0), 16777619); h = Math.imul(h ^ (s.r | 0), 16777619);
+  }
+  for (let i = 0; i < C.length; i++) {
+    const c = C[i];
+    h = Math.imul(h ^ (c.ax | 0), 16777619); h = Math.imul(h ^ (c.az | 0), 16777619);
+    h = Math.imul(h ^ (c.bx | 0), 16777619); h = Math.imul(h ^ (c.bz | 0), 16777619);
+    h = Math.imul(h ^ (c.ay | 0), 16777619); h = Math.imul(h ^ (c.by | 0), 16777619);
+    h = Math.imul(h ^ (c.r | 0), 16777619);
+    h = Math.imul(h ^ (((c.w != null) ? c.w * 1000 : 1000) | 0), 16777619);
+  }
+  return Math.imul(h ^ (S.length * 65536 + C.length), 16777619);
 }
 function _swRippleBakeMask() {
   const R = _swRipple;
@@ -28424,6 +28472,20 @@ function _swRippleTick(dt) {
     }
   }
   __pmark('rip:far');   // (v40.12) the far-mask recentre decision - INCLUDING the synchronous first bake
+  {
+    const _mT = game._hubWaterT;
+    const _mSig = _swMaskSig(_mT);
+    if (_mSig !== R._maskSig) {
+      R._maskDirty = Math.max(R._maskDirty || 0, (_mT && _mT === R._maskSigT) ? 1 : 2);
+      R._maskSig = _mSig; R._maskSigT = _mT;
+    }
+    if (R._maskDirty && !R._maskJob && !R._farJob && !(window.__water && window.__water.maskFollow === 0)) {
+      const _mFast = (R._maskDirty === 2);
+      R._maskDirty = 0;
+      R._maskJob = { cx: R.center.x, cz: R.center.y, row: 0, fast: _mFast };
+      if (!isNaN(R.farCenter.x)) R._farJob = { cx: R.farCenter.x, cz: R.farCenter.y, row: 0, fast: _mFast };
+    }
+  }
   _swRippleMaskJobTick(_cineW);
   __pmark('rip:job');   // (v40.12) the budgeted row job that bakes whichever mask is in flight
   const w = game._hubWater;
@@ -29355,7 +29417,8 @@ function _swRippleDispose() {
   try { if (R.farTex && R.farTex.dispose) R.farTex.dispose(); } catch (_) {}      
   R.gpu = null; R.heightVar = null; R.scale = 0; R.pending.length = 0; R.acc = 0;
   R.maskTex = null; R.maskData = null;
-  R.farTex = null; R.farData = null; R.farCenter.set(NaN, NaN);                   
+  R.farTex = null; R.farData = null; R.farCenter.set(NaN, NaN);
+  R._maskJob = null; R._farJob = null; R._maskDirty = 0;
 }
 
 

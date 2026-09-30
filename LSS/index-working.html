@@ -7239,7 +7239,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "49.89";
+const LSS_BUILD = "49.91";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -43877,8 +43877,11 @@ function _swRippleInit() {
     _swRipple.center.set((player && player.position) ? player.position.x : 0, (player && player.position) ? player.position.z : 0);
     _swRipple.scale = 64;   
     _swRippleBakeMask();    
-    { const _ftex = _SW_FARMASK_BOUNDS / _SW_FARMASK_RES; _swRipple.farCenter.set(Math.round(_swRipple.center.x / _ftex) * _ftex, Math.round(_swRipple.center.y / _ftex) * _ftex); }   
-    _swRippleBakeFarMask();   
+    { const _ftex = _SW_FARMASK_BOUNDS / _SW_FARMASK_RES; _swRipple.farCenter.set(Math.round(_swRipple.center.x / _ftex) * _ftex, Math.round(_swRipple.center.y / _ftex) * _ftex); }
+    _swRippleBakeFarMask();
+    // (v49.90) both lanes were just baked from THIS world: record its fingerprint, or the first tick would
+    // see "changed" and bake the whole thing a second time for nothing (see _swMaskSig)
+    try { _swRipple._maskSigT = game._hubWaterT; _swRipple._maskSig = _swMaskSig(game._hubWaterT); _swRipple._maskDirty = 0; } catch (_) {}
     
     
     
@@ -46428,6 +46431,38 @@ window.__waterAt = function (x, z) {
   const WL = w.userData.WL, gy = window.__groundY(x, z);
   return { WL: WL, groundY: Math.round(gy), depth: Math.round(WL - gy), water: (gy < WL) };
 };
+// (v49.90) DEV PROBE - DOES THE BAKED SHORE MASK STILL DESCRIBE THIS WORLD? The mask decides where the
+// water is drawn at all (shoreA = smoothstep(0, uShoreSoft, mask.g); alpha 0 -> discard), so a texel
+// that says "dry" over real water is a HOLE in the surface. Re-bakes both lanes into scratch arrays
+// from the live terrain and counts the texels whose stored depth disagrees: `holes` = stored dry
+// (< 2 %) where the world is now >= `deep` (default 40 u) under water. Each lane lists a few hole
+// centres in world x/z. `__maskAudit()` to read; the arrays are dev-only garbage, never on a frame path.
+window.__maskAudit = function (deep) {
+  const R = _swRipple, T = game && game._hubWaterT;
+  if (!T || !R.maskData) return { err: 'no water mask' };
+  const WL = (typeof game._hubWaterWL === 'number') ? game._hubWaterWL : (T.WL || 0);
+  const need = Math.max(0.02, ((deep != null) ? +deep : 40) / 400);
+  const lane = (data, cx, cz, RES, B) => {
+    const fresh = new Float32Array(RES * RES * 4);
+    for (let j = 0; j < RES; j++) _swRippleBakeMaskRow(fresh, cx, cz, j, RES, B, T, WL, false);
+    let holes = 0, ghost = 0; const at = [];
+    for (let j = 0; j < RES; j++) for (let i = 0; i < RES; i++) {
+      const k = (j * RES + i) * 4 + 1, was = data[k], now = fresh[k];
+      if (was < 0.02 && now >= need) {
+        holes++;
+        if (at.length < 8) at.push([Math.round(cx + ((i + 0.5) / RES - 0.5) * B), Math.round(cz + ((j + 0.5) / RES - 0.5) * B), Math.round(now * 400)]);
+      } else if (now < 0.02 && was >= need) ghost++;
+    }
+    return { centre: [Math.round(cx), Math.round(cz)], holes, ghost, at };
+  };
+  return {
+    WL, sameT: T === game.sandwichTerrain, map: game.selectedMap,
+    player: (typeof player !== 'undefined' && player) ? [Math.round(player.position.x), Math.round(player.position.z)] : null,
+    near: lane(R.maskData, R.center.x, R.center.y, _SW_MASK_RES, _SW_RIPPLE_BOUNDS),
+    far: R.farData ? lane(R.farData, R.farCenter.x, R.farCenter.y, _SW_FARMASK_RES, _SW_FARMASK_BOUNDS) : null,
+    jobs: { near: !!R._maskJob, far: !!R._farJob },
+  };
+};
 // (v41.02) DEV PROBE - reads the live heightfield back and reports what the DISPLAY does with it.
 // This is the instrument the v41.02 calibration was made against, and the number that matters is
 // `satPct`: the share of disturbed texels the vertex shader's tanh has flattened. Anything much
@@ -46947,6 +46982,44 @@ function _swRippleMaskJobTick(cine) {
     if (R.farTex) R.farTex.needsUpdate = true;
     R._farJob = null;
   }
+}
+// ⭐⭐⭐ (v49.90) THE SHORE MASK MUST FOLLOW THE WORLD, NOT ONLY THE SHIP. Owner: "there's still some broken
+// water spots in elimination maps... spots where the surface of the water is not drawn" - "try it on the
+// shifting deep". The mask is what makes the water visible at all (shoreA -> alpha -> `discard`), and it
+// was re-baked on exactly two triggers: the ship travelling 2000 u (near lane) / 4000 u (far lane), and a
+// FRESH sheet. But every cavern floods to the same level (YFLOOR + 16 % of its relief = -420.8), so
+// _swBuildHubWater REUSES the sheet whenever a new build lands at that level - and nothing re-baked it.
+// The Shifting Deep regenerates its room graph every round (and built twice before its first round in
+// the test), the Colonnade re-seeds its pillars, endless streams lanes in and out: each left the OLD
+// layout's shoreline in the mask, and an arena is small enough that you may never fly the 2000 u that
+// would have refreshed it. Measured with __maskAudit on Shifting Deep round 1: 409 near + 15 far texels
+// baked "dry" over what is now 55-86 u of water - holes in the surface with the rock showing through
+// below the water line around them (the first report: "a circular cutout... around it the water level
+// was up" - an old pillar or ridge, drawn as a hole in the new water).
+// This fingerprint is everything the bake reads that can change under a live sheet: the terrain table
+// itself (a rebuild makes a new T, and PILLARS / biome / relief ride on it) and the carve lists that
+// _stRouteAt reads from `game` rather than T. The ripple tick compares it every frame (a few hundred
+// integer ops) and a change re-queues both lanes through the ordinary budgeted row job.
+let _swMaskSigSeq = 0;
+function _swMaskSig(T) {
+  if (!T) return 0;
+  if (!T._maskSigId) T._maskSigId = ++_swMaskSigSeq;
+  let h = T._maskSigId | 0;
+  const S = game.levelSpheres || _ST_EMPTY, C = game.levelCylinders || _ST_EMPTY;
+  for (let i = 0; i < S.length; i++) {
+    const s = S[i];
+    h = Math.imul(h ^ (s.cx | 0), 16777619); h = Math.imul(h ^ (s.cz | 0), 16777619);
+    h = Math.imul(h ^ (s.cy | 0), 16777619); h = Math.imul(h ^ (s.r | 0), 16777619);
+  }
+  for (let i = 0; i < C.length; i++) {
+    const c = C[i];
+    h = Math.imul(h ^ (c.ax | 0), 16777619); h = Math.imul(h ^ (c.az | 0), 16777619);
+    h = Math.imul(h ^ (c.bx | 0), 16777619); h = Math.imul(h ^ (c.bz | 0), 16777619);
+    h = Math.imul(h ^ (c.ay | 0), 16777619); h = Math.imul(h ^ (c.by | 0), 16777619);
+    h = Math.imul(h ^ (c.r | 0), 16777619);
+    h = Math.imul(h ^ (((c.w != null) ? c.w * 1000 : 1000) | 0), 16777619);
+  }
+  return Math.imul(h ^ (S.length * 65536 + C.length), 16777619);
 }
 function _swRippleBakeMask() {
   const R = _swRipple;
@@ -48346,6 +48419,25 @@ function _swRippleTick(dt) {
     }
   }
   __pmark('rip:far');   // (v40.12) the far-mask recentre decision - INCLUDING the synchronous first bake
+  // (v49.90) ...and the WORLD moved under the mask (see _swMaskSig). A new terrain table is a rebuild
+  // (round start, regenerated map) and bakes on the 4 ms lane - the countdown hides it; the same table
+  // with an edited carve is endless streaming in play and takes the ordinary 1 ms lane. The re-bake
+  // waits for any in-flight job to commit: a job that started before the change may already have baked
+  // rows of the old layout, so it is followed by a whole fresh pass rather than trusted.
+  {
+    const _mT = game._hubWaterT;
+    const _mSig = _swMaskSig(_mT);
+    if (_mSig !== R._maskSig) {
+      R._maskDirty = Math.max(R._maskDirty || 0, (_mT && _mT === R._maskSigT) ? 1 : 2);
+      R._maskSig = _mSig; R._maskSigT = _mT;
+    }
+    if (R._maskDirty && !R._maskJob && !R._farJob && !(window.__water && window.__water.maskFollow === 0)) {
+      const _mFast = (R._maskDirty === 2);
+      R._maskDirty = 0;
+      R._maskJob = { cx: R.center.x, cz: R.center.y, row: 0, fast: _mFast };
+      if (!isNaN(R.farCenter.x)) R._farJob = { cx: R.farCenter.x, cz: R.farCenter.y, row: 0, fast: _mFast };
+    }
+  }
   _swRippleMaskJobTick(_cineW);
   __pmark('rip:job');   // (v40.12) the budgeted row job that bakes whichever mask is in flight
   // SHIP WAKE : the ONLY ambient ripple source — the water is STILL until something touches it
@@ -50050,7 +50142,10 @@ function _swRippleDispose() {
   try { if (R.farTex && R.farTex.dispose) R.farTex.dispose(); } catch (_) {}      
   R.gpu = null; R.heightVar = null; R.scale = 0; R.pending.length = 0; R.acc = 0;
   R.maskTex = null; R.maskData = null;
-  R.farTex = null; R.farData = null; R.farCenter.set(NaN, NaN);                   
+  R.farTex = null; R.farData = null; R.farCenter.set(NaN, NaN);
+  // (v49.90) and no half-baked job may outlive its sheet: the next sheet's init bakes both lanes itself,
+  // and a job left in flight would carry on into the NEW arrays with the old world's centre and rows
+  R._maskJob = null; R._farJob = null; R._maskDirty = 0;
 }
 
 
