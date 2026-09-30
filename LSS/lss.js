@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "49.91";
+const LSS_BUILD = "49.92";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -7168,6 +7168,21 @@ function _applyStagedRoundShip() {
     return true;
   } catch (e) {
     console.warn('[round-swap] staged ship apply failed:', e && e.message);
+    return false;
+  }
+}
+function _lssWearStoredSkin() {
+  try {
+    if (typeof player === 'undefined' || !player || !player.mesh) return false;
+    const id = _getStoredSkinId();
+    const worn = player.mesh.userData ? player.mesh.userData.skinId : undefined;
+    if (worn === id && player.skinId === id) return false;
+    player.skinId = id;
+    _applyShipSkin(player.mesh, id);
+    try { _lssAnnounceLoadout(); } catch (_) {}
+    return true;
+  } catch (e) {
+    console.warn('[round-swap] livery apply failed:', e && e.message);
     return false;
   }
 }
@@ -81090,6 +81105,7 @@ function launchCountdown(duration, opts) {
     if (countdownRuntime.launched) return;
     countdownRuntime.launched = true;
     try { _applyStagedRoundShip(); } catch (_) {}
+    try { _lssWearStoredSkin(); } catch (_) {}   // (v49.92) a livery picked in the swap window without a ship change
     try { game._launchCdOwnsDigits = false; } catch (_) {}
     let _toneSpent = false;
     try { const _fa = game._rrToneFlipAt || 0; _toneSpent = _fa > 0 && (performance.now() - _fa) < 1500; } catch (_) {}

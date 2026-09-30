@@ -7239,7 +7239,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "49.91";
+const LSS_BUILD = "49.92";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -17350,6 +17350,31 @@ function _applyStagedRoundShip() {
     return true;
   } catch (e) {
     console.warn('[round-swap] staged ship apply failed:', e && e.message);
+    return false;
+  }
+}
+// ⭐ (v49.92) ...AND THE LIVERY, WHICH NOTHING HERE EVER APPLIED. Owner: "when i set a skin in the lobby/ship
+// selection screen, between rounds, it doesn't always stick for that next round". A skin card click (or K) stores
+// the livery, sets player.skinId and re-skins the HERO - but the hull you fly is only built in commitLoadout, and
+// in the swap window that runs for exactly two things: a NEW ship (the staged pick above, which drops a same-key
+// stage) or a CONFIRM press. So a skin changed on its own reached the store, the preview and player.skinId and
+// never the mesh; it "stuck" precisely when you also swapped ships or pressed CONFIRM - the "doesn't always".
+// Re-skin the live hull in place with the ONE apply path (_applyShipSkin is idempotent; the K key's in-flight
+// branch does exactly this) and announce it, so every peer rebuilds your hull through updateNetworkPlayer's skin
+// contract. Called from finishLaunch right after the staged ship: after a commit the mesh already wears the stored
+// livery and this is a no-op, which is also what makes it safe on a fresh launch.
+function _lssWearStoredSkin() {
+  try {
+    if (typeof player === 'undefined' || !player || !player.mesh) return false;
+    const id = _getStoredSkinId();
+    const worn = player.mesh.userData ? player.mesh.userData.skinId : undefined;
+    if (worn === id && player.skinId === id) return false;
+    player.skinId = id;
+    _applyShipSkin(player.mesh, id);
+    try { _lssAnnounceLoadout(); } catch (_) {}
+    return true;
+  } catch (e) {
+    console.warn('[round-swap] livery apply failed:', e && e.message);
     return false;
   }
 }
@@ -125989,6 +126014,7 @@ function launchCountdown(duration, opts) {
     // painted over the arena instead of in the first visible frame.
     // No-op on a fresh launch (nothing is ever staged outside the swap window).
     try { _applyStagedRoundShip(); } catch (_) {}
+    try { _lssWearStoredSkin(); } catch (_) {}   // (v49.92) a livery picked in the swap window without a ship change
     // (v40.55) HAND THE DIGITS BACK at the LAUNCH beat — the same instant the picker is torn down
     // below, which is the beat updateRoundSystem used to read as "the arena owns the countdown now".
     // Between rounds this keeps the v36.36 split exactly as designed (picker digits t=0..6, arena
