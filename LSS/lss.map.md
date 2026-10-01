@@ -3679,6 +3679,19 @@ Hand-editing the ships on a Quest 3 (WebXR, VR or passthrough AR) or with a mous
   - Merge-by-distance was rejected: it CHAINS through a dense mesh and can swallow a region into one point. A cell only collapses what lies inside it.
   - **Measured on Slayer:** the seat went from 16 islands and 36,630 tris to 11 and 13,538 with one big sweep (182 ms including the rebuild), and two undos restored it bit-exact. A 2 cm-cell sweep over a busy hull panel took out 341 tris.
   - Autosave stores whole arrays for a piece once `P.topo` is set.
+- ⭐ **EDITS INTO THE GAME: `tools/ship_edit_splice.mjs`** (v50.66, the owner's first edit). Owner: *"tracker_edit.glb is my first edit! ... can you put it in game?"*.
+  - **Run:** `node tools/ship_edit_splice.mjs <ship> <edit.glb> [--dry] [--box x0,x1,y0,y1,z0,z1]`, then `node tools/compress_glb.mjs --only ships/<ship>`, then bump `_MODELS_VERSION`.
+  - **What it writes:** it compares every lab part with the SHIPPED part it came from and writes only what changed into `assets_src`:
+    - geometry, into the source node's frame;
+    - paint, laid over the 4k source map, re-encoded JPEG, renamed for `cockpit_CP_*` so the fleet share can't fold it;
+    - colour;
+    - markers, including `canopy/markers.json`.
+  - It backs up to `backups/concept_ships/pre_edit/`, and the fingerprint verifies everything else identical.
+  - A shipped part that compress_glb JOINED (Tracker's hood + console pedestal) replaces the first source node, and the others are removed.
+  - `--box` keeps only the edits inside a ship-space box; outside it the shipped triangles stay. A triangle goes to the side its centroid falls on.
+  - **First edit (Tracker, v50.66):** MELD on the right side of the nose: 305 triangles -> 113, which melded the raised block in front of the canopy flat. The hull went 61,358 -> 61,121. It also left a 21-edge opening there.
+  - ⚠ **Compare geometry with a TOLERANCE, never with rounded position keys.** My first diff rounded positions to a 5e-5 grid. A few coordinates sitting on a rounding boundary flipped by one notch, and that reported "changes" at the engines and a wing tip. The owner then asked *"engine and wingtip? maybe that was an accident"*. The vertices there matched to 0.000 mm. Use canonical vertex ids with a micron tolerance (a hash grid that checks neighbouring cells), as in the scratch `edit_where` re-run.
+  - ⚠ **The Blender `.blend` does NOT have lab edits.** Re-exporting a ship with `export_game.py` undoes them. Markers survive via markers.json.
 - **DELETE** (**Jump:** `function deleteAt` · `function deleteCommit` · `function applyFaces`). Owner: *"what about a delete vertex tool"*.
   - A press takes the vertex NEAREST the cursor / tip, and a drag adds every vertex the ball touches (marked red). Release removes them in one undo step (whole-piece `topoSnap`).
   - **HOLE** (default) drops every triangle that used them.
@@ -9277,3 +9290,17 @@ Owner: *"i find our water to look a bit jello like... i like how this water move
   - **v50.43 SOLIDITY IS THREE STEPS** (**Jump:** `COCKPIT SOLIDITY IS THREE STEPS`, `_lssSolidityStep`). Owner: *"it should be 0, 45, or 100 as the options... 0 can be called xray_color, 45 can be called xray, and 100 called solid"*.
     - Settings shows a select: X-ray Color (0), X-ray (0.45 = `XRAY_END`, the tint gone) and Solid (1 = the hull's own materials).
     - Stored values snap to the nearest step on load. The console knob stays continuous.
+
+## v50.65-50.67 — seat-view barrel fire replaces the orb; daytime stars off
+
+- **Muzzle flash from the seat** (owner: Syphon's pair "makes a vesica Pisces", Blaster's "big orbs ... make
+  them more like little muzzle fire coming out of each small barrel", "yeah no huge orbs"). The v42.16 seat
+  orb (0.095 x hull, punch 2.1) was tuned for a gun **~46 u** from the eye; the v49.93 concept hulls put
+  SYPHON's gun1/gun2 **15.8 u** away, so the orb filled half the screen. **Jump:** `function _seatJetSpawn`
+  - crossed-quad flame jet along the barrel + small spiked star, own 10-slot pool, ticked by `_seatJetTick`
+  from `updateEffects`. Every hull, pilot's own shot, first person only; third person / bots / peers keep
+  the orb (seen from 200+ u, correct there). `window.__muzzle.jet = false` = old orb; `{len, wid, star,
+  life, punch, push}` (hull fractions) tune it. The class fire (`_classMuzzleFire`, 40 u ahead) is untouched.
+- **Stars by day** (owner: "stars in the day time looks weird"). v46.45's `uDay` x12 gain stays on the
+  galaxy band + aurora; the star points now take `uDayStars` (default 0 = night only). `__sky.uDayStars.value = 12`
+  restores v46.45.
