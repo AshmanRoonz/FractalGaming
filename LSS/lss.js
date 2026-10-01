@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "50.78";
+const LSS_BUILD = "50.79";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -79524,7 +79524,10 @@ function _hlTPMap() {
              cPt: Object.assign({}, _HL.compass, { a: 'ml', x: mx, y: my }), K: KT };
   } catch (_) { return null; }
 }
+let _hlTPDefer = null;
+function _hlTPStillOn() { return !(typeof window !== 'undefined' && window.__hudTPStill === false); }
 function _hlDrawHUD(ctx, W, H, cx, cy, v) {
+  _hlTPDefer = null;   // (v50.79) filled below in third person, drained by _hudSharedTail
   ctx.save();
   ctx.translate(cx - W / 2, cy - H / 2);
   ctx.globalAlpha = _hlGA();
@@ -79560,7 +79563,8 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
       const fpx = (_HL.aegis.size || 1.5) * r.vmin;
       r = { x: cP.cx - r.w / 2, y: cP.cy + R + gap, w: r.w, h: r.h, cx: cP.cx, cy: cP.cy + R + gap + fpx * 0.6, vmin: r.vmin };
     }
-    _hlText(ctx, r, _HL.aegis, v.aegisStr, _HL.aegis.col);
+    if (_tpA && _hlTPStillOn()) (_hlTPDefer || (_hlTPDefer = {})).aegis = { r: r, str: v.aegisStr };   // (v50.79) drawn still
+    else _hlText(ctx, r, _HL.aegis, v.aegisStr, _HL.aegis.col);
   }
 
   if (v.objectiveStr) {
@@ -79570,12 +79574,16 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
 
   if (!_PN && !_V3) {   // (v50.25) on the console's screens, _hlfDrawPanels drew them into the centre one (v50.47: or the 3D ones)
     const TPm = _hlTPMap();   // (v50.40) the placement moved into _hlTPMap, unchanged
-    const mP = TPm ? TPm.mP : _HL.minimap, cPt = TPm ? TPm.cPt : _HL.compass;
-    ctx.globalAlpha = 1;
-    _hlRadar(ctx, _hlPlace(mP, W, H, 1));
-    if (typeof window === 'undefined' || window.__hudCompass !== false) {
+    if (TPm && _hlTPStillOn()) {
+      (_hlTPDefer || (_hlTPDefer = {})).map = { mP: TPm.mP, cPt: TPm.cPt };   // (v50.79) drawn still, in _hudSharedTail
+    } else {
+      const mP = TPm ? TPm.mP : _HL.minimap, cPt = TPm ? TPm.cPt : _HL.compass;
       ctx.globalAlpha = 1;
-      _hlCompass(ctx, _hlPlace(cPt, W, H, 1), _HL.compass.col);
+      _hlRadar(ctx, _hlPlace(mP, W, H, 1));
+      if (typeof window === 'undefined' || window.__hudCompass !== false) {
+        ctx.globalAlpha = 1;
+        _hlCompass(ctx, _hlPlace(cPt, W, H, 1), _HL.compass.col);
+      }
     }
   }
   ctx.globalAlpha = _hlGA();   // back to the dimmed HUD for anything drawn after
@@ -79644,14 +79652,43 @@ function _hudWorldEnd() {
   }
 }
 
+function _hlTPDrawStill(c, d, W, H, isWorld) {
+  let prevT = null;
+  if (isWorld) { try { prevT = _hudFontTarget; _hudFontTarget = c; } catch (_) {} _hudFontCache = ''; }
+  try {
+    if (d.map) {
+      const mR = _hlPlace(d.map.mP, W, H, 1), cR = _hlPlace(d.map.cPt, W, H, 1);
+      c.save();
+      c.globalAlpha = 1;
+      _hlRadar(c, mR);
+      if (typeof window === 'undefined' || window.__hudCompass !== false) { c.globalAlpha = 1; _hlCompass(c, cR, _HL.compass.col); }
+      c.restore();
+      if (isWorld) _hudWorldMark(cR.cx, cR.cy, Math.max(cR.w, cR.h) / 2 + 4);
+    }
+    if (d.aegis && d.aegis.str) {
+      const ar = d.aegis.r;
+      _hlText(c, ar, _HL.aegis, d.aegis.str, _HL.aegis.col);
+      c.globalAlpha = 1;
+      if (isWorld) {
+        let tw = ar.w;
+        try { tw = Math.max(ar.w, c.measureText(d.aegis.str).width); } catch (_) {}
+        _hudWorldMark(ar.cx, ar.cy, tw / 2 + 4);
+      }
+    }
+  } finally {
+    if (isWorld) { try { _hudFontTarget = prevT; } catch (_) {} _hudFontCache = ''; }
+  }
+}
 function _hudSharedTail(ctx, W, H, cx, cy, t, isDoomed) {
   player.muzzleFlashTimer = Math.max(0, player.muzzleFlashTimer - (1 / 60));
   player.gunRecoilL = Math.max(0, player.gunRecoilL - (1 / 60) * 12);
   player.gunRecoilR = Math.max(0, player.gunRecoilR - (1 / 60) * 12);
 
+  const _tpStill = _hlTPDefer; _hlTPDefer = null;
   const _wctx = _hudWorldBegin(W, H,
     !((typeof isXRPresenting === 'function') && isXRPresenting()) &&
-    !!(typeof game !== 'undefined' && game && game._hudTf && game._hudTf !== 'none'));
+    (!!_tpStill || !!(typeof game !== 'undefined' && game && game._hudTf && game._hudTf !== 'none')));
+  if (_tpStill) { try { _hlTPDrawStill(_wctx || ctx, _tpStill, W, H, !!_wctx); } catch (_) {} }
 
   if (player.loadoutKey === 'TRACKER') {
     const halfW = W / 2, halfH = H / 2;
