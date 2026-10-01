@@ -9308,3 +9308,17 @@ Owner: *"i find our water to look a bit jello like... i like how this water move
   of mid air"). `_hubCityBuild`'s `hero` (the beacon + searchlight host) was seeded with a placeholder
   `{centre, PY + 1600}` that only a tower taller than 1600 could replace; FROSTMARCH (`towerH` 2300, the
   lowest) could keep it. Now the tallest tower always wins; the centre at pad height is the no-tower fallback.
+- **(v50.69) Auto Cloak hitched in VR — the cloak warm only ever built the FLAT programs** (owner: "i was
+  playing in VR in elimination, and auto cloak came on, and it hitched... i guess it needs to be baked?").
+  `_warmCloakForRoot` compiles with `postFX.rtScene` bound (no tone mapping, linear out); in a headset
+  `renderFrame` draws into the XR target, which r165 keys with `renderer.toneMapping` (ACES) + sRGB out, so
+  every transparent hull program was a different key and linked cold on the first VR cloak. Fix: a cached
+  1x1 stand-in `WebGLRenderTarget` with `isXRRenderTarget = true` and `colorSpace = renderer.outputColorSpace`
+  (exactly how r165 builds the real one) and a second compile of both side passes, whenever
+  `isXRPresenting()` or `window.__xrSupported` (recorded from the existing `isSessionSupported` probe).
+  Compile only; no draw-warm (that pays ANGLE D3D11 layouts, a flat-desktop cost). `__cloakXRWarmN` counts
+  it; `__cloakXRWarm = false` skips it. ⚠ r165 `WebXRManager` has NO `getRenderTarget()` - renderFrame's
+  call to it is a guarded no-op. ⚠ The same key split applies to EVERY material the prebake warms against
+  rtScene: only the cloak is fixed here, because it is a state flip mid-fight; other first-in-VR links land
+  behind the VR loading cover. Pane proof (Vortex, flat, `__xrSupported` forced): cloaked hull compiled
+  against a FRESH XR-flagged target = 0 new programs; same with Reinhard tone mapping (control) = 17.

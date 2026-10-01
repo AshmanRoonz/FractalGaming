@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "50.68";
+const LSS_BUILD = "50.69";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -15152,6 +15152,7 @@ renderer.xr.addEventListener('sessionend', () => {
   });
 
   navigator.xr.isSessionSupported('immersive-vr').then((supported) => {
+    try { window.__xrSupported = !!supported; } catch (_) {}   // (v50.69) read by _warmCloakForRoot's VR twin
     btn.disabled = !supported;
     btn.textContent = supported ? 'ENTER VR' : 'VR NOT AVAILABLE';
     if (!supported) {
@@ -68279,6 +68280,25 @@ function _warmCloakForRoot(root, withShadow, deferDraw) {
       let _any = false;
       for (const m of mats) { if (m._wSide === THREE.DoubleSide) { m.side = THREE.FrontSide; m.needsUpdate = true; _any = true; } }
       if (_any) renderer.compile(root, camera, scene);
+      try {
+        const _xrWant = (typeof window === 'undefined' || window.__cloakXRWarm !== false) &&
+          ((typeof isXRPresenting === 'function' && isXRPresenting()) || (typeof window !== 'undefined' && window.__xrSupported));
+        if (_xrWant) {
+          if (!_warmCloakForRoot._xrRT) {
+            const _t = new THREE.WebGLRenderTarget(1, 1, { colorSpace: renderer.outputColorSpace, depthBuffer: true });
+            _t.isXRRenderTarget = true;
+            _warmCloakForRoot._xrRT = _t;
+          }
+          renderer.setRenderTarget(_warmCloakForRoot._xrRT);
+          renderer.compile(root, camera, scene);   // FrontSide (or the material's own single side)
+          if (_any) {
+            for (const m of mats) { if (m._wSide === THREE.DoubleSide) { m.side = THREE.BackSide; m.needsUpdate = true; } }
+            renderer.compile(root, camera, scene);
+          }
+          try { window.__cloakXRWarmN = (window.__cloakXRWarmN || 0) + mats.length; } catch (_) {}
+          renderer.setRenderTarget(_rtC || _pRTC);
+        }
+      } catch (_) { try { renderer.setRenderTarget(_rtC || _pRTC); } catch (__) {} }
       for (const m of mats) { if (m.side !== m._wSide) { m.side = m._wSide; m.needsUpdate = true; } }
       if (deferDraw) {
         try { renderer.setRenderTarget(_pRTC); } catch (_) {}
