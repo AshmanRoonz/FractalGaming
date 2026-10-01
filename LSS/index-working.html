@@ -7239,7 +7239,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "50.40";
+const LSS_BUILD = "50.44";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -8414,7 +8414,8 @@ const player = {
 // ⚠ SIX PLACES USED TO SPELL THIS `1`: the `input` default, `_hlScale`'s fallback,
 // the settings page's build-time and reopen values, `saveSettings`, and
 // `SHIPPED_DEFAULTS`. They only ever agreed by hand, so they are one constant now.
-// ⚠ A SAVED SETTING STILL WINS - `loadSettings` writes `data.hudScale` over this
+// (v50.41) NO LONGER TRUE - the first-person slider is gone and loadSettings LOCKS input.hudScale to this. The
+// original note: ⚠ A SAVED SETTING STILL WINS - `loadSettings` writes `data.hudScale` over this
 // whenever the key is present, which is every save written since v36.19. This
 // changes what a FIRST BOOT and a RESET TO DEFAULTS get, and what a pre-v36.19
 // save (no key at all) falls back to. Anyone who has already touched the slider
@@ -33336,21 +33337,81 @@ function _lssPaniniSync() {
 // (!) NOTHING ABOUT PANINI ITSELF CHANGES - d, xmax, ymax, uPan and _lssProjectV are untouched, so
 //     no HUD marker drifts and no render target is reallocated. __paniniInfo().centreZoom must read
 //     the same before and after; if it moved, something turned the correction down instead.
+// ⭐⭐ (v50.44) EVERY SHIP KEEPS ITS FRAMING AT EVERY FOV. Owner: "we should make the ships look the same size
+// regardless of FOV / at 90 degrees (with full wide view correction, 1), pyro fits on the screen nicely, and the
+// other ships are good". The v43.90 boom above answered Panini only, so the hull's size still went as 1/tan(fov/2):
+// measured on the seven hulls at the owner's window (aspect 1.654), going from 90 to 120 shrank every hull's screen
+// footprint to ~0.6x, and 60 grew it ~1.6x - Pyro 1.54 screen-half-widths wide, off both edges.
+// ⚠ THE OBVIOUS FIX IS WRONG. Holding size at the hull's CENTRE (a dolly zoom: D ~ M / tan(fov/2)) brings the camera
+// to 139 u at 120 / full correction - and a dreadnought's tail is 114 u behind its centre, so the near hull balloons
+// (Pyro 1.08 widths, its box bottom 3x below the frame), and with the correction OFF at 120 it puts the camera INSIDE
+// every hull (69 u). The boom is shorter than a long hull, so the near end of it is what fills the screen.
+// So the boom is SOLVED, per ship: the distance at which the hull's projected bounding box - through the presented
+// lens, Panini included (the same mapping as _lssPaniniSync), its six faces sampled because Panini bends straight
+// edges - covers the same share of the screen (the larger of its half-width and half-height fractions) as it does at
+// the owner's reference: FOV 90, correction 1, v43.90's own boom there (150 x (1 + 0.35 (M - 1)) = 174.5 u at 1.654).
+// Measured result, 120 / full correction: every hull 150-160 u (was ~203), Pyro 0.95 of the half-width against the
+// reference's 0.96; 60: 202-222 u. The height (42) is not part of the solve - it stays the rig's. One bisection per
+// ship x FOV x correction x aspect, cached; potato (no composite) solves with d = 0; VR is 1; it reads input.fovDeg,
+// never the zoomed camera.fov (v43.90's ADS reason); the pre-round cinematic reads this too, so it lands on the pose.
+// A hull without a bbox (never - every ship GLB records one at load) falls back to the v43.90 boom.
+// Knobs, live: window.__par = { boomRefFov: 90, boomRefD: 1, panBoom: 0.35 (the reference boom's fraction),
+// boomFit: false (= the v43.90 boom exactly) }.
+const _tpBoomFit = { key: null, k: 1 };
 function _lssTpBoomK() {
   try {
-    const d = (typeof _lssPaniniD === 'function') ? _lssPaniniD() : 0;
-    if (!(d > 0)) return 1;
-    if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return 1;
     if (typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting) return 1;
+    let d = (typeof _lssPaniniD === 'function') ? _lssPaniniD() : 0;
+    if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) d = 0;   // no composite, no warp
+    if (!(d > 0)) d = 0;
     const K = (typeof window !== 'undefined' && window.__par) || {};
-    const f = (K.panBoom != null) ? +K.panBoom : 0.35;
-    if (!(f > 0)) return 1;
+    const f = Math.max(0, Math.min(1, (K.panBoom != null) ? +K.panBoom : 0.35));
     const fov = ((typeof input !== 'undefined' && input && input.fovDeg) || (camera && camera.fov) || 90);
     const asp = (camera && camera.aspect) || 1.6;
-    const c = Math.cos(Math.atan(Math.tan(fov * Math.PI / 360) * asp));
-    if (!(c > 0.0001)) return 1;
-    const M = (d + c) / ((d + 1) * c);
-    return 1 + Math.max(0, Math.min(1, f)) * (M - 1);
+    const panM = (fv, dd) => {   // Panini's centre magnification - see the v43.90 note above
+      if (!(dd > 0)) return 1;
+      const c = Math.cos(Math.atan(Math.tan(fv * Math.PI / 360) * asp));
+      return (c > 0.0001) ? (dd + c) / ((dd + 1) * c) : 1;
+    };
+    const v4390 = 1 + f * (panM(fov, d) - 1);
+    const key0 = (typeof player !== 'undefined' && player) ? player.loadoutKey : null;
+    const proto = (key0 && typeof shipModelCache !== 'undefined' && shipModelCache.loaded) ? shipModelCache.loaded[key0] : null;
+    const bb = proto && proto.userData && proto.userData.bboxSize;
+    if (K.boomFit === false || !bb) return v4390;
+    const fR = (typeof K.boomRefFov === 'number') ? K.boomRefFov : 90;
+    const dR = (typeof K.boomRefD === 'number') ? K.boomRefD : 1;
+    const ck = key0 + '|' + fov + '|' + d + '|' + asp.toFixed(4) + '|' + fR + '|' + dR + '|' + f + '|' +
+               bb.x.toFixed(2) + ',' + bb.y.toFixed(2) + ',' + bb.z.toFixed(2);
+    if (_tpBoomFit.key === ck) return _tpBoomFit.k;
+    // the hull box in the mesh's frame (centred at load, nose +z) seen from the boom: the rig sets the mesh to the
+    // camera's quaternion turned 180 about Y, so a hull point (x, y, z) sits at (-x, y - 42, -z - D) in camera space
+    const hx = bb.x / 2, hy = bb.y / 2, hz = bb.z / 2;
+    const share = (fv, dd, D) => {   // the larger of the box's half-width / half-height fractions; Infinity if behind
+      const srcH = Math.atan(Math.tan(fv * Math.PI / 360) * asp);
+      const xmax = (dd > 0) ? (dd + 1) * Math.sin(srcH) / (dd + Math.cos(srcH)) : Math.tan(srcH);
+      const ymax = xmax / asp;
+      let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+      const N = 6;
+      for (let fc = 0; fc < 6; fc++) for (let i = 0; i <= N; i++) for (let j = 0; j <= N; j++) {
+        const u = -1 + 2 * i / N, v = -1 + 2 * j / N;
+        const a = (fc >> 1), s = (fc & 1) ? -1 : 1;
+        const lx = (a === 0 ? s : u) * hx, ly = (a === 1 ? s : (a === 0 ? u : v)) * hy, lz = (a === 2 ? s : v) * hz;
+        const vx = -lx, vy = ly - 42, vz = -lz - D;
+        if (!(vz < 0)) return Infinity;
+        const lon = Math.atan2(vx, -vz), hyp = Math.hypot(vx, vz);
+        const S = (dd > 0) ? (dd + 1) / (dd + Math.cos(lon)) : 1 / Math.cos(lon);
+        const px = S * Math.sin(lon) / xmax, py = (hyp > 1e-9 ? S * (vy / hyp) : 0) / ymax;
+        if (px < x0) x0 = px; if (px > x1) x1 = px; if (py < y0) y0 = py; if (py > y1) y1 = py;
+      }
+      return Math.max((x1 - x0) / 2, (y1 - y0) / 2);
+    };
+    const target = share(fR, dR, 150 * (1 + f * (panM(fR, dR) - 1)));
+    let lo = hz + 10, hi = 4000;
+    if (!(isFinite(target) && target > 0) || share(fov, d, hi) > target) return v4390;
+    for (let it = 0; it < 40; it++) { const m = (lo + hi) / 2; if (share(fov, d, m) > target) lo = m; else hi = m; }
+    const k = hi / 150;
+    _tpBoomFit.key = ck; _tpBoomFit.k = (isFinite(k) && k > 0.1) ? k : v4390;
+    return _tpBoomFit.k;
   } catch (_) { return 1; }
 }
 
@@ -107077,6 +107138,19 @@ function _ghostHullTint() {
   } catch (_) {}
   return 0x8ad8ff;
 }
+// ⭐ (v50.43) COCKPIT SOLIDITY IS THREE STEPS, NOT A SLIDER. Owner: "it should be 0, 45, or 100 as the options for
+// cockpit solidity... not a slider / 0 can be called xray_color, 45 can be called xray, and 100 called solid".
+// The three are the ramp's own landmarks (see below): 0 = the tinted x-ray shell (X-ray Color), 0.45 = XRAY_END,
+// the end of phase A - the same x-ray with the hologram tint, rim glow and flicker gone (X-ray) - and 1 = the hull's
+// own materials (Solid). Settings shows a three-way select; every stored value (old saves held anything from 0 to 1)
+// snaps to the nearest step on load. The live knob window.__cockpit.ghost.solidity stays continuous, for tuning.
+function _lssSolidityStep(v) {
+  const n = (typeof v === 'number' && isFinite(v)) ? Math.max(0, Math.min(1, v)) : 0;
+  const S = [0, 0.45, 1];
+  let best = S[0];
+  for (const s of S) if (Math.abs(n - s) < Math.abs(n - best)) best = s;
+  return best;
+}
 function _ghostHullKnobs(sOverride) {   // (v44.27) sOverride: the zoom's solidity, see _ghostZoomSolidity
   const G = (window.__cockpit && window.__cockpit.ghost) || {};
   // ⚠⚠ (v42.09) COCKPIT SOLIDITY SLIDER (Settings > Display). Owner: "a slider ... transparency for
@@ -107186,12 +107260,22 @@ const _GH_BLEND = {
   normal: THREE.NormalBlending, additive: THREE.AdditiveBlending,
   multiply: THREE.MultiplyBlending, subtractive: THREE.SubtractiveBlending,
 };
-function _ghostBlendMode(G) {
+// ⭐ (v50.42) THE DEFAULT BLEND FOLLOWS THE SOLIDITY PHASE. Owner: "i'm not sure i like the effect the cockpit
+// solidity slider does... sliding it from 0 to 99 makes it go xray to white xray, then 100 is solid" - then, offered
+// fix / switch / remove, chose to fix it. The cause: v42.12 built the slider in two phases, and its phase B
+// (XRAY_END..1) works by turning depth writing back ON so only the nearest surface draws while alpha climbs to 1.
+// v42.13 then made ADDITIVE the default blend (the shimmer fix) and _ghostHullTune deliberately exempts additive
+// from the depth write - so phase B never happened: alpha ran to 1.0 across 6-8 stacked additive layers, which is
+// white, until the hand-back to the real materials at SOLID_AT popped it solid.
+// So the DEFAULT is now additive only while the shell is x-ray (phase A - where it stops the gun-pod shimmer, the
+// reason it was made the default) and NORMAL once phase B asks for depth writing - the blend v42.12's phase B was
+// designed and judged with. An explicit knob still wins in both phases (`blend`, or `additive` true/false).
+function _ghostBlendMode(G, solidPhase) {
   try {
     const b = (G && typeof G.blend === 'string') ? G.blend.toLowerCase() : null;
     if (b && _GH_BLEND[b]) return { mode: _GH_BLEND[b], additive: (b === 'additive') };
   } catch (_) {}
-  const wantAdd = !(G && G.additive === false);
+  const wantAdd = (G && typeof G.additive === 'boolean') ? G.additive : !solidPhase;   // (v50.42) was: !(G.additive === false)
   return { mode: wantAdd ? THREE.AdditiveBlending : THREE.NormalBlending, additive: wantAdd };
 }
 function _addGhostHull(mat, K, isGlass) {
@@ -107401,7 +107485,7 @@ function _ghostHullTune(mesh, K) {
       // (v42.45) `blend` (named) wins over `additive` (boolean); both are render state, so this is
       // still free to flip live with no recompile.
       const _G = (window.__cockpit && window.__cockpit.ghost) || {};
-      const _bm = _ghostBlendMode(_G);
+      const _bm = _ghostBlendMode(_G, !!K.depthWrite);   // (v50.42) phase B defaults to normal - see _ghostBlendMode
       const _wantAdd = _bm.additive;
       if (m.blending !== _bm.mode) m.blending = _bm.mode;
       // (v42.45) SIDE. DoubleSide is what makes the shell x-ray (the far wall glows through the near
@@ -131086,25 +131170,22 @@ function _refreshSettingsValues() {
     if (_hv) _hv.textContent = _hs.toFixed(2) + 'x';
   }
   setChk('set-show-fps', input.showFps);
-  setChk('set-keep-warm', input.keepWarm !== false);
-  setChk('set-hull-glow', input.hullGlow !== false);
-  setChk('set-headlight', input.headlight !== false);   // (v44.23)
-  setChk('set-cockpit-vr', input.cockpitVR === true);
+  // (v50.41) keep-warm, hull lights, headlight and VR cockpit are no longer settings - locked in loadSettings
   {
     // (v42.09) same reopen-sync reason as HUD Size below - innerHTML is written once.
-    const _cs = (typeof input.cockpitSolidity === 'number') ? input.cockpitSolidity : 0;
-    setRange('set-cockpit-solidity', null, _cs);
-    const _cv = $('#val-cockpit-solidity');
-    if (_cv) _cv.textContent = (_cs * 100).toFixed(0) + '%';
+    // (v50.43) a select now: one of the three steps
+    setSel('set-cockpit-solidity', String(_lssSolidityStep(input.cockpitSolidity)));
   }
   setChk('set-hud-gauge-labels', input.hudGaugeLabels !== false);
   {
     // (v36.19) buildSettingsPage writes overlay.innerHTML once and is gated by
     // _settingsBuilt, so without this the slider shows its build-time value
     // every time the overlay is reopened.
-    const _fs = (typeof input.hudScale === 'number') ? input.hudScale : HUD_SCALE_DEFAULT;
-    setRange('set-hud-scale', null, _fs);
-    const _fv = $('#val-hud-scale');
+    // (v50.41) the first-person slider is gone (locked - see loadSettings); this is the third-person one now, which
+    // v50.29 added without this sync.
+    const _fs = (typeof input.hudScaleTP === 'number') ? input.hudScaleTP : HUD_SCALE_TP_DEFAULT;
+    setRange('set-hud-scale-tp', null, _fs);
+    const _fv = $('#val-hud-scale-tp');
     if (_fv) _fv.textContent = _fs.toFixed(2) + 'x';
   }
   {
@@ -131362,6 +131443,11 @@ function buildSettingsPage() {
     </div><!-- /tab-panel: controls -->
 
     <div class="settings-tab-panel" data-tab-panel="performance">
+    <!-- ⭐ (v50.41) PERFORMANCE, CONTROLS ONLY. Owner: "take the hud size 1st person slider out of the settings /
+         remove the keep warm option from settings / remove 3d cockpit in vr setting / remove hull lights setting /
+         remove headlight setting / remove all the paragraphs that describe the stuff in performance / Whatever those
+         settings were as default will stay locked". The five are FORCED to their shipped defaults in loadSettings
+         (see the v50.41 note there); the seventeen grey description rows this tab carried are gone. -->
     <div class="settings-section">
       <h3>Active GPU</h3>
       <div class="setting-row" style="opacity:0.85; font-size:0.85em;">
@@ -131392,9 +131478,6 @@ function buildSettingsPage() {
           <option value="mega" ${QUALITY.level === 'mega' ? 'selected' : ''}>Mega Ultra (2.5x supersample, 8-octave smoke, max particles - high-end GPUs)</option>
         </select>
       </div>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">High is the baseline everywhere, phones included. Low and Medium sit below it: they turn bloom off and render the world at 0.65× / 0.85× before it is scaled to your screen — so they trade the glow and some sharpness for fill rate — and in the overworld they also draw a shorter distance (Low refreshes water reflections less often too), which is what helps a slow or battery-throttled CPU. Try them if the frame rate is poor; the picture gets plainer, not broken. If your GPU has headroom, push to Ultra or Mega. The change applies to newly-spawned effects ; existing smoke plumes keep their settings until they fade out. Quality change applies to clouds + bloom on the next round-start. Window-resize also rebinds bloom RT size to the new tier.</label>
-      </div>
       <!-- (v49.45) LITE MODE - phone-class graphics on a non-touch device. Boot-time, so a change that
            flips the effective mode reloads. Hidden on touch phones: they are always on this budget. -->
       <div class="setting-row" id="set-lite-row" style="${(typeof _LSS_TOUCH_PHONE !== 'undefined' && _LSS_TOUCH_PHONE) ? 'display:none;' : ''}">
@@ -131405,30 +131488,15 @@ function buildSettingsPage() {
           <option value="0" ${_lssLiteStored() === '0' ? 'selected' : ''}>Off - full desktop graphics</option>
         </select>
       </div>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;${(typeof _LSS_TOUCH_PHONE !== 'undefined' && _LSS_TOUCH_PHONE) ? 'display:none;' : ''}">
-        <label style="flex:1;">For consoles, TV browsers and weak PCs: runs the game on the same budget as a phone. Now: <b>${(typeof _LSS_LITE !== 'undefined' && _LSS_LITE) ? 'LITE (' + _LSS_LITE + ')' : 'full'}</b>. Changing it reloads the game.</label>
-      </div>
       <div class="setting-row">
         <label>Field of View</label>
         <input type="range" id="set-fov" min="60" max="120" step="1" value="${(typeof input.fovDeg === 'number') ? input.fovDeg : 90}">
         <div class="value-display" id="val-fov">${(typeof input.fovDeg === 'number') ? input.fovDeg : 90}&deg;</div>
       </div>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">FOV applies to flat-screen rendering. The headset's native FOV is used in VR (slider has no visible effect there).</label>
-      </div>
       <div class="setting-row">
         <label>Wide View Correction</label>
         <input type="range" id="set-panini" min="0" max="1" step="0.05" value="${(function(){try{return _lssPaniniD();}catch(_){return 0;}})()}">
         <div class="value-display" id="val-panini">${(function(){try{const d=_lssPaniniD();return d>0?d.toFixed(2):'Off';}catch(_){return 'Off';}})()}</div>
-      </div>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Straightens the stretched periphery a wide FOV produces. At 120&deg; the frame edge is
-        magnified 10.5&times; versus the centre and pulled 3.2&times; wider than tall &mdash; that is ordinary perspective,
-        not a fault, and it is why 90&deg; looks natural and 120&deg; does not. This trades it away: at full strength
-        the edge drops to 1.5&times; and shapes are exact everywhere. It keeps the full horizontal field and pays in
-        VERTICAL field (120&deg;&rarr;83&deg; at full), and magnifies the centre to match, so the scene is rendered at a
-        higher resolution to suit &mdash; measured at 3 fps for 3.9&times; the pixels. 0 is the classic image, unchanged.
-        No effect in VR, where the headset owns the projection.</label>
       </div>
     </div>
 
@@ -131439,49 +131507,17 @@ function buildSettingsPage() {
         <input type="checkbox" id="set-show-fps" ${input.showFps ? 'checked' : ''}>
       </div>
       <div class="setting-row">
-        <label>GPU keep-warm (anti-stutter)</label>
-        <input type="checkbox" id="set-keep-warm" ${input.keepWarm !== false ? 'checked' : ''}>
-      </div>
-      <div class="setting-row">
-        <label>3D Cockpit in VR (experimental)</label>
-        <input type="checkbox" id="set-cockpit-vr" ${input.cockpitVR === true ? 'checked' : ''}>
-      </div>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Seats your head at the pilot's eye inside the modelled cockpit while in the headset, with free head-look. Off: the classic VR view (ship hidden).</label>
-      </div>
-      <div class="setting-row">
         <label>Cockpit Solidity</label>
-        <input type="range" id="set-cockpit-solidity" min="0" max="1" step="0.05" value="${(typeof input.cockpitSolidity === 'number') ? input.cockpitSolidity : 0}">
-        <div class="value-display" id="val-cockpit-solidity">${(((typeof input.cockpitSolidity === 'number') ? input.cockpitSolidity : 0) * 100).toFixed(0)}%</div>
-      </div>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">How solid your own ship looks from the pilot's seat. 0% is the x-ray ghost shell &mdash; you see through the airframe to the world outside. 100% draws the hull with its real materials, like any other ship. Applies live, first person and VR (and to the chase camera when it backs inside the hull). The canopy glass stays glass at every setting.</label>
-      </div>
-      <div class="setting-row">
-        <label>Hull Lights</label>
-        <input type="checkbox" id="set-hull-glow" ${input.hullGlow !== false ? 'checked' : ''}>
-      </div>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">The painted light strips on every hull glow in the dark.</label>
-      </div>
-      <div class="setting-row">
-        <label>Headlight (auto)</label>
-        <input type="checkbox" id="set-headlight" ${input.headlight !== false ? 'checked' : ''}>
-      </div>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Comes on by itself when it gets dark &mdash; night, caverns, under water &mdash; and stays off in daylight. The cone of light shows in third person.</label>
+        <!-- (v50.43) three steps, not a slider - see _lssSolidityStep -->
+        <select id="set-cockpit-solidity" style="flex:1;">
+          <option value="0" ${_lssSolidityStep(input.cockpitSolidity) === 0 ? 'selected' : ''}>X-ray Color</option>
+          <option value="0.45" ${_lssSolidityStep(input.cockpitSolidity) === 0.45 ? 'selected' : ''}>X-ray</option>
+          <option value="1" ${_lssSolidityStep(input.cockpitSolidity) === 1 ? 'selected' : ''}>Solid</option>
+        </select>
       </div>
       <div class="setting-row">
         <label>HUD Gauge Labels</label>
         <input type="checkbox" id="set-hud-gauge-labels" ${input.hudGaugeLabels !== false ? 'checked' : ''}>
-      </div>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">The small curved captions on the rings (SPEED, NRG, SHIELD, HEALTH, CORE, AMMO). Ability names on the cooldown bars are unaffected.</label>
-      </div>
-      <div class="setting-row">
-        <label>HUD Size (1st person)</label>
-        <input type="range" id="set-hud-scale" min="0.75" max="1.75" step="0.05" value="${(typeof input.hudScale === 'number') ? input.hudScale : HUD_SCALE_DEFAULT}">
-        <div class="value-display" id="val-hud-scale">${((typeof input.hudScale === 'number') ? input.hudScale : HUD_SCALE_DEFAULT).toFixed(2)}x</div>
       </div>
       <div class="setting-row">
         <!-- (v50.29) the chase view's own HUD size, default 1.25 - see HUD_SCALE_TP_DEFAULT -->
@@ -131507,21 +131543,9 @@ function buildSettingsPage() {
         <input type="range" id="set-crosshair-opacity" min="0.15" max="1" step="0.01" value="${(typeof input.crosshairOpacity === 'number') ? input.crosshairOpacity : 0.72}">
         <div class="value-display" id="val-crosshair-opacity">${(((typeof input.crosshairOpacity === 'number') ? input.crosshairOpacity : 0.72) * 100).toFixed(0)}%</div>
       </div>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Three independent controls, not a master and two trims. The arcs and ticks follow the first, every word and number on the HUD follows the second, and the reticle follows the third &mdash; so you can keep the thing you aim with solid over a ghosted instrument cluster, or take it almost to nothing for a clean shot. The radar and its compass rose are exempt from all three and always draw at full strength. All apply live, on the flat HUD and in VR.</label>
-      </div>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Scales the gauge cluster, ability bars, reticle and captions on flat screen. Applies live. The radar and compass rose stay at their designed size. Note the painted cockpit frames are drawn around the 1.00&times; layout, so first-person recesses stop lining up with the rings as you move away from it. VR has its own separate size slider below.</label>
-      </div>
       <div class="setting-row">
         <label>Clip Recorder</label>
         <input type="checkbox" id="set-clip-rec" ${input.clipRec ? 'checked' : ''}>
-      </div>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Records each round. F9 (or the SAVE CLIP button when the round ends) downloads it as a .webm video. Costs a little performance while on.</label>
-      </div>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Small amber readout in the top-right corner. Updates 4x/second from a rolling 60-frame average. Auto-hides in VR.</label>
       </div>
     </div>
 
@@ -131529,9 +131553,6 @@ function buildSettingsPage() {
          govern render cost rather than input handling. -->
     <div class="settings-section">
       <h3>VR - Performance</h3>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Performance Mode is a throttle ladder for VR: it caps render scale, smoke, particles, light counts, gas budgets, effect pools, chemistry cadence, and level grid resolution. It does not hard-remove the major rock/cloud/lightning systems unless the strip switch below is on.</label>
-      </div>
       <div class="setting-row">
         <label>Performance Mode</label>
         <select id="set-vr-perf" style="flex:1;">
@@ -131556,32 +131577,16 @@ function buildSettingsPage() {
         <label>VR Water Effects</label>
         <input type="checkbox" id="set-vr-water" ${input.vrWater ? 'checked' : ''}>
       </div>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Off (default) gives a headset the cheap water: the flat mirror, no
-        displaced surface, no crest scan, and the ripple sim at half rate. On gives it the displaced
-        sheet, the wake and the spray. A standalone Quest cannot usually afford it; a PC headset
-        generally can. Applies live in the hub &mdash; on cavern maps the water is built on entry, so
-        leave and re-enter the map for it to take.</label>
-      </div>
       <!-- (v41.82) The mirror is its own tier: it is an entire extra render of the scene, where the
            row above is a vertex-shader tier on geometry that gets drawn anyway. -->
       <div class="setting-row">
         <label>VR Water Reflection</label>
         <input type="checkbox" id="set-vr-water-refl" ${input.vrWaterRefl ? 'checked' : ''}>
       </div>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Adds the planar mirror on top of VR Water Effects &mdash; the sky, the
-        land and the ships reflected in the surface. Needs VR Water Effects on to do anything. This is
-        the expensive half: a second render of the whole scene, several times a second. Turning it on
-        also gives the mirror the desktop refresh cadence rather than the phone one.</label>
-      </div>
       <div class="setting-row">
         <label>VR HUD Size</label>
         <input type="range" id="set-vr-hud-scale" min="0.75" max="3" step="0.05" value="${(typeof input.vrHudScale === 'number') ? input.vrHudScale : 3}">
         <div class="value-display" id="val-vr-hud-scale">${((typeof input.vrHudScale === 'number') ? input.vrHudScale : 3).toFixed(2)}x</div>
-      </div>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Scales the HUD plane in VR only &mdash; flat screen has its own HUD Size slider above, and the two never compound. Applies live inside a running session. Default 1.5&times; &mdash; the plane was sized to match a desktop window, which reads small through a headset.</label>
       </div>
     </div>
 
@@ -132979,29 +132984,10 @@ function buildSettingsPage() {
     input.showFps = !!showFpsChk.checked;
     saveSettings();
   });
-  const keepWarmChk = overlay.querySelector('#set-keep-warm');   // (v39.63)
-  if (keepWarmChk) keepWarmChk.addEventListener('change', () => {
-    input.keepWarm = !!keepWarmChk.checked;
-    saveSettings();
-  });
   // (v37.26) 3D cockpit switch ; _lssApplyShipRig reads input.cockpit3d every
   // frame, so the change is live without a restart or a view toggle.
-  const hullGlowChk = overlay.querySelector('#set-hull-glow');
-  if (hullGlowChk) hullGlowChk.addEventListener('change', () => {
-    input.hullGlow = !!hullGlowChk.checked;
-    try { _lssApplyHullGlow(); } catch (_) {}   // (v44.23) live, not "next respawn"
-    saveSettings();
-  });
-  const headlightChk = overlay.querySelector('#set-headlight');   // (v44.23)
-  if (headlightChk) headlightChk.addEventListener('change', () => {
-    input.headlight = !!headlightChk.checked;
-    saveSettings();
-  });
-  const cockpitVrChk = overlay.querySelector('#set-cockpit-vr');
-  if (cockpitVrChk) cockpitVrChk.addEventListener('change', () => {
-    input.cockpitVR = !!cockpitVrChk.checked;
-    saveSettings();
-  });
+  // (v50.41) the keep-warm, Hull Lights, Headlight and 3D Cockpit in VR checkboxes are gone (owner) - their
+  // values are locked to the shipped defaults in loadSettings.
   // (v37.08) Ship Headlight checkbox removed from settings (owner call) —
   // the headlight is always on (input.headlight default true); the
   // __headlight(0|1) console hook remains for debugging.
@@ -133040,21 +133026,8 @@ function buildSettingsPage() {
     });
   }
 
-  const hudScaleSel = overlay.querySelector('#set-hud-scale');
-  const hudScaleVal = overlay.querySelector('#val-hud-scale');
-  if (hudScaleSel) {
-    const _applyHudScale = () => {
-      const v = parseFloat(hudScaleSel.value);
-      if (!isFinite(v)) return;
-      input.hudScale = v;
-      if (hudScaleVal) hudScaleVal.textContent = v.toFixed(2) + 'x';
-      try { _hlArcTextCache.clear(); } catch (_) {}
-      try { _hlfLayerClear(); } catch (_) {}   // (v48.38) every layer is keyed on vmin anyway - this just frees them
-    };
-    hudScaleSel.addEventListener('input', _applyHudScale);
-    hudScaleSel.addEventListener('change', () => { _applyHudScale(); saveSettings(); });
-  }
-  // (v50.29) the third-person HUD size: the same shape as the one above, on its own setting
+  // (v50.41) the first-person HUD Size slider is gone (owner) - input.hudScale is locked to HUD_SCALE_DEFAULT.
+  // (v50.29) the third-person HUD size, on its own setting
   const hudScaleTPSel = overlay.querySelector('#set-hud-scale-tp');
   const hudScaleTPVal = overlay.querySelector('#val-hud-scale-tp');
   if (hudScaleTPSel) {
@@ -133064,7 +133037,7 @@ function buildSettingsPage() {
       input.hudScaleTP = v;
       if (hudScaleTPVal) hudScaleTPVal.textContent = v.toFixed(2) + 'x';
       try { _hlArcTextCache.clear(); } catch (_) {}
-      try { _hlfLayerClear(); } catch (_) {}
+      try { _hlfLayerClear(); } catch (_) {}   // (v48.38) every layer is keyed on vmin anyway - this just frees them
     };
     hudScaleTPSel.addEventListener('input', _applyHudScaleTP);
     hudScaleTPSel.addEventListener('change', () => { _applyHudScaleTP(); saveSettings(); });
@@ -133094,16 +133067,12 @@ function buildSettingsPage() {
   // with fresh knobs, and crossing the top of the range makes _ghostSeatWanted() false, which makes
   // the same tick restore the hull's own materials.
   const cockSolSel = overlay.querySelector('#set-cockpit-solidity');
-  const cockSolVal = overlay.querySelector('#val-cockpit-solidity');
   if (cockSolSel) {
-    const _applyCockSol = () => {
-      const v = parseFloat(cockSolSel.value);
-      if (!isFinite(v)) return;
-      input.cockpitSolidity = Math.max(0, Math.min(1, v));
-      if (cockSolVal) cockSolVal.textContent = (input.cockpitSolidity * 100).toFixed(0) + '%';
-    };
-    cockSolSel.addEventListener('input', _applyCockSol);
-    cockSolSel.addEventListener('change', () => { _applyCockSol(); saveSettings(); });
+    // (v50.43) a three-way select now (X-ray Color / X-ray / Solid) - see _lssSolidityStep
+    cockSolSel.addEventListener('change', () => {
+      input.cockpitSolidity = _lssSolidityStep(parseFloat(cockSolSel.value));
+      saveSettings();
+    });
   }
   const clipRecChk = overlay.querySelector('#set-clip-rec');
   if (clipRecChk) clipRecChk.addEventListener('change', () => {
@@ -135702,16 +135671,23 @@ function loadSettings() {
     input.cockpit3d = true;
     input.vrStripFx = false;
     if (typeof data.showFps === 'boolean') input.showFps = data.showFps;
-    if (typeof data.keepWarm === 'boolean') input.keepWarm = data.keepWarm;
     // (v38.46) data.cockpit3d is deliberately NOT restored - see the force above. Reading it back
     // here is what put the stale `false` straight back after the force on the first attempt.
-    if (typeof data.hullGlow === 'boolean') input.hullGlow = data.hullGlow;
-    if (typeof data.headlight2 === 'boolean') input.headlight = data.headlight2;   // (v44.23)
-    if (typeof data.cockpitVR === 'boolean') input.cockpitVR = data.cockpitVR;
-    // (v37.67) ONE-TIME MIGRATION. The 3D cockpit in VR was opt-in while the seat view was an
-    // opaque hull you could not see out of. The ghost shell makes it the whole point of VR, so a
-    // save that predates this flag gets it switched ON once ; after that the checkbox rules.
-    if (!data.cockpitVRv2) input.cockpitVR = true;
+    // ⭐ (v50.41) FIVE MORE RETIRED SETTINGS, FORCED THE SAME WAY. Owner: "take the hud size 1st person slider out of
+    // the settings / remove the keep warm option ... 3d cockpit in vr ... hull lights ... headlight ... Whatever those
+    // settings were as default will stay locked". Their rows are gone from Settings > Performance, so a saved
+    // `false` (or a saved first-person HUD size) would strand a player with no way back; the shipped defaults win
+    // over every save instead. saveSettings still writes the keys (always these values now), so an older build
+    // reading this save gets the defaults too. The console hooks __hullGlow(0|1) / __headlight(0|1) still flip them
+    // live for testing; the next load locks them again.
+    //   keepWarm  true   (v39.63 GPU keep-warm idle pass)        hullGlow  true   (theme strips)
+    //   headlight true   (auto - comes on in the dark)           cockpitVR true   (v37.67 seat view in VR)
+    //   hudScale  HUD_SCALE_DEFAULT (1.75, first person; third person keeps its own slider, hudScaleTP)
+    input.keepWarm = true;
+    input.hullGlow = true;
+    input.headlight = true;
+    input.cockpitVR = true;
+    input.hudScale = HUD_SCALE_DEFAULT;
     // (v37.08) headlight is no longer a setting (owner call): the saved key
     // is deliberately IGNORED so anyone who unchecked it historically gets
     // the always-on default back. __headlight(0|1) remains for debugging.
@@ -135724,11 +135700,9 @@ function loadSettings() {
     // since v36.19. Clamped on read as well as in _hlScale so a hand-edited
     // localStorage cannot wedge the HUD off-screen.
     if (typeof data.cockpitSolidity === 'number' && isFinite(data.cockpitSolidity)) {
-      input.cockpitSolidity = Math.max(0, Math.min(1, data.cockpitSolidity));
+      input.cockpitSolidity = _lssSolidityStep(data.cockpitSolidity);   // (v50.43) snapped to X-ray Color / X-ray / Solid
     }
-    if (typeof data.hudScale === 'number' && isFinite(data.hudScale)) {
-      input.hudScale = Math.max(0.75, Math.min(1.75, data.hudScale));
-    }
+    // (v50.41) data.hudScale is no longer read - the first-person size is locked above.
     if (typeof data.hudScaleTP === 'number' && isFinite(data.hudScaleTP)) {   // (v50.29)
       input.hudScaleTP = Math.max(0.75, Math.min(1.75, data.hudScaleTP));
     }

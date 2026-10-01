@@ -1587,6 +1587,14 @@ Owner: *"there's a bug with the bot vortex using the mega laser core... it looks
 **Jump:** `const SHIPPED_DEFAULTS` (~L53360)
 - **Symbols:** `saveSettings`, `BAKED_DEFAULTS`, `SHIPPED_DEFAULTS` (~1440-line blob), `loadSettings` (~L54802)
 - **⚠** `SHIPPED_DEFAULTS` is the canonical tuning snapshot; `loadSettings` runs at bottom-of-file init.
+- ⭐ **v50.41 RETIRED SETTINGS ARE FORCED, NOT RESTORED** (**Jump:** `FIVE MORE RETIRED SETTINGS, FORCED THE SAME WAY` · `PERFORMANCE, CONTROLS ONLY`). Owner: *"take the hud size 1st person slider out... remove the keep warm option... 3d cockpit in vr... hull lights... headlight... remove all the paragraphs that describe the stuff in performance / Whatever those settings were as default will stay locked"*.
+  - `loadSettings` forces `keepWarm`, `hullGlow`, `headlight` and `cockpitVR` to true, and `hudScale` to `HUD_SCALE_DEFAULT` (1.75), over any save. This follows v38.46's `cockpit3d` / `vrStripFx` pattern.
+    - Without a control, a saved `false` would strand a player with no way back.
+    - `saveSettings` still writes the keys, so older builds read the same values.
+  - The console hooks `__hullGlow(0|1)` and `__headlight(0|1)` still flip them live; the next load re-locks them.
+  - The Performance tab lost all 17 grey description rows; only controls remain. The Active GPU name row stays: it is data, not a description.
+  - ⚠ The reopen sync (`_refreshSettingsValues`) now syncs `set-hud-scale-tp`. v50.29 had added that slider without a sync.
+  - ⚠ **The (v47.21) note above that "A SAVED SETTING STILL WINS" for hudScale is no longer true** for first person.
 
 #### Procedural wall textures — `~L55293`
 **Jump:** `function _initWallTextures` (~L55491)
@@ -9114,6 +9122,16 @@ Owner: *"i find our water to look a bit jello like... i like how this water move
       - The rose is pinned at 1x, so the line hangs off its 13.5 vmin rim; the rose's letters ride inside the rim. The text keeps its own HUD-size font.
       - `_hlTPMap()` is now the ONE place the third-person radar/rose slot is decided; both readers use it. It sits just above `_hlDrawHUD`, inside the HUD lab's extracted span.
       - Live: `window.__hudTP = { mapX, mapY, aegisGap: 1.2 }`. First person and VR keep the bottom-centre line.
+  - ⭐⭐ **v50.44 THE CHASE CAMERA FRAMES EVERY SHIP THE SAME AT EVERY FOV** (**Jump:** `EVERY SHIP KEEPS ITS FRAMING AT EVERY FOV`, `function _lssTpBoomK`). Owner: *"make the ships look the same size regardless of FOV / at 90 degrees (with full wide view correction, 1), pyro fits on the screen nicely"*.
+    - The boom distance is SOLVED per ship: the hull's projected bounding box, through the presented lens with Panini included, covers the same screen share as at FOV 90 / correction 1.
+      - The reference boom is v43.90's own (174.5 u at aspect 1.654). The solve is a bisection, cached per ship x FOV x d x aspect.
+    - Measured on Pyro at d 1: 60 -> 214.7 u, 75 -> 191.9, 90 -> 174.5 (unchanged), 105 -> 161.2, 120 -> 151.6. That matches the offline model `boomfit.mjs` (scratchpad).
+    - ⚠ **A centre-plane dolly zoom (D ~ M / tan(fov/2)) is WRONG here.** The boom is shorter than a long hull, so the NEAR tail fills the screen.
+      - At 120 / d 1 it gave 139 u, and Pyro's box overflowed both edges.
+      - With the correction off at 120 it gave 69 u: inside every hull.
+    - The height (42) is not solved. VR is 1, and potato solves with d = 0.
+    - It reads `input.fovDeg`, never the zoomed `camera.fov`. The pre-round cinematic reads it too.
+    - Knobs: `window.__par = { boomRefFov: 90, boomRefD: 1, panBoom: 0.35, boomFit: false }`. `boomFit: false` gives the v43.90 boom.
   - ⭐ **v50.30-50.34 FIRST-PERSON LEGIBILITY + SLAYER's GREEN SCREENS** (**Jump:** `ON IS LIT, OFF IS DARK` · `THE CAPTIONS KEEP THEIR SIZE` · `THE CAPTION UNDER ITS BAR` · `"DASH" UNDER THE DOTS` · `THE CLASS COLOUR FIRST`). Five builds, one change each. Owner: *"yes! nicely done"*.
     - **v50.30, ability icons:** a READY glyph and its double-flash draw OUTSIDE the dark filter, over a near-black keyline. NOT READY keeps v50.27's dark silhouette.
       - ⚠ **A uniform darken erases binary state.** v50.27 took "lit theme colour + glow" and "near-black silhouette" to two shades of dark, and the white flash to grey. Owner: *"too hard to see if the icons... are on or off... i barely saw the flash"*.
@@ -9127,3 +9145,12 @@ Owner: *"i find our water to look a bit jello like... i like how this water move
     - **v50.34:** `cockpit_CP_screen` takes `LSS.CLASS_COLORS` before `_THEME_PAINT_HEX`.
       - Only Slayer has a paint entry, LIME #bbff44, used for the v44.40 strip match. Lit, it read *"very yellow"*; the class colour is #44ff66.
       - Live, on the player's own hull: `window.__cockpit.screen = { hex: 0x44ff66 }`. It writes emissive's COLOUR only, which `_dimHullMat` never touches.
+  - ⭐ **v50.42 THE SOLIDITY SLIDER's TOP HALF WORKS AGAIN** (**Jump:** `THE DEFAULT BLEND FOLLOWS THE SOLIDITY PHASE` · `function _ghostHullKnobs` · `function _ghostHullTune`). Owner: *"sliding it from 0 to 99 makes it go xray to white xray, then 100 is solid"*; offered fix / switch / remove, they chose fix.
+    - v42.12's phase B (`XRAY_END` 0.45 .. 1) turns depth writing back on so alpha can climb to a real 1.
+    - ⚠ v42.13 made ADDITIVE the default blend (the gun-pod shimmer fix), and `_ghostHullTune` exempts additive from depth writing. So phase B never ran: alpha went to 1.0 across 6-8 stacked additive layers, which is white, then the hand-back at `SOLID_AT` popped it solid.
+    - `_ghostBlendMode(G, solidPhase)` now defaults to additive only in phase A and NORMAL once phase B asks for depth writing. An explicit `ghost.blend` or `ghost.additive` still wins.
+    - Phase A is untouched, so the third-person zoom ghost (`_ghostZoomSolidity`, which ramps inside phase A) looks exactly as before.
+    - ⚠ `window.__cockpit.ghost.solidity` OVERRIDES the Settings slider while set. `delete` it after a test, or the owner's slider looks broken.
+  - **v50.43 SOLIDITY IS THREE STEPS** (**Jump:** `COCKPIT SOLIDITY IS THREE STEPS`, `_lssSolidityStep`). Owner: *"it should be 0, 45, or 100 as the options... 0 can be called xray_color, 45 can be called xray, and 100 called solid"*.
+    - Settings shows a select: X-ray Color (0), X-ray (0.45 = `XRAY_END`, the tint gone) and Solid (1 = the hull's own materials).
+    - Stored values snap to the nearest step on load. The console knob stays continuous.
