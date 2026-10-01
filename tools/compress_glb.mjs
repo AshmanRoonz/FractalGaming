@@ -120,7 +120,11 @@ const ONLY = (() => { const i = process.argv.indexOf('--only'); return i > 0 ? p
 // the GPU draws. Bytes: neutral. Frame time and spawn hitches: the whole point.
 // (campaign) 1.2 -> 1.3: new 'prop' recipe for the campaign ARTIFACT podium. No other file's
 // output changes.
-const RECIPE_VERSION = '1.3';
+// (v49.93) 1.3 -> 1.4: `baseColorMax` caps a ship's colour map (PNG/JPEG sources only). The
+// Meshy concept hulls arrive with 4096 colour maps - 4x the texels of the c1seat art's 2k,
+// ~85 MB of VRAM per map with mips - and the seven ship entries now cap them at 2048. Files
+// without the knob (the carriers) are unchanged.
+const RECIPE_VERSION = '1.4';
 // The game's marker empties. join() leaves every absorbed part behind as a node holding
 // an EMPTY mesh; prune strips the mesh, then everything mesh-less that is not one of
 // these is dropped (prune's keepLeaves would otherwise keep ~240 dead empties).
@@ -174,9 +178,15 @@ const OVERRIDES = {
   // (~58k -> ~29k tris) and bring back the surface wobble the 0.5 pass was
   // tuned to avoid. simplify: 1.0 skips the simplifier ; weld + quantize still
   // run, which is what recovers the byte size the float32 Blender export lost.
+  // (v49.93) Since 2026-09-30 the seven are the owner's Meshy CONCEPT hulls (backups/concept_ships:
+  // the canopy cut to glass, the cockpit pod seated under it, the textured tub, the owner's own
+  // gun/thruster/cockpit markers), decimated in Blender to ~60k hull triangles with a normal map
+  // re-baked from the full-resolution hull; ~95-100k triangles a ship with the cockpit. Still
+  // Blender-decimated, so still simplify: 1.0 ; baseColorMax 2048 because the colour maps are 4k.
+  // The c1seat sources this replaced are in backups/ships_src_c1seat_2026-09-30.
   ...Object.fromEntries(['blaster', 'puncture', 'pyro', 'slayer', 'syphon', 'tracker', 'vortex'].map((s) =>
-    [`ships/${s}.glb`, { simplify: 1.0, join: true, mobile: { baseColorMax: 1024, lean: true, cockpitRatio: 0.35 },
-                        reason: 'Blender-authored from the already-simplified hull ; c1seat cockpit parts joined per material' }])),
+    [`ships/${s}.glb`, { simplify: 1.0, join: true, baseColorMax: 2048, mobile: { baseColorMax: 1024, lean: true, cockpitRatio: 0.35 },
+                        reason: 'Blender-decimated concept hull + cockpit pod ; parts joined per material ; colour capped at 2k' }])),
   // (v37.73) the flying carrier: 565k triangles decimated to 120k in Blender with its own UVs and
   // all three maps kept. Simplifying again would decimate twice.
   'objects/carrier.glb': { simplify: 1.0, reason: 'Blender-decimated capital hull' },
@@ -253,6 +263,7 @@ const RECIPES = {
       // is a generation of loss for no bytes (the c1seat hulls ship WebP already).
       encoder: sharp, targetFormat: 'webp', quality: 88, formats: /^image\/(png|jpeg)$/,
       slots: /baseColorTexture/,
+      ...(o.baseColorMax ? { resize: [o.baseColorMax, o.baseColorMax] } : {}),   // (v49.93) see RECIPE_VERSION 1.4
     }));
     steps.push(textureCompress({
       encoder: sharp, targetFormat: 'webp', quality: 85, formats: /^image\/(png|jpeg|webp)$/,
