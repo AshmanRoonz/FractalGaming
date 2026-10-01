@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "50.79";
+const LSS_BUILD = "50.80";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -45117,7 +45117,7 @@ const _SHIP_GUN_ROLES = {
   TRACKER: { main: [1], sonar: [8], rockets: [2, 3, 4, 5, 6, 7], core: [2, 3, 4, 5, 6, 7] },
   SYPHON:  { main: [1, 2], rockets: [3], syphon: [3] },
   PYRO:    { main: [1], gas: [2], chain: [3] },
-  PUNCTURE: { main: [1], cluster: [2] },   // (v49.94)
+  PUNCTURE: { main: [1], cluster: [2], core: [2] },   // (v49.94)
   BLASTER: { main: [1, 7, 2, 8, 3, 9, 4, 10, 5, 11, 6, 12] },
 };
 function _shipGunRoles(loadoutKey, gunNodes) {
@@ -48178,7 +48178,7 @@ class Bot {
           dir.z + (Math.random() - 0.5) * 0.14
         ).normalize().multiplyScalar(900);
         const origin = (this.mesh && typeof shipMuzzleWorld === 'function')
-          ? shipMuzzleWorld(this.mesh, this._coreFired, this._tempVec3c)
+          ? shipMuzzleWorld(this.mesh, this._coreFired, this._tempVec3c, 'core')   // (v50.80) G2, as the player's
           : this._tempVec3c.copy(this.position);
         const proj = new Projectile(origin, vel, 7000 / 15 * 0.6, 150, 'bot', LSS.CLASS_COLORS.PUNCTURE);
         proj.smokeTrail = true;
@@ -75713,7 +75713,7 @@ function updateAbilities(dt) {
         const _pbLaunchers = _PLAYER_LAUNCHER_FRACS.PUNCTURE;
         player._megaBarrageLaunchIdx = (player._megaBarrageLaunchIdx || 0) + 1;
         if (typeof shipMuzzleWorld === 'function' && player.mesh) {
-          try { _pbOrigin = shipMuzzleWorld(player.mesh, player._megaBarrageLaunchIdx, new THREE.Vector3()); } catch (_) {}
+          try { _pbOrigin = shipMuzzleWorld(player.mesh, player._megaBarrageLaunchIdx, new THREE.Vector3(), 'core'); } catch (_) {}   // (v50.80) G2, not the railgun
         }
         if (!_pbOrigin && _pbLaunchers && typeof _computeScreenMuzzleWorld === 'function') {
           const _f = _pbLaunchers[player._megaBarrageLaunchIdx % _pbLaunchers.length];
