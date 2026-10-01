@@ -9041,3 +9041,27 @@ Owner: *"i find our water to look a bit jello like... i like how this water move
     - **Knobs:** `window.__cockpit.frame = false` (the baked cockpit1) or `{ margin, lift (vmin), maxFwd, maxBack, maxUp, maxDown }`.
     - ⚠ **The rose still pitches.** The v35.23 tilt's pitch term moves the HUD while the console does not; `window.__hud3d.pitch = 0` would pin it (owner's call). Bank: the HUD rolls 0.55 deg/deg, the console ~0.5 on screen.
     - ⚠ **ADS uses the SETTING, never the zoomed `camera.fov`**, or every aim dollies the seat (the v44.65 lesson).
+    - ⚠ **Consequence: nothing seen from the seat can be baked against `cockpit1` any more.** The eye moves per FOV. v50.13's glass seam, cut through the baked eye, showed *"two little horns"* from the solved one.
+  - ⭐ **v50.15 YOUR OWN CANOPY GLASS IS NOT DRAWN FROM THE SEAT** (**Jump:** `YOUR OWN CANOPY GLASS IS NOT DRAWN FROM THE SEAT` · `_cockpitGlassObjs` · `userData._canopyGlass`).
+    - **Owner, on Slayer:** *"a straight line going horizontally across the screen looking like part of the window but it's weird make it look like the glass is slightly two colors"*.
+      - ⚠ That DESCRIBED the glitch. It was not a request. v50.12-50.14 built a two-tone tint, then cleaned its seam, then moved the seam per pixel, until the owner said *"the line is back, with the blue on the lower half of the screen"*. The tint is gone from both the recipe and the game.
+    - **Real cause:** Slayer's glass is LOW and CLOSE (its roof is 2.3 cm, model units, over the eye) and its windshield slopes below eye height. So the pilot looks DOWN onto the glass's outer face.
+      - 829 of 2840 faces faced the eye. All are wound correctly and nearly edge-on (median cos 0.065).
+      - They drew the glass's dark-blue tint below the horizon line. The other six hulls had 2-19 such faces.
+    - **Fix:** the rig hides the player's own `canopy_glass` meshes while the cockpit is live, and `_lssCockpitOff` shows them again.
+  - ⭐ **v50.24 + v50.25 THE HUD ON THE CONSOLE'S SCREENS - the cockpit untouched** (**Jump:** `THE HUD ON THE CONSOLE's SCREENS` · `function _lssHudPanels` · `function _hlfDrawPanels` · `function _cfPanels` · `function _hlfIconState` · `THE SOLVED EYE STAYS IN THE COCKPIT`). Owner: *"nice"*.
+    - **v50.24 is the Pyro fix ALONE.** At FOV 60 the frame solve backed Pyro's eye 3.05 units, through the hull's skin behind the seat (*"his first person view is blocked"* / *"61 does not do it, 60 does"*).
+      - `_cfClearT` ray-casts the move against the ship's solid meshes and stops `CF_CLEAR` (0.2) short. Every unblocked solve is unchanged.
+    - **v50.25 is the HUD ALONE.** The solve numbers are identical to v50.24 for every hull at FOV 60/61/120, so the console, the crosshair and the HUD's CSS tilt are exactly as before (owner: *"just the HUD, nothing else"*, *"the tilt behavior can stay"*).
+      - CENTRE: the radar + compass shrink to rest at the bottom of the centre screen's inscribed circle. That circle is the solve's own fit, `_cfSol.panel`. The shield/HP/core arc (`_hlfDraw 'top'`, scaled at its own HUD-size vmin) wraps the rose's top, concentric (*"the compass will shrink slightly, and the health/shield/core arc will shrink slightly"*).
+      - LEFT: the three glyphs in a triangle, plus a vertical NRG bar.
+      - RIGHT: a vertical AMMO bar, plus the dash pips.
+      - Everything placed against the screens goes through the tilt's INVERSE at level attitude (`toCanvas`).
+    - ⛔ **History (v50.16-50.23, all rolled back):** to make room, those builds moved the eye (the solve's margin/lift) and dropped the tilt, which moved the whole cockpit. Owner: *"not sure why you moved anything when i just asked for the HUD"*.
+      - Lesson: one visible change per build, and nothing they did not ask to move.
+      - The sources are in `LSS/backups/`.
+    - ⚠ **`_dimHullMat` OWNS every opaque hull material's `emissiveIntensity` every frame**, from `userData._baseEmissiveI`. So `__cockpit.screen.glow` (v50.07) does not stick past one frame. Write the base.
+      - The owner's *"the screens on the console are basically the same color as the HUD so it blends in"* is still OPEN. Darkening them was part of a rejected build; offer it alone.
+    - **Knobs:** `window.__hudPanels = false` (the ring layout) or `{ compass, gap, pad, bar, icon, pip }`.
+      - Every other ship already culled to a clear view, so nothing else changes.
+      - `window.__cockpit.glass = true` draws it from the seat again.

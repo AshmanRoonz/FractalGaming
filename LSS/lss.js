@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "50.12";
+const LSS_BUILD = "50.25";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -23,7 +23,7 @@ if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
 const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
-const _MODELS_VERSION = '50.12';   // (v50.12) RAILS IN THE CONSOLE's OWN ARMOUR, SLAYER's TWO-TONE GLASS, TRACKER's BLEMISH OFF, SYPHON's EYE DOWN, both sets. (1) Owner: "make the frame match the texture and pattern of the console arms, and connect to it properly" - the arm-panel rails wear cockpit_CP_armor: console1's own colour + normal maps cut from one clean arm-panel region of its atlas (canopy/armor_tile*.png), MIRROR-repeated along each rail (sampler MIRRORED_REPEAT, u = arc / the tile's own aspect) - and each rail now starts with a six-section lead-in from the console arm's own top-rear corner, so rail and arm meet top to top. (2) Owner, on Slayer: "a straight line going horizontally across the screen looking like part of the window but it's weird make it look like the glass is slightly two colors" - the line is the frame's front bow across its wall-to-wall glass; canopy_tint_lo (smoked, a .32) below the bow's height and canopy_tint_hi (a faint clear .07) above, on an INWARD-wound copy of the glass, drawn unlit (see buildModelShipMesh). (3) Owner: "the blemish is the smaller ball on the back of that ball" (the ball = the weapon pod, kept) - the block behind Tracker's pod and the pod's thin rear tab are flattened onto a membrane solved from the trough floor all round them, their texels repainted in the hull's own atlas (no UV edits: editing UVs was the earlier "swirly mess"), canopy/scripts/tracker_blemish.py. Three earlier cuts flattened the POD and were never shipped. (4) Owner: "syphon's cockpit C1 needs to lower a little, closer to the other's height" - markers.json cockpit1 z 0.09 -> 0.0677 (the v50.10 eye solve now does the rest per FOV).   // (v50.09) HULLS WITHOUT SLITS + SLIMMER BEVELLED ARM PANELS, both sets. (1) Owner: "why does blaster's model look like it has holes slashed throughout it?" - every concept game hull (<ship>_g, 60k) had been decimated straight from the glTF import, whose vertices are split along every UV seam: each side of a seam lost different vertices and the seams opened into slits (blaster_g: 47k boundary edges in 60k faces; pyro 44k), which the double-sided hull shows as dark slashes. Now: weld a copy of the full-resolution hull (remove_doubles 1e-6 - UVs live per loop and survive; every hull welds CLOSED, 0 boundary edges), decimate that to 60k, re-bake the normal map; the game hulls' only open edges are the canopy rim (110-211). The seat pod (cockpit_g2) rebuilt the same way (its remaining edges are its own loose panels). canopy/scripts/weld_full.py. (2) Owner: "the panels are too big, make them narrower and beveled" - arm_in 2.6 -> 1.3, arm_drop 1.6 -> 0.9 tube widths, chamfers on both top corners. The new hulls shifted Blaster's console slightly (gap 0.376, front room 0.458).   // (v50.08) BLACK ARM PANELS + CONSOLES OFF THE NOSE, both sets. (1) Owner: "i like how we did slayer's cockpit edges... like little extra panels that bring together the console and cockpit bowl/seat, and acts as a window frame... we should do it on the other ships" / "it's just the window frame is built cooler instead of a tube" -> asked to choose, chose "build armor panels, black, that extend the arms of the console to add a nice finish to the window frame". Slayer's look was its own side armour beside its low sill (nothing was built there); the others only had the frame tube, the bowl walls hiding everything else. canopy_proc.py build_armpanels: a black rail (canopy_frame_armor) on top of the tube along each side, from just ahead of the console's arm tips back along the sill, tapering out before the rear arc - built in a LEVEL frame (true up, out across the canopy), because on Tracker's steep walls the hull's own frame pointed "out" straight up. Not on Slayer (its armour is the look). Tried and withdrawn on the way: sizing the console so its wings fit inside the bowl (owner: "the extra panels were not just the console's wings"), and a hull-paint band (the Pyro prototype). (2) Owner: "tracker, blaster, pyro, their consoles are still squished into the nose and need to come away from the nose tip toward the back of the ship": console_front_room 0.45 pod units for those three - the gap steps back from 0.651 until the console's front clears the tip by that much, re-sized at every step: BLASTER gap 0.401 (front room 0.264 -> 0.521, k 0.80 + pedestal), PYRO 0.426 (0.262 -> 0.470), TRACKER 0.351 = the floor console_gap_min (0.093 -> 0.326). compress_glb died silently once more (puncture's phone copy) - caught by the mtime + material check, re-run.   // (v50.07) SOLID SHIP-COLOUR SCREENS, NO WINDSHIELD SPOT, TRACKER's SEAT BACK, both sets. (1) Owner: "syphon, blaster, puncture, tracker, all have one small white spot on their windshield, looks like it's supposed to be glare, but it's just in the same spot" - both canopy glass builders wound the faces INWARD and canopy_glass was double-sided, so the pilot saw the canopy's inside with the cockpit light rig (it rides the eye) mirrored at a fixed place on screen. The glass is now wound OUTWARD and exported single-sided - the v37.34 design ("single-sided so from the seat it culls to a clear view"); outside it is unchanged. (2) Owner: "tracker's seat is gone" - v50.06's seat_back 0.40 had slid it under the rear hull. Back to 0; Tracker's console keeps the standard gap at full width and the ~9% that pokes through the nose is clipped (inside the nose skin, behind the hood). (3) Owner: "fix the panels on the consoles... make them the color of the ship they belong to, and solid" - console1's three screens (the recessed y=0.02 plane of its face: centre 32 / left 49 / right 53 faces) are their own material, cockpit_CP_screen, which buildModelShipMesh paints solid: near-black base, emissive = the ship's paint hue (_THEME_PAINT_HEX, else LSS.CLASS_COLORS). Live: window.__cockpit.screen = { glow: 1.6 }.   // (v50.06) ONE CONSOLE DISTANCE FOR THE FLEET + HOODS, both sets. Owner: "look at the distance of the console between slayer's console position, and the seat/cockpit placement C1... that should be the same distance in all the other ships... slayer has a good distance" / "for some, you may have to move the seat back, if the console protrudes the nose" / "then each ship needs a hood to cover the open space between the console and nose tip" / "tracker? the whole bowl might have to move further into the ship". Measured eye -> console near face in POD units (the seat is fitted per canopy): SLAYER 0.651, SYPHON 0.685 (the owner's "perfect"), PYRO 0.598, BLASTER 0.424, TRACKER 0.323, VORTEX 1.305, PUNCTURE 1.489. canopy_proc.py console_mode "gap": near face at 0.651 pod units ahead of the (clamped) eye on every ship, wall to wall at its wing tips (k 0.95-1.0), its TOP ON THE CANOPY'S FRONT FRAME LINE (+0.5 deg) - resting on the floor had left Puncture/Vortex 33/26 deg down, half hidden by the bowl rim; a console that then floats gets a dark PEDESTAL (Puncture 0.048, Vortex 0.053 model units), one that meets the front ramp sinks into it. TRACKER fits nowhere at that gap (its short canopy puts the console on the lip) until the seat slides back 0.40 pod units (seat_back, ~5.5 game units) - and the PILOT moves with the seat (the eye clamp only ever pulled the owner's marker forward, so a seat_back first moved nothing). HOODS: a dark cowl (cockpit_CP_hood, matte, double-sided) from just inside the console's front to the tip of the opening, spanning the glass rim, its centre line on the pilot's line of sight over the console top - so from the seat it is always behind the console (the first cut, level from the console top, rose over it on the long canopies), from outside the empty bowl in front of the console is gone. The live console knobs now carry the hood and pedestal along (_cpConsoleFollower).   // (v50.05) SLAYER's GLASS GOES DOWN THE WALLS, both sets (Slayer only). Owner: "i need to also re-draw slayer's cutout from the side, it doesn't go down far enough", redrew the side outline in the canopy tracer (a closed shape; draw.html gained a Shape: open/closed toggle - the closing edge is carried as a repeated first point, only the lowest edge is used). The new sill (z 0.005 at the front, 0.024 mid) was NOT what limited the cut - nor was the old one (0.033): slices of the full hull show a boxy nose with near-vertical walls ~0.015-0.025 OUTSIDE the top trace, so only the roof was ever selected (rim z 0.07-0.14). canopy_proc.py SHIP_DEFAULTS slayer: top_widen 0.03 (a sideways-widened copy of the top trace for the face SELECTION only - the real trace still sizes the seat pod), occl_normal (walls are tested for occlusion along their own normal, 0.02 range, not straight up under the roof edge), glass_polar (rebuild_glass_polar: each section runs from the left rim up over the roof and down to the right rim along the full-resolution hull's own cross-section - rays fanned from the section middle at rim height, resampled to even arc length - instead of a height field that can only draw a wall as one sheer strip; ends fan closed only where they taper). Rim now z 0.005 -> 0.023 along the sill, rising on the owner's back edge; the frame follows it (a bow across the vertical front edge the owner drew). The wider opening re-fitted the console larger (scale 0.076 -> 0.102, top 9.7 deg).   // (v50.04) CONSOLE1 BIGGER, capped by the FRAME line only, both sets. Owner, on v50.03: "in slayer it looks tiny" / "it looks perfect for syphon". Syphon's console was capped by its own front frame line (25.6 deg below the eye); Slayer's by the extra 16-deg line (its frame is at 9.1), and the nose sweep then took the first spot where one of 0.55 x the widest opening fitted - on a long canopy that is small AND far from the eye. canopy_proc.py now: console_cap "frame" (top just under the front frame line, +0.5 deg) and console_min_w 0.80, with SHIP_DEFAULTS keeping SYPHON exactly as the owner liked it (0.55: k 0.88, 26.1 deg, front at pod x -1.262 - reproduced) and TRACKER at 0.55 (at 0.80 nothing fits under its 19.8-deg frame; the fallback clipped it to shards). Now: SLAYER k 1.0 at 9.6 deg (scale 0.0514 -> 0.076), PYRO 0.94 / 11.7, VORTEX 0.94 / 8.1, PUNCTURE 1.0 / 13.3, BLASTER 1.0 / 20.7. compress_glb died silently AGAIN mid-run: puncture's PC file was written, its phone copy was left from v50.03 - verify shipped mtimes against assets_src, not just contents.   // (v50.03) CONSOLE1, PUSHED INTO THE NOSE, both sets. Owner, flying v50.02: "it needs to fit into the nose a bit better... let's try console1.glb". console1 is Meshy's full-detail export (734k faces, 4k maps): a WRAPAROUND dash - three screens under a curved hood, side wings sweeping back along the cockpit walls. Welded (23k seam duplicates) and decimated to 20k in Blender with its normal map RE-BAKED from the full model (console1_normal, 2k), screen-glow emissive by the same HSV mask (console1_emissive.png, 0.34% of the atlas), material cockpit_CP_console1 (its own name: the fleet texture share keys on names). Placement (canopy_proc.py console_mode "nose"): it RESTS ON THE BOWL (the middle of its underside on the tub surface), spans the bowl WALL TO WALL at its wing tips, keeps its top under both the 16-deg line and the canopy's FRONT FRAME line + 0.5 deg (measured from the eye: Vortex 7.6, Slayer 9.1, Pyro 11.2, Puncture 12.8, Tracker 19.8, Blaster 20.2, Syphon 25.6 - so on the three steep noses a 16-deg console had poked above the frame, very likely the v50.01 "sticks up"), and is pushed as far forward as it fits: the sweep starts at the tip of the opening and takes the first position where one of at least 0.55 x the widest opening fits inside the hull. Result: the console sits at the FRONT of the bowl instead of mid-cockpit (pod x of its front: PUNCTURE -2.26, VORTEX -1.88, SLAYER -1.58, PYRO -1.37, BLASTER -1.32, SYPHON -1.26, TRACKER -0.93), 0.64-0.88 of wall width, tops at 16 / 20.3 (Tracker) / 20.7 (Blaster) / 26.1 (Syphon). Blender renders at the owner's 52-deg view: screens visible on Puncture/Pyro/Slayer/Vortex (only the hood tip showed on v50.02's Slayer). Live knobs: window.__cockpit.consoleFwd (game units into the nose) + consoleDeg.   // (v50.02) THE CONSOLE SITS LOWER, by ANGLE, both sets. Owner, flying v50.01: "looks like it sticks up too much". The v50.01 placement was a fixed 0.14 pod-unit drop below the eye, which left the hood's top 10-21 deg below the eye line depending on how far ahead of the eye each console landed (VORTEX 9.9, PYRO 10.0, SLAYER 10.8, PUNCTURE 11.1, TRACKER 12.8, BLASTER 16.6, SYPHON 21.1) - at the owner's view (Panini, FOV 61 = 90h/52v presented) the high ones filled the bottom ~28% of the screen. canopy_proc.py now places the console's highest-appearing point (max over vertices of elevation from the FINAL eye, i.e. cockpit1 after fix_all's pod x -0.30 clamp) exactly console_deg = 16 below the eye line on every ship, then fits as before (size first, then 3/6 deg lower, then back toward the pedals). All seven at 16.0 except SYPHON 22 (0.82 size; it does not fit higher under its bubble canopy). Live knob to judge the number before the next bake: window.__cockpit.consoleDeg (see _lssConsoleKnob).   // (v50.01) THE INSTRUMENT CONSOLE, both sets. Owner, on the textured bowl in front of the pilot: "that's what the player sees a lot... and right now it looks like shit", then supplied backups/concept_ships/console.glb (Meshy: three screens under a glare-shield hood, 15.2k tris, 4k maps). canopy_proc.py build_console turns it to face the pilot, tilts it back 12 deg, and FITS it: the largest console (0.52-1.0 of 0.9 x the opening width at pod x -0.80) that keeps <= 1% of it outside the original hull, lowering it (drop 0.14 -> 0.22 below the owner's cockpit1 eye line) and sliding it back toward the pedals (pod x -0.80 -> -0.65) only when it does not fit. The first un-fitted cut clipped Syphon's to 56% (floating shards in the pilot's view: a bubble canopy over a narrow nose) and took the hood off Blaster's and Tracker's. Fits: PYRO/SLAYER/VORTEX/PUNCTURE full size at -0.80 (Puncture -0.70), BLASTER full size dropped to 0.22 at -0.75, TRACKER 0.88 at -0.65, SYPHON 0.76 dropped 0.22 at -0.65. Material cockpit_CP_console (cockpit part: maps kept, no theme strip, no shadow, hidden past 300 u) with a NEW emissive map, backups/concept_ships/canopy/console_emissive.png: only the screen graphics glow (HSV mask S > 0.40-0.62 and V > 0.30-0.55 smoothstepped over the colour map, 0.75% of the atlas) so the dark body stays lit by the cockpit rig. +15k tris a ship. Textures are shared fleet-wide at load (_lssShareCockpitTextures) - otherwise seven copies of the console, bowl and pod maps.   // (v49.99) THE OWNER'S NEW BOWL TEXTURE, both sets: LSS/concept/shaders/ship_inside.png replaced with a flat, dark (mean 37/255), mirror-symmetric albedo made from the ChatGPT prompt - no baked highlights, which is what made the first one read as lit. Used at x1.0 now (canopy_proc tub_dark 0.55 -> 1.0; the ship_inside_dark copy is gone), packed into the .blend, WebP in the GLBs.   // (v49.98) the cockpit bowl MATTE (metallic 0.35 -> 0.05, roughness 0.55 -> 0.9), both sets. Owner, first person with solidity maxed: "it looks too shiny and reflective". The texture itself is being replaced next (owner is generating one); ship_inside_dark (x0.55) stays until then. Also: compress_glb runs over all seven ships died partway TWICE in this session (v49.96 left Vortex + phone Tracker stale, v49.98 left Slayer, then Syphon) with nothing on stderr - compress one ship at a time and CHECK every shipped file's tub material / frame after.   // (v49.96) CANOPY FRAME + GRID GLASS + DARKER BOWL, both sets. Owner, flying v49.95: "some of the ships have uneven glass, and looks like jagged edges" / "the cockpit texture we added is too bright, and it has no seam/frame where it meets the glass" / "i think this is a fix for blender, not knobs". ROOT CAUSE of the uneven glass: the 60k hulls were decimated with their glTF UV seams OPEN, so each side of a seam lost different vertices - the canopy triangles arrived as 8-20 islands with slits no weld closes, the smoothing pinned both sides of every slit (creases), and edges ran ragged. The glass is now a CLEAN GRID (canopy_proc.py rebuild_glass_grid): sections between the OUTERMOST rim points (extremes ignore interior slits), heights from the FULL-resolution hull, rim line smoothed along the sections, 40 Taubin passes - one sheet, one edge. A rounded dark FRAME (<ship>_canopy_frame, material canopy_frame - deliberately not 'cockpit_frame*', which buildModelShipMesh hides) is swept along that edge across the join, so hull, glass and bowl all end under it and the hull's ragged cut is covered. ship_inside.png is baked darker (x0.55, 'ship_inside_dark'). ~108k tris / 5 draws a ship PC, ~77k phone; 4.5-5 MB PC, 2.2-2.4 MB phone. NOT fixed by geometry: at FOV 120 near is 3 game units (~23 cm) and a ~1 m canopy puts rim and bowl beside the head inside it, so the extreme screen corners still slice - that needs a render change, not a model one.   // (v49.95) THE COCKPIT BOWL, both sets. Owner, flying v49.94: "blaster's geometry got messed up a lot, broken bits around where the hull was cut" / "syphon and blaster have some geometry covering the window, but only see it with low FOV" / "i don't like how the black part that we textured, how it cuts so hard against the cockpit bowl we added... i wish it flowed". All three were the cockpit pod's EGG SHELL: clipped against each hull it left shards round every rim, and the textured tub stopped in a flat wall where the shell took over. The shell is gone (canopy/scripts make_interior.py keeps the seat, headrest, consoles, sticks, front panel and pedals - 1425 of the pod's 4080 loose panels were shell), the game cockpit is the interior alone decimated to 40k with its normal map re-baked, and the tub is now ONE bowl front lip to rear rim (flat under pedals + seat, rising behind the backrest), ship_inside.png end to end. The low-FOV blockage was ALSO the eye inside the seat: pushing the seat back (v49.93, 'head rest just under the top back of the opening') put BLASTER's and SYPHON's marked cockpit1 inside the headrest/backrest - at FOV 60 the view was the inside of the seat, at 120 near 3 sliced it away. cockpit1 now sits no further back than just in front of the headrest face (pod x -0.30): BLASTER -0.600 -> -0.644, SYPHON -0.580 -> -0.621, PYRO -0.51 -> -0.52, the rest < 0.01; height and centre line are the owner's. 33.8 MB PC / 16.3 MB phone, ~100k tris a ship.   // (v49.93) THE CONCEPT HULLS replace all seven c1seat ships, both sets. Meshy models the owner generated from per-ship descriptions, then in Blender (backups/concept_ships/canopy/canopy_proc.py): the painted canopy cut out and replaced by real glass ('canopy_glass'), the cockpit pod seated with its headrest under the rear top of the opening (owner: 'the head rest is just under the top back of the opening'), a floor tub from under the pedals to the front lip textured with concept/shaders/ship_inside.png, and the owner's own gun/thruster/cockpit markers from tools/glb_editor.html (TRACKER gun1 + six wing tubes, SYPHON gun1-2 + a chin gun3, PYRO gun1 + a gas gun2, BLASTER twelve gatling barrels - see _SHIP_GUN_ROLES). Hulls decimated to ~60k tris with the normal map RE-BAKED from the full-resolution hull (the Meshy map on the decimated surface smeared dark streaks across big panels), cockpit 45k before clipping: ~95-100k tris a ship vs the c1seat 117k. compress_glb 1.4 caps the 4k colour maps at 2k: 34.8 MB PC set (was ~34), 16.6 MB phone set. Previous sources: backups/ships_src_c1seat_2026-09-30 ; previous shipped files: git.   // (v49.38) BLASTER orbs HIDDEN AT IDLE, growing out with speed. REVERSES v49.37's depth rule (the centring stays): 'rim - full-burn radius' was the right rule for an orb that should never overshoot its nozzle, but it left the idle orb (0.0084) ~0.012 inside an OPEN tube, so it showed straight down the nozzle at rest (owner: 'i could see the others when we were stationary') - and the two big nozzles (T3/T6) have NO cavity at all: a flat disc face at x 0.9375 out to r ~0.036, so their orbs sat 0.02 behind solid hull and never lit ('i can't see t3 and t6 lighting up'). Rule now: marker x = the surface the nozzle looks into (small: the tube FLOOR, 0.873-0.891; big: the disc face) - idle radius - 0.0006, the floor sampled across the whole orb footprint (flat to 0.0016, front-facing; the hull is doubleSided anyway). Verified with a visibility fan (60 points on each orb x 96 outward directions, JS ray test against every hull triangle): idle 0% of rays escape (v49.37: 11-15% for the small eight), half throttle 2-3% small / 17% big, full burn 2-3% / 21%. The orb pushes out THROUGH the floor as t = speed/flightSpeed rises (the 0.0006 margin hides it below t ~0.055). The phone set's tail is identical (same 9324 tail triangles, same floors to 4 decimals) so both files take the same numbers; backups/blaster*_pre_v49.38_hidden_idle.glb   // (v49.37) BLASTER: all ten thrusters CENTRED on their nozzle axes and RECESSED - each nozzle measured in the GLB editor (ray fan in the model's own units, largest inscribed circle just inside the rim, then the rim): 8 small tubes r ~0.0165 (top rim x 0.9245, bottom 0.903), 2 big r 0.041 (rim 0.937); markers were 0.002-0.013 off-axis. Each marker sits rim - 0.0202 = Blaster's full-burn orb radius in model units (1.44 x 1.6 x 1.05 flicker / 119.7), so the burning orb reaches the rim and the idle one (0.0084) sits ~0.012 inside - owner: 'they all need to go inside, so you can't see the orbs when the ship is stationary... can you center the orbs in their cylinders?'   // (v49.36) BLASTER thruster3 + thruster6 x 0.910 -> 0.950: at 0.910 their orbs were still 3.3 game units INSIDE the hull (a ray from behind hit hull at 96.7 of 100; the other eight sit at or outside the surface) - owner: 'still can't see t3 and t6... increase X, is all'   // (v49.35) BLASTER thruster3 + thruster6 (the middle nozzle of each bank) moved aft to x 0.910 from 0.890, both sets, JSON only (scratchpad glb_set_marker.py) - owner: 'on blaster's glb, thruster 3 and 6, T3 and T6 X = 0.910 instead of 0.890'   // (v49.33) BLASTER: 10 engine markers (thruster1..10, two banks of five in the tail) copied from the owner's glb_editor export (Downloads/blaster_engines.glb) into BOTH sets, JSON chunk only - thruster1/2 moved, 3..10 appended as scene-root empties like every other marker; frames verified identical (cockpit1/gun1/gun5 match exactly); originals in backups/blaster*_pre_v49.33_engine_markers.glb. Owner: "this is blaster's model with the engine markers changed... there's now 10, they need to be the smallest of all the ships"   // (v44.31) PUNCTURE: Puncture_Cabin_Emission was BLUE (0.03,0.5,0.95) in a yellow-class ship - every other hull's cabin glow is its class colour - recoloured to (1,0.85,0.08) in both sets with tools/glb_set_material.py (no Blender round trip; JSON chunk only). Owner: "puncture has some blue inside the cockpit, that needs to be changed to yellow"   // (v42.55) VORTEX: the aperture is now cut with a real BOOLEAN against a lofted prism instead of deleting whole triangles, so the rim is a clean line rather than a jagged saw-tooth (owner: "jagged triangles on some spots remaining"); and the AftCanopyArch's two legs, which stopped 40mm short in mid-air, are extended down to the sill and the arch re-symmetrised (owner: "the windshield bars are not connected to each other"). Authored in Blender and exported - the established path for these hulls   // (v42.54) VORTEX: everything around the window SYMMETRISED in place (frame/gasket/arch/glass entire, hull + cabin shell by region with a falloff) - worst mirror error 8-12mm -> under 1mm, tools/symmetrize_canopy.py. Surface-average, topology untouched, so no cracks. Plus the aperture prism widened 0.04 (--widen). Owner: the shapes he boxed are the OPENING, not geometry - rays through them miss - so its outline had to be made symmetric, not deleted   // (v42.53) VORTEX: the InnerSillLiner pair made symmetric (680 vs 624 verts, two different shapes either side of the seat) by mirroring the larger onto the smaller - tools/mirror_ship_part.py --pair. NOTE the mirror plane is solved from the pair, NOT z=0: every L/R pair on this hull sits about z = -0.0004, so reflecting about the origin lands the copy ~1.6mm out and it still reads wrong   // (v42.52) VORTEX: the same triangular prism applied to the CABIN SIDE - cabin shell 231 tris, sill liners 263+244 - owner: "the cut out needs to include the geometry inside the cabin that was next to it, because it protrudes up in the same spot". Deliberately NOT the seat/harness/HUD: the eye sits 40mm above this sill, so a blanket above-the-sill cut would take the headrest   // (v42.51) VORTEX: canopy aperture opened out to a RIGHT-ANGLE TRIANGLE - 235 hull tris deleted from the wedge under the old ragged lower rim, so the window keeps its raked top, gains a vertical aft edge and a level sill (tools/cut_canopy_aperture.py --triangle). That wedge WAS the purple: rays cast down through the window found hull 704 times vs glass 364   // (v42.50) VORTEX: the Vortex_v04_L/R_FrameInterfaceTrim pair DROPPED - owner: "the purple shit is the old window". They are the only purple geometry touching the windshield (material 17 Vortex_Cabin_Trim, base .12/.10/.20, sitting 1-2.5mm off the glass rim) and the pair never matched (671 vs 539 verts, up to 9.8mm out of line), so they read as purple slivers down both inner edges of the window   // (v42.48) canopy window frames straightened - the swept tube's path is mirror-averaged then low-passed, rings moved rigidly (tools/straighten_canopy_frame.py) ; blaster/puncture/pyro/syphon got the full mirror pass, slayer/tracker/vortex the de-wobble only   // (v42.47) blaster + slayer cockpit1 eye markers raised in the GLBs (+3 / +5 game units, tools/raise_cockpit_marker.py) - PC and mobile sets   // (v42.08) owner's BUILT-IN COCKPIT hulls (blaster/pyro/slayer/syphon/vortex v04, tracker v06, puncture v07) rebuilt through compress_glb (weld+quantize, join per material 74->21 prims, no re-simplify) + lean mobile set   // GLB models (ships/, objects/, objects/hoard/, rings/)
+const _MODELS_VERSION = '50.15';   // (v50.15) SLAYER WITHOUT THE INNER TINT, both sets (Slayer only). Owner, on v50.14: "the line is back, with the blue on the lower half of the screen" - the v50.12-50.14 two-tone tint was a misreading of "make it look like the glass is slightly two colors" (a description of the glitch, not a request), so canopy_proc.py SHIP_DEFAULTS slayer inner_tint False and the game's tint shader is gone; the glitch itself (Slayer's low windshield seen from above its outer face) is fixed in _lssApplyShipRig by not drawing the player's own canopy glass from the seat.   // (v50.13) SLAYER's TINT SEAM, CLEAN AND LEVEL, both sets (Slayer only). Owner, flying v50.12: "something up with the glass, look at the transparent blue and its jagged edges". Each tint face took its tone by its CENTRE's height and Slayer's polar glass is long thin triangles, so the tone boundary stepped along their edges in a sawtooth. canopy_proc.py build_inner_tint now BISECTS the tint mesh first, along the plane through the bow's top line and the pilot's eye (not a level plane: seen from above it, a level cut lands on screen as a V) - so the seam projects onto the frame bar's own screen line - and the lower tone is a neutral smoked grey (0.020/0.022/0.026 a .28) instead of the blue that read as "transparent blue"; the upper is a breath of clear (a .06).   // (v50.12) RAILS IN THE CONSOLE's OWN ARMOUR, SLAYER's TWO-TONE GLASS, TRACKER's BLEMISH OFF, SYPHON's EYE DOWN, both sets. (1) Owner: "make the frame match the texture and pattern of the console arms, and connect to it properly" - the arm-panel rails wear cockpit_CP_armor: console1's own colour + normal maps cut from one clean arm-panel region of its atlas (canopy/armor_tile*.png), MIRROR-repeated along each rail (sampler MIRRORED_REPEAT, u = arc / the tile's own aspect) - and each rail now starts with a six-section lead-in from the console arm's own top-rear corner, so rail and arm meet top to top. (2) Owner, on Slayer: "a straight line going horizontally across the screen looking like part of the window but it's weird make it look like the glass is slightly two colors" - the line is the frame's front bow across its wall-to-wall glass; canopy_tint_lo (smoked, a .32) below the bow's height and canopy_tint_hi (a faint clear .07) above, on an INWARD-wound copy of the glass, drawn unlit (see buildModelShipMesh). (3) Owner: "the blemish is the smaller ball on the back of that ball" (the ball = the weapon pod, kept) - the block behind Tracker's pod and the pod's thin rear tab are flattened onto a membrane solved from the trough floor all round them, their texels repainted in the hull's own atlas (no UV edits: editing UVs was the earlier "swirly mess"), canopy/scripts/tracker_blemish.py. Three earlier cuts flattened the POD and were never shipped. (4) Owner: "syphon's cockpit C1 needs to lower a little, closer to the other's height" - markers.json cockpit1 z 0.09 -> 0.0677 (the v50.10 eye solve now does the rest per FOV).   // (v50.09) HULLS WITHOUT SLITS + SLIMMER BEVELLED ARM PANELS, both sets. (1) Owner: "why does blaster's model look like it has holes slashed throughout it?" - every concept game hull (<ship>_g, 60k) had been decimated straight from the glTF import, whose vertices are split along every UV seam: each side of a seam lost different vertices and the seams opened into slits (blaster_g: 47k boundary edges in 60k faces; pyro 44k), which the double-sided hull shows as dark slashes. Now: weld a copy of the full-resolution hull (remove_doubles 1e-6 - UVs live per loop and survive; every hull welds CLOSED, 0 boundary edges), decimate that to 60k, re-bake the normal map; the game hulls' only open edges are the canopy rim (110-211). The seat pod (cockpit_g2) rebuilt the same way (its remaining edges are its own loose panels). canopy/scripts/weld_full.py. (2) Owner: "the panels are too big, make them narrower and beveled" - arm_in 2.6 -> 1.3, arm_drop 1.6 -> 0.9 tube widths, chamfers on both top corners. The new hulls shifted Blaster's console slightly (gap 0.376, front room 0.458).   // (v50.08) BLACK ARM PANELS + CONSOLES OFF THE NOSE, both sets. (1) Owner: "i like how we did slayer's cockpit edges... like little extra panels that bring together the console and cockpit bowl/seat, and acts as a window frame... we should do it on the other ships" / "it's just the window frame is built cooler instead of a tube" -> asked to choose, chose "build armor panels, black, that extend the arms of the console to add a nice finish to the window frame". Slayer's look was its own side armour beside its low sill (nothing was built there); the others only had the frame tube, the bowl walls hiding everything else. canopy_proc.py build_armpanels: a black rail (canopy_frame_armor) on top of the tube along each side, from just ahead of the console's arm tips back along the sill, tapering out before the rear arc - built in a LEVEL frame (true up, out across the canopy), because on Tracker's steep walls the hull's own frame pointed "out" straight up. Not on Slayer (its armour is the look). Tried and withdrawn on the way: sizing the console so its wings fit inside the bowl (owner: "the extra panels were not just the console's wings"), and a hull-paint band (the Pyro prototype). (2) Owner: "tracker, blaster, pyro, their consoles are still squished into the nose and need to come away from the nose tip toward the back of the ship": console_front_room 0.45 pod units for those three - the gap steps back from 0.651 until the console's front clears the tip by that much, re-sized at every step: BLASTER gap 0.401 (front room 0.264 -> 0.521, k 0.80 + pedestal), PYRO 0.426 (0.262 -> 0.470), TRACKER 0.351 = the floor console_gap_min (0.093 -> 0.326). compress_glb died silently once more (puncture's phone copy) - caught by the mtime + material check, re-run.   // (v50.07) SOLID SHIP-COLOUR SCREENS, NO WINDSHIELD SPOT, TRACKER's SEAT BACK, both sets. (1) Owner: "syphon, blaster, puncture, tracker, all have one small white spot on their windshield, looks like it's supposed to be glare, but it's just in the same spot" - both canopy glass builders wound the faces INWARD and canopy_glass was double-sided, so the pilot saw the canopy's inside with the cockpit light rig (it rides the eye) mirrored at a fixed place on screen. The glass is now wound OUTWARD and exported single-sided - the v37.34 design ("single-sided so from the seat it culls to a clear view"); outside it is unchanged. (2) Owner: "tracker's seat is gone" - v50.06's seat_back 0.40 had slid it under the rear hull. Back to 0; Tracker's console keeps the standard gap at full width and the ~9% that pokes through the nose is clipped (inside the nose skin, behind the hood). (3) Owner: "fix the panels on the consoles... make them the color of the ship they belong to, and solid" - console1's three screens (the recessed y=0.02 plane of its face: centre 32 / left 49 / right 53 faces) are their own material, cockpit_CP_screen, which buildModelShipMesh paints solid: near-black base, emissive = the ship's paint hue (_THEME_PAINT_HEX, else LSS.CLASS_COLORS). Live: window.__cockpit.screen = { glow: 1.6 }.   // (v50.06) ONE CONSOLE DISTANCE FOR THE FLEET + HOODS, both sets. Owner: "look at the distance of the console between slayer's console position, and the seat/cockpit placement C1... that should be the same distance in all the other ships... slayer has a good distance" / "for some, you may have to move the seat back, if the console protrudes the nose" / "then each ship needs a hood to cover the open space between the console and nose tip" / "tracker? the whole bowl might have to move further into the ship". Measured eye -> console near face in POD units (the seat is fitted per canopy): SLAYER 0.651, SYPHON 0.685 (the owner's "perfect"), PYRO 0.598, BLASTER 0.424, TRACKER 0.323, VORTEX 1.305, PUNCTURE 1.489. canopy_proc.py console_mode "gap": near face at 0.651 pod units ahead of the (clamped) eye on every ship, wall to wall at its wing tips (k 0.95-1.0), its TOP ON THE CANOPY'S FRONT FRAME LINE (+0.5 deg) - resting on the floor had left Puncture/Vortex 33/26 deg down, half hidden by the bowl rim; a console that then floats gets a dark PEDESTAL (Puncture 0.048, Vortex 0.053 model units), one that meets the front ramp sinks into it. TRACKER fits nowhere at that gap (its short canopy puts the console on the lip) until the seat slides back 0.40 pod units (seat_back, ~5.5 game units) - and the PILOT moves with the seat (the eye clamp only ever pulled the owner's marker forward, so a seat_back first moved nothing). HOODS: a dark cowl (cockpit_CP_hood, matte, double-sided) from just inside the console's front to the tip of the opening, spanning the glass rim, its centre line on the pilot's line of sight over the console top - so from the seat it is always behind the console (the first cut, level from the console top, rose over it on the long canopies), from outside the empty bowl in front of the console is gone. The live console knobs now carry the hood and pedestal along (_cpConsoleFollower).   // (v50.05) SLAYER's GLASS GOES DOWN THE WALLS, both sets (Slayer only). Owner: "i need to also re-draw slayer's cutout from the side, it doesn't go down far enough", redrew the side outline in the canopy tracer (a closed shape; draw.html gained a Shape: open/closed toggle - the closing edge is carried as a repeated first point, only the lowest edge is used). The new sill (z 0.005 at the front, 0.024 mid) was NOT what limited the cut - nor was the old one (0.033): slices of the full hull show a boxy nose with near-vertical walls ~0.015-0.025 OUTSIDE the top trace, so only the roof was ever selected (rim z 0.07-0.14). canopy_proc.py SHIP_DEFAULTS slayer: top_widen 0.03 (a sideways-widened copy of the top trace for the face SELECTION only - the real trace still sizes the seat pod), occl_normal (walls are tested for occlusion along their own normal, 0.02 range, not straight up under the roof edge), glass_polar (rebuild_glass_polar: each section runs from the left rim up over the roof and down to the right rim along the full-resolution hull's own cross-section - rays fanned from the section middle at rim height, resampled to even arc length - instead of a height field that can only draw a wall as one sheer strip; ends fan closed only where they taper). Rim now z 0.005 -> 0.023 along the sill, rising on the owner's back edge; the frame follows it (a bow across the vertical front edge the owner drew). The wider opening re-fitted the console larger (scale 0.076 -> 0.102, top 9.7 deg).   // (v50.04) CONSOLE1 BIGGER, capped by the FRAME line only, both sets. Owner, on v50.03: "in slayer it looks tiny" / "it looks perfect for syphon". Syphon's console was capped by its own front frame line (25.6 deg below the eye); Slayer's by the extra 16-deg line (its frame is at 9.1), and the nose sweep then took the first spot where one of 0.55 x the widest opening fitted - on a long canopy that is small AND far from the eye. canopy_proc.py now: console_cap "frame" (top just under the front frame line, +0.5 deg) and console_min_w 0.80, with SHIP_DEFAULTS keeping SYPHON exactly as the owner liked it (0.55: k 0.88, 26.1 deg, front at pod x -1.262 - reproduced) and TRACKER at 0.55 (at 0.80 nothing fits under its 19.8-deg frame; the fallback clipped it to shards). Now: SLAYER k 1.0 at 9.6 deg (scale 0.0514 -> 0.076), PYRO 0.94 / 11.7, VORTEX 0.94 / 8.1, PUNCTURE 1.0 / 13.3, BLASTER 1.0 / 20.7. compress_glb died silently AGAIN mid-run: puncture's PC file was written, its phone copy was left from v50.03 - verify shipped mtimes against assets_src, not just contents.   // (v50.03) CONSOLE1, PUSHED INTO THE NOSE, both sets. Owner, flying v50.02: "it needs to fit into the nose a bit better... let's try console1.glb". console1 is Meshy's full-detail export (734k faces, 4k maps): a WRAPAROUND dash - three screens under a curved hood, side wings sweeping back along the cockpit walls. Welded (23k seam duplicates) and decimated to 20k in Blender with its normal map RE-BAKED from the full model (console1_normal, 2k), screen-glow emissive by the same HSV mask (console1_emissive.png, 0.34% of the atlas), material cockpit_CP_console1 (its own name: the fleet texture share keys on names). Placement (canopy_proc.py console_mode "nose"): it RESTS ON THE BOWL (the middle of its underside on the tub surface), spans the bowl WALL TO WALL at its wing tips, keeps its top under both the 16-deg line and the canopy's FRONT FRAME line + 0.5 deg (measured from the eye: Vortex 7.6, Slayer 9.1, Pyro 11.2, Puncture 12.8, Tracker 19.8, Blaster 20.2, Syphon 25.6 - so on the three steep noses a 16-deg console had poked above the frame, very likely the v50.01 "sticks up"), and is pushed as far forward as it fits: the sweep starts at the tip of the opening and takes the first position where one of at least 0.55 x the widest opening fits inside the hull. Result: the console sits at the FRONT of the bowl instead of mid-cockpit (pod x of its front: PUNCTURE -2.26, VORTEX -1.88, SLAYER -1.58, PYRO -1.37, BLASTER -1.32, SYPHON -1.26, TRACKER -0.93), 0.64-0.88 of wall width, tops at 16 / 20.3 (Tracker) / 20.7 (Blaster) / 26.1 (Syphon). Blender renders at the owner's 52-deg view: screens visible on Puncture/Pyro/Slayer/Vortex (only the hood tip showed on v50.02's Slayer). Live knobs: window.__cockpit.consoleFwd (game units into the nose) + consoleDeg.   // (v50.02) THE CONSOLE SITS LOWER, by ANGLE, both sets. Owner, flying v50.01: "looks like it sticks up too much". The v50.01 placement was a fixed 0.14 pod-unit drop below the eye, which left the hood's top 10-21 deg below the eye line depending on how far ahead of the eye each console landed (VORTEX 9.9, PYRO 10.0, SLAYER 10.8, PUNCTURE 11.1, TRACKER 12.8, BLASTER 16.6, SYPHON 21.1) - at the owner's view (Panini, FOV 61 = 90h/52v presented) the high ones filled the bottom ~28% of the screen. canopy_proc.py now places the console's highest-appearing point (max over vertices of elevation from the FINAL eye, i.e. cockpit1 after fix_all's pod x -0.30 clamp) exactly console_deg = 16 below the eye line on every ship, then fits as before (size first, then 3/6 deg lower, then back toward the pedals). All seven at 16.0 except SYPHON 22 (0.82 size; it does not fit higher under its bubble canopy). Live knob to judge the number before the next bake: window.__cockpit.consoleDeg (see _lssConsoleKnob).   // (v50.01) THE INSTRUMENT CONSOLE, both sets. Owner, on the textured bowl in front of the pilot: "that's what the player sees a lot... and right now it looks like shit", then supplied backups/concept_ships/console.glb (Meshy: three screens under a glare-shield hood, 15.2k tris, 4k maps). canopy_proc.py build_console turns it to face the pilot, tilts it back 12 deg, and FITS it: the largest console (0.52-1.0 of 0.9 x the opening width at pod x -0.80) that keeps <= 1% of it outside the original hull, lowering it (drop 0.14 -> 0.22 below the owner's cockpit1 eye line) and sliding it back toward the pedals (pod x -0.80 -> -0.65) only when it does not fit. The first un-fitted cut clipped Syphon's to 56% (floating shards in the pilot's view: a bubble canopy over a narrow nose) and took the hood off Blaster's and Tracker's. Fits: PYRO/SLAYER/VORTEX/PUNCTURE full size at -0.80 (Puncture -0.70), BLASTER full size dropped to 0.22 at -0.75, TRACKER 0.88 at -0.65, SYPHON 0.76 dropped 0.22 at -0.65. Material cockpit_CP_console (cockpit part: maps kept, no theme strip, no shadow, hidden past 300 u) with a NEW emissive map, backups/concept_ships/canopy/console_emissive.png: only the screen graphics glow (HSV mask S > 0.40-0.62 and V > 0.30-0.55 smoothstepped over the colour map, 0.75% of the atlas) so the dark body stays lit by the cockpit rig. +15k tris a ship. Textures are shared fleet-wide at load (_lssShareCockpitTextures) - otherwise seven copies of the console, bowl and pod maps.   // (v49.99) THE OWNER'S NEW BOWL TEXTURE, both sets: LSS/concept/shaders/ship_inside.png replaced with a flat, dark (mean 37/255), mirror-symmetric albedo made from the ChatGPT prompt - no baked highlights, which is what made the first one read as lit. Used at x1.0 now (canopy_proc tub_dark 0.55 -> 1.0; the ship_inside_dark copy is gone), packed into the .blend, WebP in the GLBs.   // (v49.98) the cockpit bowl MATTE (metallic 0.35 -> 0.05, roughness 0.55 -> 0.9), both sets. Owner, first person with solidity maxed: "it looks too shiny and reflective". The texture itself is being replaced next (owner is generating one); ship_inside_dark (x0.55) stays until then. Also: compress_glb runs over all seven ships died partway TWICE in this session (v49.96 left Vortex + phone Tracker stale, v49.98 left Slayer, then Syphon) with nothing on stderr - compress one ship at a time and CHECK every shipped file's tub material / frame after.   // (v49.96) CANOPY FRAME + GRID GLASS + DARKER BOWL, both sets. Owner, flying v49.95: "some of the ships have uneven glass, and looks like jagged edges" / "the cockpit texture we added is too bright, and it has no seam/frame where it meets the glass" / "i think this is a fix for blender, not knobs". ROOT CAUSE of the uneven glass: the 60k hulls were decimated with their glTF UV seams OPEN, so each side of a seam lost different vertices - the canopy triangles arrived as 8-20 islands with slits no weld closes, the smoothing pinned both sides of every slit (creases), and edges ran ragged. The glass is now a CLEAN GRID (canopy_proc.py rebuild_glass_grid): sections between the OUTERMOST rim points (extremes ignore interior slits), heights from the FULL-resolution hull, rim line smoothed along the sections, 40 Taubin passes - one sheet, one edge. A rounded dark FRAME (<ship>_canopy_frame, material canopy_frame - deliberately not 'cockpit_frame*', which buildModelShipMesh hides) is swept along that edge across the join, so hull, glass and bowl all end under it and the hull's ragged cut is covered. ship_inside.png is baked darker (x0.55, 'ship_inside_dark'). ~108k tris / 5 draws a ship PC, ~77k phone; 4.5-5 MB PC, 2.2-2.4 MB phone. NOT fixed by geometry: at FOV 120 near is 3 game units (~23 cm) and a ~1 m canopy puts rim and bowl beside the head inside it, so the extreme screen corners still slice - that needs a render change, not a model one.   // (v49.95) THE COCKPIT BOWL, both sets. Owner, flying v49.94: "blaster's geometry got messed up a lot, broken bits around where the hull was cut" / "syphon and blaster have some geometry covering the window, but only see it with low FOV" / "i don't like how the black part that we textured, how it cuts so hard against the cockpit bowl we added... i wish it flowed". All three were the cockpit pod's EGG SHELL: clipped against each hull it left shards round every rim, and the textured tub stopped in a flat wall where the shell took over. The shell is gone (canopy/scripts make_interior.py keeps the seat, headrest, consoles, sticks, front panel and pedals - 1425 of the pod's 4080 loose panels were shell), the game cockpit is the interior alone decimated to 40k with its normal map re-baked, and the tub is now ONE bowl front lip to rear rim (flat under pedals + seat, rising behind the backrest), ship_inside.png end to end. The low-FOV blockage was ALSO the eye inside the seat: pushing the seat back (v49.93, 'head rest just under the top back of the opening') put BLASTER's and SYPHON's marked cockpit1 inside the headrest/backrest - at FOV 60 the view was the inside of the seat, at 120 near 3 sliced it away. cockpit1 now sits no further back than just in front of the headrest face (pod x -0.30): BLASTER -0.600 -> -0.644, SYPHON -0.580 -> -0.621, PYRO -0.51 -> -0.52, the rest < 0.01; height and centre line are the owner's. 33.8 MB PC / 16.3 MB phone, ~100k tris a ship.   // (v49.93) THE CONCEPT HULLS replace all seven c1seat ships, both sets. Meshy models the owner generated from per-ship descriptions, then in Blender (backups/concept_ships/canopy/canopy_proc.py): the painted canopy cut out and replaced by real glass ('canopy_glass'), the cockpit pod seated with its headrest under the rear top of the opening (owner: 'the head rest is just under the top back of the opening'), a floor tub from under the pedals to the front lip textured with concept/shaders/ship_inside.png, and the owner's own gun/thruster/cockpit markers from tools/glb_editor.html (TRACKER gun1 + six wing tubes, SYPHON gun1-2 + a chin gun3, PYRO gun1 + a gas gun2, BLASTER twelve gatling barrels - see _SHIP_GUN_ROLES). Hulls decimated to ~60k tris with the normal map RE-BAKED from the full-resolution hull (the Meshy map on the decimated surface smeared dark streaks across big panels), cockpit 45k before clipping: ~95-100k tris a ship vs the c1seat 117k. compress_glb 1.4 caps the 4k colour maps at 2k: 34.8 MB PC set (was ~34), 16.6 MB phone set. Previous sources: backups/ships_src_c1seat_2026-09-30 ; previous shipped files: git.   // (v49.38) BLASTER orbs HIDDEN AT IDLE, growing out with speed. REVERSES v49.37's depth rule (the centring stays): 'rim - full-burn radius' was the right rule for an orb that should never overshoot its nozzle, but it left the idle orb (0.0084) ~0.012 inside an OPEN tube, so it showed straight down the nozzle at rest (owner: 'i could see the others when we were stationary') - and the two big nozzles (T3/T6) have NO cavity at all: a flat disc face at x 0.9375 out to r ~0.036, so their orbs sat 0.02 behind solid hull and never lit ('i can't see t3 and t6 lighting up'). Rule now: marker x = the surface the nozzle looks into (small: the tube FLOOR, 0.873-0.891; big: the disc face) - idle radius - 0.0006, the floor sampled across the whole orb footprint (flat to 0.0016, front-facing; the hull is doubleSided anyway). Verified with a visibility fan (60 points on each orb x 96 outward directions, JS ray test against every hull triangle): idle 0% of rays escape (v49.37: 11-15% for the small eight), half throttle 2-3% small / 17% big, full burn 2-3% / 21%. The orb pushes out THROUGH the floor as t = speed/flightSpeed rises (the 0.0006 margin hides it below t ~0.055). The phone set's tail is identical (same 9324 tail triangles, same floors to 4 decimals) so both files take the same numbers; backups/blaster*_pre_v49.38_hidden_idle.glb   // (v49.37) BLASTER: all ten thrusters CENTRED on their nozzle axes and RECESSED - each nozzle measured in the GLB editor (ray fan in the model's own units, largest inscribed circle just inside the rim, then the rim): 8 small tubes r ~0.0165 (top rim x 0.9245, bottom 0.903), 2 big r 0.041 (rim 0.937); markers were 0.002-0.013 off-axis. Each marker sits rim - 0.0202 = Blaster's full-burn orb radius in model units (1.44 x 1.6 x 1.05 flicker / 119.7), so the burning orb reaches the rim and the idle one (0.0084) sits ~0.012 inside - owner: 'they all need to go inside, so you can't see the orbs when the ship is stationary... can you center the orbs in their cylinders?'   // (v49.36) BLASTER thruster3 + thruster6 x 0.910 -> 0.950: at 0.910 their orbs were still 3.3 game units INSIDE the hull (a ray from behind hit hull at 96.7 of 100; the other eight sit at or outside the surface) - owner: 'still can't see t3 and t6... increase X, is all'   // (v49.35) BLASTER thruster3 + thruster6 (the middle nozzle of each bank) moved aft to x 0.910 from 0.890, both sets, JSON only (scratchpad glb_set_marker.py) - owner: 'on blaster's glb, thruster 3 and 6, T3 and T6 X = 0.910 instead of 0.890'   // (v49.33) BLASTER: 10 engine markers (thruster1..10, two banks of five in the tail) copied from the owner's glb_editor export (Downloads/blaster_engines.glb) into BOTH sets, JSON chunk only - thruster1/2 moved, 3..10 appended as scene-root empties like every other marker; frames verified identical (cockpit1/gun1/gun5 match exactly); originals in backups/blaster*_pre_v49.33_engine_markers.glb. Owner: "this is blaster's model with the engine markers changed... there's now 10, they need to be the smallest of all the ships"   // (v44.31) PUNCTURE: Puncture_Cabin_Emission was BLUE (0.03,0.5,0.95) in a yellow-class ship - every other hull's cabin glow is its class colour - recoloured to (1,0.85,0.08) in both sets with tools/glb_set_material.py (no Blender round trip; JSON chunk only). Owner: "puncture has some blue inside the cockpit, that needs to be changed to yellow"   // (v42.55) VORTEX: the aperture is now cut with a real BOOLEAN against a lofted prism instead of deleting whole triangles, so the rim is a clean line rather than a jagged saw-tooth (owner: "jagged triangles on some spots remaining"); and the AftCanopyArch's two legs, which stopped 40mm short in mid-air, are extended down to the sill and the arch re-symmetrised (owner: "the windshield bars are not connected to each other"). Authored in Blender and exported - the established path for these hulls   // (v42.54) VORTEX: everything around the window SYMMETRISED in place (frame/gasket/arch/glass entire, hull + cabin shell by region with a falloff) - worst mirror error 8-12mm -> under 1mm, tools/symmetrize_canopy.py. Surface-average, topology untouched, so no cracks. Plus the aperture prism widened 0.04 (--widen). Owner: the shapes he boxed are the OPENING, not geometry - rays through them miss - so its outline had to be made symmetric, not deleted   // (v42.53) VORTEX: the InnerSillLiner pair made symmetric (680 vs 624 verts, two different shapes either side of the seat) by mirroring the larger onto the smaller - tools/mirror_ship_part.py --pair. NOTE the mirror plane is solved from the pair, NOT z=0: every L/R pair on this hull sits about z = -0.0004, so reflecting about the origin lands the copy ~1.6mm out and it still reads wrong   // (v42.52) VORTEX: the same triangular prism applied to the CABIN SIDE - cabin shell 231 tris, sill liners 263+244 - owner: "the cut out needs to include the geometry inside the cabin that was next to it, because it protrudes up in the same spot". Deliberately NOT the seat/harness/HUD: the eye sits 40mm above this sill, so a blanket above-the-sill cut would take the headrest   // (v42.51) VORTEX: canopy aperture opened out to a RIGHT-ANGLE TRIANGLE - 235 hull tris deleted from the wedge under the old ragged lower rim, so the window keeps its raked top, gains a vertical aft edge and a level sill (tools/cut_canopy_aperture.py --triangle). That wedge WAS the purple: rays cast down through the window found hull 704 times vs glass 364   // (v42.50) VORTEX: the Vortex_v04_L/R_FrameInterfaceTrim pair DROPPED - owner: "the purple shit is the old window". They are the only purple geometry touching the windshield (material 17 Vortex_Cabin_Trim, base .12/.10/.20, sitting 1-2.5mm off the glass rim) and the pair never matched (671 vs 539 verts, up to 9.8mm out of line), so they read as purple slivers down both inner edges of the window   // (v42.48) canopy window frames straightened - the swept tube's path is mirror-averaged then low-passed, rings moved rigidly (tools/straighten_canopy_frame.py) ; blaster/puncture/pyro/syphon got the full mirror pass, slayer/tracker/vortex the de-wobble only   // (v42.47) blaster + slayer cockpit1 eye markers raised in the GLBs (+3 / +5 game units, tools/raise_cockpit_marker.py) - PC and mobile sets   // (v42.08) owner's BUILT-IN COCKPIT hulls (blaster/pyro/slayer/syphon/vortex v04, tracker v06, puncture v07) rebuilt through compress_glb (weld+quantize, join per material 74->21 prims, no re-simplify) + lean mobile set   // GLB models (ships/, objects/, objects/hoard/, rings/)
 const _MODEL_CACHE_BUST = '?v=' + _MODELS_VERSION;
 const _LSS_CORNER_CSS = "font-family:'Rajdhani',monospace;font-size:11px;"
   + 'letter-spacing:2px;color:rgba(150,200,255,0.55);pointer-events:none;';
@@ -44964,10 +44964,6 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId) {
     if (child.isMesh) {
       const mats = Array.isArray(child.material) ? child.material : [child.material];
       const newMats = mats.map(m => {
-        if (m && typeof m.name === 'string' && /^canopy_tint/.test(m.name)) {
-          return new THREE.MeshBasicMaterial({ name: m.name, color: m.color ? m.color.clone() : new THREE.Color(0x0a0f14),
-            transparent: true, opacity: (typeof m.opacity === 'number') ? m.opacity : 0.2, depthWrite: false });
-        }
         const params = {
           metalness: 0.20,
           roughness: 0.60,
@@ -45045,7 +45041,7 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId) {
       child.material = newMats.length === 1 ? newMats[0] : newMats;
       child.castShadow = true; child.receiveShadow = false;
       if (mats.some((mm) => mm && /_CP_/.test(mm.name || ''))) { child.userData._cockpitPart = true; child.castShadow = false; }
-      if (mats.some((mm) => mm && /^canopy_tint/.test(mm.name || ''))) { child.userData._cockpitPart = true; child.castShadow = false; }
+      if (mats.some((mm) => mm && mm.name === 'canopy_glass')) child.userData._canopyGlass = true;
       if (mats.some((mm) => mm && /^cockpit_CP_console/.test(mm.name || ''))) child.userData._cpConsole = true;
       else if (mats.some((mm) => mm && /^cockpit_CP_(hood|screen)$/.test(mm.name || ''))) child.userData._cpConsoleFollower = true;   // (v50.07) + the screens
       else if (mats.some((mm) => mm && /_Cabin_/.test(mm.name || ''))) { child.castShadow = false; child.userData._cockpitInteriorNoShadow = true; }
@@ -68553,6 +68549,7 @@ function _lssCockpitOff(dt) {
     _lr.fill.intensity += (0 - _lr.fill.intensity) * _kk;
   }
   if (game._cockpitFrameObjs) for (const _fo of game._cockpitFrameObjs) if (_fo.visible) _fo.visible = false;
+  if (game._cockpitGlassObjs) for (const _go of game._cockpitGlassObjs) if (!_go.visible) _go.visible = true;   // (v50.15) the glass again outside
   try { const _rl = player && player.mesh && player.mesh.userData && player.mesh.userData.runningLight; if (_rl && !_rl.visible) _rl.visible = true; } catch (_) {}
   try { _ghostHullRestore(player && player.mesh); } catch (_) {}   // (v37.61) painted hull again for the chase view
 }
@@ -69061,7 +69058,17 @@ function _lssScreenCircle(mesh, eye) {
   const rho = g(cx, cy);
   if (!(rho > 0)) return null;
   const O = new THREE.Vector3(C[0], C[1], C[2]).addScaledVector(e1, cx).addScaledVector(e2, cy);
-  return { O, e1, e2, n, rho, D: O.length(), screens: comps.size, w: xmx - xmn, h: ymx - ymn };
+  const side = { C: [...c.v].map((i) => pts[i]) };
+  let bl = null, br = null;
+  for (const cc of comps.values()) {
+    if (cc === c || !(cc.A >= 0.15 * Amax)) continue;
+    const zc = cc.c[2] / cc.A;
+    if (zc > 0 && (!bl || cc.A > bl.A)) bl = cc;
+    if (zc < 0 && (!br || cc.A > br.A)) br = cc;
+  }
+  if (bl) side.L = [...bl.v].map((i) => pts[i]);
+  if (br) side.R = [...br.v].map((i) => pts[i]);
+  return { O, e1, e2, n, rho, D: O.length(), screens: comps.size, w: xmx - xmn, h: ymx - ymn, side };
 }
 function _cfLens(fovDeg, asp, d) {
   const h = Math.atan(Math.tan(fovDeg * Math.PI / 360) * asp);
@@ -69101,6 +69108,70 @@ function _cfMeasure(S, f, u, L, W, H) {
   }
   return { cx: (l + r) / 2, cy: (t + b) / 2, hw: (r - l) / 2, hh: (b - t) / 2 };
 }
+const CF_CLEAR = 0.2;   // game units of air kept between the camera and any surface it was heading for (the
+function _cfSolids(mesh) {
+  const ud = mesh.userData;
+  if (ud._cfSolid && ud._cfSolid.length) return ud._cfSolid;
+  const out = [];
+  mesh.traverse((o) => {
+    if (!o.isMesh || !o.material || !o.geometry) return;
+    if (o.name === 'shield' || (o.userData && (o.userData.isPlume || o.userData.isRunningLight || o.userData._canopyGlass))) return;
+    const ms = Array.isArray(o.material) ? o.material : [o.material];
+    if (ms.some((m) => m && !m.transparent && (m.isMeshStandardMaterial || m.isMeshPhysicalMaterial))) out.push(o);
+  });
+  ud._cfSolid = out;
+  return out;
+}
+const _cfRay = new THREE.Raycaster(), _cfR0 = new THREE.Vector3(), _cfRD = new THREE.Vector3(), _cfRQ = new THREE.Quaternion();
+function _cfClearT(mesh, eye, f, u) {
+  const len = Math.hypot(f, u);
+  if (!(len > 1e-6)) return 1;
+  eye.getWorldPosition(_cfR0); eye.getWorldQuaternion(_cfRQ);
+  _cfRD.set(-f, u, 0).applyQuaternion(_cfRQ).normalize();
+  _cfRay.set(_cfR0, _cfRD); _cfRay.near = 0; _cfRay.far = len + CF_CLEAR;
+  _cfRay.layers.enableAll();   // the hull may be on the ADS / cockpit-pass layer (5)
+  const hit = _cfRay.intersectObjects(_cfSolids(mesh), false)[0];
+  if (!hit) return 1;
+  return Math.max(0, Math.min(1, (hit.distance - CF_CLEAR) / len));
+}
+function _cfPanels(side, f, u, L, W, H) {
+  if (!side) return null;
+  const out = {}, q = new THREE.Vector3(), o2 = { x: 0, y: 0 };
+  for (const k of ['L', 'C', 'R']) {
+    const P = side[k];
+    if (!P || P.length < 3) continue;
+    const pts = [];
+    for (const p of P) { q.set(p[0], p[1], p[2]); if (_cfProj(q, f, u, L, W, H, o2)) pts.push([o2.x, o2.y]); }
+    if (pts.length < 3) continue;
+    pts.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    const cr = (a, b, c) => (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+    const lo = [], hi = [];
+    for (const p of pts) { while (lo.length >= 2 && cr(lo[lo.length - 2], lo[lo.length - 1], p) <= 0) lo.pop(); lo.push(p); }
+    for (let i = pts.length - 1; i >= 0; i--) { const p = pts[i]; while (hi.length >= 2 && cr(hi[hi.length - 2], hi[hi.length - 1], p) <= 0) hi.pop(); hi.push(p); }
+    const poly = lo.slice(0, -1).concat(hi.slice(0, -1));
+    if (poly.length < 3) continue;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, gx = 0, gy = 0;
+    for (const p of poly) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); gx += p[0]; gy += p[1]; }
+    gx /= poly.length; gy /= poly.length;
+    const inside = (x, y) => {
+      let s = 0;
+      for (let i = 0; i < poly.length; i++) {
+        const a = poly[i], b = poly[(i + 1) % poly.length];
+        const v = (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0]);
+        if (Math.abs(v) < 1e-9) continue;
+        if (s === 0) s = Math.sign(v); else if (Math.sign(v) !== s) return false;
+      }
+      return true;
+    };
+    let ix0 = x0, iy0 = y0, ix1 = x1, iy1 = y1;
+    for (let it = 0; it < 60; it++) {
+      if (inside(ix0, iy0) && inside(ix1, iy0) && inside(ix0, iy1) && inside(ix1, iy1)) break;
+      ix0 += (gx - ix0) * 0.04; ix1 += (gx - ix1) * 0.04; iy0 += (gy - iy0) * 0.04; iy1 += (gy - iy1) * 0.04;
+    }
+    out[k] = { poly, box: [x0, y0, x1, y1], inner: [ix0, iy0, ix1, iy1] };
+  }
+  return out.C ? out : null;
+}
 function _lssCockpitFrameSolve(mesh, eye, o) {
   const S = _lssScreenCircle(mesh, eye);
   if (!S) return null;
@@ -69131,8 +69202,36 @@ function _lssCockpitFrameSolve(mesh, eye, o) {
     if (f2 === f && u2 === u) break;   // pinned on a bound
     f = f2; u = u2; e = e2;
   }
-  const clamped = f <= fLo + 1e-9 || f >= fHi - 1e-9 || u <= uLo + 1e-9 || u >= uHi - 1e-9;
-  return { f, u, it, D, rho: S.rho, screens: S.screens, errPx: e[0], fitErr: e[1], clamped,
+  let blocked = 0;
+  try {
+    for (let pass = 0; pass < 2; pass++) {
+      const tc = _cfClearT(mesh, eye, f, u);
+      if (tc >= 0.999) break;
+      blocked++;
+      f *= tc; u *= tc;
+      const eB = F(f, u);
+      if (!eB) break;
+      e = eB;
+      for (let j = 0; j < 20; j++) {
+        if (Math.abs(e[0]) < 0.2) break;
+        const eu = F(f, u + h);
+        if (!eu) break;
+        const b = (eu[0] - e[0]) / h;
+        if (!(Math.abs(b) > 1e-9)) break;
+        let du = -e[0] / b;
+        if (Math.abs(du) > 0.2 * D) du = Math.sign(du) * 0.2 * D;
+        const u2 = Math.max(uLo, Math.min(uHi, u + du)), e2 = F(f, u2);
+        if (!e2 || u2 === u) break;
+        u = u2; e = e2;
+      }
+    }
+    const tl = _cfClearT(mesh, eye, f, u);   // last word: never leave the camera in the hull
+    if (tl < 0.999) { f *= tl; u *= tl; const eL = F(f, u); if (eL) e = eL; blocked++; }
+  } catch (_) {}
+  const clamped = blocked > 0 || f <= fLo + 1e-9 || f >= fHi - 1e-9 || u <= uLo + 1e-9 || u >= uHi - 1e-9;
+  let panels = null;   // (v50.25) where the screens land - read by the HUD only; the solve itself is unchanged
+  try { panels = _cfPanels(S.side, f, u, L, o.W, o.H); } catch (_) {}
+  return { f, u, it, D, rho: S.rho, screens: S.screens, errPx: e[0], fitErr: e[1], clamped, blocked, panels,
            baked: { offPx: e0[0], fit: e0[1] + o.margin }, panel: e[2], rose: R };
 }
 function _cfOpts(K) {
@@ -69156,6 +69255,19 @@ function _lssCockpitFrame(mesh, eye) {
     const ud = mesh.userData;
     if (ud._cfKey !== key) { ud._cfKey = key; ud._cfSol = _lssCockpitFrameSolve(mesh, eye, o); }
     return ud._cfSol;
+  } catch (_) { return null; }
+}
+function _lssHudPanels(W, H) {
+  try {
+    const K = (typeof window !== 'undefined') ? window.__hudPanels : null;
+    if (K === false || (K && K.on === false)) return null;
+    if (!game || !game._cockpit3dLive || game.thirdPerson) return null;
+    if (typeof isXRPresenting === 'function' && isXRPresenting()) return null;
+    const ud = player && player.mesh && player.mesh.userData;
+    const s = ud && ud._cfSol;
+    if (!s || !s.panels || !s.panels.C || !s.panel) return null;
+    if (typeof ud._cfKey !== 'string' || ud._cfKey.indexOf(W + '|' + H + '|') !== 0) return null;
+    return { L: s.panels.L, C: s.panels.C, R: s.panels.R, circle: s.panel };
   } catch (_) { return null; }
 }
 if (typeof window !== 'undefined') {
@@ -69314,7 +69426,8 @@ function _lssApplyShipRig(dt) {
           game._cockpitIntMesh = player.mesh;
           game._cockpitIntMat = null;
           game._cockpitFrameObjs = [];
-          try { player.mesh.traverse(o => { if (o.userData && o.userData._cockpitFrame) game._cockpitFrameObjs.push(o); }); } catch (_) {}
+          game._cockpitGlassObjs = [];   // (v50.15)
+          try { player.mesh.traverse(o => { if (o.userData && o.userData._cockpitFrame) game._cockpitFrameObjs.push(o); if (o.userData && o.userData._canopyGlass) game._cockpitGlassObjs.push(o); }); } catch (_) {}
           try {
             player.mesh.traverse(o => {
               if (game._cockpitIntMat || !o.isMesh) return;
@@ -69324,6 +69437,10 @@ function _lssApplyShipRig(dt) {
           } catch (_) {}
         }
         if (game._cockpitFrameObjs) for (const _fo of game._cockpitFrameObjs) if (!_fo.visible) _fo.visible = true;
+        {
+          const _gShow = !!(window.__cockpit && window.__cockpit.glass === true);
+          if (game._cockpitGlassObjs) for (const _go of game._cockpitGlassObjs) if (_go.visible !== _gShow) _go.visible = _gShow;
+        }
         try {
           const _rl = player.mesh && player.mesh.userData && player.mesh.userData.runningLight;
           const _nlWant = !(window.__cockpit && window.__cockpit.navLight === false);
@@ -77675,7 +77792,33 @@ if (typeof window !== 'undefined') {
   };
 }
 
-function _hlfDraw(ctx, W, H, v) {
+function _hlfIconState(m, v, sh, popK) {
+  const ab = player.abilities && player.abilities[m.slot];
+  if (!ab) return null;
+  const cd = (player.abilityCooldowns && player.abilityCooldowns[m.slot]) || 0;
+  const active = !!(player.abilityActive && player.abilityActive[m.slot]);
+  const _chg = _hlfAbCharges(ab);
+  const ready = (_chg ? (_chg.n > 0 && !active) : (cd <= 0 && !active)) && _hlfAbArmed(ab);
+  const _frac = _chg ? (_chg.n / _chg.max) : (ready ? 1 : 0);
+  const col = sh[m.cd] || _HL[m.cd].col;
+  let pop = 1;
+  const age = (v.t != null && _hudRF && _hudRF.t0) ? v.t - _hudRF.t0[m.slot] : -1;
+  if (age >= 0 && age < 0.45) pop = 1 + popK * (1 - age / 0.45);
+  let flash = 0;
+  try {
+    const F = window.__hudFlash;
+    if (!(F && F.on === false) && age >= 0) {
+      const dur = (F && F.dur > 0) ? F.dur : 0.12, gp = (F && F.gap >= 0) ? F.gap : 0.10;
+      if (age < dur * 2 + gp && !(age >= dur && age < dur + gp)) {
+        flash = Math.max(0, Math.min(1, (F && F.gain != null) ? F.gain : 1));
+      }
+    }
+  } catch (_) {}
+  return { kind: _HLF_ICON[m.slot] || 'bolt', col: col, ready: ready, frac: _frac, pop: pop, flash: flash };
+}
+
+function _hlfDraw(ctx, W, H, v, parts) {
+  const _all = parts !== 'top';
   const TOP = _HLF.TOP, SH = _HLF.SH, HP = _HLF.HP, AB = _HLF.AB, FR = _HLF.FR;
   const base = _hlPlace(_HL.shield, W, H);            // any centred part gives cx/cy/vmin
   const vm = base.vmin;
@@ -77773,16 +77916,18 @@ function _hlfDraw(ctx, W, H, v) {
   }
 
   const nrgCol = v.nrgWarn ? v.energyCol : (sh.speed || _HL.speed.col);
-  if (v.energyPct != null) {
+  if (_all && v.energyPct != null) {
     _hlfWedge(I, _HL.speed.r, _HL.speed.r + _HL.speed.tick * 0.5,
               _HL.speed.a0 + (_HL.speed.rot || 0),
               _HL.speed.a1 + (_HL.speed.rot || 0), _HL.speed.seg || 9,
               v.energyPct, nrgCol, false);
   }
   const SB = { rIn: _HL.ammo.r, rOut: _HL.ammo.r + 4 };
-  _hlfWedge(I, SB.rIn, SB.rOut, _HL.ammo.a0 + (_HL.ammo.rot || 0),
-            _HL.ammo.a1 + (_HL.ammo.rot || 0), _hlAmmoSegs() || _HL.ammo.seg,
-            v.ammoPct, v.ammoCol || sh.ammo || _HL.ammo.col, !!_HL.ammo.fromEnd);
+  if (_all) {
+    _hlfWedge(I, SB.rIn, SB.rOut, _HL.ammo.a0 + (_HL.ammo.rot || 0),
+              _HL.ammo.a1 + (_HL.ammo.rot || 0), _hlAmmoSegs() || _HL.ammo.seg,
+              v.ammoPct, v.ammoCol || sh.ammo || _HL.ammo.col, !!_HL.ammo.fromEnd);
+  }
 
   _hlfLabelPlate(I, (SH.rIn + SH.rOut) / 2, 270, 'SHIELD', shCol, 0.78, 15,
                  Math.max(SH.rOut - SH.rIn, 1.00));
@@ -77790,14 +77935,16 @@ function _hlfDraw(ctx, W, H, v) {
   _hlfLabelPlate(I, (AB.rIn + AB.rOut) / 2, 270, 'CORE', coreCol, 0.66, 11,
                  Math.max(AB.rOut - AB.rIn, 0.95));
   const LBL_TILT = _HLF_DASH.rot || 30;
-  if (v.energyPct != null) {
+  if (_all && v.energyPct != null) {
     _hlfFlatPlate(I, _HL.speed.r, _HL.speed.r + _HL.speed.tick * 0.5,
                   _HL.speed.a0 + (_HL.speed.rot || 0), +1, -LBL_TILT, 'NRG', 0.62);
   }
-  _hlfFlatPlate(I, _HL.ammo.r, _HL.ammo.r + 4,
-                _HL.ammo.a1 + (_HL.ammo.rot || 0), -1, +LBL_TILT, 'AMMO', 0.62);
+  if (_all) {
+    _hlfFlatPlate(I, _HL.ammo.r, _HL.ammo.r + 4,
+                  _HL.ammo.a1 + (_HL.ammo.rot || 0), -1, +LBL_TILT, 'AMMO', 0.62);
+  }
 
-  {
+  if (_all) {
     const order = _HL_AB.slice().sort((a, b) => _HL[a.cd].a0 - _HL[b.cd].a0);
     const IR = _HLF_ICON_ROW;
     let szV = IR.size, gapV = IR.gapAlong, popK = 0.16;
@@ -77814,32 +77961,14 @@ function _hlfDraw(ctx, W, H, v) {
     ctx.globalAlpha = I.ga;
     for (let i = 0; i < order.length; i++) {
       const m = order[i];
-      const ab = player.abilities && player.abilities[m.slot];
-      if (!ab) continue;
-      const cd = (player.abilityCooldowns && player.abilityCooldowns[m.slot]) || 0;
-      const active = !!(player.abilityActive && player.abilityActive[m.slot]);
-      const _chg = _hlfAbCharges(ab);
-      const ready = (_chg ? (_chg.n > 0 && !active) : (cd <= 0 && !active)) && _hlfAbArmed(ab);
-      const _frac = _chg ? (_chg.n / _chg.max) : (ready ? 1 : 0);
-      const col = sh[m.cd] || _HL[m.cd].col;
-      let pop = 1;
-      const age = (v.t != null && _hudRF && _hudRF.t0) ? v.t - _hudRF.t0[m.slot] : -1;
-      if (age >= 0 && age < 0.45) pop = 1 + popK * (1 - age / 0.45);
-      let flash = 0;
-      try {
-        const F = window.__hudFlash;
-        if (!(F && F.on === false) && age >= 0) {
-          const dur = (F && F.dur > 0) ? F.dur : 0.12, gp = (F && F.gap >= 0) ? F.gap : 0.10;
-          if (age < dur * 2 + gp && !(age >= dur && age < dur + gp)) {
-            flash = Math.max(0, Math.min(1, (F && F.gain != null) ? F.gain : 1));
-          }
-        }
-      } catch (_) {}
+      const st = _hlfIconState(m, v, sh, popK);   // (v50.25) shared with the console-screen layout
+      if (!st) continue;
+      const pop = st.pop;
       const a = (midA + ((order.length - 1) / 2 - i) * dPerStep) * _HL_D2R;
       const rDraw = IR.rIn + szV * pop / 2;
       ctx.save();
       ctx.translate(I.cx + Math.cos(a) * rDraw * vm, I.cy + Math.sin(a) * rDraw * vm);
-      _hlfIcon(I, _HLF_ICON[m.slot] || 'bolt', size * pop, col, ready, _frac, flash);
+      _hlfIcon(I, st.kind, size * pop, st.col, st.ready, st.frac, st.flash);
       ctx.restore();
     }
     ctx.restore();
@@ -77848,8 +77977,151 @@ function _hlfDraw(ctx, W, H, v) {
   ctx.restore();
 
   ctx.globalAlpha = _hlGA();
-  _hlPips(ctx, _hlPlace(_HLF_DASH, W, H), _HLF_DASH, v.dashN,
-          sh.dash || _HLF_DASH.col, v.dashMax);
+  if (_all) {
+    _hlPips(ctx, _hlPlace(_HLF_DASH, W, H), _HLF_DASH, v.dashN,
+            sh.dash || _HLF_DASH.col, v.dashMax);
+  }
+}
+
+function _hlfVBar(ctx, x0, y0, x1, y1, n, frac, col, ga) {
+  n = Math.max(1, n | 0);
+  const h = y1 - y0, gap = Math.max(1, h * 0.022), sh = (h - gap * (n - 1)) / n, bev = Math.min(sh, x1 - x0) * 0.22;
+  for (let i = 0; i < n; i++) {
+    const yb = y1 - i * (sh + gap), yt = yb - sh;   // segment i counts up from the bottom
+    const on = frac > 0 && (i / Math.max(1, n - 1)) <= frac + 1e-6;   // the rule _hlfWedge lights by
+    ctx.beginPath();
+    ctx.moveTo(x0 + bev, yt); ctx.lineTo(x1, yt); ctx.lineTo(x1, yb - bev); ctx.lineTo(x1 - bev, yb);
+    ctx.lineTo(x0, yb); ctx.lineTo(x0, yt + bev); ctx.closePath();
+    ctx.globalAlpha = ga * (on ? 1 : 0.26);
+    ctx.fillStyle = col;
+    ctx.fill();
+  }
+  ctx.globalAlpha = ga;
+}
+function _hlfPanelLabel(ctx, text, x, y, col, px, align) {
+  hudFont('700 ' + Math.max(6, px).toFixed(1) + 'px Orbitron, Courier New');   // before save() - see _hlText
+  ctx.save();
+  ctx.globalAlpha = _hlTA();
+  ctx.fillStyle = col;
+  ctx.textAlign = align || 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(text, x, y);
+  ctx.restore();
+  _hudFontCache = '';
+}
+function _hlfDrawPanels(ctx, W, H, v, PN) {
+  const K = (typeof window !== 'undefined' && window.__hudPanels && typeof window.__hudPanels === 'object') ? window.__hudPanels : {};
+  const num = (x, d) => (typeof x === 'number' && isFinite(x)) ? x : d;
+  const pad = num(K.pad, 0.06), barK = num(K.bar, 0.16);
+  const vm = Math.min(W, H) / 100;
+  const sh = _hlfShades(player && player.loadoutKey);
+  const ga = _hlGA();
+  const H3 = window.__hud3d || { on: true, persp: 1400, base: 11, max: 24 };
+  const _mx = (H3.max != null) ? H3.max : 24;
+  const _rx = (H3.on !== false) ? Math.max(-_mx, Math.min(_mx, H3.base || 0)) * Math.PI / 180 : 0;
+  const _cs = Math.cos(_rx), _sn = Math.sin(_rx), _per = H3.persp || 1400;
+  const toCanvas = (sx, sy) => {
+    const X = sx - W / 2, Y = sy - H / 2;
+    const y = Y / (_cs + Y * _sn / _per), w = 1 - y * _sn / _per;
+    return [W / 2 + X * w, H / 2 + y, w];
+  };
+  const box = (P) => {
+    const r = P.inner;
+    const a = toCanvas(r[0], r[1]), b = toCanvas(r[2], r[1]), c = toCanvas(r[0], r[3]), d = toCanvas(r[2], r[3]);
+    const x0 = Math.max(a[0], c[0]), x1 = Math.min(b[0], d[0]), y0 = Math.max(a[1], b[1]), y1 = Math.min(c[1], d[1]);
+    const w = x1 - x0, h = y1 - y0;
+    return { x0: x0 + pad * w, y0: y0 + pad * h, x1: x1 - pad * w, y1: y1 - pad * h, w: w * (1 - 2 * pad), h: h * (1 - 2 * pad) };
+  };
+  {
+    const ci = PN.circle;
+    const cc = toCanvas(ci.cx, ci.cy);
+    const rho = Math.min(ci.hw, ci.hh) * cc[2];
+    const gap = num(K.gap, 0.5) * vm;
+    const edge = 0.04 * rho;                                   // breathing room inside the screen's rim
+    const kO = (_HLF.FR.rOut + 0.62) / _HLF.AB.rIn;
+    let rc = (2 * (rho - edge) - kO * gap) / (1 + kO);
+    rc = Math.min(rc, 13.5 * vm) * num(K.compass, 1);         // never larger than the rose was
+    if (rc > 4) {
+      const ccx = cc[0], ccy = cc[1] + (rho - edge) - rc;      // resting on the bottom of the circle
+      const kc = rc / (13.5 * vm);
+      const aP = _hlPlace(_HL.shield, W, H), vmA = aP.vmin;
+      const k = (rc + gap) / (_HLF.AB.rIn * vmA);
+      ctx.save();
+      ctx.translate(ccx - aP.cx * k, ccy - aP.cy * k);
+      ctx.scale(k, k);
+      _hlfDraw(ctx, W, H, v, 'top');
+      ctx.restore();
+      const R1 = 11 * vm * kc, R2 = 13.5 * vm * kc;
+      ctx.globalAlpha = 1;
+      _hlRadar(ctx, { cx: ccx, cy: ccy, x: ccx - R1, y: ccy - R1, w: 2 * R1, h: 2 * R1, vmin: vm * kc });
+      if (typeof window === 'undefined' || window.__hudCompass !== false) {
+        ctx.globalAlpha = 1;
+        _hlCompass(ctx, { cx: ccx, cy: ccy, x: ccx - R2, y: ccy - R2, w: 2 * R2, h: 2 * R2, vmin: vm * kc }, _HL.compass.col);
+      }
+      ctx.globalAlpha = ga;
+    }
+  }
+  if (PN.L) {
+    const L = box(PN.L);
+    const bw = barK * L.w;
+    let lblW = 0;
+    if (v.energyPct != null) {
+      const nrgCol = v.nrgWarn ? v.energyCol : (sh.speed || _HL.speed.col);
+      _hlfVBar(ctx, L.x1 - bw, L.y0, L.x1, L.y1, _HL.speed.seg || 9, v.energyPct, nrgCol, ga);
+      const fpx = Math.min(bw * 0.8, 0.10 * L.h);
+      lblW = fpx * 2.6;
+      _hlfPanelLabel(ctx, 'NRG', L.x1 - bw - fpx * 0.4, (L.y0 + L.y1) / 2, nrgCol, fpx, 'right');
+      ctx.globalAlpha = ga;
+    }
+    const ax0 = L.x0, aw = Math.max(1, L.w - bw - lblW - 0.04 * L.w);
+    const order = _HL_AB.slice().sort((a, b) => _HL[a.cd].a0 - _HL[b.cd].a0);
+    const SPOT = [[0.62, 0.27], [0.27, 0.70], [0.74, 0.74]];
+    const s0 = Math.min(0.42 * aw, 0.36 * L.h) * num(K.icon, 1);
+    const IR = _HLF_ICON_ROW;
+    let popK = 0.16;
+    try { const KI = window.__hudIcon; if (KI && typeof KI.pop === 'number') popK = KI.pop; } catch (_) {}
+    const I2 = { ctx: ctx, vmin: vm * (s0 / (IR.size * vm)), ga: ga };
+    ctx.save();
+    ctx.globalAlpha = ga;
+    for (let i = 0; i < order.length && i < SPOT.length; i++) {
+      const st = _hlfIconState(order[i], v, sh, popK);
+      if (!st) continue;
+      ctx.save();
+      ctx.translate(ax0 + SPOT[i][0] * aw, L.y0 + SPOT[i][1] * L.h);
+      _hlfIcon(I2, st.kind, s0 * st.pop, st.col, st.ready, st.frac, st.flash);
+      ctx.restore();
+    }
+    ctx.restore();
+  }
+  if (PN.R) {
+    const R = box(PN.R);
+    const bw = barK * R.w;
+    const ammoCol = v.ammoCol || sh.ammo || _HL.ammo.col;
+    _hlfVBar(ctx, R.x0, R.y0, R.x0 + bw, R.y1, _hlAmmoSegs() || _HL.ammo.seg, v.ammoPct, ammoCol, ga);
+    const fpx = Math.min(bw * 0.8, 0.10 * R.h);
+    _hlfPanelLabel(ctx, 'AMMO', R.x0 + bw + fpx * 0.4, R.y0 + 0.86 * R.h, ammoCol, fpx, 'left');
+    ctx.globalAlpha = ga;
+    const px0 = R.x0 + bw + 0.10 * R.w, pw = Math.max(1, R.x1 - px0);
+    const n = Math.max(1, v.dashMax || 3), lit = v.dashN || 0;
+    const pr = Math.min(0.16 * pw, 0.10 * R.h) * num(K.pip, 1);
+    const pcol = sh.dash || _HLF_DASH.col;
+    const spots = (n === 3) ? [[0.5, 0.36], [0.28, 0.62], [0.72, 0.62]]
+      : Array.from({ length: n }, (_, i) => [0.5, 0.2 + 0.6 * (n === 1 ? 0.5 : i / (n - 1))]);
+    ctx.save();
+    for (let i = 0; i < n; i++) {
+      const x = px0 + spots[i][0] * pw, y = R.y0 + spots[i][1] * R.h;
+      ctx.beginPath(); ctx.arc(x, y, pr, 0, 7);
+      ctx.strokeStyle = pcol; ctx.globalAlpha = 0.6 * ga;
+      ctx.lineWidth = Math.max(1, pr * 0.16);
+      ctx.stroke();
+      if (i < lit) {
+        ctx.globalAlpha = ga; ctx.fillStyle = pcol;
+        ctx.shadowColor = pcol; ctx.shadowBlur = pr * 0.5;
+        ctx.fill(); ctx.shadowBlur = 0;
+      }
+    }
+    ctx.restore();
+    ctx.globalAlpha = ga;
+  }
 }
 
 function _hlDrawHUD(ctx, W, H, cx, cy, v) {
@@ -77857,7 +78129,9 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
   ctx.translate(cx - W / 2, cy - H / 2);
   ctx.globalAlpha = _hlGA();
 
-  _hlfDraw(ctx, W, H, v);
+  const _PN = (typeof _lssHudPanels === 'function') ? _lssHudPanels(W, H) : null;
+  if (_PN) _hlfDrawPanels(ctx, W, H, v, _PN);
+  else _hlfDraw(ctx, W, H, v);
 
   let r = _hlPlace(_HL.reticle, W, H);
   ctx.globalAlpha = _hlCA();   // (v42.59) the crosshair has its own slider
@@ -77885,11 +78159,13 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
     _hlText(ctx, r, _HL.objective, v.objectiveStr, _HL.objective.col);
   }
 
-  ctx.globalAlpha = 1;
-  _hlRadar(ctx, _hlPlace(_HL.minimap, W, H, 1));
-  if (typeof window === 'undefined' || window.__hudCompass !== false) {
+  if (!_PN) {   // (v50.25) on the console's screens, _hlfDrawPanels drew them into the centre one
     ctx.globalAlpha = 1;
-    _hlCompass(ctx, _hlPlace(_HL.compass, W, H, 1), _HL.compass.col);
+    _hlRadar(ctx, _hlPlace(_HL.minimap, W, H, 1));
+    if (typeof window === 'undefined' || window.__hudCompass !== false) {
+      ctx.globalAlpha = 1;
+      _hlCompass(ctx, _hlPlace(_HL.compass, W, H, 1), _HL.compass.col);
+    }
   }
   ctx.globalAlpha = _hlGA();   // back to the dimmed HUD for anything drawn after
 
