@@ -15,7 +15,8 @@
   open (the v49.96 "slits" lesson), one three-mesh-bvh per piece for rays and brush queries.
 
   TOOLS  clay: GRAB (drag + twist the clay with your hand) / POKE (the brush ball dents what it touches) /
-         INFLATE (swell or shrink) / SMOOTH / SQUISH (pinch toward the ball)
+         INFLATE (swell or shrink) / SMOOTH / SQUISH (pinch toward the ball) /
+         MELD (join + simplify: sweep an area and its little shapes and dense lines become one simpler surface)
          edit: POINT and LINE (grab a vertex or an edge and stretch it; SOFT = how far the pull spreads) /
          PIECE (move a whole part - seat, console, glass - or a gun / thruster / cockpit marker)
          paint: PAINT (alt = erase) / FILL (a whole part) / DROP (pick a colour off the ship)
@@ -25,7 +26,7 @@
            grip = grab the ship (both grips: scale + turn it) · right stick = size / strength · left stick = tool ·
            A / B = undo / redo · X = menu · Y = mirror · point the right hand at the menu to press buttons.
   DESKTOP  left-drag = tool (shift = smooth / erase) · right-drag = orbit · middle-drag = pan · wheel = zoom ·
-           [ ] size · - = strength · ctrl+Z / ctrl+Y · 1-9, 0 tools · M mirror.
+           [ ] size · - = strength · ctrl+Z / ctrl+Y · 1-9, 0 tools (1 GRAB ... 6 MELD ... 0 PAINT) · M mirror.
 
   SAVING   every stroke autosaves to this device (IndexedDB, per ship) - RESTORE brings it back after a reload.
            EXPORT writes <ship>_edit.glb: the edited pieces in ship space, the painted colour maps composited, every
@@ -69,7 +70,7 @@
   <canvas id="panel" width="512" height="720"></canvas>
   <div id="status">loading...</div>
   <div id="help">
-    <b>Mouse</b> left-drag = tool (shift = smooth / erase) · right-drag = orbit · middle-drag = pan · wheel = zoom ·
+    <b>MELD</b> sweeps an area into one simpler surface (release to commit) · <b>Mouse</b> left-drag = tool (shift = smooth / erase) · right-drag = orbit · middle-drag = pan · wheel = zoom ·
     <b>[ ]</b> size · <b>- =</b> strength · <b>ctrl+Z / ctrl+Y</b> undo / redo · <b>1-9, 0</b> tools · <b>M</b> mirror<br>
     <b>Quest 3</b> right trigger = tool · hold left trigger = smooth / erase · grip = hold the ship (both = scale + turn) ·
     right stick = size / strength · left stick = tool · <b>A / B</b> undo / redo · <b>X</b> menu · <b>Y</b> mirror
@@ -95,15 +96,15 @@ THREE.Mesh.prototype.raycast = acceleratedRaycast;
 
 // ================================================================ STATE
 const SHIPS = ['blaster', 'puncture', 'pyro', 'slayer', 'syphon', 'tracker', 'vortex'];
-const TOOLS = ['grab', 'poke', 'inflate', 'smooth', 'squish', 'point', 'line', 'piece', 'paint', 'fill', 'drop'];
-const TOOL_LABEL = { grab: 'GRAB', poke: 'POKE', inflate: 'INFLATE', smooth: 'SMOOTH', squish: 'SQUISH', point: 'POINT',
+const TOOLS = ['grab', 'poke', 'inflate', 'smooth', 'squish', 'meld', 'point', 'line', 'piece', 'paint', 'fill', 'drop'];
+const TOOL_LABEL = { grab: 'GRAB', poke: 'POKE', inflate: 'INFLATE', smooth: 'SMOOTH', squish: 'SQUISH', meld: 'MELD', point: 'POINT',
   line: 'LINE', piece: 'PIECE', paint: 'PAINT', fill: 'FILL', drop: 'DROP' };
 const CLAY = new Set(['grab', 'poke', 'inflate', 'smooth', 'squish']);
 const qs = new URLSearchParams(location.search);
 // sizes are WORLD metres (what you feel in the headset), so scaling the ship up is how you do fine work
 const S = {
   ship: SHIPS.includes(qs.get('ship')) ? qs.get('ship') : 'slayer',
-  tool: 'grab', r: 0.03, strength: 0.5, soft: 0.03, hardness: 0.5, opacity: 1,
+  tool: 'grab', r: 0.03, strength: 0.5, soft: 0.03, hardness: 0.5, opacity: 1, meld: 0.35,
   color: [255, 59, 48], mirror: true, inflateOut: true, menu: true,
 };
 const $ = (id) => document.getElementById(id);
@@ -141,6 +142,8 @@ function placeCamera() {
   camera.position.set(orbit.target.x + orbit.dist * Math.sin(orbit.az) * ce, orbit.target.y + orbit.dist * Math.sin(orbit.el),
     orbit.target.z + orbit.dist * Math.cos(orbit.az) * ce);
   camera.lookAt(orbit.target);
+  const near = clamp(orbit.dist * 0.02, 0.00002, 0.05), far = clamp(orbit.dist * 400, 5, 200);   // near follows the zoom
+  if (Math.abs(camera.near - near) > near * 0.05 || camera.far !== far) { camera.near = near; camera.far = far; camera.updateProjectionMatrix(); }
 }
 function resize() {
   if (renderer.xr.isPresenting) return;
@@ -175,12 +178,23 @@ function makePiece(src) {
   for (let i = 0; i < ia.length; i++) ia[i] = g0.index ? g0.index.getX(i) : i;
   geo.setIndex(new THREE.BufferAttribute(ia, 1));
   if (!na) geo.computeVertexNormals();
-  geo.computeBoundsTree();                             // ⚠ reorders the index IN PLACE - adjacency is built after
-  geo.computeBoundingSphere();
-  const idx = geo.index.array, nf = idx.length / 3;
   const mat = src.material.clone();
   const mesh = new THREE.Mesh(geo, mat); mesh.name = src.name || ('piece' + pieces.length);
   shipRoot.add(mesh);
+  const P = { id: pieces.length, mesh, geo, mat, name: mesh.name, matName: (src.material && src.material.name) || '', pos: geo.attributes.position.array,
+    nrm: geo.attributes.normal.array, uv, inv: new THREE.Matrix4(), hasPaint: !!(uv && mat.map), paint: null, uPaint: null, baseColor: mat.color.clone(), topo: false };
+  buildTopology(P);
+  if (P.hasPaint) patchPaintMaterial(P);
+  return P;
+}
+// everything that depends on the TRIANGLES: the BVH, the welded groups, adjacency and the grid. Runs at load, and again
+// whenever MELD (or its undo) changes the triangles.
+function buildTopology(P) {
+  const geo = P.geo, pos = P.pos, nv = pos.length / 3;
+  if (geo.boundsTree) geo.disposeBoundsTree();
+  geo.computeBoundsTree();                             // ⚠ reorders the index IN PLACE - adjacency is built after
+  geo.computeBoundingSphere();
+  const idx = geo.index.array, nf = idx.length / 3;
   // weld into groups
   const grp = new Int32Array(nv), wm = new Map(); let ng = 0;
   for (let i = 0; i < nv; i++) {
@@ -203,13 +217,19 @@ function makePiece(src) {
   }
   for (let g = 0; g < ng; g++) if (nb[g].length > 1) nb[g] = [...new Set(nb[g])];
   const [gnS, gnL] = csr(ng, (c) => { for (let g = 0; g < ng; g++) for (let k = 0; k < nb[g].length; k++) c(g); }, (f) => { for (let g = 0; g < ng; g++) for (const x of nb[g]) f(g, x); });
-  const P = { id: pieces.length, mesh, geo, mat, name: mesh.name, matName: (src.material && src.material.name) || '', pos, nrm, uv, idx, nv, nf,
-    grp, ng, gpos, gvS, gvL, gfS, gfL, gnS, gnL, cell: new Int32Array(ng), grid: new Map(), inv: new THREE.Matrix4(),
-    hasPaint: !!(uv && mat.map), paint: null, uPaint: null, baseColor: mat.color.clone(), moved: new Uint8Array(ng) };
+  Object.assign(P, { idx, nv, nf, grp, ng, gpos, gvS, gvL, gfS, gfL, gnS, gnL, cell: new Int32Array(ng), grid: new Map(), moved: new Uint8Array(ng) });
   for (let g = 0; g < ng; g++) gridPut(P, g);
-  if (P.hasPaint) patchPaintMaterial(P);
-  return P;
 }
+// swap a piece's arrays wholesale (MELD, its undo, a restored session) and rebuild what hangs off them
+function setPieceArrays(P, pos, nrm, uv, idx) {
+  const geo = P.geo; geo.dispose();                    // frees the old GPU buffers; three re-uploads on the next draw
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3)); geo.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
+  if (uv) geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  geo.setIndex(new THREE.BufferAttribute(idx, 1));
+  P.pos = pos; P.nrm = nrm; P.uv = uv;
+  buildTopology(P);
+}
+const topoSnap = (P) => ({ pos: P.pos.slice(), nrm: P.nrm.slice(), uv: P.uv ? P.uv.slice() : null, idx: P.idx.slice() });
 function gridPut(P, g) {
   const k = cellKey(P.gpos[g * 3], P.gpos[g * 3 + 1], P.gpos[g * 3 + 2]); P.cell[g] = k;
   let a = P.grid.get(k); if (!a) P.grid.set(k, a = []); a.push(g);
@@ -263,6 +283,7 @@ function clearShip() {
   pieces = []; markers = []; undoStack.length = 0; redoStack.length = 0;
   shipRoot.position.copy(HOME.pos); shipRoot.quaternion.identity(); shipRoot.scale.setScalar(HOME.scale);
 }
+function statusLine() { const tris = pieces.reduce((a, P) => a + P.nf, 0); status(ship.name + ': ' + pieces.length + ' pieces, ' + tris.toLocaleString() + ' tris, ' + markers.length + ' markers'); }
 const loader = new GLTFLoader();
 async function loadShip(name, url) {
   status('loading ' + name + ' ...'); banner('');
@@ -280,8 +301,7 @@ async function loadShip(name, url) {
   const c1 = markers.find((m) => /^cockpit1$/i.test(m.name)); ship.c1 = c1 ? c1.vis.position.clone() : null;
   syncShipInv();
   const bb = new THREE.Box3().setFromObject(shipRoot); orbit.target.copy(bb.getCenter(V()));
-  const tris = pieces.reduce((a, P) => a + P.nf, 0);
-  status(name + ': ' + pieces.length + ' pieces, ' + tris.toLocaleString() + ' tris, ' + markers.length + ' markers');
+  statusLine();
   drawPanel();
   await offerRestore();
 }
@@ -345,6 +365,10 @@ function endStroke() {
   else if (st.kind === 'paint' && st.tiles && st.tiles.size) { finishPaint(st); entry = { type: 'paint', tiles: st.tiles }; }
   else if (st.kind === 'xform' && st.target) entry = { type: 'xform', target: st.target, before: st.before, after: xformGet(st.target) };
   else if (st.kind === 'color' && st.target) entry = { type: 'color', target: st.target, before: st.before, after: st.target.mat.color.getHex() };
+  else if (st.kind === 'topo' && st.meld && st.meld.size) {
+    const r = meldCommit(st);
+    if (st.snaps.size) { entry = { type: 'topo', snaps: st.snaps }; statusLine(); toast('melded ' + r.merged + ' vertices: ' + r.before.toLocaleString() + ' -> ' + r.after.toLocaleString() + ' tris'); st.result = r; }
+  }
   if (entry) { undoStack.push(entry); redoStack.length = 0; if (undoStack.length > 80) undoStack.shift(); scheduleSave(); }
   drawPanel();
 }
@@ -364,9 +388,14 @@ function applyEntry(e) {             // returns the entry that reverses it
   if (e.type === 'paint') return { type: 'paint', tiles: applyPaintSnap(e.tiles) };
   if (e.type === 'xform') { xformSet(e.target, e.before); return { type: 'xform', target: e.target, before: e.after, after: e.before }; }
   if (e.type === 'color') { e.target.mat.color.setHex(e.before); return { type: 'color', target: e.target, before: e.after, after: e.before }; }
+  if (e.type === 'topo') {
+    const inv = new Map();
+    for (const [id, snap] of e.snaps) { const P = pieces[id]; inv.set(id, topoSnap(P)); setPieceArrays(P, snap.pos.slice(), snap.nrm.slice(), snap.uv ? snap.uv.slice() : null, snap.idx.slice()); P.topo = true; }
+    return { type: 'topo', snaps: inv };
+  }
 }
-function undo() { if (stroke) endStroke(); const e = undoStack.pop(); if (!e) return; redoStack.push(applyEntry(e)); scheduleSave(); drawPanel(); }
-function redo() { if (stroke) endStroke(); const e = redoStack.pop(); if (!e) return; undoStack.push(applyEntry(e)); scheduleSave(); drawPanel(); }
+function undo() { if (stroke) endStroke(); const e = undoStack.pop(); if (!e) return; redoStack.push(applyEntry(e)); scheduleSave(); drawPanel(); if (e.type === 'topo') statusLine(); }
+function redo() { if (stroke) endStroke(); const e = redoStack.pop(); if (!e) return; undoStack.push(applyEntry(e)); scheduleSave(); drawPanel(); if (e.type === 'topo') statusLine(); }
 
 // ================================================================ CLAY
 const falloff = (t) => (t >= 1 ? 0 : (1 - t * t) * (1 - t * t));
@@ -407,6 +436,86 @@ function clayFrame(tool, c, p, dt) {
       setGroup(P, g, _c.x, _c.y, _c.z);
     }
   });
+}
+
+// ================================================================ MELD: join + simplify
+// Owner: "could there be a meld/weld tool, or something to simplify an area where there might be lots of lines and
+// vertices, making them into one shape instead of multiple little shapes". VERTEX CLUSTERING (Rossignac-Borrel)
+// inside the brush: each vertex group the ball sweeps joins a cell of a grid T on a side (ship space, cells CENTRED on
+// z = 0 so MIRROR stays symmetric) the first time it is touched. While the trigger is held every member slides toward
+// its cell's centroid - you watch the area melt together. On release every member snaps exactly onto it, triangles
+// with two corners in one cell vanish, duplicates go, unused vertices are dropped and the piece's topology is rebuilt.
+// Little loose shapes whose corners share cells become one surface; a dense patch becomes a few big triangles.
+// A grid, not merge-by-distance: distance merging CHAINS through a dense mesh and can swallow a whole region into a
+// point; a cell can only ever collapse what lies inside it. UVs stay per corner, so the art stretches over the merged
+// faces instead of tearing. One undo step restores the piece's arrays exactly.
+const meldCell = () => (S.r * (0.05 + 0.6 * S.meld)) / shipScale();      // ship units
+let cellSeq = 0;
+function meldFrame(cShip, p, dt) {
+  const R = S.r / shipScale(), T = meldCell(), centres = S.mirror ? [cShip, mirrorZ(cShip, V())] : [cShip];
+  const k = clamp(p * dt * 8, 0, 1), v = V(), t = V();
+  for (const cc of centres) {
+    const last = stroke.areas.length ? stroke.areas[stroke.areas.length - 1] : null;
+    if (!last || last.c.distanceTo(cc) > R * 0.3) stroke.areas.push({ c: cc.clone(), R });
+    piecesNear(cc, R, (P, cl, Rl) => {
+      let M = stroke.meld.get(P.id);
+      if (!M) { M = { cells: new Map(), member: new Map() }; stroke.meld.set(P.id, M); stroke.snaps.set(P.id, topoSnap(P)); }
+      _hits.length = 0; groupsNear(P, cl, Rl, (g) => _hits.push(g, 0));
+      for (let h = 0; h < _hits.length; h += 2) {
+        const g = _hits[h]; if (M.member.has(g)) continue;
+        toShip(P, v.fromArray(P.gpos, g * 3), v);
+        const key = Math.floor(v.x / T) + ',' + Math.floor(v.y / T) + ',' + Math.floor(v.z / T + 0.5);
+        let c = M.cells.get(key); if (!c) M.cells.set(key, c = { id: --cellSeq, x: 0, y: 0, z: 0, n: 0 });
+        c.x += v.x; c.y += v.y; c.z += v.z; c.n++; M.member.set(g, c);
+      }
+    });
+  }
+  for (const [id, M] of stroke.meld) {
+    const P = pieces[id];
+    for (const [g, c] of M.member) {
+      if (c.n < 2) continue;
+      toLocal(P, t.set(c.x / c.n, c.y / c.n, c.z / c.n), t); v.fromArray(P.gpos, g * 3);
+      if (v.distanceToSquared(t) < 1e-16) continue;
+      v.lerp(t, k); setGroup(P, g, v.x, v.y, v.z);
+    }
+  }
+}
+function meldCommit(st) {
+  let before = 0, after = 0, merged = 0; const t = V();
+  for (const [id, M] of st.meld) {
+    const P = pieces[id], rep = new Int32Array(P.ng);
+    for (let g = 0; g < P.ng; g++) rep[g] = g;
+    let any = false;
+    for (const [g, c] of M.member) {
+      if (c.n < 2) continue; any = true; rep[g] = c.id;
+      toLocal(P, t.set(c.x / c.n, c.y / c.n, c.z / c.n), t);
+      for (let q = P.gvS[g]; q < P.gvS[g + 1]; q++) { const i = P.gvL[q] * 3; P.pos[i] = t.x; P.pos[i + 1] = t.y; P.pos[i + 2] = t.z; }
+    }
+    if (!any) { st.snaps.delete(id); continue; }
+    merged += [...M.cells.values()].filter((c) => c.n > 1).reduce((a, c) => a + c.n - 1, 0);
+    // keep a triangle unless two of its corners now share a cell; drop new duplicates (either winding)
+    const idx = P.idx, keep = [], seen = new Set();
+    for (let f = 0; f < P.nf; f++) {
+      const a = idx[f * 3], b = idx[f * 3 + 1], c = idx[f * 3 + 2], ra = rep[P.grp[a]], rb = rep[P.grp[b]], rc = rep[P.grp[c]];
+      if (ra === rb || rb === rc || ra === rc) continue;
+      if (ra < 0 || rb < 0 || rc < 0) { const key = [ra, rb, rc].sort((x, y) => x - y).join(); if (seen.has(key)) continue; seen.add(key); }
+      keep.push(a, b, c);
+    }
+    // drop the vertices nothing uses any more, so they can't be picked or exported
+    const remap = new Int32Array(P.nv).fill(-1); let nv = 0;
+    for (const i of keep) if (remap[i] < 0) remap[i] = nv++;
+    const pos = new Float32Array(nv * 3), nrm = new Float32Array(nv * 3), uv = P.uv ? new Float32Array(nv * 2) : null;
+    for (let i = 0; i < P.nv; i++) {
+      const j = remap[i]; if (j < 0) continue;
+      pos.set(P.pos.subarray(i * 3, i * 3 + 3), j * 3); nrm.set(P.nrm.subarray(i * 3, i * 3 + 3), j * 3);
+      if (uv) uv.set(P.uv.subarray(i * 2, i * 2 + 2), j * 2);
+    }
+    before += P.nf; setPieceArrays(P, pos, nrm, uv, Uint32Array.from(keep, (i) => remap[i])); after += P.nf; P.topo = true;
+    const set = new Set();
+    for (const a of st.areas) groupsNear(P, toLocal(P, a.c, V()), a.R / pieceScale(P) * 1.2, (g) => set.add(g));
+    refreshNormals(P, set); P.geo.attributes.normal.needsUpdate = true;
+  }
+  return { before, after, merged };
 }
 
 // ================================================================ GRAB / POINT / LINE: a captured set that follows the hand
@@ -703,12 +812,18 @@ const hex2rgb = (h) => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16)
 const rgb2hex = (c) => '#' + c.map((v) => clamp(Math.round(v), 0, 255).toString(16).padStart(2, '0')).join('');
 function hsl() { const c = new THREE.Color(S.color[0] / 255, S.color[1] / 255, S.color[2] / 255), o = {}; c.getHSL(o, THREE.LinearSRGBColorSpace); return o; }
 function setHSL(h, s, l) { const c = new THREE.Color(); c.setHSL(h, s, l, THREE.LinearSRGBColorSpace); S.color = [c.r * 255, c.g * 255, c.b * 255].map(Math.round); }
-const sizeT = { get: () => Math.log(S.r / 0.004) / Math.log(75), set: (t) => { S.r = 0.004 * Math.pow(75, clamp(t, 0, 1)); } };
-const softT = { get: () => (S.soft <= 0 ? 0 : 0.05 + 0.95 * Math.log(S.soft / 0.003) / Math.log(100)), set: (t) => { S.soft = t < 0.05 ? 0 : 0.003 * Math.pow(100, (clamp(t, 0, 1) - 0.05) / 0.95); } };
+// (owner: ".4cm is not small enough, not even close") - at the default scale the seat's and console's median edge is
+// ~2 mm and 1 in 100 is under 0.3 mm, so SIZE now spans 0.05 mm .. 30 cm on a log slider, SOFT 0.03 mm .. 30 cm
+const R_MIN = 0.00005, R_MAX = 0.3, SOFT_MIN = 0.00003;
+const sizeT = { get: () => Math.log(S.r / R_MIN) / Math.log(R_MAX / R_MIN), set: (t) => { S.r = R_MIN * Math.pow(R_MAX / R_MIN, clamp(t, 0, 1)); } };
+const softT = { get: () => (S.soft <= 0 ? 0 : 0.05 + 0.95 * Math.log(S.soft / SOFT_MIN) / Math.log(R_MAX / SOFT_MIN)),
+  set: (t) => { S.soft = t < 0.05 ? 0 : SOFT_MIN * Math.pow(R_MAX / SOFT_MIN, (clamp(t, 0, 1) - 0.05) / 0.95); } };
+const fmtLen = (m) => (m >= 0.01 ? (m * 100).toFixed(1) + ' cm' : m >= 0.001 ? (m * 1000).toFixed(1) + ' mm' : (m * 1000).toFixed(2) + ' mm');
 function sliderRows() {
-  const t = S.tool, rows = [{ id: 'size', label: t === 'piece' || t === 'point' || t === 'line' ? 'REACH' : 'SIZE', t: sizeT.get(), txt: (S.r * 100).toFixed(1) + ' cm' }];
+  const t = S.tool, rows = [{ id: 'size', label: t === 'piece' || t === 'point' || t === 'line' ? 'REACH' : 'SIZE', t: sizeT.get(), txt: fmtLen(S.r) }];
   if (CLAY.has(t)) rows.push({ id: 'strength', label: 'STRENGTH', t: S.strength, txt: Math.round(S.strength * 100) + '%' });
-  if (t === 'point' || t === 'line') rows.push({ id: 'soft', label: 'SOFT', t: softT.get(), txt: S.soft <= 0 ? 'rigid' : (S.soft * 100).toFixed(1) + ' cm' });
+  if (t === 'point' || t === 'line') rows.push({ id: 'soft', label: 'SOFT', t: softT.get(), txt: S.soft <= 0 ? 'rigid' : fmtLen(S.soft) });
+  if (t === 'meld') rows.push({ id: 'meld', label: 'MELD (cell size)', t: S.meld, txt: fmtLen(S.r * (0.05 + 0.6 * S.meld)) });
   if (t === 'paint' || t === 'fill' || t === 'drop') { rows.push({ id: 'opacity', label: 'OPACITY', t: S.opacity, txt: Math.round(S.opacity * 100) + '%' }); rows.push({ id: 'hardness', label: 'HARDNESS', t: S.hardness, txt: Math.round(S.hardness * 100) + '%' }); }
   return rows;
 }
@@ -724,7 +839,7 @@ function drawPanel() {
     c.lineWidth = 2; c.strokeStyle = on ? '#ffd27a' : (hov ? '#ffaa00' : 'rgba(120,160,220,0.35)'); c.stroke();
     c.fillStyle = on ? '#101010' : '#dbe9ff'; c.font = '700 ' + (o.fs || 22) + 'px Segoe UI, system-ui, sans-serif';
     c.fillText(label, o.x + o.w / 2, o.y + o.h / 2 + (sub ? -9 : 1));
-    if (sub) { c.font = '500 15px Segoe UI, system-ui, sans-serif'; c.fillStyle = on ? '#332200' : '#7f93ad'; c.fillText(sub, o.x + o.w / 2, o.y + o.h / 2 + 16); }
+    if (sub) { c.font = '500 ' + (o.fs ? 13 : 15) + 'px Segoe UI, system-ui, sans-serif'; c.fillStyle = on ? '#332200' : '#7f93ad'; c.fillText(sub, o.x + o.w / 2, o.y + o.h / 2 + 16); }
   };
   // header: ship + restore
   btn({ id: 'prev', x: 8, y: 8, w: 52, h: 48, act: () => switchShip(-1) }, '◀', false);
@@ -732,10 +847,13 @@ function drawPanel() {
   btn({ id: 'next', x: ui.restore ? 272 : 452, y: 8, w: 52, h: 48, act: () => switchShip(1) }, '▶', false);
   if (ui.restore) btn({ id: 'restore', x: 332, y: 8, w: 172, h: 48, fs: 18, act: () => restoreSession() }, 'RESTORE', false, ui.restore);
   // tools
-  const subs = { grab: 'drag clay', poke: 'dent it', inflate: S.inflateOut ? 'swell' : 'shrink', smooth: 'relax', squish: 'pinch', point: 'vertex', line: 'edge',
-    piece: 'part / gem', paint: 'alt: erase', fill: 'whole part', drop: 'pick colour' };
-  TOOLS.forEach((t, i) => btn({ id: 'tool_' + t, x: 8 + (i % 4) * 126, y: 64 + Math.floor(i / 4) * 76, w: 118, h: 70, act: () => setTool(t) }, TOOL_LABEL[t], S.tool === t, subs[t]));
-  btn({ id: 'mirror', x: 8 + 3 * 126, y: 64 + 2 * 76, w: 118, h: 70, act: () => { S.mirror = !S.mirror; toast('mirror ' + (S.mirror ? 'on' : 'off')); } }, 'MIRROR', S.mirror, S.mirror ? 'z = 0 on' : 'off');
+  const subs = { grab: 'drag clay', poke: 'dent it', inflate: S.inflateOut ? 'swell' : 'shrink', smooth: 'relax', squish: 'pinch', meld: 'join + simplify',
+    point: 'vertex', line: 'edge', piece: 'part / gem', paint: 'alt: erase', fill: 'whole part', drop: 'pick colour' };
+  const SLOT = { grab: [0, 0], poke: [1, 0], inflate: [2, 0], smooth: [3, 0], squish: [4, 0], meld: [0, 1], point: [1, 1], line: [2, 1], piece: [3, 1],
+    paint: [0, 2], fill: [1, 2], drop: [2, 2] };
+  const cell = (cx, cy) => ({ x: 8 + cx * 101, y: 64 + cy * 76, w: 95, h: 70, fs: 19 });
+  TOOLS.forEach((t) => btn(Object.assign(cell(...SLOT[t]), { id: 'tool_' + t, act: () => setTool(t) }), TOOL_LABEL[t], S.tool === t, subs[t]));
+  btn(Object.assign(cell(4, 1), { id: 'mirror', act: () => { S.mirror = !S.mirror; toast('mirror ' + (S.mirror ? 'on' : 'off')); } }), 'MIRROR', S.mirror, S.mirror ? 'z = 0 on' : 'off');
   // sliders
   let y = 300;
   for (const r of sliderRows()) {
@@ -772,7 +890,7 @@ function drawPanel() {
   const acts = [['undo', 'UNDO', () => undo(), undoStack.length + ''], ['redo', 'REDO', () => redo(), redoStack.length + ''],
     ['seat', 'SEAT', () => sitInSeat(), 'pilot size'], ['home', 'RESET', () => resetView(), 'view'], ['export', 'EXPORT', () => exportGLB(), '.glb']];
   acts.forEach(([id, label, fn, sub], i) => btn({ id, x: 8 + i * 101, y, w: 95, h: 50, fs: 18, act: fn }, label, false, sub));
-  if (ui.toast && performance.now() < ui.toastT) { c.fillStyle = 'rgba(0,0,0,0.75)'; rr(56, 258, 400, 38, 10); c.fill(); c.fillStyle = '#ffd27a'; c.font = '600 18px Segoe UI, system-ui, sans-serif'; c.fillText(ui.toast, 256, 277); }
+  if (ui.toast && performance.now() < ui.toastT) { c.fillStyle = 'rgba(0,0,0,0.85)'; rr(40, 10, 432, 44, 10); c.fill(); c.fillStyle = '#ffd27a'; c.font = '600 18px Segoe UI, system-ui, sans-serif'; c.fillText(ui.toast, 256, 32); }
   panelTex.needsUpdate = true;
 }
 function toast(t) { ui.toast = t; ui.toastT = performance.now() + 1800; drawPanel(); setTimeout(drawPanel, 1850); }
@@ -786,7 +904,7 @@ function panelInput(px, py, phase) {
   if (o.slider) {
     const t = clamp((px - (o.slider === 'hue' || o.slider === 'shade' ? 100 : 16)) / (o.slider === 'hue' || o.slider === 'shade' ? 400 : 480), 0, 1);
     if (o.slider === 'size') sizeT.set(t); else if (o.slider === 'strength') S.strength = Math.max(0.05, t); else if (o.slider === 'soft') softT.set(t);
-    else if (o.slider === 'opacity') S.opacity = Math.max(0.05, t); else if (o.slider === 'hardness') S.hardness = t;
+    else if (o.slider === 'meld') S.meld = t; else if (o.slider === 'opacity') S.opacity = Math.max(0.05, t); else if (o.slider === 'hardness') S.hardness = t;
     else if (o.slider === 'hue') { const h = hsl(); setHSL(t, Math.max(h.s, 0.6), h.l > 0.92 || h.l < 0.08 ? 0.5 : h.l); }
     else if (o.slider === 'shade') { const h = hsl(); setHSL(h.h, h.s, t); }
     drawPanel(); return true;
@@ -815,12 +933,23 @@ const nearEdges = new THREE.LineSegments(new THREE.BufferGeometry().setAttribute
 const pickDot = new THREE.Mesh(new THREE.SphereGeometry(1, 12, 8), new THREE.MeshBasicMaterial({ color: 0xffaa00, depthTest: false }));
 const pickSeg = new THREE.Line(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3)), new THREE.LineBasicMaterial({ color: 0xffaa00, depthTest: false }));
 for (const o of [nearPts, nearEdges, pickDot, pickSeg]) { o.renderOrder = 12; o.visible = false; o.frustumCulled = false; shipRoot.add(o); }
+// how far away you are looking from (desktop: the orbit distance; headset: about arm's length) - the helpers size
+// themselves by it, so a 0.05 mm brush on a big triangle still shows the vertices around it
+const viewRef = () => (renderer.xr.isPresenting ? 0.4 : orbit.dist);
+// POINT / LINE take the NEAREST vertex or edge. The search starts at REACH (or 2% of the viewing distance) and grows
+// x3 until something answers, capped at 30% of the view / 8 cm: a dense patch still picks exactly, and a 0.05 mm
+// REACH over a big triangle still finds its corners (a fixed small range found nothing there: the cursor sat 1.5 mm
+// from the nearest corner of a seat plate)
+function pickNear(fn, c) {
+  const base = Math.max(S.r, viewRef() * 0.02) / shipScale(), cap = Math.max(S.r, Math.min(viewRef() * 0.3, 0.08)) / shipScale();
+  for (let R = base; ; R = Math.min(R * 3, cap)) { const h = fn(c, R); if (h || R >= cap) return h; }
+}
 // shows the vertex points + edges around the tip, and which one a press would take
 function updateHelpers(tipShip) {
-  const show = !!tipShip && (S.tool === 'point' || S.tool === 'line');
+  const show = !!tipShip && (S.tool === 'point' || S.tool === 'line' || S.tool === 'meld');
   nearPts.visible = nearEdges.visible = show; pickDot.visible = pickSeg.visible = false;
   if (!show) return;
-  const R = S.r / shipScale(), reveal = Math.max(R * 2.5, 0.04), pa = nearPts.geometry.attributes.position.array, ea = nearEdges.geometry.attributes.position.array;
+  const R = S.r / shipScale(), reveal = Math.max(R * 3, viewRef() * 0.25 / shipScale()), pa = nearPts.geometry.attributes.position.array, ea = nearEdges.geometry.attributes.position.array;
   let np = 0, ne = 0; const a = V(), b = V();
   piecesNear(tipShip, reveal, (P, cl, Rl) => groupsNear(P, cl, Rl, (g) => {
     if (np < MAXP) { toShip(P, a.fromArray(P.gpos, g * 3), a); pa[np * 3] = a.x; pa[np * 3 + 1] = a.y; pa[np * 3 + 2] = a.z; np++; }
@@ -829,12 +958,13 @@ function updateHelpers(tipShip) {
       toShip(P, a.fromArray(P.gpos, g * 3), a); toShip(P, b.fromArray(P.gpos, n * 3), b); ea.set([a.x, a.y, a.z, b.x, b.y, b.z], ne * 6); ne++;
     }
   }));
+  nearPts.material.size = clamp(viewRef() * 0.01, 0.00003, 0.006);
   nearPts.geometry.setDrawRange(0, np); nearPts.geometry.attributes.position.needsUpdate = true;
   nearEdges.geometry.setDrawRange(0, ne * 2); nearEdges.geometry.attributes.position.needsUpdate = true;
-  if (cap) return;
-  const ds = Math.max(0.0025, R * 0.08);
-  if (S.tool === 'point') { const h = pickPoint(tipShip, R); if (h) { pickDot.visible = true; pickDot.position.copy(h.p); pickDot.scale.setScalar(ds); } }
-  else { const h = pickLine(tipShip, R); if (h) { pickSeg.visible = true; pickSeg.geometry.attributes.position.array.set([h.pa.x, h.pa.y, h.pa.z, h.pb.x, h.pb.y, h.pb.z]); pickSeg.geometry.attributes.position.needsUpdate = true; } }
+  if (cap || S.tool === 'meld') return;
+  const ds = Math.max(R * 0.3, viewRef() * 0.008 / shipScale());
+  if (S.tool === 'point') { const h = pickNear(pickPoint, tipShip); if (h) { pickDot.visible = true; pickDot.position.copy(h.p); pickDot.scale.setScalar(ds); } }
+  else { const h = pickNear(pickLine, tipShip); if (h) { pickSeg.visible = true; pickSeg.geometry.attributes.position.array.set([h.pa.x, h.pa.y, h.pa.z, h.pb.x, h.pb.y, h.pb.z]); pickSeg.geometry.attributes.position.needsUpdate = true; } }
 }
 
 // ================================================================ DESKTOP INPUT
@@ -863,9 +993,10 @@ cvs.addEventListener('pointerdown', (e) => {
   const hs = hit ? worldToShip(hit.point, V()) : null;
   desk.plane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(V()).negate(), hit ? hit.point : orbit.target);
   if (t === 'grab' && !alt) { capBegin('grab', hs, null, pointFeature(hs), reachShip(), 0); desk.mode = 'cap'; }
-  else if (CLAY.has(t)) { beginStroke('geo'); desk.mode = 'clay'; desk.lastDab = null; }
+  else if (t === 'meld' && !alt) { beginStroke('topo', { meld: new Map(), snaps: new Map(), areas: [] }); desk.mode = 'meld'; }
+  else if (CLAY.has(t) || t === 'meld') { beginStroke('geo'); desk.mode = 'clay'; desk.lastDab = null; }
   else if (t === 'point' || t === 'line') {
-    const h = t === 'point' ? pickPoint(hs, reachShip()) : pickLine(hs, reachShip());
+    const h = pickNear(t === 'point' ? pickPoint : pickLine, hs);
     if (h) { const f = t === 'point' ? pointFeature(h.p) : segFeature(h.pa, h.pb); capBegin(t, hs, null, f, S.soft / shipScale(), 1e-9); desk.mode = 'cap'; }
   } else if (t === 'piece') { const h = hs && pickPiece(hs, reachShip()); if (h) { pieceBegin(h, new THREE.Matrix4().makeTranslation(hs)); desk.mode = 'piece'; } }
   else if (t === 'paint') { beginStroke('paint', { tiles: new Map() }); paintDab(hs, alt); desk.lastDab = hit.point.clone(); desk.mode = 'paint'; }
@@ -885,11 +1016,16 @@ cvs.addEventListener('pointermove', (e) => {
   }
 });
 cvs.addEventListener('pointerup', () => {
-  if (desk.mode === 'cap') capEnd(); else if (desk.mode === 'piece') pieceEnd(); else if (desk.mode === 'clay' || desk.mode === 'paint') endStroke();
+  if (desk.mode === 'cap') capEnd(); else if (desk.mode === 'piece') pieceEnd(); else if (desk.mode === 'clay' || desk.mode === 'paint' || desk.mode === 'meld') endStroke();
   desk.mode = null; desk.btn = -1;
 });
 cvs.addEventListener('pointerleave', () => { desk.in = false; });
-cvs.addEventListener('wheel', (e) => { e.preventDefault(); orbit.dist = clamp(orbit.dist * Math.exp(e.deltaY * 0.0012), 0.02, 30); }, { passive: false });
+cvs.addEventListener('wheel', (e) => {
+  e.preventDefault(); const k = Math.exp(e.deltaY * 0.0012), d = clamp(orbit.dist * k, 0.002, 30);
+  if (d < orbit.dist) { const h = castAt(e.clientX, e.clientY); if (h) orbit.target.lerp(h.point, 1 - d / orbit.dist); }   // zoom toward what's under the cursor
+  orbit.dist = d;
+}, { passive: false });
+cvs.addEventListener('dblclick', (e) => { const h = castAt(e.clientX, e.clientY); if (h) orbit.target.copy(h.point); });
 addEventListener('keydown', (e) => {
   if (e.target && e.target.tagName === 'INPUT') return;
   const k = e.key.toLowerCase();
@@ -908,11 +1044,12 @@ function deskFrame(dt) {
   let hit = null;
   if (desk.in && desk.mode !== 'orbit' && desk.mode !== 'pan' && desk.mode !== 'cap' && desk.mode !== 'piece') hit = castAt(desk.x, desk.y);
   else if (desk.mode === 'cap' || desk.mode === 'piece') hit = desk.hit;
+  const gem = Math.min(1, orbit.dist * 0.006 / (0.012 * shipScale())); for (const m of markers) m.vis.scale.setScalar(gem);
   brushBall.visible = !!hit && desk.mode !== 'cap' && desk.mode !== 'piece';
-  if (hit) { brushBall.position.copy(hit.point); brushBall.scale.setScalar(S.r); }
+  if (hit) { brushBall.position.copy(hit.point); brushBall.scale.setScalar(S.r); brushBall.material.color.setHex(S.tool === 'meld' ? 0x33ddff : (S.tool === 'paint' || S.tool === 'fill' ? rgb2num(S.color) : 0xffaa00)); }
   const hs = hit ? worldToShip(hit.point, V()) : null;
   if (desk.mode === 'clay' && hit) {
-    const tool = desk.shift ? 'smooth' : S.tool;
+    const tool = desk.shift || S.tool === 'meld' ? 'smooth' : S.tool;
     if (tool === 'poke') {   // the ball sits half into the surface, and only dents while it MOVES (no digging on the spot)
       if (!desk.lastDab || desk.lastDab.distanceTo(hit.point) > S.r * 0.15) {
         const c = hit.point.clone().addScaledVector(raycaster.ray.direction, S.r * 0.5);
@@ -921,7 +1058,8 @@ function deskFrame(dt) {
     } else if (tool !== 'grab') clayFrame(tool, hs, 1, dt);
     flushEdits();
     if (performance.now() - (desk.refit || 0) > 200) { desk.refit = performance.now(); for (const id of stroke ? stroke.orig.keys() : []) refitPiece(pieces[id]); }
-  } else if (desk.mode === 'paint' && hit && desk.lastDab && desk.lastDab.distanceTo(hit.point) > S.r * 0.25) { paintDab(hs, desk.shift); desk.lastDab = hit.point.clone(); }
+  } else if (desk.mode === 'meld' && hit) { meldFrame(hs, 1, dt); flushEdits(); }
+  else if (desk.mode === 'paint' && hit && desk.lastDab && desk.lastDab.distanceTo(hit.point) > S.r * 0.25) { paintDab(hs, desk.shift); desk.lastDab = hit.point.clone(); }
   updateHelpers(desk.mode === 'cap' ? null : hs);
 }
 
@@ -1008,9 +1146,10 @@ function xrTools(R, L, dt, onMenu) {
   if (on && !was) {                                   // press
     R.active = t; R.lastDab = null;
     if (t === 'grab' && !alt) capBegin('grab', tip, q, pointFeature(tip), S.r / shipScale(), 0);
-    else if (CLAY.has(t)) beginStroke('geo');
+    else if (t === 'meld' && !alt) beginStroke('topo', { meld: new Map(), snaps: new Map(), areas: [] });
+    else if (CLAY.has(t) || t === 'meld') beginStroke('geo');
     else if (t === 'point' || t === 'line') {
-      const h = t === 'point' ? pickPoint(tip, S.r / shipScale()) : pickLine(tip, S.r / shipScale());
+      const h = pickNear(t === 'point' ? pickPoint : pickLine, tip);
       if (h) capBegin(t, tip, null, t === 'point' ? pointFeature(h.p) : segFeature(h.pa, h.pb), S.soft / shipScale(), 1e-9); else R.active = 'none';
     } else if (t === 'piece') { const h = pickPiece(tip, S.r / shipScale()); if (h) pieceBegin(h, handShip(R)); else R.active = 'none'; }
     else if (t === 'paint') beginStroke('paint', { tiles: new Map() });
@@ -1021,7 +1160,8 @@ function xrTools(R, L, dt, onMenu) {
     const a = R.active;
     if (cap) capMove(tip, q);
     else if (a === 'piece') pieceMove(handShip(R));
-    else if (CLAY.has(a)) clayFrame(alt ? 'smooth' : (a === 'grab' ? 'smooth' : a), tip, trig, dt);
+    else if (a === 'meld' && stroke && stroke.kind === 'topo') meldFrame(tip, trig, dt);
+    else if (CLAY.has(a) || a === 'meld') clayFrame(alt || a === 'grab' || a === 'meld' ? 'smooth' : a, tip, trig, dt);
     else if (a === 'paint' && (!R.lastDab || R.lastDab.distanceTo(R.pos) > S.r * 0.2)) { paintDab(tip, alt); R.lastDab = R.pos.clone(); }
     flushEdits();
     if (stroke && stroke.orig && stroke.orig.size && performance.now() - R.lastPulse > 90) { R.lastPulse = performance.now(); pulse('right', 0.12 + 0.2 * trig, 12); }
@@ -1037,7 +1177,7 @@ function xrFrame(dt) {
   if (!wg || wg.hand !== R || wg.mode === 2) xrTools(R, L, dt, onMenu);
   // sticks + buttons
   const [rx, ry] = R.axes;
-  if (Math.abs(ry) > 0.2) { S.r = clamp(S.r * Math.exp(-ry * dt * 1.6), 0.004, 0.3); ui.dirty = true; }
+  if (Math.abs(ry) > 0.2) { S.r = clamp(S.r * Math.exp(-ry * dt * 1.6), R_MIN, R_MAX); ui.dirty = true; }
   if (Math.abs(rx) > 0.2) { bumpStrength(rx * dt * 0.7); ui.dirty = true; }
   const lx = L.axes[0];
   if (L.stickArmed && Math.abs(lx) > 0.7) { L.stickArmed = false; const i = TOOLS.indexOf(S.tool); setTool(TOOLS[(i + (lx > 0 ? 1 : -1) + TOOLS.length) % TOOLS.length]); pulse('left', 0.3, 20); }
@@ -1046,7 +1186,7 @@ function xrFrame(dt) {
   if (pressed(L, 4)) S.menu = !S.menu; if (pressed(L, 5)) { S.mirror = !S.mirror; toast('mirror ' + (S.mirror ? 'on' : 'off')); }
   if (ui.dirty && performance.now() - (ui.lastDraw || 0) > 100) { ui.dirty = false; ui.lastDraw = performance.now(); drawPanel(); }
   brushBall.visible = R.connected && !onMenu; brushBall.position.copy(R.pos); brushBall.scale.setScalar(S.r);
-  brushBall.material.color.setHex(S.tool === 'paint' || S.tool === 'fill' ? (L.trig > 0.5 ? 0x8899aa : rgb2num(S.color)) : 0xffaa00);
+  brushBall.material.color.setHex(S.tool === 'paint' || S.tool === 'fill' ? (L.trig > 0.5 ? 0x8899aa : rgb2num(S.color)) : (S.tool === 'meld' ? 0x33ddff : 0xffaa00));
   updateHelpers(R.connected && !onMenu ? worldToShip(R.pos, V()) : null);
 }
 const rgb2num = (c) => (c[0] << 16) | (c[1] << 8) | c[2];
@@ -1054,9 +1194,10 @@ let xrMode = null;
 async function enterXR(mode) {
   try {
     const session = await navigator.xr.requestSession(mode, { optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking'] });
+    camera.near = 0.005; camera.far = 200; camera.updateProjectionMatrix();
     renderer.xr.setReferenceSpaceType('local-floor');
     await renderer.xr.setSession(session);
-    xrMode = mode; const ar = mode === 'immersive-ar';
+    xrMode = mode; const ar = mode === 'immersive-ar'; for (const m of markers) m.vis.scale.setScalar(1);
     scene.background = ar ? null : BG; grid.visible = !ar; renderer.setClearColor(0x000000, ar ? 0 : 1);
     session.addEventListener('end', () => { xrMode = null; scene.background = BG; grid.visible = true; renderer.setClearColor(0x000000, 1); panelMesh.visible = false; laser.visible = false; resize(); });
   } catch (e) { banner('could not enter ' + mode + ': ' + e.message, true); }
@@ -1123,7 +1264,8 @@ let saveTimer = 0;
 function scheduleSave() { clearTimeout(saveTimer); saveTimer = setTimeout(() => saveSession().catch((e) => console.warn('[ship lab] save failed', e)), 1500); }
 async function saveSession() {
   if (!ship.name) return;
-  const rec = { ts: Date.now(), pieces: pieces.map((P) => ({ name: P.name, ng: P.ng, gpos: P.moved.some((x) => x) ? P.gpos.slice() : null, matrix: P.mesh.matrix.toArray(), color: P.mat.color.getHex() })),
+  const rec = { ts: Date.now(), pieces: pieces.map((P) => ({ name: P.name, ng: P.ng, gpos: !P.topo && P.moved.some((x) => x) ? P.gpos.slice() : null,
+      topo: P.topo ? topoSnap(P) : null, matrix: P.mesh.matrix.toArray(), color: P.mat.color.getHex() })),
     markers: markers.map((m) => ({ name: m.name, pos: m.vis.position.toArray() })), paints: pieces.filter((P) => P.paint && P.paint.used).map((P) => P.name) };
   await idb('readwrite', (st) => st.put(rec, ship.name + ':geo'));
   for (const P of pieces) if (P.paint && P.paint.used && P.paint.savedAt !== P.paint.ver) { const pt = P.paint; await idb('readwrite', (st) => st.put({ w: pt.w, h: pt.h, data: pt.data.slice() }, ship.name + ':paint:' + P.name)); pt.savedAt = pt.ver; }
@@ -1138,7 +1280,8 @@ async function restoreSession() {
   beginStroke('geo');
   for (const r of rec.pieces) {
     const P = pieces.find((p) => p.name === r.name); if (!P) continue;
-    if (r.gpos && r.ng === P.ng) { const set = new Set(); for (let g = 0; g < P.ng; g++) { const i = g * 3; if (r.gpos[i] !== P.gpos[i] || r.gpos[i + 1] !== P.gpos[i + 1] || r.gpos[i + 2] !== P.gpos[i + 2]) { setGroup(P, g, r.gpos[i], r.gpos[i + 1], r.gpos[i + 2]); set.add(g); } } }
+    if (r.topo) { setPieceArrays(P, r.topo.pos, r.topo.nrm, r.topo.uv, r.topo.idx); P.topo = true; }
+    else if (r.gpos && r.ng === P.ng) { const set = new Set(); for (let g = 0; g < P.ng; g++) { const i = g * 3; if (r.gpos[i] !== P.gpos[i] || r.gpos[i + 1] !== P.gpos[i + 1] || r.gpos[i + 2] !== P.gpos[i + 2]) { setGroup(P, g, r.gpos[i], r.gpos[i + 1], r.gpos[i + 2]); set.add(g); } } }
     xformSet({ kind: 'piece', P }, r.matrix); P.mat.color.setHex(r.color);
   }
   for (const r of rec.markers) { const m = markers.find((x) => x.name === r.name); if (m) m.vis.position.fromArray(r.pos); }
@@ -1166,10 +1309,11 @@ function simStroke(tool, pts, o) {
   o = o || {}; setTool(tool); const P0 = V().fromArray(pts[0]);
   if (tool === 'grab' || tool === 'point' || tool === 'line') {
     let f = pointFeature(P0), R = S.r / shipScale(), rigid = 0;
-    if (tool === 'point') { const h = pickPoint(P0, R); if (!h) return 'no point'; f = pointFeature(h.p); R = S.soft / shipScale(); rigid = 1e-9; }
-    if (tool === 'line') { const h = pickLine(P0, R); if (!h) return 'no line'; f = segFeature(h.pa, h.pb); R = S.soft / shipScale(); rigid = 1e-9; }
+    if (tool === 'point') { const h = pickNear(pickPoint, P0); if (!h) return 'no point'; f = pointFeature(h.p); R = S.soft / shipScale(); rigid = 1e-9; }
+    if (tool === 'line') { const h = pickNear(pickLine, P0); if (!h) return 'no line'; f = segFeature(h.pa, h.pb); R = S.soft / shipScale(); rigid = 1e-9; }
     const n = capBegin(tool, P0, o.q0 || null, f, R, rigid); for (const p of pts.slice(1)) { capMove(V().fromArray(p), o.q1 || null); flushEdits(); } capEnd(); return n;
   }
+  if (tool === 'meld') { beginStroke('topo', { meld: new Map(), snaps: new Map(), areas: [] }); for (const p of pts) for (let k = 0; k < (o.frames || 30); k++) meldFrame(V().fromArray(p), 1, 1 / 60); flushEdits(); const st = stroke; endStroke(); return st.result || null; }
   if (CLAY.has(tool)) { beginStroke('geo'); for (const p of pts) for (let k = 0; k < (o.frames || 10); k++) clayFrame(tool, V().fromArray(p), 1, 1 / 60); flushEdits(); const n = stroke.orig.size; endStroke(); return n; }
   if (tool === 'paint') { beginStroke('paint', { tiles: new Map() }); let n = 0; for (const p of pts) n += paintDab(V().fromArray(p), !!o.erase); endStroke(); return n; }
   if (tool === 'piece') { const h = pickPiece(P0, S.r / shipScale()); if (!h) return 'no piece'; pieceBegin(h, new THREE.Matrix4().makeTranslation(P0)); pieceMove(new THREE.Matrix4().makeTranslation(V().fromArray(pts[pts.length - 1]))); pieceEnd(); return h.kind + ':' + (h.P ? h.P.name : h.m.name); }

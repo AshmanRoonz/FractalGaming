@@ -3673,6 +3673,17 @@ Hand-editing the ships on a Quest 3 (WebXR, VR or passthrough AR) or with a mous
   - A dab rasterises each triangle the ball reaches in texel space and measures every texel in 3D. A UV-space circle would bleed across the Meshy atlas islands.
   - Uploads are `texSubImage2D` of the dirty rectangle.
 - **Saving:** autosave goes to IndexedDB per ship and per ORIGIN (a new preview port is an empty store). EXPORT writes `<ship>_edit.glb`: the pieces, composited colour maps, markers, and the raw layers as `__paint__<material>` nodes. The splice back into assets_src is NOT built yet.
+- **MELD (join + simplify)** (**Jump:** `function meldFrame` · `function meldCommit` · `function buildTopology`). Owner: *"could there be a meld/weld tool, or something to simplify an area where there might be lots of lines and vertices, making them into one shape instead of multiple little shapes"*.
+  - **How it works:** vertex CLUSTERING inside the brush. Each group the ball sweeps joins a grid cell (`meldCell()` = SIZE x (0.05 + 0.6 x MELD), ship space, cells centred on z = 0 for MIRROR). Held: members slide toward their cell's centroid. Release: they snap onto it, triangles with two corners in one cell go, new duplicates go, unused vertices are dropped, and `setPieceArrays` -> `buildTopology` rebuilds the BVH, groups, adjacency and grid.
+  - **Undo** is a whole-piece array snapshot (`topoSnap`), so it is exact. Geometry undo entries hold GROUP ids, and those stay valid because group ids come from VERTEX order and undo runs LIFO.
+  - Merge-by-distance was rejected: it CHAINS through a dense mesh and can swallow a region into one point. A cell only collapses what lies inside it.
+  - **Measured on Slayer:** the seat went from 16 islands and 36,630 tris to 11 and 13,538 with one big sweep (182 ms including the rebuild), and two undos restored it bit-exact. A 2 cm-cell sweep over a busy hull panel took out 341 tris.
+  - Autosave stores whole arrays for a piece once `P.topo` is set.
+- **Sub-millimetre work** (**Jump:** `const R_MIN` · `function pickNear` · `const viewRef`). Owner: *".4cm is not small enough, not even close"*. At the default scale (0.8) the seat's and console's median edge is ~2 mm, and 1 in 100 is under 0.3 mm.
+  - SIZE now runs 0.05 mm .. 30 cm on a log slider, and SOFT 0.03 mm .. 30 cm.
+  - The desktop orbit zooms to 2 mm. Near / far follow the zoom distance (XR resets them to 0.005 / 200 on entry). The wheel zooms toward the cursor, and double-click focuses.
+  - Helper dots, the reveal radius, the pick dot and the marker gems are sized by `viewRef()` (orbit distance, or 0.4 m in a headset). At 1 cm, the fixed 1 cm gems and 6 mm dots filled the view.
+  - ⚠ **POINT / LINE must pick the NEAREST corner with a GROWING search** (`pickNear`: from REACH or 2% of the view, x3, up to 30% of the view or 8 cm). A fixed 0.75 mm range found nothing over a seat plate whose nearest corner was 1.5 mm from the cursor. Now one vertex moves alone: 0.35 mm for a 30 px drag at 1.2 cm.
 - ⚠ **`computeBoundsTree()` reorders `geometry.index` in place.** Build any face adjacency AFTER it.
 - ⚠ **three-mesh-bvh 0.8 `closestPointToPoint(p, t, min, max)`: `max` only prunes BOXES.** A farther triangle still comes back, so check `hit.distance` yourself.
 - **Testing in the Browser pane:** it has no headset, and a hidden pane has no requestAnimationFrame.
