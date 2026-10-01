@@ -3684,6 +3684,17 @@ Hand-editing the ships on a Quest 3 (WebXR, VR or passthrough AR) or with a mous
   - Meshy builds it as an UPRIGHT seat facing +Z, head +Y (as the original cockpit.glb was). The lab copy `LSS/backups/cockpit_edit/cockpit4_lab.glb` is rotated into the ships' frame, (x, y, z) -> (-z, y, x): nose -X, so MIRROR (z = 0) splits it left / right.
   - It carries a guessed `cockpit1` eye at (-0.1, 0.6, 0); the owner drags it with PIECE.
   - `LSS/backups/` is served locally and never deployed. Open the lab at `?file=backups/cockpit_edit/cockpit4_lab.glb`.
+- ⭐ **v50.70-50.72: THE OWNER'S COCKPIT IN EVERY SHIP** (`backups/concept_ships/canopy/scripts/cockpit4_swap.mjs`). The owner stripped `cockpit4` in the lab ("i got down to 20mb": 10,094 -> 6,827 tris, the egg's back shell gone), and it replaced every `<ship>_game_cockpit` (material `cockpit_CP_seat4`, full-res maps, shared fleet-wide by name). Three lessons:
+  - ⚠ **Placement: overlay the SEAT PROFILES, not box corners.** v50.70 lined up the back + top of the bounding boxes, and the owner said *"i am not sure why you're moving the seat"* / *"it was in the right spot"*. Box corners are different features on two models: it slid the seat 0.30 back and 0.12 down (pod units).
+    - Overlaying the centre-slab top lines (seat back + headrest + cushion, the old seats taken back into pod space through pod_T / pod_s) fits at scale 1 with offset (-0.02, +0.025). cockpit4 IS the old Meshy cockpit, reduced ("i have a reduced cockpit").
+    - The owner's choice when asked: "where the old seat was". Their 18 deg PIECE turn in the export is NOT applied.
+  - ⚠ **"It sticks out the top" was the missing TRIM, not the model.** The owner: *"nothing changed on the seat/cockpit except i removed some geometry off the back"* / *"they need to be able to have the glass go in front"* / *"there was glass in previous versions"*.
+    - The old pipeline deleted every seat triangle with any corner outside the hull. That kept it inside, and it is also what mangled it.
+    - The CLEAN trim cuts each straddling triangle along the roof and keeps position, normal and UV continuous.
+    - The roof is the highest hull / canopy_glass / canopy_frame surface per 1.5 mm column, taken as the MIN of the 3x3 neighbours. A column with NO surface over it counts as outside: a vertical side wall covers no area seen from above, which is how Syphon kept a 9 cm side bulge.
+    - The trim samples corners + edge midpoints + centre, splits stragglers to ~3 mm, and cuts 2 mm inside.
+    - Verified on an independent 1 mm map: 0 tris above the glass/hull in six ships, one 1.3 mm sliver on Tracker. Seats are 7.6-10k tris.
+  - ⚠ compress_glb left a ship STALE again once (slayer). Re-check mtimes after every batch and re-run the stale one.
 - ⭐ **EDITS INTO THE GAME: `tools/ship_edit_splice.mjs`** (v50.66, the owner's first edit). Owner: *"tracker_edit.glb is my first edit! ... can you put it in game?"*.
   - **Run:** `node tools/ship_edit_splice.mjs <ship> <edit.glb> [--dry] [--box x0,x1,y0,y1,z0,z1]`, then `node tools/compress_glb.mjs --only ships/<ship>`, then bump `_MODELS_VERSION`.
   - **What it writes:** it compares every lab part with the SHIPPED part it came from and writes only what changed into `assets_src`:
