@@ -9132,6 +9132,18 @@ Owner: *"i find our water to look a bit jello like... i like how this water move
     - The height (42) is not solved. VR is 1, and potato solves with d = 0.
     - It reads `input.fovDeg`, never the zoomed `camera.fov`. The pre-round cinematic reads it too.
     - Knobs: `window.__par = { boomRefFov: 90, boomRefD: 1, panBoom: 0.35, boomFit: false }`. `boomFit: false` gives the v43.90 boom.
+  - ⭐ **v50.45 THE HULL STEERS INTO THE TURN** (**Jump:** `STEER INTO THE TURN`, `game._stYaw`). Owner: *"move the ship's nose around in a small circle, circumpunct (nose in the center), while in third person... so the ship looks like it's steering into its turns"*.
+    - The look RATE (its own spring, 8/s, beside the parallax's 3.5) turns the hull toward the turn. The lead (yaw, pitch) is clamped to a CIRCLE of `max` rad, and it springs back to the dot when the look stops.
+    - It pivots about the hull's TAIL: the boom sits ~60 u behind a dreadnought's tail, so a centre pivot swings the near hull across the frame.
+    - ⚠ Signs: +yaw rate (euler.y rising) is a LEFT turn. The hull is turned 180 about Y from the camera, so +Y rotation is nose LEFT and nose UP is -X.
+    - Measured on Vortex: a left turn at the cap (0.10 rad) put the nose 0.115 NDC left of centre, and it re-centred on release. Pitching up moved the nose up.
+    - Third person only; never first person (the cockpit is the camera) or VR.
+    - **v50.46: tuned live with the owner** (*"it's good!"*). The defaults are now k 0.15, max 0.30, pivot 0 (centre), and the v35.00 parallax ship SLIDE is OFF (`__par.ship` 0, was 34; the fallback was 26).
+      - *"doing nothing"*: their look rate averaged 1.16 rad/s with peaks of 2.8, so k 0.06 pinned the 0.10 cap on every turn.
+      - *"barely anything"*: the hull WAS turning (sampled 0.30 rad). A mid-turn screenshot showed the slide shoving the whole ship ~25% of the half-width sideways, which swamps the turn and pulls the nose off the centre.
+      - *"the back of the ship is stuck in place"*: that was the tail pivot.
+      - ⚠ **When a new effect "does nothing", sample its transform during the owner's play, then screenshot mid-action.** An older effect can be swamping it, so raising the gain alone is the wrong move.
+    - Live: `window.__steer = { on, k: 0.15, max: 0.30, spring: 8, pivot: 0 }`. `window.__par.ship = 34` restores the slide.
   - ⭐ **v50.30-50.34 FIRST-PERSON LEGIBILITY + SLAYER's GREEN SCREENS** (**Jump:** `ON IS LIT, OFF IS DARK` · `THE CAPTIONS KEEP THEIR SIZE` · `THE CAPTION UNDER ITS BAR` · `"DASH" UNDER THE DOTS` · `THE CLASS COLOUR FIRST`). Five builds, one change each. Owner: *"yes! nicely done"*.
     - **v50.30, ability icons:** a READY glyph and its double-flash draw OUTSIDE the dark filter, over a near-black keyline. NOT READY keeps v50.27's dark silhouette.
       - ⚠ **A uniform darken erases binary state.** v50.27 took "lit theme colour + glow" and "near-black silhouette" to two shades of dark, and the white flash to grey. Owner: *"too hard to see if the icons... are on or off... i barely saw the flash"*.

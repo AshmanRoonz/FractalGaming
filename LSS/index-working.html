@@ -7239,7 +7239,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "50.44";
+const LSS_BUILD = "50.46";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -13951,6 +13951,7 @@ if (typeof window !== 'undefined') window._campTick = function (dt) { try { Camp
 const _tpOff = new THREE.Vector3();
 const _tpDir = new THREE.Vector3();
 const _tpRight = new THREE.Vector3();
+const _stQ = new THREE.Quaternion(), _stE = new THREE.Euler(), _stV = new THREE.Vector3(), _stV2 = new THREE.Vector3();   // (v50.45) steer
 function _toggleThirdPerson() {
   if (typeof LSS === 'undefined') return;   
   if (typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting) return;   // (v38.68) VR has no third person
@@ -108149,7 +108150,8 @@ function _lssApplyShipRig(dt) {
     // even though the camera itself is responding immediately. The ship-lead
     // boom (ship / shipMax) is a separate effect and is left ON; set
     // window.__par.ship = 0 to kill that too, or gain = 0.55 to restore this.
-    const P = window.__par || (window.__par = { on: true, gain: 0, circle: 110, dot: 0.35, ship: 34, shipMax: 64, spring: 7, panBoom: 0.35 });
+    // (v50.46) ship 34 -> 0: the slide is OFF - see STEER INTO THE TURN. window.__par.ship = 34 brings it back.
+    const P = window.__par || (window.__par = { on: true, gain: 0, circle: 110, dot: 0.35, ship: 0, shipMax: 64, spring: 7, panBoom: 0.35 });
     const ey = player.euler ? player.euler.y : 0, ex = player.euler ? player.euler.x : 0;
     let dy = ey - (game._parPrevYaw != null ? game._parPrevYaw : ey);
     if (dy > Math.PI) dy -= Math.PI * 2; else if (dy < -Math.PI) dy += Math.PI * 2;
@@ -108167,6 +108169,14 @@ function _lssApplyShipRig(dt) {
     game._parPitch = (game._parPitch || 0) + (rxT - (game._parPitch || 0)) * k;
     game._parYawEff = game._parYaw;
     game._parPitchEff = game._parPitch;
+    // (v50.45) the nose's own turn-rate spring (STEER INTO THE TURN, below): faster than rateSpring's ~285 ms, which
+    // was tuned to slide the HUD and reads as lag on the hull (the v35.22 lesson); still smooth over mouse events.
+    {
+      const _St = window.__steer || {};
+      const ks = Math.min(1, _dtc * ((_St.spring != null) ? +_St.spring : 8));
+      game._stYaw = (game._stYaw || 0) + (ryT - (game._stYaw || 0)) * ks;
+      game._stPitch = (game._stPitch || 0) + (rxT - (game._stPitch || 0)) * ks;
+    }
     game._hudTgtX = 0; game._hudTgtY = 0;   // set by the boom block when 3rd person
 
     // (v35.24) A SECOND, much faster yaw signal, used ONLY by the HUD
@@ -108203,6 +108213,51 @@ function _lssApplyShipRig(dt) {
     player.mesh.position.copy(player.position);
     player.mesh.quaternion.copy(camera.quaternion);
     player.mesh.rotateY(Math.PI);   
+    // ⭐ (v50.45) STEER INTO THE TURN. Owner: "i want the right stick, or mouse look, when looking around, to move the
+    // ship's nose around in a small circle, circumpunct (nose in the center), while in third person... this is so the
+    // ship looks like it's steering into its turns". The hull used to wear the camera's exact orientation (only the
+    // lateral-velocity bank on top), so a turn moved the whole picture and the ship never led it. Now, in the chase
+    // view, the look RATE (yaw / pitch, the _stYaw / _stPitch spring above) turns the hull toward the turn by up to
+    // `max` - the lead vector is clamped to a CIRCLE, so the nose's offset from centre traces the circumpunct ring
+    // and settles back on the dot when the look stops. It pivots about the hull's TAIL by default (pivot 1; 0 = its
+    // centre): the boom sits ~60 u behind a dreadnought's tail, so a centre pivot swings the near hull across the
+    // frame while the far nose barely moves - the tail pivot keeps the near hull planted and lets the nose sweep.
+    // Signs: +yaw rate = turning left, and the hull is turned 180 about Y from the camera, so +Y rotation is nose
+    // left; nose UP is -X. Never in first person (the cockpit is the camera) or VR; the state springs back to 0.
+    // Live: window.__steer = { on: true, k: 0.15 (s: lead angle per rad/s), max: 0.30 (rad), spring: 8, pivot: 0 }.
+    // ⭐ (v50.46) TUNED LIVE WITH THE OWNER - three corrections to the v50.45 first cut, in order:
+    //   1. "it feels like it's doing nothing" - measured their look rates while they flew: mean 1.16 rad/s, peaks
+    //      2.8, so k 0.06 hit the 0.10 cap on nearly every turn - 6 degrees, imperceptible. Now k 0.15 / max 0.30.
+    //   2. "still nothing or barely anything" - the hull WAS turning (sampled 0.30 rad relative to the camera); a
+    //      mid-turn screenshot showed why it did not read: the v35.00 parallax SLIDE (window.__par.ship) shoved the
+    //      whole ship ~a quarter of the screen sideways, which swamps a 10-17 degree turn and pulls the nose off the
+    //      centre the owner asked it to circle. The slide is OFF now (ship 0; window.__par.ship = 34 restores it).
+    //      Owner: "yeah that's what i meant".
+    //   3. "it looks like the back of the ship is stuck in place" - the tail pivot (the v50.45 reasoning: keep the
+    //      near hull planted) read as a pinned tail. Pivot 0, the hull's centre: the nose leads, the tail swings out.
+    //   Owner, on all three: "it's good!"
+    {
+      const S = window.__steer || {};
+      const _vrS = (typeof isXRPresenting === 'function') && isXRPresenting();
+      let ly = 0, lp = 0;
+      if (game.thirdPerson && !_vrS && S.on !== false) {
+        const k = (S.k != null) ? +S.k : 0.15, R = (S.max != null) ? +S.max : 0.30;   // (v50.46) were 0.06 / 0.10
+        ly = (game._stYaw || 0) * k; lp = (game._stPitch || 0) * k;
+        const m = Math.hypot(ly, lp);
+        if (m > R && m > 0) { ly *= R / m; lp *= R / m; }   // the circle
+      }
+      if (Math.abs(ly) + Math.abs(lp) > 1e-5) {
+        let hz = 0;
+        try { const pr = shipModelCache.loaded[player.loadoutKey]; const bb = pr && pr.userData && pr.userData.bboxSize; if (bb) hz = bb.z / 2; } catch (_) {}
+        const pv = (S.pivot != null) ? +S.pivot : 0;   // (v50.46) the hull's centre (was 1, the tail)
+        _stQ.setFromEuler(_stE.set(-lp, ly, 0, 'YXZ'));
+        // keep the pivot (on the hull's own axis, tail = -z) where it was: position += Q (P - S P)
+        _stV.set(0, 0, -hz * pv); _stV2.copy(_stV).applyQuaternion(_stQ);
+        _stV.sub(_stV2).applyQuaternion(player.mesh.quaternion);
+        player.mesh.position.add(_stV);
+        player.mesh.quaternion.multiply(_stQ);
+      }
+    }
     
     
     _tpRight.set(1, 0, 0).applyQuaternion(camera.quaternion);
@@ -108220,7 +108275,7 @@ function _lssApplyShipRig(dt) {
       // leads into it on screen (vertical at half strength).
       const _pP = window.__par || {};
       const _pAct = (_pP.on !== false) ? 1 : 0;
-      const _pS = (_pP.ship != null) ? _pP.ship : 26;
+      const _pS = (_pP.ship != null) ? _pP.ship : 0;   // (v50.46) 26 -> 0, the slide is off (STEER INTO THE TURN)
       const _pMax = (_pP.shipMax != null) ? _pP.shipMax : 64;
       const _pox = Math.max(-_pMax, Math.min(_pMax, (game._parYawEff || 0) * _pS)) * _pAct;
       const _poy = Math.max(-_pMax, Math.min(_pMax, -(game._parPitchEff || 0) * _pS * 0.5)) * _pAct;

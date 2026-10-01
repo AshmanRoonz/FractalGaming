@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "50.44";
+const LSS_BUILD = "50.46";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -4581,6 +4581,7 @@ if (typeof window !== 'undefined') window._campTick = function (dt) { try { Camp
 const _tpOff = new THREE.Vector3();
 const _tpDir = new THREE.Vector3();
 const _tpRight = new THREE.Vector3();
+const _stQ = new THREE.Quaternion(), _stE = new THREE.Euler(), _stV = new THREE.Vector3(), _stV2 = new THREE.Vector3();   // (v50.45) steer
 function _toggleThirdPerson() {
   if (typeof LSS === 'undefined') return;   
   if (typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting) return;   // (v38.68) VR has no third person
@@ -69394,7 +69395,7 @@ if (typeof window !== 'undefined') {
 }
 function _lssApplyShipRig(dt) {
   {
-    const P = window.__par || (window.__par = { on: true, gain: 0, circle: 110, dot: 0.35, ship: 34, shipMax: 64, spring: 7, panBoom: 0.35 });
+    const P = window.__par || (window.__par = { on: true, gain: 0, circle: 110, dot: 0.35, ship: 0, shipMax: 64, spring: 7, panBoom: 0.35 });
     const ey = player.euler ? player.euler.y : 0, ex = player.euler ? player.euler.x : 0;
     let dy = ey - (game._parPrevYaw != null ? game._parPrevYaw : ey);
     if (dy > Math.PI) dy -= Math.PI * 2; else if (dy < -Math.PI) dy += Math.PI * 2;
@@ -69408,6 +69409,12 @@ function _lssApplyShipRig(dt) {
     game._parPitch = (game._parPitch || 0) + (rxT - (game._parPitch || 0)) * k;
     game._parYawEff = game._parYaw;
     game._parPitchEff = game._parPitch;
+    {
+      const _St = window.__steer || {};
+      const ks = Math.min(1, _dtc * ((_St.spring != null) ? +_St.spring : 8));
+      game._stYaw = (game._stYaw || 0) + (ryT - (game._stYaw || 0)) * ks;
+      game._stPitch = (game._stPitch || 0) + (rxT - (game._stPitch || 0)) * ks;
+    }
     game._hudTgtX = 0; game._hudTgtY = 0;   // set by the boom block when 3rd person
 
     const _gpAx = (typeof input !== 'undefined' && input && input.gpConnected)
@@ -69422,6 +69429,27 @@ function _lssApplyShipRig(dt) {
     player.mesh.position.copy(player.position);
     player.mesh.quaternion.copy(camera.quaternion);
     player.mesh.rotateY(Math.PI);   
+    {
+      const S = window.__steer || {};
+      const _vrS = (typeof isXRPresenting === 'function') && isXRPresenting();
+      let ly = 0, lp = 0;
+      if (game.thirdPerson && !_vrS && S.on !== false) {
+        const k = (S.k != null) ? +S.k : 0.15, R = (S.max != null) ? +S.max : 0.30;   // (v50.46) were 0.06 / 0.10
+        ly = (game._stYaw || 0) * k; lp = (game._stPitch || 0) * k;
+        const m = Math.hypot(ly, lp);
+        if (m > R && m > 0) { ly *= R / m; lp *= R / m; }   // the circle
+      }
+      if (Math.abs(ly) + Math.abs(lp) > 1e-5) {
+        let hz = 0;
+        try { const pr = shipModelCache.loaded[player.loadoutKey]; const bb = pr && pr.userData && pr.userData.bboxSize; if (bb) hz = bb.z / 2; } catch (_) {}
+        const pv = (S.pivot != null) ? +S.pivot : 0;   // (v50.46) the hull's centre (was 1, the tail)
+        _stQ.setFromEuler(_stE.set(-lp, ly, 0, 'YXZ'));
+        _stV.set(0, 0, -hz * pv); _stV2.copy(_stV).applyQuaternion(_stQ);
+        _stV.sub(_stV2).applyQuaternion(player.mesh.quaternion);
+        player.mesh.position.add(_stV);
+        player.mesh.quaternion.multiply(_stQ);
+      }
+    }
     
     
     _tpRight.set(1, 0, 0).applyQuaternion(camera.quaternion);
@@ -69435,7 +69463,7 @@ function _lssApplyShipRig(dt) {
       _lssCockpitOff(dt);   // (v37.39) the chase view is never a live cockpit: strips off, lights down
       const _pP = window.__par || {};
       const _pAct = (_pP.on !== false) ? 1 : 0;
-      const _pS = (_pP.ship != null) ? _pP.ship : 26;
+      const _pS = (_pP.ship != null) ? _pP.ship : 0;   // (v50.46) 26 -> 0, the slide is off (STEER INTO THE TURN)
       const _pMax = (_pP.shipMax != null) ? _pP.shipMax : 64;
       const _pox = Math.max(-_pMax, Math.min(_pMax, (game._parYawEff || 0) * _pS)) * _pAct;
       const _poy = Math.max(-_pMax, Math.min(_pMax, -(game._parPitchEff || 0) * _pS * 0.5)) * _pAct;
