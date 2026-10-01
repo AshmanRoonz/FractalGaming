@@ -9304,3 +9304,7 @@ Owner: *"i find our water to look a bit jello like... i like how this water move
 - **Stars by day** (owner: "stars in the day time looks weird"). v46.45's `uDay` x12 gain stays on the
   galaxy band + aurora; the star points now take `uDayStars` (default 0 = night only). `__sky.uDayStars.value = 12`
   restores v46.45.
+- **(v50.68) Sector-city searchlights in mid air** (owner: "the frostmarch city has its spot lights coming out
+  of mid air"). `_hubCityBuild`'s `hero` (the beacon + searchlight host) was seeded with a placeholder
+  `{centre, PY + 1600}` that only a tower taller than 1600 could replace; FROSTMARCH (`towerH` 2300, the
+  lowest) could keep it. Now the tallest tower always wins; the centre at pad height is the no-tower fallback.

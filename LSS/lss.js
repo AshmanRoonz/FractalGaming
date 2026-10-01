@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "50.67";
+const LSS_BUILD = "50.68";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -33176,8 +33176,9 @@ function _hubCityBuild(g, site) {
     }
   }
 
-  let hero = { x: CX, z: CZ, y1: PY + 1600 };
-  for (const t of towers) if (t.y1 > hero.y1) hero = t;
+  let hero = null;
+  for (const t of towers) if (!hero || t.y1 > hero.y1) hero = t;
+  if (!hero) hero = { x: CX, z: CZ, y1: PY };
 
   {
     const PAD_R = 200, PLAZA_R = 320;
