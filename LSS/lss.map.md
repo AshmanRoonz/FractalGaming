@@ -9144,6 +9144,21 @@ Owner: *"i find our water to look a bit jello like... i like how this water move
       - *"the back of the ship is stuck in place"*: that was the tail pivot.
       - ⚠ **When a new effect "does nothing", sample its transform during the owner's play, then screenshot mid-action.** An older effect can be swamping it, so raising the gain alone is the wrong move.
     - Live: `window.__steer = { on, k: 0.15, max: 0.30, spring: 8, pivot: 0 }`. `window.__par.ship = 34` restores the slide.
+  - ⭐⭐ **v50.47-50.49 THE NEW HUD IN VR, ON THE CONSOLE's OWN SCREENS** (**Jump:** `THE NEW HUD IN VR - DRAWN ONTO THE CONSOLE's OWN SCREENS` · `_vscBuild` · `_vscDraw` · `_vscSync` · `_hudFontTarget`). Owner: *"we just need to put the new HUD into VR... right now it's using the old one"*.
+    - ⚠ **A 1:1 copy of the flat layout cannot work in VR.** The flat layout is placed where the screens land through the flat camera's lens.
+      - The VR HUD is a plane 2 m out (x VR HUD Size), and the screens are ~0.5 m away.
+      - So the copy would sit wrong and slide across them as the head moves, in stereo too.
+    - **How it works:** the same drawing (`_hlfDrawPanels`, `PN.flat` = no tilt inverse) goes into its own canvas laid out L | C | R. That canvas is UV-mapped onto copies of the three `cockpit_CP_screen` components, 0.03 u toward the pilot. So it is 1:1 with the GLB by construction.
+      - Per screen: an area-weighted normal turned toward cockpit1, up = the hull's +Y in the screen's plane, right = the pilot's (-X; the hull is nose +z, so +x is the pilot's LEFT). UVs are those plane coordinates at one scale (true proportions).
+      - The floating plane keeps the reticle and the text lines.
+    - The overlay lives in the SCENE, not under the hull, because every hull traverse (ghost shell, skins, dimming, layers) would take it over.
+      - `_vscSync` (renderFrame, beside `_ghostHullSync`) copies the hull's world matrix onto it each frame, on layer 5 while the flat cockpit pass is up.
+      - renderOrder is 4001: AFTER the ghost seat shell (4000), whose additive x-ray washed the screens out (50.47-50.48).
+    - ⚠ **`hudFont` writes `hudCtx.font` by name.** A helper drawing into another canvas got the wrong font, so `_hudFontTarget` swaps the target. Reset `_hudFontCache` around any swap.
+    - ⚠ v50.48: the flat layout caps the compass at 13.5 vmin of the SCREEN, which in a 436 px texture is 59 px inside a 205 px circle (owner: *"why is the middle panel tiny?"*). There is no cap on `PN.flat`.
+    - On in VR by default (`window.__hudScreens3d = false` reverts to the old ring). On flat screens it stays the screen-space layout, and `__hudScreens3d = true` shows this one there (how it was checked without a headset). Probe: `window.__vscInfo()`.
+    - Verified on flat first person (Vortex, solid and x-ray): all three screens built, canvas 1127x436, centre circle 205 px, no errors.
+    - ⚠ UNTESTED IN A HEADSET. Watch the Quest's cost: one 1127x436 canvas upload per HUD frame.
   - ⭐ **v50.30-50.34 FIRST-PERSON LEGIBILITY + SLAYER's GREEN SCREENS** (**Jump:** `ON IS LIT, OFF IS DARK` · `THE CAPTIONS KEEP THEIR SIZE` · `THE CAPTION UNDER ITS BAR` · `"DASH" UNDER THE DOTS` · `THE CLASS COLOUR FIRST`). Five builds, one change each. Owner: *"yes! nicely done"*.
     - **v50.30, ability icons:** a READY glyph and its double-flash draw OUTSIDE the dark filter, over a near-black keyline. NOT READY keeps v50.27's dark silhouette.
       - ⚠ **A uniform darken erases binary state.** v50.27 took "lit theme colour + glow" and "near-black silhouette" to two shades of dark, and the white flash to grey. Owner: *"too hard to see if the icons... are on or off... i barely saw the flash"*.

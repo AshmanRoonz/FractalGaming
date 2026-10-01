@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "50.46";
+const LSS_BUILD = "50.49";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -21315,6 +21315,7 @@ function renderFrame() {
   try { _lssHubDirectTonemap(); } catch (_) {}
   try { if (typeof _shipLightsFrame === 'function') _shipLightsFrame(); } catch (_) {}
   try { if (typeof _ghostHullSync === 'function') _ghostHullSync(); } catch (_) {}
+  try { if (typeof _vscSync === 'function') _vscSync(); } catch (_) {}   // (v50.47) the HUD on the console's screens, in 3D
   try { _orbitCamApply(); } catch (_) {}   // (v44.81) dev orbit camera; one property read when off
   try { _rplFrame(); } catch (_) {}        // (v47.97) the replay recorder / final kill cam: samples, or poses + owns the camera
   if (renderer.xr.isPresenting) {
@@ -69353,6 +69354,226 @@ function _lssHudPanels(W, H) {
     return { L: s.panels.L, C: s.panels.C, R: s.panels.R, circle: s.panel };
   } catch (_) { return null; }
 }
+const _VSC = { mesh: null, ov: null, canvas: null, ctx: null, tex: null, W: 0, H: 0, PN: null, drawn: false, failed: null };
+function _vscWanted() {
+  try {
+    if (typeof game === 'undefined' || !game || !game._cockpit3dLive) return false;
+    const vr = (typeof isXRPresenting === 'function') && isXRPresenting();
+    if (!vr && game.thirdPerson) return false;
+    const m = (typeof player !== 'undefined' && player) ? player.mesh : null;
+    if (!m || !m.visible || player.shipState === 'dead') return false;
+    const K = (typeof window !== 'undefined') ? window.__hudScreens3d : undefined;
+    if (vr) return K !== false;
+    return K === true;
+  } catch (_) { return false; }
+}
+function _vscOutline(pts) {
+  pts = pts.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const cr = (a, b, c) => (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+  const lo = [], hi = [];
+  for (const p of pts) { while (lo.length >= 2 && cr(lo[lo.length - 2], lo[lo.length - 1], p) <= 0) lo.pop(); lo.push(p); }
+  for (let i = pts.length - 1; i >= 0; i--) { const p = pts[i]; while (hi.length >= 2 && cr(hi[hi.length - 2], hi[hi.length - 1], p) <= 0) hi.pop(); hi.push(p); }
+  const poly = lo.slice(0, -1).concat(hi.slice(0, -1));
+  if (poly.length < 3) return null;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, gx = 0, gy = 0;
+  for (const p of poly) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); gx += p[0]; gy += p[1]; }
+  gx /= poly.length; gy /= poly.length;
+  const dist = (x, y) => {
+    let s = 0, m = Infinity;
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[i], b = poly[(i + 1) % poly.length], ex = b[0] - a[0], ey = b[1] - a[1];
+      const v = ex * (y - a[1]) - ey * (x - a[0]);
+      if (Math.abs(v) > 1e-9) { if (s === 0) s = Math.sign(v); else if (Math.sign(v) !== s) return -1; }
+      m = Math.min(m, Math.abs(v) / (Math.hypot(ex, ey) || 1));
+    }
+    return m;
+  };
+  let ix0 = x0, iy0 = y0, ix1 = x1, iy1 = y1;
+  for (let it = 0; it < 80; it++) {
+    if (dist(ix0, iy0) >= 0 && dist(ix1, iy0) >= 0 && dist(ix0, iy1) >= 0 && dist(ix1, iy1) >= 0) break;
+    ix0 += (gx - ix0) * 0.04; ix1 += (gx - ix1) * 0.04; iy0 += (gy - iy0) * 0.04; iy1 += (gy - iy1) * 0.04;
+  }
+  let bx = gx, by = gy, bd = Math.max(0, dist(gx, gy)), span = Math.max(x1 - x0, y1 - y0);
+  for (let round = 0; round < 4; round++) {
+    const cx = bx, cy = by, h = span / 2;
+    for (let i = 0; i <= 16; i++) for (let j = 0; j <= 16; j++) {
+      const x = cx - h + 2 * h * i / 16, y = cy - h + 2 * h * j / 16, d = dist(x, y);
+      if (d > bd) { bd = d; bx = x; by = y; }
+    }
+    span /= 6;
+  }
+  return { poly, box: [x0, y0, x1, y1], inner: [ix0, iy0, ix1, iy1], circle: { cx: bx, cy: by, hw: bd, hh: bd } };
+}
+function _vscBuild(mesh) {
+  let scr = null;
+  mesh.traverse((o) => {
+    if (scr || !o.isMesh || !o.geometry || !o.geometry.attributes || !o.geometry.attributes.position) return;
+    const ms = Array.isArray(o.material) ? o.material : [o.material];
+    if (ms.some((m) => m && m.name === 'cockpit_CP_screen')) scr = o;
+  });
+  if (!scr) return null;
+  mesh.updateMatrixWorld(true);
+  const M = new THREE.Matrix4().copy(mesh.matrixWorld).invert().multiply(scr.matrixWorld);   // screen geometry -> hull frame
+  const pos = scr.geometry.attributes.position, ix = scr.geometry.index, v = new THREE.Vector3();
+  const P = [];
+  for (let i = 0; i < pos.count; i++) { v.fromBufferAttribute(pos, i).applyMatrix4(M); P.push([v.x, v.y, v.z]); }
+  const T = [], nI = ix ? ix.count : pos.count;
+  for (let i = 0; i + 2 < nI; i += 3) T.push(ix ? [ix.getX(i), ix.getX(i + 1), ix.getX(i + 2)] : [i, i + 1, i + 2]);
+  if (!T.length) return null;
+  const par = new Int32Array(P.length);
+  for (let i = 0; i < par.length; i++) par[i] = i;
+  const find = (a) => { while (par[a] !== a) { par[a] = par[par[a]]; a = par[a]; } return a; };
+  const join = (a, b) => { a = find(a); b = find(b); if (a !== b) par[a] = b; };
+  const seen = new Map();
+  for (let i = 0; i < P.length; i++) {
+    const k = Math.round(P[i][0] * 500) + ',' + Math.round(P[i][1] * 500) + ',' + Math.round(P[i][2] * 500);
+    const j = seen.get(k);
+    if (j === undefined) seen.set(k, i); else join(i, j);
+  }
+  for (const tr of T) { join(tr[0], tr[1]); join(tr[1], tr[2]); }
+  const comps = new Map();
+  for (const tr of T) {
+    const r = find(tr[0]);
+    let c = comps.get(r);
+    if (!c) comps.set(r, (c = { A: 0, c: [0, 0, 0], n: [0, 0, 0], tris: [] }));
+    const a = P[tr[0]], b = P[tr[1]], d = P[tr[2]];
+    const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2], wx = d[0] - a[0], wy = d[1] - a[1], wz = d[2] - a[2];
+    const nx = uy * wz - uz * wy, ny = uz * wx - ux * wz, nz = ux * wy - uy * wx;
+    const A = 0.5 * Math.hypot(nx, ny, nz);
+    c.A += A;
+    for (let k = 0; k < 3; k++) c.c[k] += A * (a[k] + b[k] + d[k]) / 3;
+    c.n[0] += nx; c.n[1] += ny; c.n[2] += nz;
+    c.tris.push(tr);
+  }
+  let Amax = 0;
+  for (const c of comps.values()) Amax = Math.max(Amax, c.A);
+  const big = [...comps.values()].filter((c) => c.A >= 0.15 * Amax).map((c) => { c.C = c.c.map((x) => x / c.A); return c; });
+  if (!big.length) return null;
+  big.sort((a, b) => Math.abs(a.C[0]) - Math.abs(b.C[0]));
+  const C0 = big[0], rest = big.slice(1);
+  const L0 = rest.filter((c) => c.C[0] > 0).sort((a, b) => b.A - a.A)[0] || null;   // +x is the pilot's left
+  const R0 = rest.filter((c) => c.C[0] < 0).sort((a, b) => b.A - a.A)[0] || null;
+  const eye = mesh.getObjectByName('cockpit1');
+  const E = new THREE.Vector3();
+  if (eye) { eye.getWorldPosition(E); mesh.worldToLocal(E); }
+  const Y = new THREE.Vector3(0, 1, 0);
+  const frame = (c) => {
+    const n = new THREE.Vector3(c.n[0], c.n[1], c.n[2]).normalize();
+    if (n.dot(new THREE.Vector3(E.x - c.C[0], E.y - c.C[1], E.z - c.C[2])) < 0) n.negate();   // toward the pilot
+    const e2 = Y.clone().addScaledVector(n, -n.dot(Y)).normalize();
+    const e1 = new THREE.Vector3().crossVectors(e2, n).normalize();                       // the pilot's right
+    let a0 = Infinity, a1 = -Infinity, b0 = Infinity, b1 = -Infinity;
+    const ab = new Map();
+    for (const tr of c.tris) for (const i of tr) {
+      if (ab.has(i)) continue;
+      const p = P[i], dx = p[0] - c.C[0], dy = p[1] - c.C[1], dz = p[2] - c.C[2];
+      const a = dx * e1.x + dy * e1.y + dz * e1.z, b = dx * e2.x + dy * e2.y + dz * e2.z;
+      ab.set(i, [a, b]);
+      a0 = Math.min(a0, a); a1 = Math.max(a1, a); b0 = Math.min(b0, b); b1 = Math.max(b1, b);
+    }
+    return { c, n, e1, e2, ab, a0, a1, b0, b1, w: a1 - a0, h: b1 - b0 };
+  };
+  const F = { L: L0 && frame(L0), C: frame(C0), R: R0 && frame(R0) };
+  const order = ['L', 'C', 'R'].filter((k) => F[k] && F[k].w > 0 && F[k].h > 0);
+  let sumW = 0, maxH = 0;
+  for (const k of order) { sumW += F[k].w; maxH = Math.max(maxH, F[k].h); }
+  const g = 8, rho = Math.min(420 / maxH, 1500 / sumW);
+  const W = Math.ceil(sumW * rho + g * (order.length + 1)), H = Math.ceil(maxH * rho + 2 * g);
+  let x = g;
+  const PN = { flat: true };
+  const posA = [], uvA = [];
+  const off = (window.__vscOff != null) ? +window.__vscOff : 0.03;   // game units toward the pilot
+  for (const k of order) {
+    const f = F[k], rx = x, ry = g + (maxH - f.h) * rho / 2;
+    const px = (a) => rx + (a - f.a0) * rho, py = (b) => ry + (f.b1 - b) * rho;
+    const pts = [];
+    for (const [, q] of f.ab) pts.push([px(q[0]), py(q[1])]);
+    const o = _vscOutline(pts);
+    if (o) { PN[k] = { poly: o.poly, box: o.box, inner: o.inner }; if (k === 'C') PN.circle = o.circle; }
+    for (const tr of f.c.tris) for (const i of tr) {
+      const p = P[i], q = f.ab.get(i);
+      posA.push(p[0] + f.n.x * off, p[1] + f.n.y * off, p[2] + f.n.z * off);
+      uvA.push(px(q[0]) / W, 1 - py(q[1]) / H);
+    }
+    x += f.w * rho + g;
+  }
+  if (!PN.C || !PN.circle) return null;
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(posA, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvA, 2));
+  return { geo, PN, W, H };
+}
+function _vscEnsure(mesh) {
+  if (!mesh) return null;
+  if (_VSC.mesh === mesh && _VSC.ov) return _VSC;
+  if (_VSC.failed === mesh) return null;
+  let b = null;
+  try { b = _vscBuild(mesh); } catch (e) { b = null; try { console.warn('[vsc] build failed', e); } catch (_) {} }
+  if (!b) { _VSC.failed = mesh; return null; }
+  if (!_VSC.canvas || _VSC.W !== b.W || _VSC.H !== b.H) {
+    _VSC.canvas = _VSC.canvas || document.createElement('canvas');
+    _VSC.canvas.width = b.W; _VSC.canvas.height = b.H;
+    _VSC.ctx = _VSC.canvas.getContext('2d');
+    if (_VSC.tex) _VSC.tex.dispose();
+    _VSC.tex = new THREE.CanvasTexture(_VSC.canvas);
+    _VSC.tex.colorSpace = THREE.SRGBColorSpace;
+    _VSC.tex.minFilter = THREE.LinearFilter; _VSC.tex.generateMipmaps = false; _VSC.tex.anisotropy = 4;
+    if (_VSC.ov) _VSC.ov.material.map = _VSC.tex;
+  }
+  if (!_VSC.ov) {
+    const mat = new THREE.MeshBasicMaterial({ map: _VSC.tex, transparent: true, depthWrite: false, toneMapped: false,
+      side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 });
+    _VSC.ov = new THREE.Mesh(b.geo, mat);
+    _VSC.ov.name = '__vscHud';
+    _VSC.ov.matrixAutoUpdate = false;
+    _VSC.ov.frustumCulled = false;
+    _VSC.ov.renderOrder = 4001;
+    _VSC.ov.visible = false;
+    scene.add(_VSC.ov);
+  } else {
+    _VSC.ov.geometry.dispose();
+    _VSC.ov.geometry = b.geo;
+    _VSC.ov.material.needsUpdate = true;
+  }
+  _VSC.mesh = mesh; _VSC.PN = b.PN; _VSC.W = b.W; _VSC.H = b.H; _VSC.drawn = false; _VSC.failed = null;
+  return _VSC;
+}
+function _vscSync() {
+  const want = _vscWanted();
+  const mesh = (typeof player !== 'undefined' && player) ? player.mesh : null;
+  if (want) _vscEnsure(mesh);
+  const ov = _VSC.ov;
+  if (!ov) return;
+  const on = !!(want && _VSC.mesh === mesh && _VSC.drawn);
+  ov.visible = on;
+  if (!on) return;
+  mesh.updateWorldMatrix(true, false);
+  ov.matrix.copy(mesh.matrixWorld);
+  ov.matrixWorldNeedsUpdate = true;
+  ov.layers.set(game._adsOvOn ? 5 : 0);
+}
+function _vscDraw(v) {
+  if (!_vscWanted()) return false;
+  const S = _vscEnsure(player.mesh);
+  if (!S || !S.ctx) return false;
+  const c = S.ctx;
+  c.setTransform(1, 0, 0, 1, 0, 0);
+  c.clearRect(0, 0, S.W, S.H);
+  _hudFontTarget = c; _hudFontCache = '';
+  try {
+    c.save();
+    c.globalAlpha = _hlGA();
+    _hlfDrawPanels(c, S.W, S.H, v, S.PN);
+    c.restore();
+  } finally { _hudFontTarget = null; _hudFontCache = ''; }
+  S.tex.needsUpdate = true;
+  S.drawn = true;
+  return true;
+}
+if (typeof window !== 'undefined') {
+  window.__vscInfo = () => ({ wanted: _vscWanted(), built: !!_VSC.ov, visible: !!(_VSC.ov && _VSC.ov.visible), canvas: [_VSC.W, _VSC.H],
+    screens: _VSC.PN ? ['L', 'C', 'R'].filter((k) => _VSC.PN[k]).join('') : '', circle: _VSC.PN && _VSC.PN.circle ? +_VSC.PN.circle.hw.toFixed(1) : null });
+}
 if (typeof window !== 'undefined') {
   const _cfRow = (s) => s && {
     fwd: +s.f.toFixed(2), up: +s.u.toFixed(2), eyeToScreen: +s.D.toFixed(2), screenR: +s.rho.toFixed(2),
@@ -76575,10 +76796,11 @@ try {
 let _hudLastW = 0, _hudLastH = 0, _hudLastDPR = 0;
 let _hudFontCache = '';
 const _hudRF = { arr: null, cd: [0, 0, 0], core: false, t0: [-1e9, -1e9, -1e9, -1e9] };
+let _hudFontTarget = null;
 function hudFont(s) {
   if (s === _hudFontCache) return;
   _hudFontCache = s;
-  hudCtx.font = s;
+  (_hudFontTarget || hudCtx).font = s;
 }
 
 const _HUD_TICK_COUNT = 96;
@@ -78149,11 +78371,11 @@ function _hlfDrawPanels(ctx, W, H, v, PN) {
   const _mx = (H3.max != null) ? H3.max : 24;
   const _rx = (H3.on !== false) ? Math.max(-_mx, Math.min(_mx, H3.base || 0)) * Math.PI / 180 : 0;
   const _cs = Math.cos(_rx), _sn = Math.sin(_rx), _per = H3.persp || 1400;
-  const toCanvas = (sx, sy) => {
+  const toCanvas = PN.flat ? ((sx, sy) => [sx, sy, 1]) : ((sx, sy) => {   // (v50.47) PN.flat: the screen texture, no tilt
     const X = sx - W / 2, Y = sy - H / 2;
     const y = Y / (_cs + Y * _sn / _per), w = 1 - y * _sn / _per;
     return [W / 2 + X * w, H / 2 + y, w];
-  };
+  });
   const box = (P) => {
     const r = P.inner;
     const a = toCanvas(r[0], r[1]), b = toCanvas(r[2], r[1]), c = toCanvas(r[0], r[3]), d = toCanvas(r[2], r[3]);
@@ -78179,7 +78401,7 @@ function _hlfDrawPanels(ctx, W, H, v, PN) {
     const edge = 0.04 * rho;                                   // breathing room inside the screen's rim
     const kO = (_HLF.FR.rOut + 0.62) / _HLF.AB.rIn;
     let rc = (2 * (rho - edge) - kO * gap) / (1 + kO);
-    rc = Math.min(rc, 13.5 * vm) * num(K.compass, 1);         // never larger than the rose was
+    rc = Math.min(rc, PN.flat ? Infinity : 13.5 * vm) * num(K.compass, 1);
     if (rc > 4) {
       const ccx = cc[0], ccy = cc[1] + (rho - edge) - rc;      // resting on the bottom of the circle
       const kc = rc / (13.5 * vm);
@@ -78302,8 +78524,10 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
   ctx.translate(cx - W / 2, cy - H / 2);
   ctx.globalAlpha = _hlGA();
 
-  const _PN = (typeof _lssHudPanels === 'function') ? _lssHudPanels(W, H) : null;
-  if (_PN) _hlfDrawPanels(ctx, W, H, v, _PN);
+  const _V3 = (typeof _vscDraw === 'function') && _vscDraw(v);
+  const _PN = _V3 ? null : ((typeof _lssHudPanels === 'function') ? _lssHudPanels(W, H) : null);
+  if (_V3) { /* on the screens */ }
+  else if (_PN) _hlfDrawPanels(ctx, W, H, v, _PN);
   else _hlfDraw(ctx, W, H, v);
 
   let r = _hlPlace(_HL.reticle, W, H);
@@ -78339,7 +78563,7 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
     _hlText(ctx, r, _HL.objective, v.objectiveStr, _HL.objective.col);
   }
 
-  if (!_PN) {   // (v50.25) on the console's screens, _hlfDrawPanels drew them into the centre one
+  if (!_PN && !_V3) {   // (v50.25) on the console's screens, _hlfDrawPanels drew them into the centre one (v50.47: or the 3D ones)
     const TPm = _hlTPMap();   // (v50.40) the placement moved into _hlTPMap, unchanged
     const mP = TPm ? TPm.mP : _HL.minimap, cPt = TPm ? TPm.cPt : _HL.compass;
     ctx.globalAlpha = 1;
