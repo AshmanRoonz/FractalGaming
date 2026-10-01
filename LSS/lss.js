@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "50.72";
+const LSS_BUILD = "50.78";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -44504,7 +44504,8 @@ function _initShipPreview3D() {
   if (_shipPreview3D.initFailed) return null;
   if (typeof THREE === 'undefined') { _shipPreview3D.initFailed = true; return null; }
   const canvas = document.getElementById('ship-preview-canvas');
-  if (!canvas) return null; 
+  if (!canvas) return null;
+  const _mainRenderer = renderer;
   try {
     if (_ONE_CTX_PREVIEW) {
       const scene = new THREE.Scene();
@@ -44517,10 +44518,10 @@ function _initShipPreview3D() {
         _eg.fillStyle = _grad; _eg.fillRect(0, 0, 64, 32);
         const _etex = new THREE.CanvasTexture(_ec);
         _etex.mapping = THREE.EquirectangularReflectionMapping;
-        const _pm = new THREE.PMREMGenerator(renderer);   // the MAIN renderer owns it now — no cross-context borrow
+        const _pm = new THREE.PMREMGenerator(_mainRenderer);   // the MAIN renderer owns it now — no cross-context borrow
         scene.environment = _pm.fromEquirectangular(_etex).texture;
         _pm.dispose(); _etex.dispose();
-      } catch (_) {}
+      } catch (e) { try { console.warn('[ship-preview] env build failed:', e && e.message); } catch (_) {} }   // (v50.77) never silent again
       const camera = new THREE.PerspectiveCamera(32, 1, 1, 8000);
       camera.position.set(0, 70, 320); camera.lookAt(0, 0, 0);
       _shipPreview3D.renderer = null;
@@ -45361,6 +45362,34 @@ const _SKIN_HUE_PARS = [
   '  else shade = uSkinPatLift + (1.0 - uSkinPatLift) * clamp(lum * uSkinPatGain, 0.0, 1.0);',
   '  return mix(base, min(camo * shade, vec3(1.0)), uSkinPatMix);',
   '}',
+  'uniform float uPaintLiftAmt;',     // 0 = off
+  'uniform float uPaintLiftHue;',     // the hull's OWN accent paint (linear HSV hue, 0..1), measured from its albedo
+  'uniform float uPaintLiftTo;',      // the class colour's hue (linear HSV): where the paint is nudged
+  'uniform float uPaintLiftWin;',     // half-width of the hue window around uPaintLiftHue
+  'uniform float uPaintLiftSat;',     // saturation the paint is lifted to (linear HSV)
+  'uniform float uPaintLiftVal;',     // value gain on the paint (1 = twice as bright, linear)
+  'uniform float uPaintLiftShift;',   // 0..1 of the way from the paint's hue to uPaintLiftTo
+  'vec3 lssThemeLift(vec3 c){',
+  '  float mx = max(c.r, max(c.g, c.b));',
+  '  float mn = min(c.r, min(c.g, c.b));',
+  '  float d = mx - mn;',
+  '  if (d < 1e-5 || mx <= 0.0) return c;',
+  '  float h;',
+  '  if (mx == c.r)      h = mod((c.g - c.b) / d, 6.0);',
+  '  else if (mx == c.g) h = (c.b - c.r) / d + 2.0;',
+  '  else                h = (c.r - c.g) / d + 4.0;',
+  '  h /= 6.0;',
+  '  float sat = d / mx;',
+  '  float dh = h - uPaintLiftHue; dh -= floor(dh + 0.5);',
+  '  float w = (1.0 - smoothstep(uPaintLiftWin * 0.55, uPaintLiftWin, abs(dh))) * smoothstep(0.22, 0.45, sat) * uPaintLiftAmt;',
+  '  if (w <= 0.0) return c;',
+  '  float dt = uPaintLiftTo - h; dt -= floor(dt + 0.5);',
+  '  h = fract(h + dt * uPaintLiftShift * w);',
+  '  sat = mix(sat, max(sat, uPaintLiftSat), w);',
+  '  float val = min(1.0, mx * (1.0 + uPaintLiftVal * w));',
+  '  vec3 p = abs(fract(vec3(h) + vec3(1.0, 0.6666666, 0.3333333)) * 6.0 - 3.0);',
+  '  return val * mix(vec3(1.0), clamp(p - 1.0, 0.0, 1.0), sat);',
+  '}',
 ].join('\n');
 
 const _SKIN_PAT_VERT = [
@@ -45461,6 +45490,8 @@ function _skinPatchHueShader(m) {
     uSkinRatio: { value: 0 }, uSkinHullLum: { value: 0.05 }, uSkinPatKeep: { value: 0.85 },
     uSkinPatFloor: { value: 0.05 }, uSkinPatCap: { value: 1.4 }, uSkinPatFlat: { value: 0 },
     uSkinReflPass: { value: 0 }, uSkinPatTex: { value: _skinDefaultTex() },
+    uPaintLiftAmt: { value: 0 }, uPaintLiftHue: { value: 0 }, uPaintLiftTo: { value: 0 }, uPaintLiftWin: { value: 0.08 },
+    uPaintLiftSat: { value: 0.9 }, uPaintLiftVal: { value: 0.8 }, uPaintLiftShift: { value: 0 },
   };
   Object.defineProperty(ud, '_skinHueU', { value: u, writable: true, configurable: true, enumerable: false });
   const prevOBC = m.onBeforeCompile;
@@ -45476,11 +45507,13 @@ function _skinPatchHueShader(m) {
       .replace('#include <map_fragment>',
         '#include <map_fragment>\n\tvec3 lssRaw = diffuseColor.rgb;'   // (v49.26) the hull's own paint, for the ratio shade
         + '\n\tdiffuseColor.rgb = lssSkinHue(diffuseColor.rgb, uSkinHue, uSkinMix, uSkinSat, uSkinLift);'
-        + '\n\tif (uSkinPatMix > 0.001) diffuseColor.rgb = lssSkinPattern(diffuseColor.rgb, lssRaw);')
+        + '\n\tif (uSkinPatMix > 0.001) diffuseColor.rgb = lssSkinPattern(diffuseColor.rgb, lssRaw);'
+        + '\n\tif (uPaintLiftAmt > 0.001) diffuseColor.rgb = lssThemeLift(diffuseColor.rgb);')   // (v50.77)
       .replace('#include <emissivemap_fragment>',
         '#include <emissivemap_fragment>\n\tif (uSkinReflPass > 0.5) {'
         + '\n\ttotalEmissiveRadiance = lssSkinHue(totalEmissiveRadiance, uSkinHue, uSkinMix, uSkinSat, 0.0);'
         + '\n\tif (uSkinPatMix > 0.001) totalEmissiveRadiance = lssSkinPattern(totalEmissiveRadiance, totalEmissiveRadiance);'
+        + '\n\tif (uPaintLiftAmt > 0.001) totalEmissiveRadiance = lssThemeLift(totalEmissiveRadiance);'   // (v50.77) the mirror copy too
         + '\n\t}');
   };
   const prevKey = m.customProgramCacheKey;
@@ -45549,6 +45582,99 @@ function _skinBakePatternSpace(root, mats) {
   }
 }
 
+const _THEME_LIFT = {
+  on: true,
+  SLAYER:  { amt: 1, sat: 0.92, val: 0.9, shift: 0.55, win: 0.09 },
+  SYPHON:  { amt: 1, sat: 0.92, val: 0.6, shift: 0.3,  win: 0.08 },
+  VORTEX:  { amt: 1, sat: 0.92, val: 0.9, shift: 0.3,  win: 0.08 },
+  BLASTER: { amt: 1, sat: 0.92, val: 1.0, shift: 0.3,  win: 0.08 },
+};
+const _skinTexHueC = new Map();
+function _lssLinHue(r, g, b) {
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+  if (!(d > 1e-6)) return null;
+  let h;
+  if (mx === r) h = ((g - b) / d) % 6; else if (mx === g) h = (b - r) / d + 2; else h = (r - g) / d + 4;
+  h /= 6; if (h < 0) h += 1;
+  return h;
+}
+function _skinTexHue(tex) {
+  if (!tex || !tex.image) return null;
+  if (_skinTexHueC.has(tex.uuid)) return _skinTexHueC.get(tex.uuid);
+  let v = null;
+  try {
+    const S = 64, cv = document.createElement('canvas'); cv.width = S; cv.height = S;
+    const cx = cv.getContext('2d', { willReadFrequently: true });
+    cx.drawImage(tex.image, 0, 0, S, S);
+    const d = cx.getImageData(0, 0, S, S).data;
+    const lin = (c) => { c /= 255; return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
+    const H = [], W = [], bins = new Float64Array(36);
+    for (let i = 0; i < d.length; i += 4) {
+      const r = lin(d[i]), g = lin(d[i + 1]), b = lin(d[i + 2]);
+      const mx = Math.max(r, g, b); if (mx < 0.01) continue;
+      const sat = (mx - Math.min(r, g, b)) / mx; if (sat < 0.45) continue;
+      const h = _lssLinHue(r, g, b); if (h == null) continue;
+      const w = sat * mx; H.push(h); W.push(w); bins[Math.floor(h * 36) % 36] += w;
+    }
+    if (H.length >= 24) {
+      let pk = 0; for (let i = 1; i < 36; i++) if (bins[i] > bins[pk]) pk = i;
+      const c0 = (pk + 0.5) / 36;
+      let sx = 0, sy = 0;
+      for (let i = 0; i < H.length; i++) {
+        let dh = H[i] - c0; dh -= Math.floor(dh + 0.5);
+        if (Math.abs(dh) > 0.09) continue;
+        sx += Math.cos(H[i] * 2 * Math.PI) * W[i]; sy += Math.sin(H[i] * 2 * Math.PI) * W[i];
+      }
+      if (sx || sy) { v = Math.atan2(sy, sx) / (2 * Math.PI); if (v < 0) v += 1; }
+    }
+  } catch (_) { v = null; }
+  _skinTexHueC.set(tex.uuid, v);
+  return v;
+}
+function _themeLiftSet(m, hu) {
+  hu.uPaintLiftAmt.value = 0;
+  const mk = /^([a-z]+)_hull_game$/i.exec((m && m.name) || '');
+  if (!mk || !_THEME_LIFT.on) return;
+  const key = mk[1].toUpperCase(), T = _THEME_LIFT[key];
+  const cc = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS) ? LSS.CLASS_COLORS[key] : null;
+  if (!T || cc == null || !(T.amt > 0)) return;
+  const ph = m.map ? _skinTexHue(m.map) : null;
+  const c = new THREE.Color(cc);   // linear, as diffuseColor is
+  const th = _lssLinHue(c.r, c.g, c.b);
+  if (th == null) return;
+  hu.uPaintLiftHue.value = (ph != null) ? ph : th;
+  hu.uPaintLiftTo.value = th;
+  hu.uPaintLiftWin.value = (T.win != null) ? T.win : 0.08;
+  hu.uPaintLiftSat.value = (T.sat != null) ? T.sat : 0.9;
+  hu.uPaintLiftVal.value = (T.val != null) ? T.val : 0.8;
+  hu.uPaintLiftShift.value = (T.shift != null) ? T.shift : 0;
+  hu.uPaintLiftAmt.value = T.amt;
+}
+if (typeof window !== 'undefined') window.__themeLift = function (cfg) {
+  if (cfg === false || cfg === true) _THEME_LIFT.on = cfg;
+  else if (cfg && typeof cfg === 'object') {
+    for (const k in cfg) { if (cfg[k] && typeof cfg[k] === 'object') _THEME_LIFT[k] = Object.assign(_THEME_LIFT[k] || { amt: 1 }, cfg[k]); }
+  }
+  let n = 0;
+  const visit = (root) => {
+    if (!root || !root.traverse) return;
+    root.traverse((o) => {
+      if (!o.isMesh || !o.material) return;
+      const ms = Array.isArray(o.material) ? o.material : [o.material];
+      for (const m of ms) {
+        const hu = m && m.userData && m.userData._skinHueU;
+        if (!hu || !hu.uPaintLiftAmt) continue;
+        if (hu.uSkinMix.value > 0.001 || hu.uSkinPatMix.value > 0.001) continue;   // a livery is on: leave it off
+        _themeLiftSet(m, hu); n++;
+      }
+    });
+  };
+  try { visit(scene); } catch (_) {}
+  try { if (_shipPreview3D && _shipPreview3D.scene) visit(_shipPreview3D.scene); } catch (_) {}
+  const out = { on: _THEME_LIFT.on, applied: n };
+  for (const k in _THEME_LIFT) if (k !== 'on') out[k] = Object.assign({}, _THEME_LIFT[k]);
+  return out;
+};
 function _applyShipSkin(root, skinId) {
   if (!root) return null;
   const sk = _shipSkinDef(skinId);
@@ -45575,6 +45701,7 @@ function _applyShipSkin(root, skinId) {
     if (sk.restore) {
       hu.uSkinHue.value = 0; hu.uSkinMix.value = 0; hu.uSkinSat.value = 1; hu.uSkinLift.value = 0;
       hu._cyc = null; _skinCycle.delete(hu);   // (v40.04) FACTORY stops the cycle with everything else
+      try { _themeLiftSet(m, hu); } catch (_) { hu.uPaintLiftAmt.value = 0; }   // (v50.77) the class colour, brighter
       hu.uSkinPat.value = 0; hu.uSkinPatMix.value = 0;
       if (m.color) m.color.copy(b.color);
       if (m.emissive) m.emissive.copy(b.emissive);
@@ -45583,6 +45710,7 @@ function _applyShipSkin(root, skinId) {
       m.roughness = b.roughness;
       m.envMapIntensity = b.envMapIntensity;
     } else {
+      hu.uPaintLiftAmt.value = 0;   // (v50.77) a livery replaces the paint the theme lift works on
       hu.uSkinHue.value = ((sk.hue || 0) % 360) / 360;
       if (sk.hueCycle) { hu._cyc = { base: hu.uSkinHue.value, rate: sk.hueCycle / 360 }; _skinCycle.add(hu); }
       else { hu._cyc = null; _skinCycle.delete(hu); }
@@ -70851,7 +70979,16 @@ function _adsOverlayRender() {
       scene.matrixWorldAutoUpdate = false;
       renderer.shadowMap.autoUpdate = false;
       renderer.clearDepth();
-      renderer.render(scene, _adsOvCam);
+      let _hl = null;
+      if (_cpOv && game._adsOvMesh && (typeof window === 'undefined' || window.__cockpitHullLast !== false)) {
+        _hl = _cpHullMeshes(game._adsOvMesh);
+        for (let i = 0; i < _hl.length; i++) _hl[i].renderOrder = 1;
+      }
+      try {
+        renderer.render(scene, _adsOvCam);
+      } finally {
+        if (_hl) for (let i = 0; i < _hl.length; i++) _hl[i].renderOrder = 0;
+      }
     } finally {
       renderer.autoClear = _prevAC;
       scene.background = _prevBG;
@@ -70859,6 +70996,25 @@ function _adsOverlayRender() {
       renderer.shadowMap.autoUpdate = _prevSM;
     }
   } catch (_) {}
+}
+function _cpHullMeshes(root) {
+  const ud = root.userData || (root.userData = {});
+  let all = ud._cpHullAll;
+  if (!all) {
+    all = [];
+    root.traverse((o) => { if (o.isMesh && /_game_hull$/.test(o.name || '')) all.push(o); });
+    ud._cpHullAll = all;
+  }
+  const out = _cpHullMeshes._out || (_cpHullMeshes._out = []);
+  out.length = 0;
+  for (let i = 0; i < all.length; i++) {
+    const o = all[i];
+    if (!o.visible || o.renderOrder !== 0) continue;
+    const m = o.material;
+    if (!m || (Array.isArray(m) ? m.some((x) => x && x.transparent) : m.transparent)) continue;
+    out.push(o);
+  }
+  return out;
 }
 
 
@@ -78453,6 +78609,71 @@ function _hlfBorderPath(ctx, cx, cy, rIn, rOut, a0, a1, nodes, nh, nw, sw) {
   ctx.closePath();
 }
 
+const _hlfDimCache = new Map();
+function _hlfDimColor(s, k) {
+  const key = s + '|' + k;
+  let out = _hlfDimCache.get(key);
+  if (out !== undefined) return out;
+  let r = 0, g = 0, b = 0, a = 1, ok = false;
+  if (s.charCodeAt(0) === 35 && s.length === 7) {                 // '#rrggbb' - how a canvas serialises an opaque colour
+    r = parseInt(s.slice(1, 3), 16); g = parseInt(s.slice(3, 5), 16); b = parseInt(s.slice(5, 7), 16); ok = true;
+  } else {
+    const m = /^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+)\s*)?\)$/.exec(s);   // ...and a translucent one
+    if (m) { r = +m[1]; g = +m[2]; b = +m[3]; a = (m[4] != null) ? +m[4] : 1; ok = true; }
+  }
+  out = ok ? ('rgba(' + (r * k).toFixed(2) + ',' + (g * k).toFixed(2) + ',' + (b * k).toFixed(2) + ',' + a + ')') : null;
+  if (_hlfDimCache.size > 256) _hlfDimCache.clear();
+  _hlfDimCache.set(key, out);
+  return out;
+}
+const _hlfDimCtxs = (typeof WeakMap === 'function') ? new WeakMap() : null;
+function _hlfDimCtx(R, k, DARK) {
+  if (!_hlfDimCtxs || typeof Proxy !== 'function' || !R) return null;
+  let E = _hlfDimCtxs.get(R);
+  if (!E) {
+    E = { k: k, DARK: DARK, bound: new Map(), proxy: null, ops: null };
+    const glows = () => (R.shadowBlur > 0 || R.shadowOffsetX !== 0 || R.shadowOffsetY !== 0);
+    const viaFill = (fn) => function () {
+      const o = R.fillStyle;
+      const d = (typeof o === 'string' && !glows()) ? _hlfDimColor(o, E.k) : null;
+      if (d) { R.fillStyle = d; try { return fn.apply(R, arguments); } finally { R.fillStyle = o; } }
+      const pf = R.filter; R.filter = E.DARK;
+      try { return fn.apply(R, arguments); } finally { R.filter = pf; }
+    };
+    const viaStroke = (fn) => function () {
+      const o = R.strokeStyle;
+      const d = (typeof o === 'string' && !glows()) ? _hlfDimColor(o, E.k) : null;
+      if (d) { R.strokeStyle = d; try { return fn.apply(R, arguments); } finally { R.strokeStyle = o; } }
+      const pf = R.filter; R.filter = E.DARK;
+      try { return fn.apply(R, arguments); } finally { R.filter = pf; }
+    };
+    const viaFilter = (fn) => function () {
+      const pf = R.filter; R.filter = E.DARK;
+      try { return fn.apply(R, arguments); } finally { R.filter = pf; }
+    };
+    E.ops = {
+      fill: viaFill(R.fill), fillRect: viaFill(R.fillRect),
+      stroke: viaStroke(R.stroke), strokeRect: viaStroke(R.strokeRect),
+      fillText: viaFilter(R.fillText), strokeText: viaFilter(R.strokeText), drawImage: viaFilter(R.drawImage),
+    };
+    E.proxy = new Proxy(R, {
+      get(t, p) {
+        if (p === '__hlfReal') return R;
+        const op = E.ops[p];
+        if (op) return op;
+        const v = R[p];
+        if (typeof v !== 'function') return v;
+        let b = E.bound.get(p);
+        if (!b) { b = v.bind(R); E.bound.set(p, b); }
+        return b;
+      },
+      set(t, p, v) { R[p] = v; return true; },
+    });
+    _hlfDimCtxs.set(R, E);
+  }
+  E.k = k; E.DARK = DARK;
+  return E.proxy;
+}
 function _hlfLabelPlate(I, r, mid, text, col, sizeV, wDeg, hV, bevel, lit) {
   const ctx = I.ctx, vm = I.vmin;
   _hlfCellPath(ctx, I.cx, I.cy, (r - hV / 2) * vm, (r + hV / 2) * vm,
@@ -78464,10 +78685,11 @@ function _hlfLabelPlate(I, r, mid, text, col, sizeV, wDeg, hV, bevel, lit) {
     ctx.lineWidth = Math.max(1, vm * 0.12);
     ctx.stroke();
   }
-  if (lit) { ctx.save(); ctx.filter = 'none'; }
-  _hlArcLabel(ctx, I.cx, I.cy, r * vm, mid, text,
+  const lc = (lit && ctx.__hlfReal) ? ctx.__hlfReal : ctx;
+  if (lit) { lc.save(); lc.filter = 'none'; }
+  _hlArcLabel(lc, I.cx, I.cy, r * vm, mid, text,
               'rgba(236,247,255,0.95)', Math.max(7, vm * sizeV), wDeg * 0.88);
-  if (lit) ctx.restore();
+  if (lit) lc.restore();
 }
 
 const _HLF_LBL = { slide: 0.5, radial: 0.5 };
@@ -79145,6 +79367,9 @@ function _hlfDrawPanels(ctx, W, H, v, PN) {
   const ga = _hlGA();
   const _dk = Math.max(0, Math.min(1, num(K.dark, 0.3)));
   const DARK = (_dk < 0.999) ? 'brightness(' + _dk.toFixed(3) + ')' : 'none';
+  const D = (DARK !== 'none' && K.filterOps !== true) ? _hlfDimCtx(ctx, _dk, DARK) : null;
+  const FD = D ? 'none' : DARK;
+  const dc = D || ctx;
   const H3 = window.__hud3d || { on: true, persp: 1400, base: 11, max: 24 };
   const _mx = (H3.max != null) ? H3.max : 24;
   const _rx = (H3.on !== false) ? Math.max(-_mx, Math.min(_mx, H3.base || 0)) * Math.PI / 180 : 0;
@@ -79186,25 +79411,25 @@ function _hlfDrawPanels(ctx, W, H, v, PN) {
       const aP = _hlPlace(_HL.shield, W, H), vmA = aP.vmin;
       const k = (rc + gap) / (_HLF.AB.rIn * vmA);
       const lblM = Math.max(1, 1.75 * vm / (k * vmA)) * num(K.lbl, 1);
-      ctx.save();
-      ctx.filter = DARK;
-      ctx.translate(ccx - aP.cx * k, ccy - aP.cy * k);
-      ctx.scale(k, k);
-      _hlfDraw(ctx, W, H, v, 'top', { lbl: lblM });
-      ctx.restore();
+      dc.save();
+      dc.filter = FD;
+      dc.translate(ccx - aP.cx * k, ccy - aP.cy * k);
+      dc.scale(k, k);
+      _hlfDraw(dc, W, H, v, 'top', { lbl: lblM });
+      dc.restore();
       const R1 = 11 * vm * kc, R2 = 13.5 * vm * kc;
       ctx.globalAlpha = 1;
       _hlRadar(ctx, { cx: ccx, cy: ccy, x: ccx - R1, y: ccy - R1, w: 2 * R1, h: 2 * R1, vmin: vm * kc });
       if (typeof window === 'undefined' || window.__hudCompass !== false) {
         ctx.globalAlpha = 1;
-        ctx.filter = DARK;
-        _hlCompass(ctx, { cx: ccx, cy: ccy, x: ccx - R2, y: ccy - R2, w: 2 * R2, h: 2 * R2, vmin: vm * kc }, _HL.compass.col);
+        dc.filter = FD;
+        _hlCompass(dc, { cx: ccx, cy: ccy, x: ccx - R2, y: ccy - R2, w: 2 * R2, h: 2 * R2, vmin: vm * kc }, _HL.compass.col);
         ctx.filter = 'none';
       }
       ctx.globalAlpha = ga;
     }
   }
-  ctx.filter = DARK;   // (v50.27) both side screens; reset at the end
+  dc.filter = FD;   // (v50.27) both side screens; reset at the end. (v50.73) 'none' when the dimming context does it
   if (PN.L) {
     const L = box(PN.L);
     const bw = barK * L.w;
@@ -79212,9 +79437,9 @@ function _hlfDrawPanels(ctx, W, H, v, PN) {
     if (v.energyPct != null) {
       const nrgCol = v.nrgWarn ? v.energyCol : (sh.speed || _HL.speed.col);
       const fpx = Math.min(bw * 0.8, 0.10 * L.h);
-      _hlfVBar(ctx, L.x1 - bw, L.y0, L.x1, L.y1 - fpx * 1.5, _HL.speed.seg || 9, v.energyPct, nrgCol, ga);
+      _hlfVBar(dc, L.x1 - bw, L.y0, L.x1, L.y1 - fpx * 1.5, _HL.speed.seg || 9, v.energyPct, nrgCol, ga);
       lblW = fpx * 2.6;
-      _hlfPanelLabel(ctx, 'NRG', capX('NRG', fpx, L.x1 - bw / 2, L.x0 - L.px, L.x1 + L.px), L.y1 - fpx * 0.62,
+      _hlfPanelLabel(dc, 'NRG', capX('NRG', fpx, L.x1 - bw / 2, L.x0 - L.px, L.x1 + L.px), L.y1 - fpx * 0.62,
                      nrgCol, fpx, 'center');
       ctx.globalAlpha = ga;
     }
@@ -79227,6 +79452,7 @@ function _hlfDrawPanels(ctx, W, H, v, PN) {
     let popK = 0.16;
     try { const KI = window.__hudIcon; if (KI && typeof KI.pop === 'number') popK = KI.pop; } catch (_) {}
     const I2 = { ctx: ctx, vmin: vm * (s0 / (IR.size * vm)), ga: ga };
+    const I2d = D ? { ctx: dc, vmin: I2.vmin, ga: ga } : I2;   // (v50.73) a not-ready glyph: dimmed
     ctx.save();
     ctx.globalAlpha = ga;
     for (let i = 0; i < order.length && i < SPOT.length; i++) {
@@ -79234,7 +79460,8 @@ function _hlfDrawPanels(ctx, W, H, v, PN) {
       if (!st) continue;
       ctx.save();
       ctx.translate(ax0 + SPOT[i][0] * aw, L.y0 + SPOT[i][1] * L.h);
-      if (st.ready || st.flash > 0) {
+      const lit = st.ready || st.flash > 0;
+      if (lit) {
         ctx.filter = 'none';
         _hlfIconPath(ctx, st.kind, s0 * st.pop);
         ctx.globalAlpha = ga;
@@ -79243,7 +79470,7 @@ function _hlfDrawPanels(ctx, W, H, v, PN) {
         ctx.lineJoin = 'round';
         ctx.stroke();
       }
-      _hlfIcon(I2, st.kind, s0 * st.pop, st.col, st.ready, st.frac, st.flash);
+      _hlfIcon(lit ? I2 : I2d, st.kind, s0 * st.pop, st.col, st.ready, st.frac, st.flash);
       ctx.restore();
     }
     ctx.restore();
@@ -79253,9 +79480,9 @@ function _hlfDrawPanels(ctx, W, H, v, PN) {
     const bw = barK * R.w;
     const ammoCol = v.ammoCol || sh.ammo || _HL.ammo.col;
     const fpx = Math.min(bw * 0.8, 0.10 * R.h);
-    _hlfVBar(ctx, R.x0, R.y0, R.x0 + bw, R.y1 - fpx * 1.5, _hlAmmoSegs() || _HL.ammo.seg, v.ammoPct, ammoCol, ga);
+    _hlfVBar(dc, R.x0, R.y0, R.x0 + bw, R.y1 - fpx * 1.5, _hlAmmoSegs() || _HL.ammo.seg, v.ammoPct, ammoCol, ga);
     const ammoX = capX('AMMO', fpx, R.x0 + bw / 2, R.x0 - R.px, R.x1 + R.px);
-    _hlfPanelLabel(ctx, 'AMMO', ammoX, R.y1 - fpx * 0.62, ammoCol, fpx, 'center');
+    _hlfPanelLabel(dc, 'AMMO', ammoX, R.y1 - fpx * 0.62, ammoCol, fpx, 'center');
     ctx.globalAlpha = ga;
     const px0 = R.x0 + bw + 0.10 * R.w, pw = Math.max(1, R.x1 - px0);
     const n = Math.max(1, v.dashMax || 3), lit = v.dashN || 0;
@@ -79265,21 +79492,21 @@ function _hlfDrawPanels(ctx, W, H, v, PN) {
       : (n === 2) ? [[0.3, 0.45], [0.7, 0.45]]
       : (n === 3) ? [[0.5, 0.36], [0.28, 0.62], [0.72, 0.62]]
       : Array.from({ length: n }, (_, i) => [(i % 2) ? 0.7 : 0.3, 0.22 + 0.45 * (Math.floor(i / 2) / Math.max(1, Math.ceil(n / 2) - 1))]);
-    ctx.save();
+    dc.save();
     for (let i = 0; i < n; i++) {
       const x = px0 + spots[i][0] * pw, y = R.y0 + spots[i][1] * R.h;
-      ctx.beginPath(); ctx.arc(x, y, pr, 0, 7);
-      ctx.strokeStyle = pcol; ctx.globalAlpha = 0.6 * ga;
-      ctx.lineWidth = Math.max(1, pr * 0.16);
-      ctx.stroke();
+      dc.beginPath(); dc.arc(x, y, pr, 0, 7);
+      dc.strokeStyle = pcol; dc.globalAlpha = 0.6 * ga;
+      dc.lineWidth = Math.max(1, pr * 0.16);
+      dc.stroke();
       if (i < lit) {
-        ctx.globalAlpha = ga; ctx.fillStyle = pcol;
-        ctx.shadowColor = pcol; ctx.shadowBlur = pr * 0.5;
-        ctx.fill(); ctx.shadowBlur = 0;
+        dc.globalAlpha = ga; dc.fillStyle = pcol;
+        dc.shadowColor = pcol; dc.shadowBlur = pr * 0.5;
+        dc.fill(); dc.shadowBlur = 0;
       }
     }
-    ctx.restore();
-    _hlfPanelLabel(ctx, 'DASH', capX('DASH', fpx, px0 + pw / 2, ammoX + capW('AMMO', fpx) / 2 + 0.8 * fpx, R.x1 + R.px),
+    dc.restore();
+    _hlfPanelLabel(dc, 'DASH', capX('DASH', fpx, px0 + pw / 2, ammoX + capW('AMMO', fpx) / 2 + 0.8 * fpx, R.x1 + R.px),
                    R.y1 - fpx * 0.62, pcol, fpx, 'center');
     ctx.globalAlpha = ga;
   }
