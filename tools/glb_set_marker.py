@@ -22,6 +22,8 @@ def main():
     ap.add_argument('--y', type=float)
     ap.add_argument('--z', type=float)
     ap.add_argument('--list', action='store_true', help='list marker-like nodes, change nothing')
+    ap.add_argument('--add', action='store_true',
+                    help='create a marker that does not exist yet (a scene-root empty, like the others); needs --x --y --z')
     a = ap.parse_args()
 
     b = open(a.glb, 'rb').read()
@@ -40,7 +42,26 @@ def main():
         return
     for name in a.markers:
         hit = [n for n in nodes if n.get('name') == name]
-        if len(hit) != 1: sys.exit('node %r: found %d (use --list)' % (name, len(hit)))
+        if not hit and a.add:
+            if a.x is None or a.y is None or a.z is None: sys.exit('--add %r needs --x --y --z' % name)
+            # beside its siblings: the parent of an existing marker with the same prefix (gun8 -> gun1's), else the
+            # scene root - the shipped GLBs keep markers at the root, the assets_src exports under the hull node
+            import re
+            pre = re.sub(r'\d+$', '', name)
+            par = {c: i for i, n in enumerate(nodes) for c in n.get('children', [])}
+            sib = next((i for i, n in enumerate(nodes) if re.fullmatch(re.escape(pre) + r'\d+', n.get('name', ''))), None)
+            nodes.append({'name': name, 'translation': [0.0, 0.0, 0.0]})
+            k = len(nodes) - 1
+            if sib is not None and sib in par:
+                nodes[par[sib]].setdefault('children', []).append(k)
+                where = 'under %r' % nodes[par[sib]].get('name')
+            else:
+                j.setdefault('scenes', [{'nodes': []}])
+                j['scenes'][j.get('scene', 0)].setdefault('nodes', []).append(k)
+                where = 'at the scene root'
+            hit = [nodes[-1]]
+            print('%-12s added %s' % (name, where))
+        if len(hit) != 1: sys.exit('node %r: found %d (use --list, or --add to create it)' % (name, len(hit)))
         n = hit[0]
         if 'mesh' in n or 'matrix' in n: sys.exit('node %r is not a plain marker empty' % name)
         t = list(n.get('translation', [0.0, 0.0, 0.0]))

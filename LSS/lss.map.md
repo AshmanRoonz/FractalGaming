@@ -9090,6 +9090,38 @@ Owner: *"i find our water to look a bit jello like... i like how this water move
       - 829 of 2840 faces faced the eye. All are wound correctly and nearly edge-on (median cos 0.065).
       - They drew the glass's dark-blue tint below the horizon line. The other six hulls had 2-19 such faces.
     - **Fix:** the rig hides the player's own `canopy_glass` meshes while the cockpit is live, and `_lssCockpitOff` shows them again.
+  - **v50.53-50.55 weapon origins and shapes** (owner, one message):
+    - **v50.53, Cluster plume** (**Jump:** `SKINNY OUT OF THE TUBE, THEN OPEN UP`; *"doesn't look like it's coming from the G2 weapon position... the tail... should be skinny when it first comes out, then open up full"*).
+      - The missile already spawned AT gun2. The cone's WIDE end sits on the launcher until the plume has grown out (v49.88), and it started at 40% width: a 22 u disc on the sizeMult-3 Cluster that buried G2.
+      - Now it starts at 8% and opens to full by 35% of the full length. The code is shared, so every smokeTrail rocket gets it.
+      - Knob: `window.__plume = { start, open }`.
+      - ⚠ Puncture's G2 sits ~5 u BEHIND the pilot's eye and 13 u to the left, so in first person the missile starts behind the camera.
+    - **v50.54, Tracker gun8:** `_SHIP_GUN_ROLES.TRACKER.sonar` is `[8]`. The marker is at (-0.938, -0.066, 0.002) in both sets, assets_src and markers.json.
+      - `tools/glb_set_marker.py --add` creates a marker beside its siblings: scene root in the shipped files, under `tracker_game_hull` in assets_src.
+    - **v50.56, Pyro gun3** (**Jump:** `_pyroChainReleaseFX`). Owner: *"his flame chain will be fired from here... similar to the way the gas is fired"*.
+      - `_SHIP_GUN_ROLES.PYRO.chain` is `[3]`, at (-0.937, -0.017, -0.007), in all four places.
+      - `_pyroChainReleaseFX` mirrors `_pyroGasReleaseFX`: two anchored tracers (0xff5a14 / 0xffd27a) from the tube to the fire line's start, for the player and bots.
+      - The firewall itself is unchanged: 100 u / 80 u ahead, 800 long.
+      - **v50.57: the line now starts IN FRONT of the nose** (owner: *"the flame chain looks like it starts in pyro's nose, the chain should be infront of the ship"*).
+        - 100 u ahead of the CENTRE is inside a dreadnought: gun3 sits 112 u out on Pyro's nose axis.
+        - `_flameChainStart` = the tube's projection on the aim + `_FC_AHEAD` (40), floored at the old 100 / 80 u, for the player and bots. Peers get it through effect_spawn.
+        - Live: `window.__fcAhead`. The damage zone moves with the line.
+    - **v50.55, Laser arms are cones:** the ability's arms took `_getVortexCoreArmConeGeometry()` (point at the gun, armTip 0.18) instead of the straight cylinder, whose open end showed as a 3.4 u ring at the muzzle. Peers and replays draw through the same function.
+  - ⭐⭐ **v50.50-50.52 THE SWITCH-TO-FIRST-PERSON HITCH WAS THE EYE SOLVE's CLEARANCE RAYS** (**Jump:** `THE CLEARANCE RAYS COST THE SWITCH-TO-FIRST-PERSON HITCH` · `_cfNearTris` · `_cfSolveCache` · `WARM THE COCKPIT-FRAME SOLVE ON A NEW HULL`). Owner: *"there's a hitch when i switch to first person from third person"*.
+    - Measured with `__profOn` section max: 31-34 ms in `player+weapons`, a 40-48 ms frame, and no new programs or geometry at the switch.
+    - Each `__cockpitFrameInfo()` solve took 28 ms. One three `Raycaster` ray against the hull's solid meshes took 13.4 ms over Slayer's 138k triangles: no BVH, and the eye is inside every bounding box, so nothing is rejected early. That is 2 rays per unblocked solve and 4 when blocked.
+    - It re-solved on EVERY new hull (each ship cycle builds one) and on every FOV or window change.
+    - **v50.50: a per-ship triangle soup in the eye frame.** It holds only triangles within the eye's reach (the solve's move bounds x D + CF_CLEAR, box-vs-sphere). The ray is a Moller-Trumbore loop over that soup.
+      - The solved eye is cached per ship x settings (`_cfSolveCache`).
+      - ⚠ The solid test now reads `userData._ghostOrig || material`. In an x-ray cockpit `o.material` is the ghost's transparent clone, so the old test found NO solids and v50.24's Pyro clearance silently did nothing.
+      - Its empty-list cache also re-walked the hull every call.
+    - **v50.52: the soup keeps only triangles crossing the rays' plane** (z = 0 in the eye frame; the rays move in forward/up only). Vortex went from 30,040 to 795 triangles.
+      - Vertices go through one combined matrix by hand. Cold build plus solve fell from 22 ms to 4-5.5 ms; a warm fresh solve takes 0.7 ms.
+      - It is WARMED on the first rig frame of a new hull, inside the hull-build hitch.
+      - Result: the V switch's worst frame is 13 ms, and `player+weapons` stays under 1.5 ms. The solved eye is identical (Vortex fwd 5.91 / up -1.31).
+    - Probe: `window.__cfCaches = { solve, near }`. Clear both to time a cold solve with `__cockpitFrameInfo()`.
+    - ⚠ **A background pane tab polls the owner's GAMEPAD too** (both tabs are 'visible'), so their ship cycling showed up in my test tab mid-measurement. Use single key events, and check `player.loadoutKey` before and after.
+    - ⚠ A first-person FPS drop the owner reported earlier was my `__hudScreens3d = true` test knob left on in an adopted tab. In a clean tab first person measured 137 fps vs 142.
   - ⭐ **v50.24 + v50.25 THE HUD ON THE CONSOLE'S SCREENS - the cockpit untouched** (**Jump:** `THE HUD ON THE CONSOLE's SCREENS` · `function _lssHudPanels` · `function _hlfDrawPanels` · `function _cfPanels` · `function _hlfIconState` · `THE SOLVED EYE STAYS IN THE COCKPIT`). Owner: *"nice"*.
     - **v50.24 is the Pyro fix ALONE.** At FOV 60 the frame solve backed Pyro's eye 3.05 units, through the hull's skin behind the seat (*"his first person view is blocked"* / *"61 does not do it, 60 does"*).
       - `_cfClearT` ray-casts the move against the ship's solid meshes and stops `CF_CLEAR` (0.2) short. Every unblocked solve is unchanged.
