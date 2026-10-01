@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "50.39";
+const LSS_BUILD = "50.40";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -78213,6 +78213,17 @@ function _hlfDrawPanels(ctx, W, H, v, PN) {
   ctx.filter = 'none';
 }
 
+function _hlTPMap() {
+  try {
+    const _tp = (typeof game !== 'undefined' && game && game.thirdPerson) &&
+                !(typeof isXRPresenting === 'function' && isXRPresenting());
+    if (!_tp) return null;
+    const KT = (typeof window !== 'undefined' && window.__hudTP) || {};
+    const mx = (typeof KT.mapX === 'number') ? KT.mapX : 17, my = (typeof KT.mapY === 'number') ? KT.mapY : 0;
+    return { mP: Object.assign({}, _HL.minimap, { a: 'ml', x: mx, y: my }),
+             cPt: Object.assign({}, _HL.compass, { a: 'ml', x: mx, y: my }), K: KT };
+  } catch (_) { return null; }
+}
 function _hlDrawHUD(ctx, W, H, cx, cy, v) {
   ctx.save();
   ctx.translate(cx - W / 2, cy - H / 2);
@@ -78240,6 +78251,13 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
 
   if (v.aegisStr) {
     r = _hlPlace(_HL.aegis, W, H);
+    const _tpA = _PN ? null : _hlTPMap();
+    if (_tpA) {
+      const cP = _hlPlace(_tpA.cPt, W, H, 1), R = Math.min(cP.w, cP.h) / 2;
+      const gap = ((typeof _tpA.K.aegisGap === 'number') ? _tpA.K.aegisGap : 1.2) * Math.min(W, H) / 100;
+      const fpx = (_HL.aegis.size || 1.5) * r.vmin;
+      r = { x: cP.cx - r.w / 2, y: cP.cy + R + gap, w: r.w, h: r.h, cx: cP.cx, cy: cP.cy + R + gap + fpx * 0.6, vmin: r.vmin };
+    }
     _hlText(ctx, r, _HL.aegis, v.aegisStr, _HL.aegis.col);
   }
 
@@ -78249,17 +78267,8 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
   }
 
   if (!_PN) {   // (v50.25) on the console's screens, _hlfDrawPanels drew them into the centre one
-    let mP = _HL.minimap, cPt = _HL.compass;
-    try {
-      const _tp = (typeof game !== 'undefined' && game && game.thirdPerson) &&
-                  !(typeof isXRPresenting === 'function' && isXRPresenting());
-      if (_tp) {
-        const KT = (typeof window !== 'undefined' && window.__hudTP) || {};
-        const mx = (typeof KT.mapX === 'number') ? KT.mapX : 17, my = (typeof KT.mapY === 'number') ? KT.mapY : 0;
-        mP = Object.assign({}, _HL.minimap, { a: 'ml', x: mx, y: my });
-        cPt = Object.assign({}, _HL.compass, { a: 'ml', x: mx, y: my });
-      }
-    } catch (_) {}
+    const TPm = _hlTPMap();   // (v50.40) the placement moved into _hlTPMap, unchanged
+    const mP = TPm ? TPm.mP : _HL.minimap, cPt = TPm ? TPm.cPt : _HL.compass;
     ctx.globalAlpha = 1;
     _hlRadar(ctx, _hlPlace(mP, W, H, 1));
     if (typeof window === 'undefined' || window.__hudCompass !== false) {

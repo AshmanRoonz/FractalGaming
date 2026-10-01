@@ -9110,6 +9110,10 @@ Owner: *"i find our water to look a bit jello like... i like how this water move
       - ⚠ **A new default on `hudScale` could never show.** A saved setting always wins, and every save since v36.19 carries one. A new setting has no saved value, so its default shows.
       - `_hlScale()` picks the setting by `game.thirdPerson`. VR stays at 1.
       - The HUD's caches key on vmin (`_lk`, `_hlArcTextCache`), so a view toggle re-bakes them on its own.
+    - **v50.40, third person:** the AEGIS rank + XP line hangs UNDER the compass (owner: *"3rd person, put the aegis level and xp count under the compass"*).
+      - The rose is pinned at 1x, so the line hangs off its 13.5 vmin rim; the rose's letters ride inside the rim. The text keeps its own HUD-size font.
+      - `_hlTPMap()` is now the ONE place the third-person radar/rose slot is decided; both readers use it. It sits just above `_hlDrawHUD`, inside the HUD lab's extracted span.
+      - Live: `window.__hudTP = { mapX, mapY, aegisGap: 1.2 }`. First person and VR keep the bottom-centre line.
   - ⭐ **v50.30-50.34 FIRST-PERSON LEGIBILITY + SLAYER's GREEN SCREENS** (**Jump:** `ON IS LIT, OFF IS DARK` · `THE CAPTIONS KEEP THEIR SIZE` · `THE CAPTION UNDER ITS BAR` · `"DASH" UNDER THE DOTS` · `THE CLASS COLOUR FIRST`). Five builds, one change each. Owner: *"yes! nicely done"*.
     - **v50.30, ability icons:** a READY glyph and its double-flash draw OUTSIDE the dark filter, over a near-black keyline. NOT READY keeps v50.27's dark silhouette.
       - ⚠ **A uniform darken erases binary state.** v50.27 took "lit theme colour + glow" and "near-black silhouette" to two shades of dark, and the white flash to grey. Owner: *"too hard to see if the icons... are on or off... i barely saw the flash"*.
