@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "50.25";
+const LSS_BUILD = "50.34";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -717,6 +717,7 @@ const player = {
 };
 
 const HUD_SCALE_DEFAULT = 1.75;
+const HUD_SCALE_TP_DEFAULT = 1.25;
 
 
 const input = {
@@ -834,6 +835,7 @@ const input = {
   vrWater: false,
   vrWaterRefl: false,
   hudScale: HUD_SCALE_DEFAULT,
+  hudScaleTP: HUD_SCALE_TP_DEFAULT,   // (v50.29) third person's own - see HUD_SCALE_TP_DEFAULT
   hudOpacity: 0.72,
   hudTextOpacity: 1,
   crosshairOpacity: 0.72,
@@ -45012,8 +45014,8 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId) {
         if (m && m.name === 'cockpit_CP_screen') {
           let _sHex = 0x44eeff;
           try {
-            _sHex = (_THEME_PAINT_HEX[loadoutKey] != null) ? _THEME_PAINT_HEX[loadoutKey]
-                  : ((typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS[loadoutKey] != null) ? LSS.CLASS_COLORS[loadoutKey] : 0x44eeff);
+            _sHex = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS[loadoutKey] != null) ? LSS.CLASS_COLORS[loadoutKey]
+                  : ((_THEME_PAINT_HEX[loadoutKey] != null) ? _THEME_PAINT_HEX[loadoutKey] : 0x44eeff);
           } catch (_) {}
           const _SG = (window.__cockpit && window.__cockpit.screen) || {};
           params.color = new THREE.Color(0x050608);
@@ -68864,7 +68866,8 @@ function _lssConsoleKnob(mesh) {
   if (!ud) return;
   const W = window.__cockpit;
   const SG = (W && W.screen && typeof W.screen.glow === 'number') ? W.screen.glow : null;
-  if (SG !== null && ud._screenGlow !== SG) {
+  const SX = (W && W.screen && typeof W.screen.hex === 'number') ? W.screen.hex : null;
+  if ((SG !== null && ud._screenGlow !== SG) || (SX !== null && ud._screenHex !== SX)) {
     if (!ud._screenMats) {
       ud._screenMats = [];
       mesh.traverse((o) => {
@@ -68872,8 +68875,9 @@ function _lssConsoleKnob(mesh) {
         for (const mm of (Array.isArray(o.material) ? o.material : [o.material])) if (mm && mm.name === 'cockpit_CP_screen') ud._screenMats.push(mm);
       });
     }
-    for (const mm of ud._screenMats) mm.emissiveIntensity = SG;
-    ud._screenGlow = SG;
+    if (SG !== null) for (const mm of ud._screenMats) mm.emissiveIntensity = SG;
+    if (SX !== null) for (const mm of ud._screenMats) if (mm.emissive) mm.emissive.setHex(SX);
+    ud._screenGlow = SG; ud._screenHex = SX;
   }
   const want = (W && typeof W.consoleDeg === 'number' && isFinite(W.consoleDeg)) ? W.consoleDeg : null;
   const fwd = (W && typeof W.consoleFwd === 'number' && isFinite(W.consoleFwd)) ? W.consoleFwd : 0;
@@ -76763,7 +76767,11 @@ function _nrgLowCol(pct, t) {
 
 function _hlScale() {
   if (typeof isXRPresenting === 'function' && isXRPresenting()) return 1;
-  const s = (typeof input !== 'undefined' && input && typeof input.hudScale === 'number') ? input.hudScale : HUD_SCALE_DEFAULT;
+  let _tp = false;
+  try { _tp = !!(typeof game !== 'undefined' && game && game.thirdPerson); } catch (_) {}
+  const s = _tp
+    ? ((typeof input !== 'undefined' && input && typeof input.hudScaleTP === 'number') ? input.hudScaleTP : HUD_SCALE_TP_DEFAULT)
+    : ((typeof input !== 'undefined' && input && typeof input.hudScale === 'number') ? input.hudScale : HUD_SCALE_DEFAULT);
   if (!(s > 0)) return 1;
   return Math.max(0.75, Math.min(1.75, Math.round(s * 20) / 20));
 }
@@ -77339,7 +77347,7 @@ function _hlfBorderPath(ctx, cx, cy, rIn, rOut, a0, a1, nodes, nh, nw, sw) {
   ctx.closePath();
 }
 
-function _hlfLabelPlate(I, r, mid, text, col, sizeV, wDeg, hV, bevel) {
+function _hlfLabelPlate(I, r, mid, text, col, sizeV, wDeg, hV, bevel, lit) {
   const ctx = I.ctx, vm = I.vmin;
   _hlfCellPath(ctx, I.cx, I.cy, (r - hV / 2) * vm, (r + hV / 2) * vm,
                mid - wDeg / 2, mid + wDeg / 2, bevel != null ? bevel : wDeg * 0.20);
@@ -77350,8 +77358,10 @@ function _hlfLabelPlate(I, r, mid, text, col, sizeV, wDeg, hV, bevel) {
     ctx.lineWidth = Math.max(1, vm * 0.12);
     ctx.stroke();
   }
+  if (lit) { ctx.save(); ctx.filter = 'none'; }
   _hlArcLabel(ctx, I.cx, I.cy, r * vm, mid, text,
               'rgba(236,247,255,0.95)', Math.max(7, vm * sizeV), wDeg * 0.88);
+  if (lit) ctx.restore();
 }
 
 const _HLF_LBL = { slide: 0.5, radial: 0.5 };
@@ -77817,7 +77827,7 @@ function _hlfIconState(m, v, sh, popK) {
   return { kind: _HLF_ICON[m.slot] || 'bolt', col: col, ready: ready, frac: _frac, pop: pop, flash: flash };
 }
 
-function _hlfDraw(ctx, W, H, v, parts) {
+function _hlfDraw(ctx, W, H, v, parts, opt) {
   const _all = parts !== 'top';
   const TOP = _HLF.TOP, SH = _HLF.SH, HP = _HLF.HP, AB = _HLF.AB, FR = _HLF.FR;
   const base = _hlPlace(_HL.shield, W, H);            // any centred part gives cx/cy/vmin
@@ -77929,11 +77939,23 @@ function _hlfDraw(ctx, W, H, v, parts) {
               v.ammoPct, v.ammoCol || sh.ammo || _HL.ammo.col, !!_HL.ammo.fromEnd);
   }
 
-  _hlfLabelPlate(I, (SH.rIn + SH.rOut) / 2, 270, 'SHIELD', shCol, 0.78, 15,
-                 Math.max(SH.rOut - SH.rIn, 1.00));
-  _hlfLabelPlate(I, (HP.rIn + HP.rOut) / 2, 270, 'HP', hpCol, 0.78, 9, HP.rOut - HP.rIn);
-  _hlfLabelPlate(I, (AB.rIn + AB.rOut) / 2, 270, 'CORE', coreCol, 0.66, 11,
-                 Math.max(AB.rOut - AB.rIn, 0.95));
+  const _lm = (opt && opt.lbl > 0) ? opt.lbl : 0;
+  if (!_lm) {
+    _hlfLabelPlate(I, (SH.rIn + SH.rOut) / 2, 270, 'SHIELD', shCol, 0.78, 15,
+                   Math.max(SH.rOut - SH.rIn, 1.00));
+    _hlfLabelPlate(I, (HP.rIn + HP.rOut) / 2, 270, 'HP', hpCol, 0.78, 9, HP.rOut - HP.rIn);
+    _hlfLabelPlate(I, (AB.rIn + AB.rOut) / 2, 270, 'CORE', coreCol, 0.66, 11,
+                   Math.max(AB.rOut - AB.rIn, 0.95));
+  } else {
+    const hS = Math.max(SH.rOut - SH.rIn, 1.00) * _lm;
+    const rS = Math.max((SH.rIn + SH.rOut) / 2, FR.rOut - 0.1 - hS / 2);
+    const rH = (HP.rIn + HP.rOut) / 2;
+    const hH = Math.max(0.6, Math.min((HP.rOut - HP.rIn) * _lm, 2 * (rS - hS / 2 - 0.1 - rH)));
+    _hlfLabelPlate(I, rS, 270, 'SHIELD', shCol, 0.78 * _lm, 15 * _lm, hS, null, true);
+    _hlfLabelPlate(I, rH, 270, 'HP', hpCol, Math.min(0.78 * _lm, 0.84 * hH), 9 * _lm, hH, null, true);
+    _hlfLabelPlate(I, (AB.rIn + AB.rOut) / 2, 270, 'CORE', coreCol, 0.66 * _lm, 11 * _lm,
+                   Math.max(AB.rOut - AB.rIn, 0.95) * _lm, null, true);
+  }
   const LBL_TILT = _HLF_DASH.rot || 30;
   if (_all && v.energyPct != null) {
     _hlfFlatPlate(I, _HL.speed.r, _HL.speed.r + _HL.speed.tick * 0.5,
@@ -78015,6 +78037,8 @@ function _hlfDrawPanels(ctx, W, H, v, PN) {
   const vm = Math.min(W, H) / 100;
   const sh = _hlfShades(player && player.loadoutKey);
   const ga = _hlGA();
+  const _dk = Math.max(0, Math.min(1, num(K.dark, 0.3)));
+  const DARK = (_dk < 0.999) ? 'brightness(' + _dk.toFixed(3) + ')' : 'none';
   const H3 = window.__hud3d || { on: true, persp: 1400, base: 11, max: 24 };
   const _mx = (H3.max != null) ? H3.max : 24;
   const _rx = (H3.on !== false) ? Math.max(-_mx, Math.min(_mx, H3.base || 0)) * Math.PI / 180 : 0;
@@ -78029,7 +78053,17 @@ function _hlfDrawPanels(ctx, W, H, v, PN) {
     const a = toCanvas(r[0], r[1]), b = toCanvas(r[2], r[1]), c = toCanvas(r[0], r[3]), d = toCanvas(r[2], r[3]);
     const x0 = Math.max(a[0], c[0]), x1 = Math.min(b[0], d[0]), y0 = Math.max(a[1], b[1]), y1 = Math.min(c[1], d[1]);
     const w = x1 - x0, h = y1 - y0;
-    return { x0: x0 + pad * w, y0: y0 + pad * h, x1: x1 - pad * w, y1: y1 - pad * h, w: w * (1 - 2 * pad), h: h * (1 - 2 * pad) };
+    return { x0: x0 + pad * w, y0: y0 + pad * h, x1: x1 - pad * w, y1: y1 - pad * h, w: w * (1 - 2 * pad), h: h * (1 - 2 * pad),
+             px: pad * w, py: pad * h };
+  };
+  const capW = (text, px) => {
+    ctx.font = '700 ' + Math.max(6, px).toFixed(1) + 'px Orbitron, Courier New';
+    _hudFontCache = '';
+    return ctx.measureText(text).width;
+  };
+  const capX = (text, px, cx, lo, hi) => {
+    const w = capW(text, px);
+    return (hi - lo > w) ? Math.max(lo + w / 2, Math.min(hi - w / 2, cx)) : (lo + hi) / 2;
   };
   {
     const ci = PN.circle;
@@ -78045,34 +78079,41 @@ function _hlfDrawPanels(ctx, W, H, v, PN) {
       const kc = rc / (13.5 * vm);
       const aP = _hlPlace(_HL.shield, W, H), vmA = aP.vmin;
       const k = (rc + gap) / (_HLF.AB.rIn * vmA);
+      const lblM = Math.max(1, 1.75 * vm / (k * vmA)) * num(K.lbl, 1);
       ctx.save();
+      ctx.filter = DARK;
       ctx.translate(ccx - aP.cx * k, ccy - aP.cy * k);
       ctx.scale(k, k);
-      _hlfDraw(ctx, W, H, v, 'top');
+      _hlfDraw(ctx, W, H, v, 'top', { lbl: lblM });
       ctx.restore();
       const R1 = 11 * vm * kc, R2 = 13.5 * vm * kc;
       ctx.globalAlpha = 1;
       _hlRadar(ctx, { cx: ccx, cy: ccy, x: ccx - R1, y: ccy - R1, w: 2 * R1, h: 2 * R1, vmin: vm * kc });
       if (typeof window === 'undefined' || window.__hudCompass !== false) {
         ctx.globalAlpha = 1;
+        ctx.filter = DARK;
         _hlCompass(ctx, { cx: ccx, cy: ccy, x: ccx - R2, y: ccy - R2, w: 2 * R2, h: 2 * R2, vmin: vm * kc }, _HL.compass.col);
+        ctx.filter = 'none';
       }
       ctx.globalAlpha = ga;
     }
   }
+  ctx.filter = DARK;   // (v50.27) both side screens; reset at the end
   if (PN.L) {
     const L = box(PN.L);
     const bw = barK * L.w;
     let lblW = 0;
     if (v.energyPct != null) {
       const nrgCol = v.nrgWarn ? v.energyCol : (sh.speed || _HL.speed.col);
-      _hlfVBar(ctx, L.x1 - bw, L.y0, L.x1, L.y1, _HL.speed.seg || 9, v.energyPct, nrgCol, ga);
       const fpx = Math.min(bw * 0.8, 0.10 * L.h);
+      _hlfVBar(ctx, L.x1 - bw, L.y0, L.x1, L.y1 - fpx * 1.5, _HL.speed.seg || 9, v.energyPct, nrgCol, ga);
       lblW = fpx * 2.6;
-      _hlfPanelLabel(ctx, 'NRG', L.x1 - bw - fpx * 0.4, (L.y0 + L.y1) / 2, nrgCol, fpx, 'right');
+      _hlfPanelLabel(ctx, 'NRG', capX('NRG', fpx, L.x1 - bw / 2, L.x0 - L.px, L.x1 + L.px), L.y1 - fpx * 0.62,
+                     nrgCol, fpx, 'center');
       ctx.globalAlpha = ga;
     }
-    const ax0 = L.x0, aw = Math.max(1, L.w - bw - lblW - 0.04 * L.w);
+    void lblW;
+    const ax0 = L.x0, aw = Math.max(1, L.w - bw - 0.04 * L.w);
     const order = _HL_AB.slice().sort((a, b) => _HL[a.cd].a0 - _HL[b.cd].a0);
     const SPOT = [[0.62, 0.27], [0.27, 0.70], [0.74, 0.74]];
     const s0 = Math.min(0.42 * aw, 0.36 * L.h) * num(K.icon, 1);
@@ -78087,6 +78128,15 @@ function _hlfDrawPanels(ctx, W, H, v, PN) {
       if (!st) continue;
       ctx.save();
       ctx.translate(ax0 + SPOT[i][0] * aw, L.y0 + SPOT[i][1] * L.h);
+      if (st.ready || st.flash > 0) {
+        ctx.filter = 'none';
+        _hlfIconPath(ctx, st.kind, s0 * st.pop);
+        ctx.globalAlpha = ga;
+        ctx.strokeStyle = 'rgba(4,6,9,0.9)';
+        ctx.lineWidth = Math.max(2, I2.vmin * 0.55);
+        ctx.lineJoin = 'round';
+        ctx.stroke();
+      }
       _hlfIcon(I2, st.kind, s0 * st.pop, st.col, st.ready, st.frac, st.flash);
       ctx.restore();
     }
@@ -78096,16 +78146,19 @@ function _hlfDrawPanels(ctx, W, H, v, PN) {
     const R = box(PN.R);
     const bw = barK * R.w;
     const ammoCol = v.ammoCol || sh.ammo || _HL.ammo.col;
-    _hlfVBar(ctx, R.x0, R.y0, R.x0 + bw, R.y1, _hlAmmoSegs() || _HL.ammo.seg, v.ammoPct, ammoCol, ga);
     const fpx = Math.min(bw * 0.8, 0.10 * R.h);
-    _hlfPanelLabel(ctx, 'AMMO', R.x0 + bw + fpx * 0.4, R.y0 + 0.86 * R.h, ammoCol, fpx, 'left');
+    _hlfVBar(ctx, R.x0, R.y0, R.x0 + bw, R.y1 - fpx * 1.5, _hlAmmoSegs() || _HL.ammo.seg, v.ammoPct, ammoCol, ga);
+    const ammoX = capX('AMMO', fpx, R.x0 + bw / 2, R.x0 - R.px, R.x1 + R.px);
+    _hlfPanelLabel(ctx, 'AMMO', ammoX, R.y1 - fpx * 0.62, ammoCol, fpx, 'center');
     ctx.globalAlpha = ga;
     const px0 = R.x0 + bw + 0.10 * R.w, pw = Math.max(1, R.x1 - px0);
     const n = Math.max(1, v.dashMax || 3), lit = v.dashN || 0;
     const pr = Math.min(0.16 * pw, 0.10 * R.h) * num(K.pip, 1);
     const pcol = sh.dash || _HLF_DASH.col;
-    const spots = (n === 3) ? [[0.5, 0.36], [0.28, 0.62], [0.72, 0.62]]
-      : Array.from({ length: n }, (_, i) => [0.5, 0.2 + 0.6 * (n === 1 ? 0.5 : i / (n - 1))]);
+    const spots = (n === 1) ? [[0.5, 0.45]]
+      : (n === 2) ? [[0.3, 0.45], [0.7, 0.45]]
+      : (n === 3) ? [[0.5, 0.36], [0.28, 0.62], [0.72, 0.62]]
+      : Array.from({ length: n }, (_, i) => [(i % 2) ? 0.7 : 0.3, 0.22 + 0.45 * (Math.floor(i / 2) / Math.max(1, Math.ceil(n / 2) - 1))]);
     ctx.save();
     for (let i = 0; i < n; i++) {
       const x = px0 + spots[i][0] * pw, y = R.y0 + spots[i][1] * R.h;
@@ -78120,8 +78173,11 @@ function _hlfDrawPanels(ctx, W, H, v, PN) {
       }
     }
     ctx.restore();
+    _hlfPanelLabel(ctx, 'DASH', capX('DASH', fpx, px0 + pw / 2, ammoX + capW('AMMO', fpx) / 2 + 0.8 * fpx, R.x1 + R.px),
+                   R.y1 - fpx * 0.62, pcol, fpx, 'center');
     ctx.globalAlpha = ga;
   }
+  ctx.filter = 'none';
 }
 
 function _hlDrawHUD(ctx, W, H, cx, cy, v) {
@@ -78160,11 +78216,22 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
   }
 
   if (!_PN) {   // (v50.25) on the console's screens, _hlfDrawPanels drew them into the centre one
+    let mP = _HL.minimap, cPt = _HL.compass;
+    try {
+      const _tp = (typeof game !== 'undefined' && game && game.thirdPerson) &&
+                  !(typeof isXRPresenting === 'function' && isXRPresenting());
+      if (_tp) {
+        const KT = (typeof window !== 'undefined' && window.__hudTP) || {};
+        const mx = (typeof KT.mapX === 'number') ? KT.mapX : 17, my = (typeof KT.mapY === 'number') ? KT.mapY : 0;
+        mP = Object.assign({}, _HL.minimap, { a: 'ml', x: mx, y: my });
+        cPt = Object.assign({}, _HL.compass, { a: 'ml', x: mx, y: my });
+      }
+    } catch (_) {}
     ctx.globalAlpha = 1;
-    _hlRadar(ctx, _hlPlace(_HL.minimap, W, H, 1));
+    _hlRadar(ctx, _hlPlace(mP, W, H, 1));
     if (typeof window === 'undefined' || window.__hudCompass !== false) {
       ctx.globalAlpha = 1;
-      _hlCompass(ctx, _hlPlace(_HL.compass, W, H, 1), _HL.compass.col);
+      _hlCompass(ctx, _hlPlace(cPt, W, H, 1), _HL.compass.col);
     }
   }
   ctx.globalAlpha = _hlGA();   // back to the dimmed HUD for anything drawn after
@@ -84515,9 +84582,15 @@ function buildSettingsPage() {
         <label style="flex:1;">The small curved captions on the rings (SPEED, NRG, SHIELD, HEALTH, CORE, AMMO). Ability names on the cooldown bars are unaffected.</label>
       </div>
       <div class="setting-row">
-        <label>HUD Size</label>
+        <label>HUD Size (1st person)</label>
         <input type="range" id="set-hud-scale" min="0.75" max="1.75" step="0.05" value="${(typeof input.hudScale === 'number') ? input.hudScale : HUD_SCALE_DEFAULT}">
         <div class="value-display" id="val-hud-scale">${((typeof input.hudScale === 'number') ? input.hudScale : HUD_SCALE_DEFAULT).toFixed(2)}x</div>
+      </div>
+      <div class="setting-row">
+        <!-- (v50.29) the chase view's own HUD size, default 1.25 - see HUD_SCALE_TP_DEFAULT -->
+        <label>HUD Size (3rd person)</label>
+        <input type="range" id="set-hud-scale-tp" min="0.75" max="1.75" step="0.05" value="${(typeof input.hudScaleTP === 'number') ? input.hudScaleTP : HUD_SCALE_TP_DEFAULT}">
+        <div class="value-display" id="val-hud-scale-tp">${((typeof input.hudScaleTP === 'number') ? input.hudScaleTP : HUD_SCALE_TP_DEFAULT).toFixed(2)}x</div>
       </div>
       <div class="setting-row">
         <!-- step 0.01, not the 0.05 its neighbours use: the shipped default is 0.72, which is not
@@ -85951,6 +86024,20 @@ function buildSettingsPage() {
     hudScaleSel.addEventListener('input', _applyHudScale);
     hudScaleSel.addEventListener('change', () => { _applyHudScale(); saveSettings(); });
   }
+  const hudScaleTPSel = overlay.querySelector('#set-hud-scale-tp');
+  const hudScaleTPVal = overlay.querySelector('#val-hud-scale-tp');
+  if (hudScaleTPSel) {
+    const _applyHudScaleTP = () => {
+      const v = parseFloat(hudScaleTPSel.value);
+      if (!isFinite(v)) return;
+      input.hudScaleTP = v;
+      if (hudScaleTPVal) hudScaleTPVal.textContent = v.toFixed(2) + 'x';
+      try { _hlArcTextCache.clear(); } catch (_) {}
+      try { _hlfLayerClear(); } catch (_) {}
+    };
+    hudScaleTPSel.addEventListener('input', _applyHudScaleTP);
+    hudScaleTPSel.addEventListener('change', () => { _applyHudScaleTP(); saveSettings(); });
+  }
   [['#set-hud-opacity', '#val-hud-opacity', 'hudOpacity', 0.72],
    ['#set-hud-text-opacity', '#val-hud-text-opacity', 'hudTextOpacity', 1],
    ['#set-crosshair-opacity', '#val-crosshair-opacity', 'crosshairOpacity', 0.72]].forEach(([sel, vsel, key, dflt]) => {
@@ -86572,6 +86659,7 @@ function saveSettings() {
       cockpitVRv2: true,   // (v37.67) this save has seen the VR cockpit default flip
       hudGaugeLabels: input.hudGaugeLabels !== false,
       hudScale: (typeof input.hudScale === 'number') ? input.hudScale : HUD_SCALE_DEFAULT,
+      hudScaleTP: (typeof input.hudScaleTP === 'number') ? input.hudScaleTP : HUD_SCALE_TP_DEFAULT,   // (v50.29)
       hudOpacity: (typeof input.hudOpacity === 'number') ? input.hudOpacity : 0.72,
       hudTextOpacity: (typeof input.hudTextOpacity === 'number') ? input.hudTextOpacity : 1,
       crosshairOpacity: (typeof input.crosshairOpacity === 'number') ? input.crosshairOpacity : 0.72,
@@ -86826,6 +86914,7 @@ const SHIPPED_DEFAULTS = {
   "vrPerfMode": "standard",
   "vrStripFx": true,
   "hudScale": HUD_SCALE_DEFAULT,   // (v47.21) first boot and RESET TO DEFAULTS both land here
+  "hudScaleTP": HUD_SCALE_TP_DEFAULT,   // (v50.29) the third-person HUD size
   "hudOpacity": 0.72,
   "hudTextOpacity": 1,
   "crosshairOpacity": 0.72,
@@ -88407,6 +88496,9 @@ function loadSettings() {
     }
     if (typeof data.hudScale === 'number' && isFinite(data.hudScale)) {
       input.hudScale = Math.max(0.75, Math.min(1.75, data.hudScale));
+    }
+    if (typeof data.hudScaleTP === 'number' && isFinite(data.hudScaleTP)) {   // (v50.29)
+      input.hudScaleTP = Math.max(0.75, Math.min(1.75, data.hudScaleTP));
     }
     if (typeof data.hudOpacity === 'number' && isFinite(data.hudOpacity)) {
       input.hudOpacity = Math.max(0, Math.min(1, data.hudOpacity));

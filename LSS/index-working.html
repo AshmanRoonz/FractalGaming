@@ -7239,7 +7239,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "50.25";
+const LSS_BUILD = "50.34";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -8420,6 +8420,12 @@ const player = {
 // save (no key at all) falls back to. Anyone who has already touched the slider
 // keeps their number, by design: a default is not a migration.
 const HUD_SCALE_DEFAULT = 1.75;
+// ⭐ (v50.29) THIRD PERSON HAS ITS OWN HUD SIZE. Owner: "i realized we can have a different HUD for different
+// views... 3rd person make default HUD size 1.25x". A new DEFAULT on `hudScale` could never show: a saved setting
+// wins (see above), and every save since v36.19 carries one. So the chase view reads its own setting -
+// `input.hudScaleTP`, its own slider - which no save has yet, and _hlScale picks it whenever the camera is in third
+// person. `hudScale` stays the first-person one.
+const HUD_SCALE_TP_DEFAULT = 1.25;
 
 // ---- INPUT ----
 
@@ -8602,6 +8608,7 @@ const input = {
   // which is designed around the layout at 1x.
   // (v47.21) Default is now the slider's MAXIMUM - see HUD_SCALE_DEFAULT above.
   hudScale: HUD_SCALE_DEFAULT,
+  hudScaleTP: HUD_SCALE_TP_DEFAULT,   // (v50.29) third person's own - see HUD_SCALE_TP_DEFAULT
   // (v42.56) HOW OPAQUE THE HUD IS, and how opaque its TEXT is, as two independent settings.
   // Owner: "can we put a slider for HUD opacity, in the settings, make text opacity independent".
   // The graphics side already existed as `window.__hudAlpha` (v41.40, default 0.72) - every
@@ -72697,11 +72704,16 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId) {
         // _THEME_PAINT_HEX, else LSS.CLASS_COLORS), no maps. A glTF emissive colour WITHOUT a map is
         // dropped by the generic path above (it keeps only emissiveMap-driven emission), so the colour is
         // set here, per loadout - bots included. Live: window.__cockpit.screen = { glow: 1.6 }.
+        // ⭐ (v50.34) THE CLASS COLOUR FIRST, NOT THE PAINT's. Owner: "slayer is very yellow on his console display,
+        // should be more green". The screens took _THEME_PAINT_HEX first, and its one entry is SLAYER's LIME (#bbff44)
+        // - the hue its painted accents match for the theme strips (v44.40) - which glows as yellow on a lit panel.
+        // Slayer's class colour is the green (#44ff66) its HUD theme is built on (_hlfShades). No other hull has a
+        // paint entry, so only Slayer's screens change. Live, the player's own hull: window.__cockpit.screen.hex.
         if (m && m.name === 'cockpit_CP_screen') {
           let _sHex = 0x44eeff;
           try {
-            _sHex = (_THEME_PAINT_HEX[loadoutKey] != null) ? _THEME_PAINT_HEX[loadoutKey]
-                  : ((typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS[loadoutKey] != null) ? LSS.CLASS_COLORS[loadoutKey] : 0x44eeff);
+            _sHex = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS[loadoutKey] != null) ? LSS.CLASS_COLORS[loadoutKey]
+                  : ((_THEME_PAINT_HEX[loadoutKey] != null) ? _THEME_PAINT_HEX[loadoutKey] : 0x44eeff);
           } catch (_) {}
           const _SG = (window.__cockpit && window.__cockpit.screen) || {};
           params.color = new THREE.Color(0x050608);
@@ -107448,8 +107460,11 @@ function _lssConsoleKnob(mesh) {
   if (!ud) return;
   const W = window.__cockpit;
   // (v50.07) live screen glow on the player's own hull (bots keep the value their hull was built with)
+  // (v50.34) ...and live screen COLOUR, the same way: window.__cockpit.screen = { hex: 0x44ff66 }. Only emissive's
+  // colour - _dimHullMat owns emissiveIntensity and the base colour every frame, never this.
   const SG = (W && W.screen && typeof W.screen.glow === 'number') ? W.screen.glow : null;
-  if (SG !== null && ud._screenGlow !== SG) {
+  const SX = (W && W.screen && typeof W.screen.hex === 'number') ? W.screen.hex : null;
+  if ((SG !== null && ud._screenGlow !== SG) || (SX !== null && ud._screenHex !== SX)) {
     if (!ud._screenMats) {
       ud._screenMats = [];
       mesh.traverse((o) => {
@@ -107457,8 +107472,9 @@ function _lssConsoleKnob(mesh) {
         for (const mm of (Array.isArray(o.material) ? o.material : [o.material])) if (mm && mm.name === 'cockpit_CP_screen') ud._screenMats.push(mm);
       });
     }
-    for (const mm of ud._screenMats) mm.emissiveIntensity = SG;
-    ud._screenGlow = SG;
+    if (SG !== null) for (const mm of ud._screenMats) mm.emissiveIntensity = SG;
+    if (SX !== null) for (const mm of ud._screenMats) if (mm.emissive) mm.emissive.setHex(SX);
+    ud._screenGlow = SG; ud._screenHex = SX;
   }
   const want = (W && typeof W.consoleDeg === 'number' && isFinite(W.consoleDeg)) ? W.consoleDeg : null;
   const fwd = (W && typeof W.consoleFwd === 'number' && isFinite(W.consoleFwd)) ? W.consoleFwd : 0;
@@ -119215,7 +119231,12 @@ function _nrgLowCol(pct, t) {
 // would see hudScale × vrHudScale — 2.25× at both defaults.
 function _hlScale() {
   if (typeof isXRPresenting === 'function' && isXRPresenting()) return 1;
-  const s = (typeof input !== 'undefined' && input && typeof input.hudScale === 'number') ? input.hudScale : HUD_SCALE_DEFAULT;
+  // (v50.29) the chase view has its own size (HUD_SCALE_TP_DEFAULT); `game` is guarded for the HUD lab, which has none
+  let _tp = false;
+  try { _tp = !!(typeof game !== 'undefined' && game && game.thirdPerson); } catch (_) {}
+  const s = _tp
+    ? ((typeof input !== 'undefined' && input && typeof input.hudScaleTP === 'number') ? input.hudScaleTP : HUD_SCALE_TP_DEFAULT)
+    : ((typeof input !== 'undefined' && input && typeof input.hudScale === 'number') ? input.hudScale : HUD_SCALE_DEFAULT);
   if (!(s > 0)) return 1;
   return Math.max(0.75, Math.min(1.75, Math.round(s * 20) / 20));
 }
@@ -120113,7 +120134,9 @@ function _hlfBorderPath(ctx, cx, cy, rIn, rOut, a0, a1, nodes, nh, nw, sw) {
 // what NRG and AMMO want, because those two sit ON a striped bar rather than
 // on open space, and an outline there adds a third edge next to the bar's own
 // and the plate's fill.
-function _hlfLabelPlate(I, r, mid, text, col, sizeV, wDeg, hV, bevel) {
+// (v50.31) `lit` draws the TEXT with no canvas filter - the console-screen layout's brightness filter (v50.27)
+// otherwise takes the near-white word to a grey on the dark plate. The plate itself stays under the filter.
+function _hlfLabelPlate(I, r, mid, text, col, sizeV, wDeg, hV, bevel, lit) {
   const ctx = I.ctx, vm = I.vmin;
   _hlfCellPath(ctx, I.cx, I.cy, (r - hV / 2) * vm, (r + hV / 2) * vm,
                mid - wDeg / 2, mid + wDeg / 2, bevel != null ? bevel : wDeg * 0.20);
@@ -120124,8 +120147,10 @@ function _hlfLabelPlate(I, r, mid, text, col, sizeV, wDeg, hV, bevel) {
     ctx.lineWidth = Math.max(1, vm * 0.12);
     ctx.stroke();
   }
+  if (lit) { ctx.save(); ctx.filter = 'none'; }
   _hlArcLabel(ctx, I.cx, I.cy, r * vm, mid, text,
               'rgba(236,247,255,0.95)', Math.max(7, vm * sizeV), wDeg * 0.88);
+  if (lit) ctx.restore();
 }
 
 // (v47.17) A label on a plate that is TURNED, not CURVED. `_hlfLabelPlate` rides
@@ -120867,9 +120892,10 @@ function _hlfIconState(m, v, sh, popK) {
 }
 
 // ── THE ASSEMBLY ────────────────────────────────────────────────────────────
-function _hlfDraw(ctx, W, H, v, parts) {
+function _hlfDraw(ctx, W, H, v, parts, opt) {
   // (v50.25) parts === 'top' draws only the shield/HP/core arc and its three plates - the piece the console-screen
   // layout maps into the centre screen (_hlfDrawPanels); anything else draws the whole assembly, as always.
+  // (v50.31) opt.lbl: the console layout's caption scale (see the labels below); absent everywhere else.
   const _all = parts !== 'top';
   const TOP = _HLF.TOP, SH = _HLF.SH, HP = _HLF.HP, AB = _HLF.AB, FR = _HLF.FR;
   const base = _hlPlace(_HL.shield, W, H);            // any centred part gives cx/cy/vmin
@@ -121032,13 +121058,33 @@ function _hlfDraw(ctx, W, H, v, parts) {
   // The labels. SHIELD and HP sit in trapezoid cutouts punched through their
   // own bars; the shield plate keeps a floor height so its text still fits now
   // the band under it is thin — it reads as a tab sitting proud of the band.
-  _hlfLabelPlate(I, (SH.rIn + SH.rOut) / 2, 270, 'SHIELD', shCol, 0.78, 15,
-                 Math.max(SH.rOut - SH.rIn, 1.00));
-  _hlfLabelPlate(I, (HP.rIn + HP.rOut) / 2, 270, 'HP', hpCol, 0.78, 9, HP.rOut - HP.rIn);
-  // (v47.01) The curved ability NAMES are gone with the pills they sat in —
-  // the icon row below is the ability readout now. CORE takes the caption.
-  _hlfLabelPlate(I, (AB.rIn + AB.rOut) / 2, 270, 'CORE', coreCol, 0.66, 11,
-                 Math.max(AB.rOut - AB.rIn, 0.95));
+  // ⭐ (v50.31) ON THE CONSOLE's CENTRE SCREEN THE CAPTIONS KEEP THEIR SIZE. Owner, first person: "the text on
+  // "health" "shield" and "core" is not legible". The console layout draws this arc at the SCREEN's scale - 0.6x
+  // the ring at HUD size 1.75, and since the screen fixes the arc's size the HUD SIZE setting cancels out - so the
+  // words shrank with it to ~0.8 vmin (5.7 px in a 688 px pane), and v50.27's dark filter took them to grey.
+  // There `opt.lbl` (_hlfDrawPanels) scales the three captions and their plates back up to what the ring draws at
+  // HUD size 1.75 (x1.66), with the WORDS out of the filter: near-white on the dark plate. Bigger plates have to
+  // share the band stack, so SHIELD's rides out against the frame's outer edge and HP's takes what is left
+  // between it and CORE's; both still sit across their own bands. The ring (opt absent) draws exactly as before.
+  const _lm = (opt && opt.lbl > 0) ? opt.lbl : 0;
+  if (!_lm) {
+    _hlfLabelPlate(I, (SH.rIn + SH.rOut) / 2, 270, 'SHIELD', shCol, 0.78, 15,
+                   Math.max(SH.rOut - SH.rIn, 1.00));
+    _hlfLabelPlate(I, (HP.rIn + HP.rOut) / 2, 270, 'HP', hpCol, 0.78, 9, HP.rOut - HP.rIn);
+    // (v47.01) The curved ability NAMES are gone with the pills they sat in —
+    // the icon row below is the ability readout now. CORE takes the caption.
+    _hlfLabelPlate(I, (AB.rIn + AB.rOut) / 2, 270, 'CORE', coreCol, 0.66, 11,
+                   Math.max(AB.rOut - AB.rIn, 0.95));
+  } else {
+    const hS = Math.max(SH.rOut - SH.rIn, 1.00) * _lm;
+    const rS = Math.max((SH.rIn + SH.rOut) / 2, FR.rOut - 0.1 - hS / 2);
+    const rH = (HP.rIn + HP.rOut) / 2;
+    const hH = Math.max(0.6, Math.min((HP.rOut - HP.rIn) * _lm, 2 * (rS - hS / 2 - 0.1 - rH)));
+    _hlfLabelPlate(I, rS, 270, 'SHIELD', shCol, 0.78 * _lm, 15 * _lm, hS, null, true);
+    _hlfLabelPlate(I, rH, 270, 'HP', hpCol, Math.min(0.78 * _lm, 0.84 * hH), 9 * _lm, hH, null, true);
+    _hlfLabelPlate(I, (AB.rIn + AB.rOut) / 2, 270, 'CORE', coreCol, 0.66 * _lm, 11 * _lm,
+                   Math.max(AB.rOut - AB.rIn, 0.95) * _lm, null, true);
+  }
   // (v47.01) NRG and AMMO are plates on their OWN bars, instead of curved
   // captions riding beside them. `_HL.speed.labR` / `_HL.ammo.labR` (16.3,
   // outside the band) are no longer used on this path — NRG's would have ended
@@ -121182,7 +121228,7 @@ function _hlfDraw(ctx, W, H, v, parts) {
 // dash pips beside it. Glyph states from _hlfIconState, so they read exactly as on the ring.
 // ⚠ The HUD canvas KEEPS its CSS tilt (owner: "the tilt behavior can stay"), so everything placed against the
 // screens goes through the tilt's INVERSE at level attitude (toCanvas); pitch/bank still tilt the HUD in flight.
-// Live: window.__hudPanels = { compass: 1, gap: 0.5, pad: 0.06, bar: 0.16, icon: 1, pip: 1 } (false: the ring).
+// Live: window.__hudPanels = { compass: 1, gap: 0.5, pad: 0.06, bar: 0.16, icon: 1, pip: 1, dark: 0.3, lbl: 1 } (false: the ring).
 function _hlfVBar(ctx, x0, y0, x1, y1, n, frac, col, ga) {
   n = Math.max(1, n | 0);
   const h = y1 - y0, gap = Math.max(1, h * 0.022), sh = (h - gap * (n - 1)) / n, bev = Math.min(sh, x1 - x0) * 0.22;
@@ -121215,6 +121261,13 @@ function _hlfDrawPanels(ctx, W, H, v, PN) {
   const vm = Math.min(W, H) / 100;
   const sh = _hlfShades(player && player.loadoutKey);
   const ga = _hlGA();
+  // (v50.27) DARK ON THE LIT SCREENS. Owner: "let's darken the HUD in first person view, since it's the same colors"
+  // - the theme shades come off the same class colour the screens are painted in, so a lit glyph on a lit screen
+  // read as nothing. Everything drawn onto the screens goes through a brightness filter (one colour matrix per draw
+  // in Skia - no layers), so it reads as dark symbology on a lit display; the radar disc is exempt (it is dark
+  // already, and its blips must stay bright). window.__hudPanels.dark = 1 turns it off, 0.3 is the default.
+  const _dk = Math.max(0, Math.min(1, num(K.dark, 0.3)));
+  const DARK = (_dk < 0.999) ? 'brightness(' + _dk.toFixed(3) + ')' : 'none';
   // the tilt's inverse at level attitude: screen point -> canvas point (y = Y / (cos + Y sin / p), x = X (1 - y sin / p))
   const H3 = window.__hud3d || { on: true, persp: 1400, base: 11, max: 24 };
   const _mx = (H3.max != null) ? H3.max : 24;
@@ -121230,7 +121283,18 @@ function _hlfDrawPanels(ctx, W, H, v, PN) {
     const a = toCanvas(r[0], r[1]), b = toCanvas(r[2], r[1]), c = toCanvas(r[0], r[3]), d = toCanvas(r[2], r[3]);
     const x0 = Math.max(a[0], c[0]), x1 = Math.min(b[0], d[0]), y0 = Math.max(a[1], b[1]), y1 = Math.min(c[1], d[1]);
     const w = x1 - x0, h = y1 - y0;
-    return { x0: x0 + pad * w, y0: y0 + pad * h, x1: x1 - pad * w, y1: y1 - pad * h, w: w * (1 - 2 * pad), h: h * (1 - 2 * pad) };
+    return { x0: x0 + pad * w, y0: y0 + pad * h, x1: x1 - pad * w, y1: y1 - pad * h, w: w * (1 - 2 * pad), h: h * (1 - 2 * pad),
+             px: pad * w, py: pad * h };
+  };
+  // (v50.32) a caption's centre: `cx`, nudged only as far as keeps the word inside lo..hi (measured in its own font)
+  const capW = (text, px) => {
+    ctx.font = '700 ' + Math.max(6, px).toFixed(1) + 'px Orbitron, Courier New';
+    _hudFontCache = '';
+    return ctx.measureText(text).width;
+  };
+  const capX = (text, px, cx, lo, hi) => {
+    const w = capW(text, px);
+    return (hi - lo > w) ? Math.max(lo + w / 2, Math.min(hi - w / 2, cx)) : (lo + hi) / 2;
   };
   // ── CENTRE: the screen's inscribed circle (the frame solve's own fit), into the canvas
   {
@@ -121250,10 +121314,13 @@ function _hlfDrawPanels(ctx, W, H, v, PN) {
       // the arc, concentric, drawn at _hlfDraw's own vmin (x the HUD SIZE setting - _hlPlace without the pin)
       const aP = _hlPlace(_HL.shield, W, H), vmA = aP.vmin;
       const k = (rc + gap) / (_HLF.AB.rIn * vmA);
+      // (v50.31) the captions at the ring's HUD-size-1.75 size whatever this scale is (see _hlfDraw's labels)
+      const lblM = Math.max(1, 1.75 * vm / (k * vmA)) * num(K.lbl, 1);
       ctx.save();
+      ctx.filter = DARK;
       ctx.translate(ccx - aP.cx * k, ccy - aP.cy * k);
       ctx.scale(k, k);
-      _hlfDraw(ctx, W, H, v, 'top');
+      _hlfDraw(ctx, W, H, v, 'top', { lbl: lblM });
       ctx.restore();
       // the radar + rose at that scale (full opacity, as _hlDrawHUD draws them - one instrument)
       const R1 = 11 * vm * kc, R2 = 13.5 * vm * kc;
@@ -121261,25 +121328,35 @@ function _hlfDrawPanels(ctx, W, H, v, PN) {
       _hlRadar(ctx, { cx: ccx, cy: ccy, x: ccx - R1, y: ccy - R1, w: 2 * R1, h: 2 * R1, vmin: vm * kc });
       if (typeof window === 'undefined' || window.__hudCompass !== false) {
         ctx.globalAlpha = 1;
+        ctx.filter = DARK;
         _hlCompass(ctx, { cx: ccx, cy: ccy, x: ccx - R2, y: ccy - R2, w: 2 * R2, h: 2 * R2, vmin: vm * kc }, _HL.compass.col);
+        ctx.filter = 'none';
       }
       ctx.globalAlpha = ga;
     }
   }
   // ── LEFT: NRG on the inner edge, the glyphs in a triangle
+  ctx.filter = DARK;   // (v50.27) both side screens; reset at the end
   if (PN.L) {
     const L = box(PN.L);
     const bw = barK * L.w;
     let lblW = 0;
     if (v.energyPct != null) {
       const nrgCol = v.nrgWarn ? v.energyCol : (sh.speed || _HL.speed.col);
-      _hlfVBar(ctx, L.x1 - bw, L.y0, L.x1, L.y1, _HL.speed.seg || 9, v.energyPct, nrgCol, ga);
       const fpx = Math.min(bw * 0.8, 0.10 * L.h);
+      // ⭐ (v50.32) THE CAPTION UNDER ITS BAR. Owner: ""NRG" should be below the bar, same with "ammo"". It sat beside
+      // the bar at half height. The bar now gives the bottom 1.5 font-heights of the screen to the word, which
+      // centres under it (capX nudges it in only where it would leave the screen). Same for AMMO below.
+      _hlfVBar(ctx, L.x1 - bw, L.y0, L.x1, L.y1 - fpx * 1.5, _HL.speed.seg || 9, v.energyPct, nrgCol, ga);
       lblW = fpx * 2.6;
-      _hlfPanelLabel(ctx, 'NRG', L.x1 - bw - fpx * 0.4, (L.y0 + L.y1) / 2, nrgCol, fpx, 'right');
+      _hlfPanelLabel(ctx, 'NRG', capX('NRG', fpx, L.x1 - bw / 2, L.x0 - L.px, L.x1 + L.px), L.y1 - fpx * 0.62,
+                     nrgCol, fpx, 'center');
       ctx.globalAlpha = ga;
     }
-    const ax0 = L.x0, aw = Math.max(1, L.w - bw - lblW - 0.04 * L.w);
+    // (v50.26) the glyphs are sized and placed as if NRG's label were not there. Owner: "don't shrink the 3 icons
+    // when the NRG bar is present" - its label's width came off their space (lblW, kept for the record only).
+    void lblW;
+    const ax0 = L.x0, aw = Math.max(1, L.w - bw - 0.04 * L.w);
     const order = _HL_AB.slice().sort((a, b) => _HL[a.cd].a0 - _HL[b.cd].a0);
     const SPOT = [[0.62, 0.27], [0.27, 0.70], [0.74, 0.74]];
     const s0 = Math.min(0.42 * aw, 0.36 * L.h) * num(K.icon, 1);
@@ -121294,6 +121371,22 @@ function _hlfDrawPanels(ctx, W, H, v, PN) {
       if (!st) continue;
       ctx.save();
       ctx.translate(ax0 + SPOT[i][0] * aw, L.y0 + SPOT[i][1] * L.h);
+      // ⭐ (v50.30) ON IS LIT, OFF IS DARK. Owner: "first person, it's too hard to see if the icons (shield,
+      // lightning, sword) are on or off... i barely saw the flash". v50.27's brightness filter took a READY glyph
+      // (full theme colour + glow) and a not-ready one (a near-black silhouette) to two shades of dark, and the
+      // white double-flash to a grey - one bit of state drawn as almost no difference. So the filter now only
+      // covers the OFF state: a glyph you can press draws at full brightness, the flash at full white, each over a
+      // near-black keyline so the shape holds on a lit screen of its own hue (the reason for v50.27). Not ready
+      // is the dark silhouette exactly as v50.27 drew it. The filter comes back with the restore() below.
+      if (st.ready || st.flash > 0) {
+        ctx.filter = 'none';
+        _hlfIconPath(ctx, st.kind, s0 * st.pop);
+        ctx.globalAlpha = ga;
+        ctx.strokeStyle = 'rgba(4,6,9,0.9)';
+        ctx.lineWidth = Math.max(2, I2.vmin * 0.55);
+        ctx.lineJoin = 'round';
+        ctx.stroke();
+      }
       _hlfIcon(I2, st.kind, s0 * st.pop, st.col, st.ready, st.frac, st.flash);
       ctx.restore();
     }
@@ -121304,16 +121397,24 @@ function _hlfDrawPanels(ctx, W, H, v, PN) {
     const R = box(PN.R);
     const bw = barK * R.w;
     const ammoCol = v.ammoCol || sh.ammo || _HL.ammo.col;
-    _hlfVBar(ctx, R.x0, R.y0, R.x0 + bw, R.y1, _hlAmmoSegs() || _HL.ammo.seg, v.ammoPct, ammoCol, ga);
     const fpx = Math.min(bw * 0.8, 0.10 * R.h);
-    _hlfPanelLabel(ctx, 'AMMO', R.x0 + bw + fpx * 0.4, R.y0 + 0.86 * R.h, ammoCol, fpx, 'left');
+    // (v50.32) under its bar, as NRG (it sat beside the bar's foot, under the dash pips)
+    _hlfVBar(ctx, R.x0, R.y0, R.x0 + bw, R.y1 - fpx * 1.5, _hlAmmoSegs() || _HL.ammo.seg, v.ammoPct, ammoCol, ga);
+    const ammoX = capX('AMMO', fpx, R.x0 + bw / 2, R.x0 - R.px, R.x1 + R.px);
+    _hlfPanelLabel(ctx, 'AMMO', ammoX, R.y1 - fpx * 0.62, ammoCol, fpx, 'center');
     ctx.globalAlpha = ga;
     const px0 = R.x0 + bw + 0.10 * R.w, pw = Math.max(1, R.x1 - px0);
     const n = Math.max(1, v.dashMax || 3), lit = v.dashN || 0;
     const pr = Math.min(0.16 * pw, 0.10 * R.h) * num(K.pip, 1);
     const pcol = sh.dash || _HLF_DASH.col;
-    const spots = (n === 3) ? [[0.5, 0.36], [0.28, 0.62], [0.72, 0.62]]
-      : Array.from({ length: n }, (_, i) => [0.5, 0.2 + 0.6 * (n === 1 ? 0.5 : i / (n - 1))]);
+    // (v50.26) every arrangement stays ABOVE the AMMO label (it sits at 0.86 of the screen's height). Owner: "dash
+    // dots cover "ammo" when there's 2 dots" - two used to stack at 0.2 / 0.8, the lower one on the label. Two sit
+    // side by side now; three keep the triangle; more fill two columns above the label.
+    // (v50.32) AMMO's label is under its own bar now; the pips keep these spots.
+    const spots = (n === 1) ? [[0.5, 0.45]]
+      : (n === 2) ? [[0.3, 0.45], [0.7, 0.45]]
+      : (n === 3) ? [[0.5, 0.36], [0.28, 0.62], [0.72, 0.62]]
+      : Array.from({ length: n }, (_, i) => [(i % 2) ? 0.7 : 0.3, 0.22 + 0.45 * (Math.floor(i / 2) / Math.max(1, Math.ceil(n / 2) - 1))]);
     ctx.save();
     for (let i = 0; i < n; i++) {
       const x = px0 + spots[i][0] * pw, y = R.y0 + spots[i][1] * R.h;
@@ -121328,8 +121429,14 @@ function _hlfDrawPanels(ctx, W, H, v, PN) {
       }
     }
     ctx.restore();
+    // ⭐ (v50.33) "DASH" UNDER THE DOTS. Owner: "we could add "dash" by the dots (first person only)". Here only -
+    // the ring's pip row stays unlabelled. AMMO's font, baseline and colour rule (its own readout's colour), centred
+    // under the pips' column and kept clear of AMMO's word, so the two read as one line along the screen's foot.
+    _hlfPanelLabel(ctx, 'DASH', capX('DASH', fpx, px0 + pw / 2, ammoX + capW('AMMO', fpx) / 2 + 0.8 * fpx, R.x1 + R.px),
+                   R.y1 - fpx * 0.62, pcol, fpx, 'center');
     ctx.globalAlpha = ga;
   }
+  ctx.filter = 'none';
 }
 
 function _hlDrawHUD(ctx, W, H, cx, cy, v) {
@@ -121407,11 +121514,28 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
   // its cardinals with a bare fillText), so both simply inherit whatever is set here, and that one
   // value covers the disc, the rim, the rose and its letters.
   if (!_PN) {   // (v50.25) on the console's screens, _hlfDrawPanels drew them into the centre one
+    // ⭐ (v50.28) THIRD PERSON PUTS THE RADAR + ROSE AT THE MIDDLE LEFT. Owner: "i realized we can have a different
+    // HUD for different views... for third person view let's move the mini map so we can see our own ship nicely
+    // (let's try putting it to the middle left of the screen)" - bottom-centre sat right over the chase view's own
+    // hull. Same parts, same pinned 1x size, anchored middle-left; first person (the ring layout off the screens) and
+    // VR keep the bottom-centre slot. Live: window.__hudTP = { mapX: 17, mapY: 0 } (vmin from the left edge / from
+    // the screen's middle, + down).
+    let mP = _HL.minimap, cPt = _HL.compass;
+    try {
+      const _tp = (typeof game !== 'undefined' && game && game.thirdPerson) &&
+                  !(typeof isXRPresenting === 'function' && isXRPresenting());
+      if (_tp) {
+        const KT = (typeof window !== 'undefined' && window.__hudTP) || {};
+        const mx = (typeof KT.mapX === 'number') ? KT.mapX : 17, my = (typeof KT.mapY === 'number') ? KT.mapY : 0;
+        mP = Object.assign({}, _HL.minimap, { a: 'ml', x: mx, y: my });
+        cPt = Object.assign({}, _HL.compass, { a: 'ml', x: mx, y: my });
+      }
+    } catch (_) {}
     ctx.globalAlpha = 1;
-    _hlRadar(ctx, _hlPlace(_HL.minimap, W, H, 1));
+    _hlRadar(ctx, _hlPlace(mP, W, H, 1));
     if (typeof window === 'undefined' || window.__hudCompass !== false) {
       ctx.globalAlpha = 1;
-      _hlCompass(ctx, _hlPlace(_HL.compass, W, H, 1), _HL.compass.col);
+      _hlCompass(ctx, _hlPlace(cPt, W, H, 1), _HL.compass.col);
     }
   }
   ctx.globalAlpha = _hlGA();   // back to the dimmed HUD for anything drawn after
@@ -131277,9 +131401,15 @@ function buildSettingsPage() {
         <label style="flex:1;">The small curved captions on the rings (SPEED, NRG, SHIELD, HEALTH, CORE, AMMO). Ability names on the cooldown bars are unaffected.</label>
       </div>
       <div class="setting-row">
-        <label>HUD Size</label>
+        <label>HUD Size (1st person)</label>
         <input type="range" id="set-hud-scale" min="0.75" max="1.75" step="0.05" value="${(typeof input.hudScale === 'number') ? input.hudScale : HUD_SCALE_DEFAULT}">
         <div class="value-display" id="val-hud-scale">${((typeof input.hudScale === 'number') ? input.hudScale : HUD_SCALE_DEFAULT).toFixed(2)}x</div>
+      </div>
+      <div class="setting-row">
+        <!-- (v50.29) the chase view's own HUD size, default 1.25 - see HUD_SCALE_TP_DEFAULT -->
+        <label>HUD Size (3rd person)</label>
+        <input type="range" id="set-hud-scale-tp" min="0.75" max="1.75" step="0.05" value="${(typeof input.hudScaleTP === 'number') ? input.hudScaleTP : HUD_SCALE_TP_DEFAULT}">
+        <div class="value-display" id="val-hud-scale-tp">${((typeof input.hudScaleTP === 'number') ? input.hudScaleTP : HUD_SCALE_TP_DEFAULT).toFixed(2)}x</div>
       </div>
       <div class="setting-row">
         <!-- step 0.01, not the 0.05 its neighbours use: the shipped default is 0.72, which is not
@@ -132846,6 +132976,21 @@ function buildSettingsPage() {
     hudScaleSel.addEventListener('input', _applyHudScale);
     hudScaleSel.addEventListener('change', () => { _applyHudScale(); saveSettings(); });
   }
+  // (v50.29) the third-person HUD size: the same shape as the one above, on its own setting
+  const hudScaleTPSel = overlay.querySelector('#set-hud-scale-tp');
+  const hudScaleTPVal = overlay.querySelector('#val-hud-scale-tp');
+  if (hudScaleTPSel) {
+    const _applyHudScaleTP = () => {
+      const v = parseFloat(hudScaleTPSel.value);
+      if (!isFinite(v)) return;
+      input.hudScaleTP = v;
+      if (hudScaleTPVal) hudScaleTPVal.textContent = v.toFixed(2) + 'x';
+      try { _hlArcTextCache.clear(); } catch (_) {}
+      try { _hlfLayerClear(); } catch (_) {}
+    };
+    hudScaleTPSel.addEventListener('input', _applyHudScaleTP);
+    hudScaleTPSel.addEventListener('change', () => { _applyHudScaleTP(); saveSettings(); });
+  }
   // (v42.56) HUD opacity + HUD text opacity. Same shape as HUD Size: live on `input`, one
   // localStorage write per drag on `change`. Nothing to re-apply by hand for the canvas HUD -
   // _hlGA()/_hlTA() are read fresh every frame - but _hudDomAlpha() pushes the same two numbers
@@ -133577,6 +133722,7 @@ function saveSettings() {
       cockpitVRv2: true,   // (v37.67) this save has seen the VR cockpit default flip
       hudGaugeLabels: input.hudGaugeLabels !== false,
       hudScale: (typeof input.hudScale === 'number') ? input.hudScale : HUD_SCALE_DEFAULT,
+      hudScaleTP: (typeof input.hudScaleTP === 'number') ? input.hudScaleTP : HUD_SCALE_TP_DEFAULT,   // (v50.29)
       hudOpacity: (typeof input.hudOpacity === 'number') ? input.hudOpacity : 0.72,
       hudTextOpacity: (typeof input.hudTextOpacity === 'number') ? input.hudTextOpacity : 1,
       crosshairOpacity: (typeof input.crosshairOpacity === 'number') ? input.crosshairOpacity : 0.72,
@@ -133860,6 +134006,7 @@ const SHIPPED_DEFAULTS = {
   "vrPerfMode": "standard",
   "vrStripFx": true,
   "hudScale": HUD_SCALE_DEFAULT,   // (v47.21) first boot and RESET TO DEFAULTS both land here
+  "hudScaleTP": HUD_SCALE_TP_DEFAULT,   // (v50.29) the third-person HUD size
   "hudOpacity": 0.72,
   "hudTextOpacity": 1,
   "crosshairOpacity": 0.72,
@@ -135503,6 +135650,9 @@ function loadSettings() {
     }
     if (typeof data.hudScale === 'number' && isFinite(data.hudScale)) {
       input.hudScale = Math.max(0.75, Math.min(1.75, data.hudScale));
+    }
+    if (typeof data.hudScaleTP === 'number' && isFinite(data.hudScaleTP)) {   // (v50.29)
+      input.hudScaleTP = Math.max(0.75, Math.min(1.75, data.hudScaleTP));
     }
     if (typeof data.hudOpacity === 'number' && isFinite(data.hudOpacity)) {
       input.hudOpacity = Math.max(0, Math.min(1, data.hudOpacity));

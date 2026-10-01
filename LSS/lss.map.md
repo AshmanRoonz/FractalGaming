@@ -9061,7 +9061,32 @@ Owner: *"i find our water to look a bit jello like... i like how this water move
       - Lesson: one visible change per build, and nothing they did not ask to move.
       - The sources are in `LSS/backups/`.
     - ⚠ **`_dimHullMat` OWNS every opaque hull material's `emissiveIntensity` every frame**, from `userData._baseEmissiveI`. So `__cockpit.screen.glow` (v50.07) does not stick past one frame. Write the base.
-      - The owner's *"the screens on the console are basically the same color as the HUD so it blends in"* is still OPEN. Darkening them was part of a rejected build; offer it alone.
-    - **Knobs:** `window.__hudPanels = false` (the ring layout) or `{ compass, gap, pad, bar, icon, pip }`.
+      - The owner's *"the screens on the console are basically the same color as the HUD so it blends in"* was answered by v50.27, which darkens the HUD rather than the screens.
+    - **Knobs:** `window.__hudPanels = false` (the ring layout) or `{ compass, gap, pad, bar, icon, pip, dark }`.
       - Every other ship already culled to a clear view, so nothing else changes.
       - `window.__cockpit.glass = true` draws it from the seat again.
+  - ⭐ **v50.26-50.29 A DIFFERENT HUD PER VIEW** (**Jump:** `function _hlfDrawPanels` · `HUD_SCALE_TP_DEFAULT` · `function _hlScale` · `__hudTP`). Owner: *"i realized we can have a different HUD for different views"*. All four accepted together: *"looks good"*.
+    - **v50.26, first person:**
+      - The two dash pips sit above the AMMO label; they had covered it (*"dash dots cover "ammo" when there's 2 dots"*).
+      - The three glyphs keep their full width beside the NRG bar (*"don't shrink the 3 icons when the NRG bar is present"*).
+    - **v50.27, first person:** the panel HUD draws through `ctx.filter = brightness(dark)`, with `dark` 0.3. The radar is not filtered.
+      - It is canvas-side only, so `_dimHullMat`'s per-frame ownership of the screens' emissive (above) never comes into it.
+    - **v50.28, third person:** the minimap and its compass ring move to the middle left (anchor `ml`, x 17 vmin), clear of the chase-cam hull (*"so we can see our own ship nicely"*).
+      - Nudge them live with `window.__hudTP = { mapX, mapY }`, in vmin.
+    - **v50.29, third person:** the HUD gets its own size, `input.hudScaleTP`, default `HUD_SCALE_TP_DEFAULT` = 1.25, with its own Settings slider, "HUD Size (3rd person)". The old slider is relabelled "(1st person)".
+      - ⚠ **A new default on `hudScale` could never show.** A saved setting always wins, and every save since v36.19 carries one. A new setting has no saved value, so its default shows.
+      - `_hlScale()` picks the setting by `game.thirdPerson`. VR stays at 1.
+      - The HUD's caches key on vmin (`_lk`, `_hlArcTextCache`), so a view toggle re-bakes them on its own.
+  - ⭐ **v50.30-50.34 FIRST-PERSON LEGIBILITY + SLAYER's GREEN SCREENS** (**Jump:** `ON IS LIT, OFF IS DARK` · `THE CAPTIONS KEEP THEIR SIZE` · `THE CAPTION UNDER ITS BAR` · `"DASH" UNDER THE DOTS` · `THE CLASS COLOUR FIRST`). Five builds, one change each. Owner: *"yes! nicely done"*.
+    - **v50.30, ability icons:** a READY glyph and its double-flash draw OUTSIDE the dark filter, over a near-black keyline. NOT READY keeps v50.27's dark silhouette.
+      - ⚠ **A uniform darken erases binary state.** v50.27 took "lit theme colour + glow" and "near-black silhouette" to two shades of dark, and the white flash to grey. Owner: *"too hard to see if the icons... are on or off... i barely saw the flash"*.
+      - On a darkened HUD, state has to win over the darkening.
+    - **v50.31, SHIELD / HP / CORE captions:** `_hlfDraw(..., 'top', { lbl })` draws the three plates and their text 1.66x larger. The words are white and outside the filter.
+      - ⚠ **The console screen fixes the arc's pixel size, so HUD SIZE cancels out.** k = 0.60 at HUD size 1.75 and 1.06 at 1.0, giving the same 5.7 px words either way (688 px pane). The scale is set to the ring's caption size at 1.75: `lbl = 1.75 * vm / (k * vmA)`.
+      - SHIELD's plate rides out against the frame's outer edge, so HP's plate keeps room between it and CORE's.
+      - Knob: `__hudPanels.lbl`, a multiplier.
+    - **v50.32:** NRG and AMMO sit UNDER their bars, centred. Each bar gives up 1.5 font-heights at its foot, and `capX` nudges the word only where it would leave the screen's pad.
+    - **v50.33:** a "DASH" caption sits under the pips, on AMMO's baseline and kept clear of AMMO's word. Console layout only; the ring stays unlabelled.
+    - **v50.34:** `cockpit_CP_screen` takes `LSS.CLASS_COLORS` before `_THEME_PAINT_HEX`.
+      - Only Slayer has a paint entry, LIME #bbff44, used for the v44.40 strip match. Lit, it read *"very yellow"*; the class colour is #44ff66.
+      - Live, on the player's own hull: `window.__cockpit.screen = { hex: 0x44ff66 }`. It writes emissive's COLOUR only, which `_dimHullMat` never touches.
