@@ -17,6 +17,7 @@
   TOOLS  clay: GRAB (drag + twist the clay with your hand) / POKE (the brush ball dents what it touches) /
          INFLATE (swell or shrink) / SMOOTH / SQUISH (pinch toward the ball) /
          MELD (join + simplify: sweep an area and its little shapes and dense lines become one simpler surface)
+         DELETE (click = the nearest vertex, drag = everything the ball touches; HOLE leaves a gap, COLLAPSE closes it)
          edit: POINT and LINE (grab a vertex or an edge and stretch it; SOFT = how far the pull spreads) /
          PIECE (move a whole part - seat, console, glass - or a gun / thruster / cockpit marker)
          paint: PAINT (alt = erase) / FILL (a whole part) / DROP (pick a colour off the ship)
@@ -70,7 +71,7 @@
   <canvas id="panel" width="512" height="720"></canvas>
   <div id="status">loading...</div>
   <div id="help">
-    <b>MELD</b> sweeps an area into one simpler surface (release to commit) · <b>Mouse</b> left-drag = tool (shift = smooth / erase) · right-drag = orbit · middle-drag = pan · wheel = zoom ·
+    <b>MELD</b> sweeps an area into one simpler surface (release to commit) · <b>DELETE</b> click = nearest vertex, drag = all the ball touches (HOLE / COLLAPSE toggle, shift flips it) · <b>Mouse</b> left-drag = tool (shift = smooth / erase) · right-drag = orbit · middle-drag = pan · wheel = zoom ·
     <b>[ ]</b> size · <b>- =</b> strength · <b>ctrl+Z / ctrl+Y</b> undo / redo · <b>1-9, 0</b> tools · <b>M</b> mirror<br>
     <b>Quest 3</b> right trigger = tool · hold left trigger = smooth / erase · grip = hold the ship (both = scale + turn) ·
     right stick = size / strength · left stick = tool · <b>A / B</b> undo / redo · <b>X</b> menu · <b>Y</b> mirror
@@ -96,15 +97,15 @@ THREE.Mesh.prototype.raycast = acceleratedRaycast;
 
 // ================================================================ STATE
 const SHIPS = ['blaster', 'puncture', 'pyro', 'slayer', 'syphon', 'tracker', 'vortex'];
-const TOOLS = ['grab', 'poke', 'inflate', 'smooth', 'squish', 'meld', 'point', 'line', 'piece', 'paint', 'fill', 'drop'];
-const TOOL_LABEL = { grab: 'GRAB', poke: 'POKE', inflate: 'INFLATE', smooth: 'SMOOTH', squish: 'SQUISH', meld: 'MELD', point: 'POINT',
+const TOOLS = ['grab', 'poke', 'inflate', 'smooth', 'squish', 'meld', 'point', 'line', 'piece', 'paint', 'fill', 'drop', 'delete'];
+const TOOL_LABEL = { grab: 'GRAB', poke: 'POKE', inflate: 'INFLATE', smooth: 'SMOOTH', squish: 'SQUISH', meld: 'MELD', delete: 'DELETE', point: 'POINT',
   line: 'LINE', piece: 'PIECE', paint: 'PAINT', fill: 'FILL', drop: 'DROP' };
 const CLAY = new Set(['grab', 'poke', 'inflate', 'smooth', 'squish']);
 const qs = new URLSearchParams(location.search);
 // sizes are WORLD metres (what you feel in the headset), so scaling the ship up is how you do fine work
 const S = {
   ship: SHIPS.includes(qs.get('ship')) ? qs.get('ship') : 'slayer',
-  tool: 'grab', r: 0.03, strength: 0.5, soft: 0.03, hardness: 0.5, opacity: 1, meld: 0.35,
+  tool: 'grab', r: 0.03, strength: 0.5, soft: 0.03, hardness: 0.5, opacity: 1, meld: 0.35, delCollapse: false,
   color: [255, 59, 48], mirror: true, inflateOut: true, menu: true,
 };
 const $ = (id) => document.getElementById(id);
@@ -369,6 +370,11 @@ function endStroke() {
     const r = meldCommit(st);
     if (st.snaps.size) { entry = { type: 'topo', snaps: st.snaps }; statusLine(); toast('melded ' + r.merged + ' vertices: ' + r.before.toLocaleString() + ' -> ' + r.after.toLocaleString() + ' tris'); st.result = r; }
   }
+  else if (st.kind === 'topo' && st.del) {
+    delPts.visible = false;
+    if (st.del.size) { const r = deleteCommit(st); st.result = r; entry = { type: 'topo', snaps: st.snaps }; statusLine();
+      toast((st.collapse ? 'collapsed ' : 'deleted ') + r.removed + ' vert' + (r.removed === 1 ? 'ex' : 'ices') + ': ' + r.before.toLocaleString() + ' -> ' + r.after.toLocaleString() + ' tris'); }
+  }
   if (entry) { undoStack.push(entry); redoStack.length = 0; if (undoStack.length > 80) undoStack.shift(); scheduleSave(); }
   drawPanel();
 }
@@ -501,21 +507,95 @@ function meldCommit(st) {
       if (ra < 0 || rb < 0 || rc < 0) { const key = [ra, rb, rc].sort((x, y) => x - y).join(); if (seen.has(key)) continue; seen.add(key); }
       keep.push(a, b, c);
     }
-    // drop the vertices nothing uses any more, so they can't be picked or exported
-    const remap = new Int32Array(P.nv).fill(-1); let nv = 0;
-    for (const i of keep) if (remap[i] < 0) remap[i] = nv++;
-    const pos = new Float32Array(nv * 3), nrm = new Float32Array(nv * 3), uv = P.uv ? new Float32Array(nv * 2) : null;
-    for (let i = 0; i < P.nv; i++) {
-      const j = remap[i]; if (j < 0) continue;
-      pos.set(P.pos.subarray(i * 3, i * 3 + 3), j * 3); nrm.set(P.nrm.subarray(i * 3, i * 3 + 3), j * 3);
-      if (uv) uv.set(P.uv.subarray(i * 2, i * 2 + 2), j * 2);
-    }
-    before += P.nf; setPieceArrays(P, pos, nrm, uv, Uint32Array.from(keep, (i) => remap[i])); after += P.nf; P.topo = true;
+    before += P.nf; applyFaces(P, keep); after += P.nf; P.topo = true;
     const set = new Set();
     for (const a of st.areas) groupsNear(P, toLocal(P, a.c, V()), a.R / pieceScale(P) * 1.2, (g) => set.add(g));
     refreshNormals(P, set); P.geo.attributes.normal.needsUpdate = true;
   }
   return { before, after, merged };
+}
+// keep[] = the corner vertex indices of the triangles that survive: drop the vertices nothing uses any more (so they
+// can't be picked or exported), swap the arrays in and rebuild the topology
+function applyFaces(P, keep) {
+  const remap = new Int32Array(P.nv).fill(-1); let nv = 0;
+  for (const i of keep) if (remap[i] < 0) remap[i] = nv++;
+  const pos = new Float32Array(nv * 3), nrm = new Float32Array(nv * 3), uv = P.uv ? new Float32Array(nv * 2) : null;
+  for (let i = 0; i < P.nv; i++) {
+    const j = remap[i]; if (j < 0) continue;
+    pos.set(P.pos.subarray(i * 3, i * 3 + 3), j * 3); nrm.set(P.nrm.subarray(i * 3, i * 3 + 3), j * 3);
+    if (uv) uv.set(P.uv.subarray(i * 2, i * 2 + 2), j * 2);
+  }
+  setPieceArrays(P, pos, nrm, uv, Uint32Array.from(keep, (i) => remap[i]));
+}
+
+// ================================================================ DELETE: vertices out - a hole, or collapsed shut
+// Owner: "what about a delete vertex tool". A press takes the vertex NEAREST the cursor / tip (pickNear, so a 0.05 mm
+// REACH still finds one); dragging adds every vertex the ball touches (they show red). Release removes them, one undo
+// step. HOLE (default) drops every triangle that used them, like Blender's Delete Vertices. COLLAPSE (the toggle, or
+// hold shift / left trigger to flip it) merges each one into its nearest surviving neighbour, walking out ring by ring,
+// so the surface closes over the gap; a whole island selected has nowhere to go and simply disappears.
+const MAXDEL = 20000;
+const delPts = new THREE.Points(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(MAXDEL * 3), 3)),
+  new THREE.PointsMaterial({ color: 0xff3b30, size: 0.004, sizeAttenuation: true, depthTest: false, transparent: true }));
+delPts.renderOrder = 13; delPts.frustumCulled = false; delPts.visible = false; shipRoot.add(delPts);
+function delAdd(P, g) {
+  let set = stroke.del.get(P.id);
+  if (!set) { set = new Set(); stroke.del.set(P.id, set); stroke.snaps.set(P.id, topoSnap(P)); }
+  if (set.has(g)) return; set.add(g);
+  const n = stroke.delN || 0; if (n >= MAXDEL) return;
+  const v = toShip(P, V().fromArray(P.gpos, g * 3), V());
+  delPts.geometry.attributes.position.array.set([v.x, v.y, v.z], n * 3); stroke.delN = n + 1;
+  delPts.geometry.setDrawRange(0, n + 1); delPts.geometry.attributes.position.needsUpdate = true; delPts.visible = true;
+}
+function deleteAt(cShip, nearest) {   // nearest: the press (one vertex); otherwise the sweep (everything in the ball)
+  if (!stroke || !stroke.del) return;
+  const R = S.r / shipScale(), centres = S.mirror ? [cShip, mirrorZ(cShip, V())] : [cShip];
+  for (const cc of centres) {
+    stroke.areas.push({ c: cc.clone(), R: Math.max(R, viewRef() * 0.05 / shipScale()) });
+    if (nearest) { const h = pickNear(pickPoint, cc); if (h) delAdd(h.P, h.g); continue; }
+    piecesNear(cc, R, (P, cl, Rl) => { _hits.length = 0; groupsNear(P, cl, Rl, (g) => _hits.push(g, 0)); for (let h = 0; h < _hits.length; h += 2) delAdd(P, _hits[h]); });
+  }
+  delPts.material.size = clamp(viewRef() * 0.012, 0.00003, 0.008);
+}
+function deleteCommit(st) {
+  delPts.visible = false;
+  let before = 0, after = 0, removed = 0;
+  for (const [id, set] of st.del) {
+    const P = pieces[id], gp = P.gpos, rep = new Int32Array(P.ng), dead = new Uint8Array(P.ng);
+    for (let g = 0; g < P.ng; g++) rep[g] = g;
+    for (const g of set) dead[g] = 1;
+    if (st.collapse) {
+      const dist = (a, b) => Math.hypot(gp[a * 3] - gp[b * 3], gp[a * 3 + 1] - gp[b * 3 + 1], gp[a * 3 + 2] - gp[b * 3 + 2]);
+      for (const g of set) {
+        let ring = [g], target = -1; const seen = new Set([g]);
+        for (let depth = 0; depth < 64 && target < 0 && ring.length; depth++) {
+          const next = []; let bd = Infinity;
+          for (const x of ring) for (let k = P.gnS[x]; k < P.gnS[x + 1]; k++) {
+            const y = P.gnL[k]; if (seen.has(y)) continue; seen.add(y);
+            if (dead[y]) next.push(y); else { const d = dist(g, y); if (d < bd) { bd = d; target = y; } }
+          }
+          ring = next;
+        }
+        if (target >= 0) { rep[g] = target; for (let q = P.gvS[g]; q < P.gvS[g + 1]; q++) { const i = P.gvL[q] * 3; P.pos[i] = gp[target * 3]; P.pos[i + 1] = gp[target * 3 + 1]; P.pos[i + 2] = gp[target * 3 + 2]; } }
+      }
+    }
+    const idx = P.idx, keep = [], seen = new Set();
+    for (let f = 0; f < P.nf; f++) {
+      const a = idx[f * 3], b = idx[f * 3 + 1], c = idx[f * 3 + 2], ga = P.grp[a], gb = P.grp[b], gc = P.grp[c];
+      const hit = dead[ga] || dead[gb] || dead[gc];
+      if (!hit) { keep.push(a, b, c); continue; }
+      if (!st.collapse) continue;
+      const ra = rep[ga], rb = rep[gb], rc = rep[gc];
+      if ((dead[ga] && ra === ga) || (dead[gb] && rb === gb) || (dead[gc] && rc === gc)) continue;   // nowhere to go
+      if (ra === rb || rb === rc || ra === rc) continue;
+      const key = [ra, rb, rc].sort((x, y) => x - y).join(); if (seen.has(key)) continue; seen.add(key);
+      keep.push(a, b, c);
+    }
+    before += P.nf; removed += set.size; applyFaces(P, keep); after += P.nf; P.topo = true;
+    const ns = new Set(); for (const ar of st.areas) groupsNear(P, toLocal(P, ar.c, V()), ar.R / pieceScale(P) * 1.5, (g) => ns.add(g));
+    if (ns.size) { refreshNormals(P, ns); P.geo.attributes.normal.needsUpdate = true; }
+  }
+  return { before, after, removed };
 }
 
 // ================================================================ GRAB / POINT / LINE: a captured set that follows the hand
@@ -820,7 +900,7 @@ const softT = { get: () => (S.soft <= 0 ? 0 : 0.05 + 0.95 * Math.log(S.soft / SO
   set: (t) => { S.soft = t < 0.05 ? 0 : SOFT_MIN * Math.pow(R_MAX / SOFT_MIN, (clamp(t, 0, 1) - 0.05) / 0.95); } };
 const fmtLen = (m) => (m >= 0.01 ? (m * 100).toFixed(1) + ' cm' : m >= 0.001 ? (m * 1000).toFixed(1) + ' mm' : (m * 1000).toFixed(2) + ' mm');
 function sliderRows() {
-  const t = S.tool, rows = [{ id: 'size', label: t === 'piece' || t === 'point' || t === 'line' ? 'REACH' : 'SIZE', t: sizeT.get(), txt: fmtLen(S.r) }];
+  const t = S.tool, rows = [{ id: 'size', label: t === 'piece' || t === 'point' || t === 'line' || t === 'delete' ? 'REACH' : 'SIZE', t: sizeT.get(), txt: fmtLen(S.r) }];
   if (CLAY.has(t)) rows.push({ id: 'strength', label: 'STRENGTH', t: S.strength, txt: Math.round(S.strength * 100) + '%' });
   if (t === 'point' || t === 'line') rows.push({ id: 'soft', label: 'SOFT', t: softT.get(), txt: S.soft <= 0 ? 'rigid' : fmtLen(S.soft) });
   if (t === 'meld') rows.push({ id: 'meld', label: 'MELD (cell size)', t: S.meld, txt: fmtLen(S.r * (0.05 + 0.6 * S.meld)) });
@@ -848,12 +928,12 @@ function drawPanel() {
   if (ui.restore) btn({ id: 'restore', x: 332, y: 8, w: 172, h: 48, fs: 18, act: () => restoreSession() }, 'RESTORE', false, ui.restore);
   // tools
   const subs = { grab: 'drag clay', poke: 'dent it', inflate: S.inflateOut ? 'swell' : 'shrink', smooth: 'relax', squish: 'pinch', meld: 'join + simplify',
-    point: 'vertex', line: 'edge', piece: 'part / gem', paint: 'alt: erase', fill: 'whole part', drop: 'pick colour' };
+    point: 'vertex', line: 'edge', piece: 'part / gem', paint: 'alt: erase', fill: 'whole part', drop: 'pick colour', delete: S.delCollapse ? 'collapse' : 'hole' };
   const SLOT = { grab: [0, 0], poke: [1, 0], inflate: [2, 0], smooth: [3, 0], squish: [4, 0], meld: [0, 1], point: [1, 1], line: [2, 1], piece: [3, 1],
-    paint: [0, 2], fill: [1, 2], drop: [2, 2] };
+    delete: [4, 1], paint: [0, 2], fill: [1, 2], drop: [2, 2] };
   const cell = (cx, cy) => ({ x: 8 + cx * 101, y: 64 + cy * 76, w: 95, h: 70, fs: 19 });
   TOOLS.forEach((t) => btn(Object.assign(cell(...SLOT[t]), { id: 'tool_' + t, act: () => setTool(t) }), TOOL_LABEL[t], S.tool === t, subs[t]));
-  btn(Object.assign(cell(4, 1), { id: 'mirror', act: () => { S.mirror = !S.mirror; toast('mirror ' + (S.mirror ? 'on' : 'off')); } }), 'MIRROR', S.mirror, S.mirror ? 'z = 0 on' : 'off');
+  btn(Object.assign(cell(4, 2), { id: 'mirror', act: () => { S.mirror = !S.mirror; toast('mirror ' + (S.mirror ? 'on' : 'off')); } }), 'MIRROR', S.mirror, S.mirror ? 'z = 0 on' : 'off');
   // sliders
   let y = 300;
   for (const r of sliderRows()) {
@@ -864,6 +944,7 @@ function drawPanel() {
     rr(16, y + 30, Math.max(12, 480 * clamp(r.t, 0, 1)), 12, 6); c.fillStyle = ui.hover === o.id ? '#ffd27a' : '#ffaa00'; c.fill();
     y += 56;
   }
+  if (S.tool === 'delete') btn({ id: 'delmode', x: 8, y, w: 496, h: 44, fs: 18, act: () => { S.delCollapse = !S.delCollapse; } }, S.delCollapse ? 'COLLAPSE - closes the gap  (tap for HOLE)' : 'HOLE - leaves a gap  (tap for COLLAPSE)', false);
   if (S.tool === 'inflate') btn({ id: 'inout', x: 8, y, w: 496, h: 44, fs: 18, act: () => { S.inflateOut = !S.inflateOut; } }, S.inflateOut ? 'SWELL  (tap for SHRINK)' : 'SHRINK  (tap for SWELL)', false);
   // colour
   y = 476;
@@ -942,11 +1023,32 @@ const viewRef = () => (renderer.xr.isPresenting ? 0.4 : orbit.dist);
 // from the nearest corner of a seat plate)
 function pickNear(fn, c) {
   const base = Math.max(S.r, viewRef() * 0.02) / shipScale(), cap = Math.max(S.r, Math.min(viewRef() * 0.3, 0.08)) / shipScale();
-  for (let R = base; ; R = Math.min(R * 3, cap)) { const h = fn(c, R); if (h || R >= cap) return h; }
+  for (let R = base; ; R = Math.min(R * 3, cap)) { const h = fn(c, R); if (h) return h; if (R >= cap) break; }
+  // ...and when even that finds nothing you are on a BIG triangle (a flat hull plate: corners several cm away), so
+  // take the triangle you are touching and its nearest corner / edge - pointing at a surface always picks something
+  return triPick(fn === pickPoint ? 'point' : 'line', c, cap);
+}
+function triPick(kind, cShip, maxR) {
+  let best = null;
+  for (const P of pieces) {
+    if (!P.mesh.visible) continue;
+    const cl = toLocal(P, cShip, V()), hit = P.geo.boundsTree.closestPointToPoint(cl, {}, 0, maxR / pieceScale(P));
+    if (hit && hit.distance * pieceScale(P) <= maxR && (!best || hit.distance * pieceScale(P) < best.d)) best = { P, hit, d: hit.distance * pieceScale(P) };
+  }
+  if (!best) return null;
+  const { P, hit } = best, f = hit.faceIndex * 3, q = hit.point, gs = [P.grp[P.idx[f]], P.grp[P.idx[f + 1]], P.grp[P.idx[f + 2]]];
+  const at = (g) => V().fromArray(P.gpos, g * 3);
+  if (kind === 'point') { const g = gs.reduce((a, b) => (at(a).distanceTo(q) <= at(b).distanceTo(q) ? a : b)); return { P, g, d: at(g).distanceTo(q) * pieceScale(P), p: toShip(P, at(g), V()) }; }
+  let e = null;
+  for (const [a, b] of [[gs[0], gs[1]], [gs[1], gs[2]], [gs[2], gs[0]]]) {
+    const A = at(a), AB = at(b).sub(A), t = clamp(V().subVectors(q, A).dot(AB) / Math.max(AB.lengthSq(), 1e-18), 0, 1), d = A.addScaledVector(AB, t).distanceTo(q);
+    if (!e || d < e.d) e = { a, b, d };
+  }
+  return { P, a: e.a, b: e.b, d: e.d * pieceScale(P), pa: toShip(P, at(e.a), V()), pb: toShip(P, at(e.b), V()) };
 }
 // shows the vertex points + edges around the tip, and which one a press would take
 function updateHelpers(tipShip) {
-  const show = !!tipShip && (S.tool === 'point' || S.tool === 'line' || S.tool === 'meld');
+  const show = !!tipShip && (S.tool === 'point' || S.tool === 'line' || S.tool === 'meld' || S.tool === 'delete');
   nearPts.visible = nearEdges.visible = show; pickDot.visible = pickSeg.visible = false;
   if (!show) return;
   const R = S.r / shipScale(), reveal = Math.max(R * 3, viewRef() * 0.25 / shipScale()), pa = nearPts.geometry.attributes.position.array, ea = nearEdges.geometry.attributes.position.array;
@@ -963,7 +1065,7 @@ function updateHelpers(tipShip) {
   nearEdges.geometry.setDrawRange(0, ne * 2); nearEdges.geometry.attributes.position.needsUpdate = true;
   if (cap || S.tool === 'meld') return;
   const ds = Math.max(R * 0.3, viewRef() * 0.008 / shipScale());
-  if (S.tool === 'point') { const h = pickNear(pickPoint, tipShip); if (h) { pickDot.visible = true; pickDot.position.copy(h.p); pickDot.scale.setScalar(ds); } }
+  if (S.tool === 'point' || S.tool === 'delete') { const h = pickNear(pickPoint, tipShip); if (h) { pickDot.visible = true; pickDot.position.copy(h.p); pickDot.scale.setScalar(ds); } }
   else { const h = pickNear(pickLine, tipShip); if (h) { pickSeg.visible = true; pickSeg.geometry.attributes.position.array.set([h.pa.x, h.pa.y, h.pa.z, h.pb.x, h.pb.y, h.pb.z]); pickSeg.geometry.attributes.position.needsUpdate = true; } }
 }
 
@@ -993,6 +1095,7 @@ cvs.addEventListener('pointerdown', (e) => {
   const hs = hit ? worldToShip(hit.point, V()) : null;
   desk.plane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(V()).negate(), hit ? hit.point : orbit.target);
   if (t === 'grab' && !alt) { capBegin('grab', hs, null, pointFeature(hs), reachShip(), 0); desk.mode = 'cap'; }
+  else if (t === 'delete') { beginStroke('topo', { del: new Map(), collapse: S.delCollapse !== alt, snaps: new Map(), areas: [] }); deleteAt(hs, true); desk.mode = 'delete'; desk.lastDab = hit.point.clone(); }
   else if (t === 'meld' && !alt) { beginStroke('topo', { meld: new Map(), snaps: new Map(), areas: [] }); desk.mode = 'meld'; }
   else if (CLAY.has(t) || t === 'meld') { beginStroke('geo'); desk.mode = 'clay'; desk.lastDab = null; }
   else if (t === 'point' || t === 'line') {
@@ -1016,7 +1119,7 @@ cvs.addEventListener('pointermove', (e) => {
   }
 });
 cvs.addEventListener('pointerup', () => {
-  if (desk.mode === 'cap') capEnd(); else if (desk.mode === 'piece') pieceEnd(); else if (desk.mode === 'clay' || desk.mode === 'paint' || desk.mode === 'meld') endStroke();
+  if (desk.mode === 'cap') capEnd(); else if (desk.mode === 'piece') pieceEnd(); else if (desk.mode === 'clay' || desk.mode === 'paint' || desk.mode === 'meld' || desk.mode === 'delete') endStroke();
   desk.mode = null; desk.btn = -1;
 });
 cvs.addEventListener('pointerleave', () => { desk.in = false; });
@@ -1046,7 +1149,7 @@ function deskFrame(dt) {
   else if (desk.mode === 'cap' || desk.mode === 'piece') hit = desk.hit;
   const gem = Math.min(1, orbit.dist * 0.006 / (0.012 * shipScale())); for (const m of markers) m.vis.scale.setScalar(gem);
   brushBall.visible = !!hit && desk.mode !== 'cap' && desk.mode !== 'piece';
-  if (hit) { brushBall.position.copy(hit.point); brushBall.scale.setScalar(S.r); brushBall.material.color.setHex(S.tool === 'meld' ? 0x33ddff : (S.tool === 'paint' || S.tool === 'fill' ? rgb2num(S.color) : 0xffaa00)); }
+  if (hit) { brushBall.position.copy(hit.point); brushBall.scale.setScalar(S.r); brushBall.material.color.setHex(S.tool === 'meld' ? 0x33ddff : S.tool === 'delete' ? 0xff4040 : (S.tool === 'paint' || S.tool === 'fill' ? rgb2num(S.color) : 0xffaa00)); }
   const hs = hit ? worldToShip(hit.point, V()) : null;
   if (desk.mode === 'clay' && hit) {
     const tool = desk.shift || S.tool === 'meld' ? 'smooth' : S.tool;
@@ -1059,6 +1162,7 @@ function deskFrame(dt) {
     flushEdits();
     if (performance.now() - (desk.refit || 0) > 200) { desk.refit = performance.now(); for (const id of stroke ? stroke.orig.keys() : []) refitPiece(pieces[id]); }
   } else if (desk.mode === 'meld' && hit) { meldFrame(hs, 1, dt); flushEdits(); }
+  else if (desk.mode === 'delete' && hit && desk.lastDab && desk.lastDab.distanceTo(hit.point) > S.r * 0.3) { deleteAt(hs, false); desk.lastDab = hit.point.clone(); }
   else if (desk.mode === 'paint' && hit && desk.lastDab && desk.lastDab.distanceTo(hit.point) > S.r * 0.25) { paintDab(hs, desk.shift); desk.lastDab = hit.point.clone(); }
   updateHelpers(desk.mode === 'cap' ? null : hs);
 }
@@ -1146,6 +1250,7 @@ function xrTools(R, L, dt, onMenu) {
   if (on && !was) {                                   // press
     R.active = t; R.lastDab = null;
     if (t === 'grab' && !alt) capBegin('grab', tip, q, pointFeature(tip), S.r / shipScale(), 0);
+    else if (t === 'delete') { beginStroke('topo', { del: new Map(), collapse: S.delCollapse !== alt, snaps: new Map(), areas: [] }); deleteAt(tip, true); R.lastDab = R.pos.clone(); }
     else if (t === 'meld' && !alt) beginStroke('topo', { meld: new Map(), snaps: new Map(), areas: [] });
     else if (CLAY.has(t) || t === 'meld') beginStroke('geo');
     else if (t === 'point' || t === 'line') {
@@ -1160,6 +1265,7 @@ function xrTools(R, L, dt, onMenu) {
     const a = R.active;
     if (cap) capMove(tip, q);
     else if (a === 'piece') pieceMove(handShip(R));
+    else if (a === 'delete') { if (R.lastDab && R.lastDab.distanceTo(R.pos) > S.r * 0.3) { deleteAt(tip, false); R.lastDab = R.pos.clone(); } }
     else if (a === 'meld' && stroke && stroke.kind === 'topo') meldFrame(tip, trig, dt);
     else if (CLAY.has(a) || a === 'meld') clayFrame(alt || a === 'grab' || a === 'meld' ? 'smooth' : a, tip, trig, dt);
     else if (a === 'paint' && (!R.lastDab || R.lastDab.distanceTo(R.pos) > S.r * 0.2)) { paintDab(tip, alt); R.lastDab = R.pos.clone(); }
@@ -1186,7 +1292,7 @@ function xrFrame(dt) {
   if (pressed(L, 4)) S.menu = !S.menu; if (pressed(L, 5)) { S.mirror = !S.mirror; toast('mirror ' + (S.mirror ? 'on' : 'off')); }
   if (ui.dirty && performance.now() - (ui.lastDraw || 0) > 100) { ui.dirty = false; ui.lastDraw = performance.now(); drawPanel(); }
   brushBall.visible = R.connected && !onMenu; brushBall.position.copy(R.pos); brushBall.scale.setScalar(S.r);
-  brushBall.material.color.setHex(S.tool === 'paint' || S.tool === 'fill' ? (L.trig > 0.5 ? 0x8899aa : rgb2num(S.color)) : (S.tool === 'meld' ? 0x33ddff : 0xffaa00));
+  brushBall.material.color.setHex(S.tool === 'paint' || S.tool === 'fill' ? (L.trig > 0.5 ? 0x8899aa : rgb2num(S.color)) : (S.tool === 'meld' ? 0x33ddff : S.tool === 'delete' ? 0xff4040 : 0xffaa00));
   updateHelpers(R.connected && !onMenu ? worldToShip(R.pos, V()) : null);
 }
 const rgb2num = (c) => (c[0] << 16) | (c[1] << 8) | c[2];
@@ -1313,6 +1419,7 @@ function simStroke(tool, pts, o) {
     if (tool === 'line') { const h = pickNear(pickLine, P0); if (!h) return 'no line'; f = segFeature(h.pa, h.pb); R = S.soft / shipScale(); rigid = 1e-9; }
     const n = capBegin(tool, P0, o.q0 || null, f, R, rigid); for (const p of pts.slice(1)) { capMove(V().fromArray(p), o.q1 || null); flushEdits(); } capEnd(); return n;
   }
+  if (tool === 'delete') { const alt = !!o.alt; beginStroke('topo', { del: new Map(), collapse: S.delCollapse !== alt, snaps: new Map(), areas: [] }); deleteAt(P0, true); for (const p of pts.slice(1)) deleteAt(V().fromArray(p), false); const st = stroke; endStroke(); return st.result || null; }
   if (tool === 'meld') { beginStroke('topo', { meld: new Map(), snaps: new Map(), areas: [] }); for (const p of pts) for (let k = 0; k < (o.frames || 30); k++) meldFrame(V().fromArray(p), 1, 1 / 60); flushEdits(); const st = stroke; endStroke(); return st.result || null; }
   if (CLAY.has(tool)) { beginStroke('geo'); for (const p of pts) for (let k = 0; k < (o.frames || 10); k++) clayFrame(tool, V().fromArray(p), 1, 1 / 60); flushEdits(); const n = stroke.orig.size; endStroke(); return n; }
   if (tool === 'paint') { beginStroke('paint', { tiles: new Map() }); let n = 0; for (const p of pts) n += paintDab(V().fromArray(p), !!o.erase); endStroke(); return n; }

@@ -7239,7 +7239,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "50.58";
+const LSS_BUILD = "50.64";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -40246,6 +40246,612 @@ function _swGenTree(opt){
   g.setIndex(IDX);   // (v48.44)
   g.computeVertexNormals(); return g;
 }
+// ═══ (v50.63) THE NEW TREES: TEXTURED LEAF RIBBONS ═══════════════════════════════════════════════════════════
+// Owner, after two rounds of rejected far-tree LODs (v50.59-50.62): "is there another way to do trees that look
+// better and are cheaper?" - then, in LSS/tree_lab.html, side by side with the MEGA set: "oh the new ones look WAY
+// cooler" / "the new forest has way higher fps than the old" / "put these in the game!!!".
+// WHAT CHANGED: every leaf used to be its own flat-colour card - three crossed quads each (v33.12) - so a MEGA
+// mangrove was 6,912 leaf triangles of its 9,792 and still read as a ball of green paper. Now each TERMINAL branch
+// carries two crossed, curved RIBBONS following its rings, textured from a procedurally painted atlas (leafy twig /
+// small-leaf spray / pinnate frond / needle spray / bark) with an alpha cut-out: dozens of real leaf shapes per
+// ribbon for ~16 triangles.
+//   - Same presets, same seeded walk: _swGenRibbonTree consumes the RNG draw for draw like _swGenTree (including the
+//     five draws per leaf it no longer emits), so the skeleton is the same tree.
+//   - Smooth indexed bark (with the atlas's bark fibres); on multi-level trees the twig level is left to the ribbons.
+//   - CANOPY NORMALS: ribbon normals blended toward "out of the crown centre", so the crown is lit as a volume, not
+//     speckle; and the double-sided back face does NOT flip them (_swRibbonPatchMat) - the normal already points out.
+//   - Inner leaves darkened toward the crown centre (vertex colour): a free self-shadow that gives the crown depth.
+//   - The species colour stays in the VERTEX colour and the region tint in instanceColor, exactly as before - the
+//     atlas is painted near-white (shading, veins, edges only).
+//   - Alpha coverage is held up at distance in the shader (a mip that averages leaf and gap would otherwise fail the
+//     cut-out and thin the far canopy) - in the main pass AND the shadow pass (_lssDepth, see _swRibbonPatchMat).
+// MEASURED (tree_lab, 3,000-tree archipelago mix, flying low, main + shadow): 42.9 M -> 13.2 M triangles a frame,
+// 14.5 -> 3.9 ms GPU, 68 -> 144 fps. Per tree (MEGA set): mangrove 9792 -> 2676, oak 10852 -> 2724, willow
+// 13898 -> 4044, baobab 2214 -> 732, palm 1466 -> 1264.
+// `?trees=classic` (or window.__treeStyle = 'classic' before the first hub build) keeps the v33-v50 cards for an
+// A/B, LODs and all. Live: window.__treeRibbon = { ribbons, ribbonW, tipExt, barkSeg, twigBark, canopyN, ao,
+// cutoff, coverK } then __treeRibbonRebuild(); __treeAtlas() opens the painted atlas.
+// Ribbon trees carry no LODs, so the v50.59-50.62 LOD machinery (_swTreeLodTick, _swLodPassSwap) is dormant for them.
+function _swTreeStyleRibbon() {
+  const S = _swTreeStyleRibbon;
+  if (S.v == null) {
+    let classic = false;
+    try { classic = /[?&]trees=classic\b/.test(location.search) || window.__treeStyle === 'classic'; } catch (_) {}
+    S.v = !classic;
+  }
+  return S.v;
+}
+function _swRibbonK() {
+  const K = (typeof window !== 'undefined' && window.__treeRibbon) || {};
+  const o = _swRibbonK.o || (_swRibbonK.o = {});
+  o.ribbons = (K.ribbons != null) ? Math.max(1, K.ribbons | 0) : 2;
+  o.ribbonW = (K.ribbonW != null) ? +K.ribbonW : 2.6;
+  o.tipExt = (K.tipExt != null) ? +K.tipExt : 1.6;
+  o.barkSeg = (K.barkSeg != null) ? (K.barkSeg | 0) : 6;
+  o.twigBark = !!K.twigBark;
+  o.canopyN = (K.canopyN != null) ? +K.canopyN : 0.7;
+  o.ao = (K.ao != null) ? +K.ao : 0.45;
+  o.cutoff = (K.cutoff != null) ? +K.cutoff : 0.42;
+  o.coverK = (K.coverK != null) ? +K.coverK : 0.22;
+  return o;
+}
+// Which atlas column a species wears, by the ORIGINAL seed (snowify adds 7000; 8088 is itself a species). Built on
+// first use as a function property - no top-level const, so no TDZ however early a tree is ever asked for.
+function _swRibbonCol(p) {
+  const M = _swRibbonCol.M || (_swRibbonCol.M = { 1011: 'broad', 2022: 'needle', 3033: 'small', 4044: 'small', 5055: 'small',
+    6066: 'needle', 7077: 'broad', 8088: 'small', 9099: 'small', 1212: 'frond', 1313: 'needle', 1414: 'broad', 1515: 'frond',
+    1616: 'needle', 1717: 'small', 1818: 'small', 1919: 'small' });
+  const sd = p.seed | 0;
+  const c = M[sd] || M[sd - 7000];
+  if (c) return c;
+  return p.evergreen ? 'needle' : ((p.levels | 0) <= 1 ? 'frond' : ((p.leaf_size || 2) <= 1.6 ? 'small' : 'broad'));
+}
+// ── the leaf atlas: painted once (1024 desktop, 512 on small devices), five full-height columns with 32 px gutters
+// (at 1024) so the mips do not bleed one column into the next. Canvas row 0 is v = 0 (flipY false) = a twig's TIP.
+function _swLeafAtlasGet() {
+  const S = _swLeafAtlasGet;
+  if (S.a) return S.a;
+  const small = (typeof _fxSmallDevice === 'function' && _fxSmallDevice());
+  const W = small ? 512 : 1024, H = W;
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const cols = { broad: [0, 0.21875], small: [0.25, 0.46875], frond: [0.5, 0.71875], needle: [0.75, 0.90625], bark: [0.9375, 1.0] };
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = small ? 2 : 4;
+  tex.generateMipmaps = true; tex.minFilter = THREE.LinearMipmapLinearFilter; tex.magFilter = THREE.LinearFilter;
+  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.flipY = false;
+  S.a = { tex, canvas: cv, cols, W, H };
+  _swLeafAtlasPaint(S.a);
+  return S.a;
+}
+function _swLeafAtlasPaint(A) {
+  const g = A.canvas.getContext('2d'), W = A.W, H = A.H, k = W / 1024;
+  g.clearRect(0, 0, W, H);
+  let s = 7 >>> 0;
+  const R = () => { s = s + 0x6D2B79F5 | 0; let t = Math.imul(s ^ s >>> 15, 1 | s); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+  const colPx = (key) => [A.cols[key][0] * W, A.cols[key][1] * W];
+  // one leaf: a pointed ellipse along +y from the origin, a darker midrib, a shaded falloff across its width
+  const leaf = (x, y, ang, len, wid, tone) => {
+    g.save(); g.translate(x, y); g.rotate(ang);
+    const grd = g.createLinearGradient(-wid, 0, wid, 0);
+    const a = Math.round(170 + 85 * tone), b = Math.round(130 + 80 * tone);
+    grd.addColorStop(0, 'rgb(' + b + ',' + b + ',' + b + ')');
+    grd.addColorStop(0.5, 'rgb(' + a + ',' + a + ',' + a + ')');
+    grd.addColorStop(1, 'rgb(' + (b - 20) + ',' + (b - 20) + ',' + (b - 20) + ')');
+    g.fillStyle = grd;
+    g.beginPath(); g.moveTo(0, 0);
+    g.bezierCurveTo(wid * 1.15, len * 0.25, wid * 0.9, len * 0.75, 0, len);
+    g.bezierCurveTo(-wid * 0.9, len * 0.75, -wid * 1.15, len * 0.25, 0, 0);
+    g.fill();
+    g.strokeStyle = 'rgba(70,70,70,0.55)'; g.lineWidth = Math.max(1, wid * 0.08);
+    g.beginPath(); g.moveTo(0, len * 0.04); g.lineTo(0, len * 0.92); g.stroke();
+    g.restore();
+  };
+  const stem = (x0, y0, x1, y1, w) => { g.strokeStyle = 'rgb(95,85,70)'; g.lineWidth = Math.max(1, w * k); g.lineCap = 'round'; g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke(); };
+  { // BROAD: a twig with alternating broad leaves (oak / baobab / acacia)
+    const [a, b] = colPx('broad'), cx = (a + b) / 2, w = b - a;
+    stem(cx, H - 4 * k, cx, 30 * k, 5);
+    for (let y = H - 40 * k; y > 40 * k; y -= 34 * k) for (const sd of [-1, 1]) leaf(cx + sd * 3 * k, y + (R() - 0.5) * 14 * k, sd * (0.55 + R() * 0.45) + Math.PI, w * (0.40 + R() * 0.12), w * (0.15 + R() * 0.05), R());
+    leaf(cx, 46 * k, Math.PI, w * 0.42, w * 0.16, 0.9);
+  }
+  { // SMALL: denser, smaller leaves (mangrove / willow / aspen / birch / scrub)
+    const [a, b] = colPx('small'), cx = (a + b) / 2, w = b - a;
+    stem(cx, H - 4 * k, cx, 24 * k, 4);
+    for (let y = H - 30 * k; y > 30 * k; y -= 22 * k) {
+      for (const sd of [-1, 1]) leaf(cx + sd * 2 * k, y + (R() - 0.5) * 10 * k, sd * (0.45 + R() * 0.6) + Math.PI, w * (0.26 + R() * 0.12), w * (0.10 + R() * 0.04), R());
+      if (R() < 0.5) leaf(cx + (R() - 0.5) * w * 0.3, y, Math.PI + (R() - 0.5) * 0.6, w * 0.22, w * 0.09, R());
+    }
+  }
+  { // FROND: pinnate - long narrow leaflets angled toward the tip (palm / tree fern)
+    const [a, b] = colPx('frond'), cx = (a + b) / 2, w = b - a;
+    stem(cx, H - 2 * k, cx, 10 * k, 6);
+    for (let y = H - 20 * k; y > 20 * k; y -= 12 * k) {
+      const t = 1 - y / H, len = w * (0.48 - 0.26 * t) * (0.85 + R() * 0.3);
+      for (const sd of [-1, 1]) leaf(cx + sd * 2 * k, y, sd * (0.95 - 0.35 * t) + Math.PI, len, w * 0.045, R());
+    }
+  }
+  { // NEEDLE: short needles all round a twig (pine / cypress / redwood / juniper)
+    const [a, b] = colPx('needle'), cx = (a + b) / 2, w = b - a;
+    stem(cx, H - 2 * k, cx, 10 * k, 4);
+    g.lineCap = 'round';
+    for (let y = H - 10 * k; y > 14 * k; y -= 9 * k) for (let n = 0; n < 4; n++) {
+      const sd = (n & 1) ? 1 : -1, ang = sd * (0.5 + R() * 0.8), len = w * (0.30 + R() * 0.16), v = Math.round(140 + R() * 90);
+      g.strokeStyle = 'rgb(' + v + ',' + v + ',' + v + ')'; g.lineWidth = Math.max(1, 3 * k);
+      g.beginPath(); g.moveTo(cx, y); g.lineTo(cx + Math.sin(ang) * len, y - Math.cos(ang) * len * 0.6); g.stroke();
+    }
+  }
+  { // BARK: opaque vertical fibres
+    const [a, b] = colPx('bark');
+    g.fillStyle = 'rgb(200,200,200)'; g.fillRect(a, 0, b - a, H);
+    for (let i = 0; i < 260; i++) { const x = a + R() * (b - a), v = Math.round(130 + R() * 110); g.strokeStyle = 'rgb(' + v + ',' + v + ',' + v + ')'; g.lineWidth = Math.max(1, (1 + R() * 3) * k); g.beginPath(); g.moveTo(x, 0); g.lineTo(x + (R() - 0.5) * 6 * k, H); g.stroke(); }
+  }
+  A.tex.needsUpdate = true;
+}
+// ── the generator: the _swGenTree walk, ribbons instead of cards ─────────────────────────────────────────────────
+function _swGenRibbonTree(opt, K) {
+  K = K || _swRibbonK();
+  const A = _swLeafAtlasGet();
+  const rng = _swMul(opt.seed || 12345), deg = Math.PI / 180;
+  const bark = opt.bark || [0.30, 0.21, 0.12], leafC = opt.leaf || [0.22, 0.46, 0.18];
+  const Y = new THREE.Vector3(0, 1, 0), X = new THREE.Vector3(1, 0, 0), fstr = opt.force || 0;
+  const qTmp = new THREE.Quaternion(), qF = new THREE.Quaternion(), eTmp = new THREE.Euler(), vT = new THREE.Vector3(), dir = new THREE.Vector3();
+  const POS = [], COL = [], UV = [], NRM = [], IDX = [], KIND = [];
+  const col = _swRibbonCol(opt), levels = opt.levels | 0;
+  const vtx = (p, n, c, u, v, kind) => { const i = POS.length / 3; POS.push(p.x, p.y, p.z); NRM.push(n.x, n.y, n.z); COL.push(c[0], c[1], c[2]); UV.push(u, v); KIND.push(kind); return i; };
+  const ribbons = [];
+  const bU0 = A.cols.bark[0] + 0.004, bU1 = A.cols.bark[1] - 0.004;
+  // sparse species (the snag's 2 leaves, the thorn's 5) leaf only some of their twigs - by a hash of the twig's
+  // order, never by the walk's RNG (that would change every branch after it)
+  const keepP = Math.min(1, (opt.leaf_count || 6) / 6);
+  let twigN = 0;
+  function branch(origin, orient, length, radius, level) {
+    const sec = opt.sections[level] || 4, seg = opt.segments[level] || 4, taper = opt.taper[level] != null ? opt.taper[level] : 0.7;
+    const twist = opt.twist[level] || 0, gn = opt.gnarliness[level] || 0, secLen = length / sec, pos = origin.clone(), q = orient.clone(), rings = [];
+    for (let s = 0; s <= sec; s++) {
+      const r = Math.max(0.05, radius * (1 - taper * (s / sec))); rings.push({ p: pos.clone(), q: q.clone(), r: r });
+      dir.copy(Y).applyQuaternion(q); pos.addScaledVector(dir, secLen);
+      const g = Math.min(0.16, gn * Math.max(1, 1 / Math.sqrt(Math.max(0.05, r)))); eTmp.set((rng() - 0.5) * g, twist, (rng() - 0.5) * g); q.multiply(qTmp.setFromEuler(eTmp));
+      if (fstr) { dir.copy(Y).applyQuaternion(q); qTmp.setFromUnitVectors(dir, fstr > 0 ? Y : vT.copy(Y).negate()); qF.set(0, 0, 0, 1).slerp(qTmp, Math.min(0.13, Math.abs(fstr) * 6 / Math.max(0.1, r))); q.premultiply(qF); }
+    }
+    const terminal = !(level < opt.levels);
+    if (!(terminal && levels >= 2 && !K.twigBark)) {
+      const sE = Math.max(3, Math.min(seg, K.barkSeg | 0)), base = POS.length / 3;
+      for (let s = 0; s <= sec; s++) {
+        const Rg = rings[s];
+        for (let j = 0; j <= sE; j++) {
+          const a = j / sE * Math.PI * 2;
+          const nrm = vT.set(Math.cos(a), 0, Math.sin(a)).applyQuaternion(Rg.q).clone();
+          vtx(nrm.clone().multiplyScalar(Rg.r).add(Rg.p), nrm, bark, bU0 + (bU1 - bU0) * (j / sE), (s / sec) * length * 0.04, 0);
+        }
+      }
+      for (let s = 0; s < sec; s++) for (let j = 0; j < sE; j++) { const a = base + s * (sE + 1) + j, b = a + sE + 1; IDX.push(a, b, a + 1, a + 1, b, b + 1); }
+    }
+    if (!terminal) {
+      const cl = level + 1, nc = opt.children[level] || 0, st = opt.start[cl] != null ? opt.start[cl] : 0.3;
+      for (let i = 0; i < nc; i++) {
+        const frac = st + (i + rng()) * (1 - st) / Math.max(1, nc), si = Math.min(sec, Math.max(0, Math.round(frac * sec))), ring = rings[si];
+        const radial = Math.PI * 2 * ((i + rng() * 0.6) / Math.max(1, nc)), ang = (opt.angle[cl] || 45) * deg;
+        const cq = ring.q.clone(); cq.multiply(qTmp.setFromAxisAngle(Y, radial)); cq.multiply(qTmp.setFromAxisAngle(X, ang));
+        let clen = opt.length[cl] != null ? opt.length[cl] : length * 0.5; if (opt.evergreen) clen *= Math.max(0.18, 1 - frac);
+        branch(ring.p.clone(), cq, clen, (opt.radius[cl] != null ? opt.radius[cl] : ring.r * 0.6), cl);
+      }
+    } else {
+      // the five draws per leaf the card walk takes (frac, rotation, size, hue, warmth) - consumed so siblings match
+      const lc = opt.leaf_count || 6; let hjS = 0, wS = 0;
+      for (let i = 0; i < lc; i++) { rng(); rng(); rng(); hjS += rng(); wS += 0.7 + rng() * 0.5; }
+      const tn = twigN++;
+      const kh = ((Math.imul(tn + 1, 2654435761) >>> 0) % 10000) / 10000;
+      if (kh < keepP) ribbons.push({ rings: rings, hj: hjS / lc, warm: wS / lc, lst: opt.leaf_start || 0.2 });
+    }
+  }
+  branch(new THREE.Vector3(0, 0, 0), new THREE.Quaternion(), opt.length[0], opt.radius[0], 0);
+  // the crown centre (normals point out of the crown from here) and its reach
+  const cc = new THREE.Vector3(); let cn = 0;
+  for (const rb of ribbons) for (const Rg of rb.rings) { cc.add(Rg.p); cn++; }
+  if (cn) cc.multiplyScalar(1 / cn);
+  let maxD = 1e-3; for (const rb of ribbons) for (const Rg of rb.rings) maxD = Math.max(maxD, Rg.p.distanceTo(cc));
+  const u0 = A.cols[col][0], u1 = A.cols[col][1];
+  const ls = opt.leaf_size || 2, halfW = ls * K.ribbonW * (col === 'frond' ? 1.6 : 1.0);
+  const colW = (u1 - u0) * A.W;
+  for (const rb of ribbons) {
+    const n = rb.rings.length;
+    const s0 = Math.min(n - 2, Math.max(0, Math.round(rb.lst * (n - 1))));
+    const tip = rb.rings[n - 1], prev = rb.rings[n - 2];
+    const ext = tip.p.clone().add(tip.p.clone().sub(prev.p).normalize().multiplyScalar(ls * K.tipExt));
+    const pts = []; for (let s = s0; s < n; s++) pts.push({ p: rb.rings[s].p, q: rb.rings[s].q }); pts.push({ p: ext, q: tip.q });
+    // v: the tip at 0 (top of the canvas), length-proportional so the leaves keep their aspect
+    let L = 0; for (let k = 1; k < pts.length; k++) L += pts[k].p.distanceTo(pts[k - 1].p);
+    const vSpan = Math.min(1, (L / (2 * halfW)) * colW / A.H);
+    const hj = rb.hj, warm = rb.warm;
+    const cTop = [Math.min(1, leafC[0] * (0.9 + hj * 0.6) * warm), Math.min(1, leafC[1] * (0.9 + hj * 0.4)), Math.min(1, leafC[2] * (0.75 + hj * 0.3))];
+    for (let rI = 0; rI < K.ribbons; rI++) {
+      const rot = (rI / K.ribbons) * Math.PI + hj * 1.3, base = POS.length / 3;
+      let acc = 0;
+      for (let k = 0; k < pts.length; k++) {
+        if (k) acc += pts[k].p.distanceTo(pts[k - 1].p);
+        const side = vT.set(Math.cos(rot), 0, Math.sin(rot)).applyQuaternion(pts[k].q).clone();
+        const t = acc / Math.max(1e-3, L);
+        const w = halfW * (0.55 + 0.45 * Math.sin(Math.min(1, t * 1.15) * Math.PI * 0.5 + 0.35));
+        const v = vSpan * (1 - t);
+        for (const sgn of [-1, 1]) {
+          const p = pts[k].p.clone().addScaledVector(side, sgn * w);
+          const ao = K.ao > 0 ? (1 - K.ao) + K.ao * Math.min(1, p.distanceTo(cc) / maxD) : 1;
+          vtx(p, p.clone().sub(cc).normalize(), [cTop[0] * ao, cTop[1] * ao, cTop[2] * ao], sgn < 0 ? u0 : u1, v, 1);
+        }
+      }
+      for (let k = 0; k < pts.length - 1; k++) { const a = base + k * 2, b = a + 2; IDX.push(a, b, a + 1, a + 1, b, b + 1); }
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(POS, 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(NRM, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(COL, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(UV, 2));
+  g.setIndex(IDX);
+  if (K.canopyN < 1) {   // canopy normals: the ribbon's own (smoothed) plane normal blended toward the radial one
+    const flat = g.clone(); flat.computeVertexNormals();
+    const fn = flat.attributes.normal.array, nn = g.attributes.normal.array, kN = K.canopyN;
+    for (let i = 0; i < KIND.length; i++) {
+      if (!KIND[i]) continue;
+      let x = fn[i * 3], y = fn[i * 3 + 1], z = fn[i * 3 + 2];
+      const ox = nn[i * 3], oy = nn[i * 3 + 1], oz = nn[i * 3 + 2];
+      if (x * ox + y * oy + z * oz < 0) { x = -x; y = -y; z = -z; }
+      const rx = x * (1 - kN) + ox * kN, ry = y * (1 - kN) + oy * kN, rz = z * (1 - kN) + oz * kN;
+      const l = Math.sqrt(rx * rx + ry * ry + rz * rz) || 1;
+      nn[i * 3] = rx / l; nn[i * 3 + 1] = ry / l; nn[i * 3 + 2] = rz / l;
+    }
+    flat.dispose();
+  }
+  g.computeBoundingSphere(); g.computeBoundingBox();
+  try { Object.defineProperty(g, '_lssSrc', { value: opt, enumerable: false, writable: true, configurable: true }); } catch (_) {}
+  return g;
+}
+// ── the material: _swFoliageMat's own (same sway, same distance fade) + the atlas, the cut-out, canopy lighting on
+// both faces and the coverage hold; plus the matching depth material for the shadow pass. three r165 would build
+// an alpha-tested depth variant on its own (map + alphaTest), but without the coverage hold the far shadow map
+// - 6.6 u a texel here, the lowest mips - would fail the cut-out and lose its trees. Set as customDepthMaterial by
+// the two shadow-casting planters (_swBuildTrees' emit, the city parks); the sky islands cast nothing.
+function _swRibbonPatchMat(m) {
+  const A = _swLeafAtlasGet(), K = _swRibbonK();
+  const ALPHA = '{ vec2 _rdx = dFdx(vMapUv * uAtlasPx), _rdy = dFdy(vMapUv * uAtlasPx);\n' +
+    '  float _rmip = max(0.0, 0.5 * log2(max(dot(_rdx, _rdx), dot(_rdy, _rdy))));\n' +
+    '  diffuseColor.a *= 1.0 + _rmip * uCoverK; }\n' +
+    'if ( diffuseColor.a < alphaTest ) discard;';
+  const uCov = { value: K.coverK }, uPx = { value: new THREE.Vector2(A.W, A.H) };
+  m.map = A.tex; m.alphaTest = K.cutoff; m.roughness = 0.85;
+  const ob = m.onBeforeCompile;
+  m.onBeforeCompile = function (sh, r) {
+    if (ob) ob.call(this, sh, r);
+    sh.uniforms.uAtlasPx = uPx; sh.uniforms.uCoverK = uCov;
+    sh.fragmentShader = 'uniform vec2 uAtlasPx;\nuniform float uCoverK;\n' + sh.fragmentShader
+      .replace('#include <alphatest_fragment>', ALPHA)
+      .replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\n#ifdef DOUBLE_SIDED\n  normal *= faceDirection;\n#endif');
+  };
+  m.customProgramCacheKey = () => 'lss-ribbon-tree-1';
+  const d = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking, map: A.tex, alphaTest: K.cutoff, side: THREE.DoubleSide });
+  d.onBeforeCompile = (sh) => {
+    sh.uniforms.uAtlasPx = uPx; sh.uniforms.uCoverK = uCov;
+    sh.fragmentShader = 'uniform vec2 uAtlasPx;\nuniform float uCoverK;\n' + sh.fragmentShader.replace('#include <alphatest_fragment>', ALPHA);
+  };
+  d.customProgramCacheKey = () => 'lss-ribbon-depth-1';
+  try {
+    Object.defineProperty(m, '_lssDepth', { value: d, enumerable: false, configurable: true });
+    Object.defineProperty(m, '_lssRib', { value: { uCov: uCov, uPx: uPx }, enumerable: false, configurable: true });
+  } catch (_) {}
+  m.needsUpdate = true;
+  return m;
+}
+if (typeof window !== 'undefined') {
+  // regenerate every ribbon species IN PLACE (same geometry objects, so every chunk, park and island picks it up)
+  window.__treeRibbonRebuild = function () {
+    const sets = _swTreeGeos; if (!sets || !_swTreeStyleRibbon()) return 'no ribbon tree set';
+    const K = _swRibbonK(), seen = new Set();
+    for (const key of ['std', 'snow', 'trop']) for (const g of (sets[key] || [])) {
+      if (!g || seen.has(g) || !g._lssSrc) continue; seen.add(g);
+      const ng = _swGenRibbonTree(g._lssSrc, K);
+      g.dispose();
+      for (const a of Object.keys(g.attributes)) g.deleteAttribute(a);
+      for (const a of Object.keys(ng.attributes)) g.setAttribute(a, ng.attributes[a]);
+      g.setIndex(ng.index); g.boundingSphere = ng.boundingSphere; g.boundingBox = ng.boundingBox;
+    }
+    const m = _swTreeMat;
+    if (m && m._lssRib) { m._lssRib.uCov.value = K.coverK; m.alphaTest = K.cutoff; if (m._lssDepth) m._lssDepth.alphaTest = K.cutoff; }
+    return 'rebuilt ' + seen.size + ' ribbon species';
+  };
+  window.__treeAtlas = function () {
+    const A = _swLeafAtlasGet.a; if (!A) return 'no atlas yet';
+    const w = window.open(); if (w) { w.document.body.style.background = '#333'; const img = w.document.createElement('img'); img.src = A.canvas.toDataURL(); img.style.width = '100%'; w.document.body.appendChild(img); }
+    return A.W + 'x' + A.H;
+  };
+}
+// ═══ (v50.64) SHORE PLANTS: flowers, reeds and leafy plants along every overworld shoreline ═══════════════════
+// Owner, once the ribbon trees had bought the frames back: "i think we can afford a few flowers and some other plants
+// along the shorelines" / "the whole overworld could have those".
+// The ribbon trees' technique at plant scale: each plant is a handful of bent, cut-out CARDS (4 triangles each, 24-44
+// a plant) from their own painted atlas - FULL COLOUR this time (a flower is two colours, petals and leaves, and a
+// vertex tint would paint both), with the same cut-out coverage hold and un-flipped double-sided normals. Kinds:
+// REEDS at the waterline; FLOWERING BUSHES (red / pink / yellow) and WILDFLOWER clumps (white / yellow) - the accent -
+// and BIG LEAVES, GROUND FERNS and a leafy shrub - the majority - just above it.
+//   - Per chunk, riding the tree lifecycle (`c.trees`, like the drapes): one reed variant + one leafy + one flowering
+//     variant from a REGIONAL palette (3-chunk grid), so a coast reads as one ecology and a chunk costs <= 3 draws.
+//   - Only where a shore is: a 5x5 height probe drops a chunk with no ground near the water before any per-plant work,
+//     so inland chunks cost ~25 terrain samples. Bands by height over the water: reeds -3..12, the rest 12..62,
+//     gentle slopes only (beaches and banks, not cliffs).
+//   - Zones: none in the snow or volcanic sectors; the deep sectors thin them the way they thin the trees.
+//   - No shadows (small plants - the mushrooms' rule). Their own fade: they shrink out between fadeA and fadeB
+//     (1800 / 2600 u - the same shader code as the trees' fade, pointed at their own uniforms) and the chunk gate in
+//     _swTreeVisTick hides them past fadeB (`userData._plantB`), so a far coast submits nothing.
+//   - window.__plants = { on, density, fadeA, fadeB } - on / density apply to chunks built after the change, the
+//     fades live; __plantAtlas() opens the painted atlas.
+function _swPlantK() {
+  const K = (typeof window !== 'undefined' && window.__plants) || {};
+  const o = _swPlantK.o || (_swPlantK.o = {});
+  o.on = K.on !== false;
+  o.density = (K.density != null) ? +K.density : 1;
+  o.fadeA = (K.fadeA != null) ? +K.fadeA : 1800;
+  o.fadeB = (K.fadeB != null) ? +K.fadeB : 2600;
+  return o;
+}
+function _swPlantAtlasGet() {
+  const S = _swPlantAtlasGet;
+  if (S.a) return S.a;
+  const small = (typeof _fxSmallDevice === 'function' && _fxSmallDevice());
+  const C = small ? 128 : 256, W = C * 4, H = C * 2;
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = small ? 2 : 4;
+  tex.generateMipmaps = true; tex.minFilter = THREE.LinearMipmapLinearFilter; tex.magFilter = THREE.LinearFilter;
+  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping; tex.flipY = false;   // canvas row 0 = v 0
+  const cells = { red: [0, 0], yellow: [1, 0], pink: [2, 0], white: [3, 0], blades: [0, 1], bigleaf: [1, 1], sprig: [2, 1], fern: [3, 1] };
+  const m = 0.04;   // the UVs stay inside each cell; the painted art does too
+  const uv = (name) => { const c = cells[name]; return { u0: (c[0] + m) / 4, u1: (c[0] + 1 - m) / 4, vT: (c[1] + m) / 2, vB: (c[1] + 1 - m) / 2 }; };
+  S.a = { tex: tex, canvas: cv, C: C, W: W, H: H, cells: cells, uv: uv };
+  _swPlantAtlasPaint(S.a);
+  return S.a;
+}
+function _swPlantAtlasPaint(A) {
+  const g = A.canvas.getContext('2d'), C = A.C;
+  g.clearRect(0, 0, A.W, A.H);
+  let s = 11 >>> 0;
+  const R = () => { s = s + 0x6D2B79F5 | 0; let t = Math.imul(s ^ s >>> 15, 1 | s); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+  const at = (name) => { const c = A.cells[name]; return [c[0] * C, c[1] * C]; };   // a cell's top-left, px
+  // a pointed leaf from (x, y) growing along `ang` (0 = straight up the canvas)
+  const leaf = (x, y, ang, len, wid, c0, c1) => {
+    g.save(); g.translate(x, y); g.rotate(ang);
+    const grd = g.createLinearGradient(0, 0, 0, -len); grd.addColorStop(0, c0); grd.addColorStop(1, c1);
+    g.fillStyle = grd; g.beginPath(); g.moveTo(0, 0);
+    g.bezierCurveTo(wid, -len * 0.25, wid * 0.8, -len * 0.75, 0, -len);
+    g.bezierCurveTo(-wid * 0.8, -len * 0.75, -wid, -len * 0.25, 0, 0); g.fill();
+    g.strokeStyle = 'rgba(20,50,20,0.45)'; g.lineWidth = Math.max(1, wid * 0.08);
+    g.beginPath(); g.moveTo(0, -len * 0.05); g.lineTo(0, -len * 0.9); g.stroke();
+    g.restore();
+  };
+  // a flower: nP petals round (x, y), each a gradient from the heart colour out to the tip colour
+  const flower = (x, y, r, nP, cIn, cOut, cCtr, petalW) => {
+    for (let i = 0; i < nP; i++) {
+      const a = (i / nP) * Math.PI * 2 + R() * 0.3;
+      g.save(); g.translate(x, y); g.rotate(a);
+      const grd = g.createLinearGradient(0, 0, 0, -r); grd.addColorStop(0, cIn); grd.addColorStop(1, cOut);
+      g.fillStyle = grd; g.beginPath(); g.ellipse(0, -r * 0.5, r * petalW, r * 0.55, 0, 0, Math.PI * 2); g.fill();
+      g.restore();
+    }
+    g.fillStyle = cCtr; g.beginPath(); g.arc(x, y, r * 0.18, 0, Math.PI * 2); g.fill();
+  };
+  const leavesUnder = (x0, y0, n) => { for (let i = 0; i < n; i++) leaf(x0 + C * (0.15 + R() * 0.7), y0 + C * 0.97, (R() - 0.5) * 1.8, C * (0.32 + R() * 0.2), C * 0.085, '#1d4a1a', '#3f8a33'); };
+  { // RED: hibiscus - big five-petal blooms, yellow stamen hearts
+    const [x0, y0] = at('red'); leavesUnder(x0, y0, 6);
+    for (const [fx, fy, fr] of [[0.30, 0.36, 0.20], [0.70, 0.30, 0.18], [0.52, 0.64, 0.21]]) flower(x0 + C * fx, y0 + C * fy, C * fr, 5, '#7e0b1e', '#ff4a5a', '#ffd34a', 0.55);
+  }
+  { // YELLOW: allamanda-like trumpets
+    const [x0, y0] = at('yellow'); leavesUnder(x0, y0, 6);
+    for (const [fx, fy, fr] of [[0.28, 0.40, 0.15], [0.66, 0.28, 0.16], [0.70, 0.62, 0.14], [0.36, 0.70, 0.13]]) flower(x0 + C * fx, y0 + C * fy, C * fr, 5, '#c98a00', '#ffe560', '#a35a00', 0.62);
+  }
+  { // PINK: bougainvillea - clusters of small papery three-bract flowers
+    const [x0, y0] = at('pink'); leavesUnder(x0, y0, 5);
+    for (let i = 0; i < 16; i++) flower(x0 + C * (0.16 + R() * 0.68), y0 + C * (0.14 + R() * 0.62), C * (0.06 + R() * 0.035), 3, '#a0105e', '#ff5cb0', '#fff1c8', 0.75);
+  }
+  { // WHITE: daisy-like wildflowers - many thin petals, yellow hearts, a few stems
+    const [x0, y0] = at('white');
+    g.strokeStyle = '#3d7a2e'; g.lineWidth = Math.max(1, C * 0.012);
+    const pts = [];
+    for (let i = 0; i < 9; i++) pts.push([x0 + C * (0.14 + R() * 0.72), y0 + C * (0.12 + R() * 0.55)]);
+    for (const [px, py] of pts) { g.beginPath(); g.moveTo(px, py); g.quadraticCurveTo(px + (R() - 0.5) * C * 0.1, (py + y0 + C) / 2, x0 + C * 0.5 + (R() - 0.5) * C * 0.3, y0 + C * 0.98); g.stroke(); }
+    for (const [px, py] of pts) flower(px, py, C * (0.075 + R() * 0.03), 12, '#d9d3ff', '#ffffff', '#ffc928', 0.22);
+  }
+  { // BLADES: grass and reeds fanning from the base, a couple of cattails
+    const [x0, y0] = at('blades'), bx = x0 + C * 0.5, by = y0 + C * 0.98;
+    for (let i = 0; i < 13; i++) {
+      const ang = (R() - 0.5) * 0.9, len = C * (0.62 + R() * 0.32), w = C * (0.022 + R() * 0.014);
+      g.save(); g.translate(bx + (R() - 0.5) * C * 0.12, by); g.rotate(ang);
+      const grd = g.createLinearGradient(0, 0, 0, -len); grd.addColorStop(0, '#2f6a24'); grd.addColorStop(1, '#a8c95a');
+      g.fillStyle = grd; g.beginPath(); g.moveTo(-w, 0); g.quadraticCurveTo(-w * 0.6, -len * 0.6, (R() - 0.5) * w * 4, -len); g.quadraticCurveTo(w * 0.6, -len * 0.6, w, 0); g.fill();
+      g.restore();
+    }
+    for (const fx of [0.36, 0.62]) { // cattails
+      const cx = x0 + C * fx, top = y0 + C * (0.10 + R() * 0.08);
+      g.strokeStyle = '#4d6b2a'; g.lineWidth = Math.max(1, C * 0.012); g.beginPath(); g.moveTo(cx, by); g.lineTo(cx, top); g.stroke();
+      g.fillStyle = '#6b4423'; g.beginPath(); g.ellipse(cx, top + C * 0.1, C * 0.03, C * 0.09, 0, 0, Math.PI * 2); g.fill();
+    }
+  }
+  { // BIGLEAF: one elephant-ear heart, veined
+    const [x0, y0] = at('bigleaf'), cx = x0 + C * 0.5, base = y0 + C * 0.97, top = y0 + C * 0.05;
+    g.strokeStyle = '#3d6b2a'; g.lineWidth = Math.max(1, C * 0.02); g.beginPath(); g.moveTo(cx, base); g.lineTo(cx, y0 + C * 0.72); g.stroke();
+    const grd = g.createLinearGradient(0, base, 0, top); grd.addColorStop(0, '#24561f'); grd.addColorStop(1, '#5fa64a');
+    g.fillStyle = grd; g.beginPath();
+    g.moveTo(cx, y0 + C * 0.74);
+    g.bezierCurveTo(cx + C * 0.52, y0 + C * 0.82, cx + C * 0.50, y0 + C * 0.20, cx, top);
+    g.bezierCurveTo(cx - C * 0.50, y0 + C * 0.20, cx - C * 0.52, y0 + C * 0.82, cx, y0 + C * 0.74);
+    g.fill();
+    g.strokeStyle = 'rgba(200,235,170,0.45)'; g.lineWidth = Math.max(1, C * 0.008);
+    g.beginPath(); g.moveTo(cx, y0 + C * 0.72); g.lineTo(cx, top + C * 0.04); g.stroke();
+    for (let i = 1; i <= 5; i++) { const yy = y0 + C * (0.70 - i * 0.11); for (const sd of [-1, 1]) { g.beginPath(); g.moveTo(cx, yy); g.quadraticCurveTo(cx + sd * C * 0.18, yy - C * 0.02, cx + sd * C * (0.36 - i * 0.03), yy - C * 0.10); g.stroke(); } }
+  }
+  { // SPRIG: a stem with alternate leaves (the shrubs' foliage and the leafy shrub)
+    const [x0, y0] = at('sprig'), cx = x0 + C * 0.5;
+    g.strokeStyle = '#4a5a2a'; g.lineWidth = Math.max(1, C * 0.016); g.beginPath(); g.moveTo(cx, y0 + C * 0.98); g.lineTo(cx, y0 + C * 0.08); g.stroke();
+    for (let y = y0 + C * 0.9; y > y0 + C * 0.12; y -= C * 0.09) for (const sd of [-1, 1]) leaf(cx, y + (R() - 0.5) * C * 0.03, sd * (0.6 + R() * 0.5), C * (0.22 + R() * 0.08), C * (0.075 + R() * 0.02), '#25561f', '#4f9a3c');
+    leaf(cx, y0 + C * 0.14, 0, C * 0.16, C * 0.06, '#25561f', '#5aa846');
+  }
+  { // FERN: a pinnate frond
+    const [x0, y0] = at('fern'), cx = x0 + C * 0.5;
+    g.strokeStyle = '#3f6a26'; g.lineWidth = Math.max(1, C * 0.014); g.beginPath(); g.moveTo(cx, y0 + C * 0.98); g.lineTo(cx, y0 + C * 0.05); g.stroke();
+    for (let y = y0 + C * 0.92; y > y0 + C * 0.07; y -= C * 0.045) {
+      const t = 1 - (y - y0) / C, len = C * (0.40 - 0.28 * t);
+      for (const sd of [-1, 1]) leaf(cx, y, sd * (1.25 - 0.35 * t), len, C * 0.026, '#2a5e22', '#6cb24e');
+    }
+  }
+  A.tex.needsUpdate = true;
+}
+// one plant: a handful of bent cards - base, mid, tip rows; mostly-up normals for a soft, lit look
+function _swGenPlant(kind, seed, flowerCell) {
+  const A = _swPlantAtlasGet();
+  let s = Math.imul(seed | 0, 2654435761) | 0;
+  const R = () => { s = s + 0x6D2B79F5 | 0; let t = Math.imul(s ^ s >>> 15, 1 | s); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+  const POS = [], NRM = [], COL = [], UV = [], IDX = [];
+  const card = (bx, by, bz, ang, tilt, bend, w, h, cell, br) => {
+    const U = A.uv(cell);
+    const dx = Math.cos(ang), dz = Math.sin(ang), sx = -dz, sz = dx;
+    const a1x = Math.sin(tilt) * dx, a1y = Math.cos(tilt), a1z = Math.sin(tilt) * dz;
+    const t2 = tilt + bend, a2x = Math.sin(t2) * dx, a2y = Math.cos(t2), a2z = Math.sin(t2) * dz;
+    const hh = h * 0.5;
+    const p1x = bx + a1x * hh, p1y = by + a1y * hh, p1z = bz + a1z * hh;
+    const rows = [[bx, by, bz, U.vB], [p1x, p1y, p1z, (U.vB + U.vT) * 0.5], [p1x + a2x * hh, p1y + a2y * hh, p1z + a2z * hh, U.vT]];
+    let nx = dx * 0.45, ny = 0.85, nz = dz * 0.45; const nl = Math.sqrt(nx * nx + ny * ny + nz * nz); nx /= nl; ny /= nl; nz /= nl;
+    const base = POS.length / 3;
+    for (const r of rows) for (const sg of [-1, 1]) {
+      POS.push(r[0] + sx * sg * w * 0.5, r[1], r[2] + sz * sg * w * 0.5);
+      NRM.push(nx, ny, nz); COL.push(br, br, br); UV.push(sg < 0 ? U.u0 : U.u1, r[3]);
+    }
+    IDX.push(base, base + 2, base + 1, base + 1, base + 2, base + 3, base + 2, base + 4, base + 3, base + 3, base + 4, base + 5);
+  };
+  if (kind === 'reeds') {
+    const n = 7 + (R() * 3 | 0);
+    for (let i = 0; i < n; i++) { const a = R() * 6.283, r = R() * 3; card(Math.cos(a) * r, 0, Math.sin(a) * r, R() * 6.283, 0.05 + R() * 0.25, 0.1 + R() * 0.3, 7 + R() * 3, 28 + R() * 16, 'blades', 0.85 + R() * 0.2); }
+  } else if (kind === 'bush') {
+    for (let i = 0; i < 7; i++) { const a = (i / 7) * 6.283 + R() * 0.5; card(Math.cos(a) * 1.5, 0, Math.sin(a) * 1.5, a, 0.55 + R() * 0.35, 0.25, 11 + R() * 4, 14 + R() * 5, 'sprig', 0.8 + R() * 0.25); }
+    for (let i = 0; i < 4; i++) { const a = (i / 4) * 6.283 + R() * 0.8, r = 2 + R() * 3; card(Math.cos(a) * r, 8 + R() * 4, Math.sin(a) * r, a, 0.25 + R() * 0.45, 0, 9 + R() * 3, 9 + R() * 3, flowerCell, 0.95 + R() * 0.1); }
+  } else if (kind === 'wild') {
+    for (let i = 0; i < 5; i++) { const a = R() * 6.283; card(Math.cos(a), 0, Math.sin(a), a, 0.1 + R() * 0.3, 0.2, 6 + R() * 2, 12 + R() * 6, 'blades', 0.85 + R() * 0.2); }
+    for (let i = 0; i < 3; i++) { const a = R() * 6.283, r = 1 + R() * 2.5; card(Math.cos(a) * r, 4 + R() * 4, Math.sin(a) * r, a, 0.2 + R() * 0.5, 0, 8 + R() * 3, 8 + R() * 3, flowerCell, 0.95 + R() * 0.1); }
+  } else if (kind === 'bigleaf') {
+    const n = 5 + (R() * 2 | 0);
+    for (let i = 0; i < n; i++) { const a = (i / n) * 6.283 + R() * 0.4; card(Math.cos(a) * 1.2, 0, Math.sin(a) * 1.2, a, 0.55 + R() * 0.4, 0.3, 14 + R() * 5, 20 + R() * 7, 'bigleaf', 0.8 + R() * 0.25); }
+  } else {   // 'fern'
+    const n = 7 + (R() * 2 | 0);
+    for (let i = 0; i < n; i++) { const a = (i / n) * 6.283 + R() * 0.3; card(Math.cos(a), 0, Math.sin(a), a, 0.75 + R() * 0.35, 0.55, 7 + R() * 2, 18 + R() * 6, 'fern', 0.8 + R() * 0.25); }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(POS, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(NRM, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(COL, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(UV, 2));
+  geo.setIndex(IDX);
+  geo.computeBoundingSphere(); geo.computeBoundingBox();
+  return geo;
+}
+function _swPlantGeoGet() {
+  const S = _swPlantGeoGet;
+  if (!S.g) S.g = {
+    reeds: [_swGenPlant('reeds', 11), _swGenPlant('reeds', 12)],
+    leafy: [_swGenPlant('bigleaf', 21), _swGenPlant('fern', 22), _swGenPlant('bush', 23, 'sprig')],
+    bloom: [_swGenPlant('bush', 31, 'red'), _swGenPlant('bush', 32, 'pink'), _swGenPlant('bush', 33, 'yellow'), _swGenPlant('wild', 34, 'white'), _swGenPlant('wild', 35, 'yellow')],
+  };
+  return S.g;
+}
+function _swPlantMatGet() {
+  const S = _swPlantMatGet;
+  if (S.m) return S.m;
+  const A = _swPlantAtlasGet(), K = _swPlantK();
+  const m = _swFoliageMat(0);   // the trees' sway + distance fade, pointed at the plants' own fade below
+  m.map = A.tex; m.alphaTest = 0.45; m.roughness = 0.8;
+  const uA = { value: K.fadeA }, uB = { value: K.fadeB }, uCov = { value: 0.22 }, uPx = { value: new THREE.Vector2(A.W, A.H) };
+  const ob = m.onBeforeCompile;
+  m.onBeforeCompile = function (sh, r) {
+    if (ob) ob.call(this, sh, r);
+    sh.uniforms.uTreeFadeA = uA; sh.uniforms.uTreeFadeB = uB;
+    sh.uniforms.uAtlasPx = uPx; sh.uniforms.uCoverK = uCov;
+    sh.fragmentShader = 'uniform vec2 uAtlasPx;\nuniform float uCoverK;\n' + sh.fragmentShader
+      .replace('#include <alphatest_fragment>',
+        '{ vec2 _rdx = dFdx(vMapUv * uAtlasPx), _rdy = dFdy(vMapUv * uAtlasPx);\n' +
+        '  float _rmip = max(0.0, 0.5 * log2(max(dot(_rdx, _rdx), dot(_rdy, _rdy))));\n' +
+        '  diffuseColor.a *= 1.0 + _rmip * uCoverK; }\n' +
+        'if ( diffuseColor.a < alphaTest ) discard;')
+      .replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\n#ifdef DOUBLE_SIDED\n  normal *= faceDirection;\n#endif');
+  };
+  m.customProgramCacheKey = () => 'lss-shore-plant-1';
+  try { Object.defineProperty(m, '_lssFade', { value: { uA: uA, uB: uB }, enumerable: false, configurable: true }); } catch (_) {}
+  m.needsUpdate = true;
+  S.m = m;
+  return m;
+}
+function _swBuildShorePlants(x0, z0, T) {
+  const K = _swPlantK();
+  if (!K.on || !T || !T.HUB || T.WL == null || T.biome !== 'mossy') return null;
+  const WL = T.WL;
+  // is there a shore here at all? 25 samples, before any per-plant work
+  let near = false;
+  for (let j = 0; j <= 4 && !near; j++) for (let i = 0; i <= 4; i++) {
+    const y = _stGroundYCarved(x0 + i * _SW_CHUNK / 4, z0 + j * _SW_CHUNK / 4, T);
+    if (y > WL - 30 && y < WL + 90) { near = true; break; }
+  }
+  if (!near) return null;
+  const P = _swPlantGeoGet(), mat = _swPlantMatGet();
+  const small = (typeof _fxSmallDevice === 'function' && _fxSmallDevice());
+  const spacing = small ? 46 : 32, N = Math.max(2, Math.round(_SW_CHUNK / spacing)), step = _SW_CHUNK / N;
+  // the coast's palette, shared by neighbouring chunks (a 3-chunk grid)
+  const rx = Math.floor(x0 / (_SW_CHUNK * 3)), rz = Math.floor(z0 / (_SW_CHUNK * 3));
+  const hsh = (a, b) => { let h = (Math.imul(a | 0, 73856093) ^ Math.imul(b | 0, 19349663)) >>> 0; h = Math.imul(h ^ (h >>> 13), 1274126177) >>> 0; return ((h ^ (h >>> 16)) >>> 0) / 4294967296; };
+  const geos = [P.reeds[Math.floor(hsh(rx, rz) * P.reeds.length) % P.reeds.length],
+                P.leafy[Math.floor(hsh(rx + 17, rz - 5) * P.leafy.length) % P.leafy.length],
+                P.bloom[Math.floor(hsh(rx - 9, rz + 23) * P.bloom.length) % P.bloom.length]];
+  const buckets = [[], [], []];   // reeds / leafy / flowering
+  // deterministic per chunk: a rebuilt chunk replants exactly the same plants
+  let s = (Math.imul(Math.round(x0 / 16) + 4242, 2654435761) ^ Math.imul(Math.round(z0 / 16) + 777, 40503)) | 0;
+  const rnd = () => { s = s + 0x6D2B79F5 | 0; let t = Math.imul(s ^ s >>> 15, 1 | s); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+  const dens = K.density * (small ? 0.6 : 1);
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+    const x = x0 + (i + rnd()) * step, z = z0 + (j + rnd()) * step;
+    const r1 = rnd(), r2 = rnd(), r3 = rnd();   // drawn up front: a rejection never shifts the stream
+    const y = _stGroundYCarved(x, z, T), dy = y - WL;
+    if (dy < -3 || dy > 62) continue;
+    const reedBand = dy < 12;
+    if (r1 > (reedBand ? 0.40 : 0.26) * dens) continue;   // the cheap rejection first
+    if (_hubCityExcludes(x, z)) continue;
+    if (typeof _owExcludes === 'function' && _owExcludes(x, z)) continue;
+    const zn = _hzZoneForFoliage(x, z);
+    if (zn && (zn.key === 'snow' || zn.key === 'volcanic')) continue;
+    if (zn && r2 > Math.max(0.15, 1 - 0.8 * zn.zs)) continue;
+    const yx = _stGroundYCarved(x + 6, z, T), yz = _stGroundYCarved(x, z + 6, T);   // gentle ground only
+    if (Math.sqrt((yx - y) * (yx - y) + (yz - y) * (yz - y)) / 6 > (reedBand ? 0.45 : 0.6)) continue;
+    if (typeof _volcHotAt === 'function' && _volcHotAt(x, z, 1.2) > 0.004) continue;
+    buckets[reedBand ? 0 : (r3 < 0.62 ? 1 : 2)].push(x, y, z);
+  }
+  const meshes = [];
+  const M = new THREE.Matrix4(), Q = new THREE.Quaternion(), E = new THREE.Euler(), Pv = new THREE.Vector3(), Sv = new THREE.Vector3(), Cc = new THREE.Color();
+  for (let b = 0; b < 3; b++) {
+    const pts = buckets[b], n = pts.length / 3;
+    if (n < 1) continue;
+    const im = new THREE.InstancedMesh(geos[b], mat, n);
+    for (let k = 0; k < n; k++) {
+      const sc = 0.8 + rnd() * 0.7;
+      E.set(0, rnd() * 6.283, 0); Q.setFromEuler(E);
+      Pv.set(pts[k * 3], pts[k * 3 + 1] - 1.5, pts[k * 3 + 2]); Sv.set(sc, sc * (0.85 + rnd() * 0.3), sc);
+      M.compose(Pv, Q, Sv); im.setMatrixAt(k, M);
+      const bl = 0.86 + rnd() * 0.2; Cc.setRGB(bl, bl, bl); im.setColorAt(k, Cc);
+    }
+    im.instanceMatrix.needsUpdate = true; if (im.instanceColor) im.instanceColor.needsUpdate = true;
+    im.frustumCulled = true; im.castShadow = false; im.receiveShadow = true;
+    im.userData = { isSandwichTerrain: true, _plantB: true };
+    scene.add(_lssFreezeStatic(im)); meshes.push(im);
+  }
+  return meshes.length ? meshes : null;
+}
+if (typeof window !== 'undefined') window.__plantAtlas = function () {
+  const A = _swPlantAtlasGet.a; if (!A) return 'no atlas yet';
+  const w = window.open(); if (w) { w.document.body.style.background = '#333'; const img = w.document.createElement('img'); img.src = A.canvas.toDataURL(); img.style.width = '100%'; w.document.body.appendChild(img); }
+  return A.W + 'x' + A.H;
+};
 // (v35.12) Bioluminescent MUSHROOM — the "tree" of the hub's glowing-blue
 // zones (crystalcave / rocky sectors). Same vertex-coloured merged-geometry
 // pattern as _swGenTree : bent pale stalk, blue dome cap (dark rim -> bright
@@ -40391,8 +40997,9 @@ function _swTreeGeoGet(){
   _swTreeGeos={
     // Index list of the `park` species within std, for the hub city's planting.
     park: base.map((p,i)=>p.park?i:-1).filter(i=>i>=0),
-    std: base.map(p=>_swGenTree(p)),
-    snow: (_cold.length?_cold:base).map(p=>_swGenTree(snowify(p))),
+    // (v50.63) textured leaf ribbons unless ?trees=classic - see _swGenRibbonTree (same presets, same skeleton)
+    std: base.map(p=>_swTreeStyleRibbon()?_swGenRibbonTree(p):_swGenTree(p)),
+    snow: (_cold.length?_cold:base).map(p=>{ const sp=snowify(p); return _swTreeStyleRibbon()?_swGenRibbonTree(sp):_swGenTree(sp); }),
     shroom: [
       _swGenMushroom({seed:501,h:15,r:6.5,capH:5.2,sr:1.5}),
       _swGenMushroom({seed:502,h:23,r:5.4,capH:6.8,sr:1.15}),
@@ -40417,7 +41024,7 @@ function _swTreeGeoGet(){
       const bi = base.findIndex(p => p.seed === sd);
       if (bi >= 0) return _swTreeGeos.std[bi];
       const p = _all.find(q => q.seed === sd);
-      return p ? _swGenTree(p) : null;
+      return p ? (_swTreeStyleRibbon() ? _swGenRibbonTree(p) : _swGenTree(p)) : null;   // (v50.63)
     };
     const want = { palm: 1212, fern: 1515, oak: 1011, baobab: 1414 };
     if (_full) { want.mangrove = 1818; want.willow = 4044; }
@@ -40440,7 +41047,7 @@ function _swFoliageMat(glow){
       '#include <begin_vertex>\n vec3 ip=vec3(instanceMatrix[3][0],instanceMatrix[3][1],instanceMatrix[3][2]);\n float ph=ip.x*0.05+ip.z*0.05;\n float vph=ph+transformed.x*0.08+transformed.z*0.08+transformed.y*0.05;\n float canopy=max(0.0,transformed.y-18.0);\n float cf=canopy*canopy*0.0012+canopy*0.015;\n cf=min(cf,transformed.y*uSway);\n float gust=0.6+0.4*sin(uTime*0.13+ph*0.3);\n float swayX=(sin(uTime*0.9+vph)*0.85+sin(uTime*1.9+vph*1.7)*0.4)*gust;\n float swayZ=(sin(uTime*0.8+vph*1.2+1.7)*0.7+sin(uTime*2.3+vph*1.5)*0.3)*gust;\n transformed.x+=swayX*cf;\n transformed.z+=swayZ*cf;\n transformed.y+=sin(uTime*3.1+vph*2.0)*cf*0.22;\n float tfade=1.0-smoothstep(uTreeFadeA,uTreeFadeB,distance(ip.xz,uCam.xz));\n transformed*=tfade;'); };
   return m;
 }
-function _swTreeMatGet(){ if(!_swTreeMat) _swTreeMat=_swFoliageMat(0); return _swTreeMat; }
+function _swTreeMatGet(){ if(!_swTreeMat){ _swTreeMat=_swFoliageMat(0); if(_swTreeStyleRibbon()) _swRibbonPatchMat(_swTreeMat); } return _swTreeMat; }   // (v50.63) the ribbon trees' atlas + cut-out + canopy lighting
 function _swShroomMatGet(){ if(!_swShroomMat) _swShroomMat=_swFoliageMat(0x2a55ff); return _swShroomMat; }
 // (v33.92) Low-frequency FOREST PATCH mask — large zones (~thousands of units) of DENSE forest amid the sparse
 // scatter. Drives both tree density (_swBuildTrees) AND where birds roost (_birdComputePerches), so the birds
@@ -40772,6 +41379,7 @@ function _swBuildTrees(x0,z0,T){
       } }
     im.instanceMatrix.needsUpdate=true; if(im.instanceColor) im.instanceColor.needsUpdate=true;
     im.frustumCulled=true; im.castShadow=!noShadow; im.receiveShadow=true; im.userData={isSandwichTerrain:true, _cs:!noShadow}; scene.add(_lssFreezeStatic(im)); meshes.push(im);   // (v48.47) _cs: see _swTreeShadowCull; (v49.50) frozen: see _lssFreezeStatic
+    if(!noShadow && mat && mat._lssDepth) im.customDepthMaterial=mat._lssDepth;   // (v50.63) ribbon trees cast leaf shapes, held up at distance - see _swRibbonPatchMat
   };
   // NOTE both tree emits pass a tint even when it is the identity family: std and
   // snow SHARE _swTreeMatGet(), and instanceColor is a program define, so a mesh
@@ -40830,6 +41438,10 @@ function _swTreeVisTick(cx, cz) {
   const B = _swU.uTreeFadeB.value;
   if (!(B > 0)) return;
   const B2 = B * B;
+  // (v50.64) the shore plants gate on their OWN, much nearer fade end (see _swBuildShorePlants) - and their fade
+  // knob is live: the uniforms their shader reads are written here, the same frame the gate uses the value.
+  const _PK = _swPlantK(), _PB2 = _PK.fadeB * _PK.fadeB;
+  try { const _pmM = _swPlantMatGet.m; if (_pmM && _pmM._lssFade) { _pmM._lssFade.uA.value = _PK.fadeA; _pmM._lssFade.uB.value = _PK.fadeB; } } catch (_) {}
   let _hid = 0, _shown = 0;
   for (const c of chunks.values()) {
     const arr = c.trees;
@@ -40841,8 +41453,9 @@ function _swTreeVisTick(cx, cz) {
     for (let i = 0; i < arr.length; i++) {
       const im = arr[i];
       if (!im || !im.isInstancedMesh) continue;      // the drapes are merged Meshes - no fade, leave them
-      if (im.visible !== vis) im.visible = vis;
-      if (vis) _shown++; else _hid++;
+      const v = (im.userData && im.userData._plantB) ? ((dx * dx + dz * dz) < _PB2) : vis;   // (v50.64)
+      if (im.visible !== v) im.visible = v;
+      if (v) _shown++; else _hid++;
     }
   }
   try { window.__treeVis = { hidden: _hid, shown: _shown, fadeB: Math.round(B) }; } catch (_) {}
@@ -55951,6 +56564,7 @@ function _hcMakeMeshes(city, site) {
       if (im.instanceColor) im.instanceColor.needsUpdate = true;
       im.frustumCulled = true;
       im.castShadow = true; im.receiveShadow = true;
+      if (tmat && tmat._lssDepth) im.customDepthMaterial = tmat._lssDepth;   // (v50.63) ribbon trees: see _swRibbonPatchMat
       im.userData.isHubCity = true;
       im.userData.hcShared = true;
       group.add(im);
@@ -66970,7 +67584,11 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
       // so the catch stays; it just stops being silent.
       if (wantDrapes) { try { _dm = _swBuildDrapes(cx * _SW_CHUNK, cz * _SW_CHUNK, T); }
         catch (e) { if (!_swDrapeErr) { _swDrapeErr = 1; try { console.warn('[drapes] build threw:', e); } catch (_) {} } } }
-      c.trees = (_tm || _dm) ? (_tm || []).concat(_dm || []) : null; c.treesBuilt = true; tBuilt++;
+      // (v50.64) the shore plants ride the same slot - see _swBuildShorePlants. Same catch-once rule as the drapes.
+      let _pm = null;
+      if (wantTrees) { try { _pm = _swBuildShorePlants(cx * _SW_CHUNK, cz * _SW_CHUNK, T); }
+        catch (e) { if (!_swBuildShorePlants.err) { _swBuildShorePlants.err = 1; try { console.warn('[plants] build threw:', e); } catch (_) {} } } }
+      c.trees = (_tm || _dm || _pm) ? (_tm || []).concat(_dm || [], _pm || []) : null; c.treesBuilt = true; tBuilt++;
       if (game._foliageProf) _foliageProfRec('trees', performance.now() - _fpT);
     } else if ((!nearT || !wantFoliage) && c.treesBuilt && _swRemoved < _remMax) {
       _swRemoveTrees(c.trees); c.trees = null; c.treesBuilt = false; _swRemoved++;   // (v39.94) capped

@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LSS Tree Lab</title>
+<!--
+  LSS TREE LAB - "is there another way to do trees that look better and are cheaper?" (owner, 2026-10-01,
+  after the far-tree LODs of v50.59-50.61 were rejected for popping).
+
+  LEFT / "CURRENT": the game's own trees. This page does not keep a copy of them: on load it fetches lss.js
+  (the shipped build) and pulls `_swMul`, `_swGenTree`, `_swFoliageMat`, `_SW_FAM` and the preset tables out of
+  `_swTreeGeoGet`, exactly like skin_lab.html does for the skin shader. If the extraction fails the banner says so.
+  The presets are the ULTRA/MEGA set (`full` + `extra`) - the one that put 46 M triangles a frame on screen.
+
+  RIGHT / "NEW": textured leaf RIBBONS. Same preset, same seeded branch walk (the RNG is consumed draw for draw, so
+  the skeleton is the same tree), but every terminal branch carries two crossed, curved ribbons textured with a
+  procedurally painted leafy twig / frond / needle spray (alpha cut-out), instead of leaf_count x 3 flat-colour
+  cards. Smooth indexed bark, twig bark dropped (the ribbons cover it), canopy normals (lit as a volume, not
+  speckle), and inner leaves darkened toward the crown centre (cheap self-shadow).
+
+  Keys: 1 current / 2 new / 3 split - F close-up / forest - [ ] species - G grid of all species.
+  Drag to orbit, wheel to zoom. Gamepad: left stick orbit, right stick zoom, A cycles the view.
+-->
+<style>
+  html, body { margin: 0; height: 100%; background: #0b1016; color: #dfe7ee; font: 13px/1.4 system-ui, sans-serif; overflow: hidden; }
+  canvas#c { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  #banner { position: fixed; left: 50%; top: 10px; transform: translateX(-50%); padding: 6px 12px; border-radius: 6px; background: rgba(0,0,0,.6); }
+  #banner.err { background: #6b1d1d; }
+  #stats { position: fixed; left: 10px; top: 10px; padding: 8px 10px; border-radius: 6px; background: rgba(0,0,0,.6); white-space: pre; font: 12px/1.45 ui-monospace, Consolas, monospace; min-width: 270px; }
+  #bar { position: fixed; left: 50%; bottom: 12px; transform: translateX(-50%); display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; max-width: calc(100% - 24px); }
+  #bar button { background: rgba(20,28,36,.85); color: #dfe7ee; border: 1px solid #3a4a5a; border-radius: 6px; padding: 6px 10px; cursor: pointer; font: inherit; }
+  #bar button.on { background: #2c5d7c; border-color: #5aa0c8; }
+  .lbl { position: fixed; top: 46px; padding: 3px 8px; border-radius: 4px; background: rgba(0,0,0,.55); font-weight: 600; letter-spacing: .04em; pointer-events: none; }
+  #lblL { left: 25%; transform: translateX(-50%); } #lblR { left: 75%; transform: translateX(-50%); }
+  .lil-gui.root { position: fixed; right: 10px; top: 10px; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.min.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.165.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="banner">loading the game's tree code from lss.js...</div>
+<div id="stats"></div>
+<div class="lbl" id="lblL">CURRENT (game, MEGA set)</div>
+<div class="lbl" id="lblR">NEW (textured ribbons)</div>
+<div id="bar"></div>
+<script type="module">
+import * as THREE from 'three';
+import GUI from 'https://cdn.jsdelivr.net/npm/lil-gui@0.19.2/+esm';
+
+const banner = document.getElementById('banner');
+const say = (t, bad) => { banner.textContent = t; banner.classList.toggle('err', !!bad); banner.style.display = t ? '' : 'none'; };
+
+// ── PULL THE GAME'S TREE CODE OUT OF THE SHIPPED BUILD ───────────────────────────────────────────
+// Same scanner as skin_lab.html: bracket-matched, skipping strings and comments.
+const _NL = String.fromCharCode(10), _BS = String.fromCharCode(92);
+function matchFrom(src, i, open, close) {
+  let depth = 0, q = null;
+  for (let j = i; j < src.length; j++) {
+    const ch = src[j], prev = src[j - 1], next = src[j + 1];
+    if (q) {
+      if (q === '//') { if (ch === _NL) q = null; continue; }
+      if (q === '/*') { if (ch === '/' && prev === '*') q = null; continue; }
+      if (ch === q && prev !== _BS) q = null;
+      continue;
+    }
+    if (ch === '/' && next === '/') { q = '//'; continue; }
+    if (ch === '/' && next === '*') { q = '/*'; continue; }
+    if (ch === '"' || ch === "'" || ch === '`') { q = ch; continue; }
+    if (ch === open) depth++;
+    else if (ch === close) { depth--; if (!depth) return j; }
+  }
+  return -1;
+}
+function sliceLiteral(src, name, open, close) {
+  const at = src.indexOf('const ' + name);
+  if (at < 0) return null;
+  const i = src.indexOf(open, at); if (i < 0) return null;
+  const j = matchFrom(src, i, open, close); return j < 0 ? null : src.slice(i, j + 1);
+}
+function sliceFunction(src, name) {
+  const at = src.indexOf('function ' + name + '(');
+  if (at < 0) return null;
+  const i = src.indexOf('{', at); if (i < 0) return null;
+  const j = matchFrom(src, i, '{', '}'); return j < 0 ? null : src.slice(at, j + 1);
+}
+const U = {   // the game's _swU foliage uniforms (only the ones _swFoliageMat reads)
+  uTime: { value: 0 }, uCam: { value: new THREE.Vector3() },
+  uTreeFadeA: { value: 5616 }, uTreeFadeB: { value: 8208 }, uSway: { value: 0.075 },
+};
+let G = null;   // { genTree, foliageMat, presets: {seed: preset}, fam }
+async function loadGame() {
+  const res = await fetch('lss.js', { cache: 'no-cache' });
+  if (!res.ok) throw new Error('lss.js ' + res.status + ' - serve the LSS folder');
+  const src = await res.text();
+  const need = (v, what) => { if (!v) throw new Error('could not find ' + what + ' in lss.js'); return v; };
+  const mulSrc = need(sliceFunction(src, '_swMul'), '_swMul');
+  const genSrc = need(sliceFunction(src, '_swGenTree'), '_swGenTree');
+  const matSrc = need(sliceFunction(src, '_swFoliageMat'), '_swFoliageMat');
+  const getSrc = need(sliceFunction(src, '_swTreeGeoGet'), '_swTreeGeoGet');
+  const famLit = need(sliceLiteral(src, '_SW_FAM', '[', ']'), '_SW_FAM');
+  const lit = (name) => Function('return (' + need(sliceLiteral(getSrc, name, '[', ']'), name + ' (in _swTreeGeoGet)') + ')')();
+  const _swMul = Function('return (' + mulSrc + ')')();
+  const genTree = Function('THREE', '_swMul', 'return (' + genSrc + ')')(THREE, _swMul);
+  const foliageMat = Function('THREE', '_swU', 'return (' + matSrc + ')')(THREE, U);
+  const fam = Function('return (' + famLit + ')')();
+  const full = lit('full'), extra = lit('extra'), lite = lit('lite');
+  const presets = {};
+  for (const p of lite.concat(full, extra)) presets[p.seed] = p;   // full overrides lite for the shared seeds = the MEGA set
+  if (!genTree || Object.keys(presets).length < 10) throw new Error('preset tables look wrong');
+  return { genTree, foliageMat, presets, fam, _swMul, lines: src.length };
+}
+
+// The archipelago's species (the game's trop palette: shore / palm / interior) + two std species for contrast.
+const SPECIES = [
+  { seed: 1818, name: 'MANGROVE (shore)', tex: 'small' },
+  { seed: 1212, name: 'PALM', tex: 'frond' },
+  { seed: 1515, name: 'TREE FERN', tex: 'frond' },
+  { seed: 1011, name: 'OAK (interior)', tex: 'broad' },
+  { seed: 1414, name: 'BAOBAB (interior)', tex: 'broad' },
+  { seed: 4044, name: 'WILLOW (interior)', tex: 'small' },
+  { seed: 2022, name: 'PINE', tex: 'needle' },
+  { seed: 3033, name: 'ASPEN', tex: 'small' },
+];
+
+// ── THE LEAF ATLAS (procedural, no assets) ───────────────────────────────────────────────────────
+// Five columns, each the full height: broad leafy twig / small-leaf twig / pinnate frond / needle spray /
+// opaque bark. Painted near-white (shading, veins, edges only) - the species colour arrives as the vertex colour,
+// exactly as the current trees' does, so the game's per-region tints still apply. 32 px transparent gutters keep
+// the mips from bleeding one column into the next.
+const ATLAS_W = 1024, ATLAS_H = 1024;
+const COLS = { broad: [0, 0.21875], small: [0.25, 0.46875], frond: [0.5, 0.71875], needle: [0.75, 0.90625], bark: [0.9375, 1.0] };
+function rngOf(seed) { let a = seed >>> 0; return () => { a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+function paintAtlas(K) {
+  const cv = document.createElement('canvas'); cv.width = ATLAS_W; cv.height = ATLAS_H;
+  const g = cv.getContext('2d');
+  g.clearRect(0, 0, ATLAS_W, ATLAS_H);
+  const R = rngOf(K.texSeed | 0 || 7);
+  const colPx = (key) => [COLS[key][0] * ATLAS_W, COLS[key][1] * ATLAS_W];
+  // one leaf: a pointed ellipse along +y from the origin, with a darker midrib and a soft edge falloff
+  const leaf = (x, y, ang, len, wid, tone) => {
+    g.save(); g.translate(x, y); g.rotate(ang);
+    const grd = g.createLinearGradient(-wid, 0, wid, 0);
+    const a = Math.round(170 + 85 * tone), b = Math.round(130 + 80 * tone);
+    grd.addColorStop(0, 'rgb(' + b + ',' + b + ',' + b + ')');
+    grd.addColorStop(0.5, 'rgb(' + a + ',' + a + ',' + a + ')');
+    grd.addColorStop(1, 'rgb(' + (b - 20) + ',' + (b - 20) + ',' + (b - 20) + ')');
+    g.fillStyle = grd;
+    g.beginPath(); g.moveTo(0, 0);
+    g.bezierCurveTo(wid * 1.15, len * 0.25, wid * 0.9, len * 0.75, 0, len);
+    g.bezierCurveTo(-wid * 0.9, len * 0.75, -wid * 1.15, len * 0.25, 0, 0);
+    g.fill();
+    g.strokeStyle = 'rgba(70,70,70,0.55)'; g.lineWidth = Math.max(1, wid * 0.08);
+    g.beginPath(); g.moveTo(0, len * 0.04); g.lineTo(0, len * 0.92); g.stroke();
+    g.restore();
+  };
+  const stem = (cx, x0, y0, x1, y1, w) => { g.strokeStyle = 'rgb(95,85,70)'; g.lineWidth = w; g.lineCap = 'round'; g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke(); };
+  // BROAD: a twig up the column with alternating broad leaves (oak / baobab / generic broadleaf)
+  {
+    const [a, b] = colPx('broad'), cx = (a + b) / 2, w = b - a;
+    stem(cx, cx, ATLAS_H - 4, cx, 30, 5);
+    for (let y = ATLAS_H - 40; y > 40; y -= K.broadStep) {
+      for (const side of [-1, 1]) {
+        const ang = side * (0.55 + R() * 0.45) + Math.PI;   // pointing up/out
+        leaf(cx + side * 3, y + (R() - 0.5) * 14, ang, w * (0.40 + R() * 0.12), w * (0.15 + R() * 0.05), R());
+      }
+    }
+    leaf(cx, 46, Math.PI, w * 0.42, w * 0.16, 0.9);
+  }
+  // SMALL: denser, smaller leaves (mangrove / willow / aspen)
+  {
+    const [a, b] = colPx('small'), cx = (a + b) / 2, w = b - a;
+    stem(cx, cx, ATLAS_H - 4, cx, 24, 4);
+    for (let y = ATLAS_H - 30; y > 30; y -= K.smallStep) {
+      for (const side of [-1, 1]) {
+        const ang = side * (0.45 + R() * 0.6) + Math.PI;
+        leaf(cx + side * 2, y + (R() - 0.5) * 10, ang, w * (0.26 + R() * 0.12), w * (0.10 + R() * 0.04), R());
+      }
+      if (R() < 0.5) leaf(cx + (R() - 0.5) * w * 0.3, y, Math.PI + (R() - 0.5) * 0.6, w * 0.22, w * 0.09, R());
+    }
+  }
+  // FROND: pinnate - long narrow leaflets angled toward the tip (palm / tree fern)
+  {
+    const [a, b] = colPx('frond'), cx = (a + b) / 2, w = b - a;
+    stem(cx, cx, ATLAS_H - 2, cx, 10, 6);
+    for (let y = ATLAS_H - 20; y > 20; y -= K.frondStep) {
+      const t = 1 - y / ATLAS_H;                       // 0 at the base, 1 at the tip
+      const len = w * (0.48 - 0.26 * t) * (0.85 + R() * 0.3);
+      for (const side of [-1, 1]) leaf(cx + side * 2, y, side * (0.95 - 0.35 * t) + Math.PI, len, w * 0.045, R());
+    }
+  }
+  // NEEDLE: short dark needles all round a twig (pine / cypress / redwood)
+  {
+    const [a, b] = colPx('needle'), cx = (a + b) / 2, w = b - a;
+    stem(cx, cx, ATLAS_H - 2, cx, 10, 4);
+    g.lineCap = 'round';
+    for (let y = ATLAS_H - 10; y > 14; y -= K.needleStep) {
+      for (let k = 0; k < 4; k++) {
+        const side = (k & 1) ? 1 : -1, ang = side * (0.5 + R() * 0.8);
+        const len = w * (0.30 + R() * 0.16);
+        const v = Math.round(140 + R() * 90);
+        g.strokeStyle = 'rgb(' + v + ',' + v + ',' + v + ')'; g.lineWidth = 3;
+        g.beginPath(); g.moveTo(cx, y); g.lineTo(cx + Math.sin(ang) * len, y - Math.cos(ang) * len * 0.6); g.stroke();
+      }
+    }
+  }
+  // BARK: opaque fibres
+  {
+    const [a, b] = colPx('bark');
+    g.fillStyle = 'rgb(200,200,200)'; g.fillRect(a, 0, b - a, ATLAS_H);
+    for (let i = 0; i < 260; i++) { const x = a + R() * (b - a), v = Math.round(130 + R() * 110); g.strokeStyle = 'rgb(' + v + ',' + v + ',' + v + ')'; g.lineWidth = 1 + R() * 3; g.beginPath(); g.moveTo(x, 0); g.lineTo(x + (R() - 0.5) * 6, ATLAS_H); g.stroke(); }
+  }
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  tex.generateMipmaps = true; tex.minFilter = THREE.LinearMipmapLinearFilter; tex.magFilter = THREE.LinearFilter;
+  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.flipY = false;   // row 0 = v 0 = the twig BASE (painted at the bottom of the canvas is v 1 - see uv below)
+  return { tex, canvas: cv };
+}
+
+// ── THE NEW GENERATOR: same walk, ribbons instead of cards ───────────────────────────────────────
+// A line-for-line port of the game's _swGenTree WALK (rings, gnarl, force, children placement - and every leaf's
+// five RNG draws, consumed even though no card is emitted), so the skeleton is the same tree. What changes is only
+// what gets emitted.
+function genRibbonTree(opt, K) {
+  const rng = G._swMul(opt.seed || 12345), deg = Math.PI / 180;
+  const bark = opt.bark || [0.30, 0.21, 0.12], leafC = opt.leaf || [0.22, 0.46, 0.18];
+  const Y = new THREE.Vector3(0, 1, 0), X = new THREE.Vector3(1, 0, 0), fstr = opt.force || 0;
+  const qTmp = new THREE.Quaternion(), qF = new THREE.Quaternion(), eTmp = new THREE.Euler(), vT = new THREE.Vector3(), dir = new THREE.Vector3();
+  const POS = [], COL = [], UV = [], NRM = [], IDX = [], KIND = [];   // KIND per vertex: 0 bark, 1 leaf (for canopy normals)
+  const tex = SPECIES_TEX[opt.seed] || 'broad';
+  const levels = opt.levels | 0;
+  const vtx = (p, n, c, u, v, kind) => { const i = POS.length / 3; POS.push(p.x, p.y, p.z); NRM.push(n.x, n.y, n.z); COL.push(c[0], c[1], c[2]); UV.push(u, v); KIND.push(kind); return i; };
+  const ribbons = [];   // per terminal branch: { rings, hj, warm }
+  const barkU0 = COLS.bark[0] + 0.004, barkU1 = COLS.bark[1] - 0.004;
+  function branch(origin, orient, length, radius, level) {
+    const sec = opt.sections[level] || 4, seg = opt.segments[level] || 4, taper = opt.taper[level] != null ? opt.taper[level] : 0.7;
+    const twist = opt.twist[level] || 0, gn = opt.gnarliness[level] || 0, secLen = length / sec, pos = origin.clone(), q = orient.clone(), rings = [];
+    for (let s = 0; s <= sec; s++) {
+      const r = Math.max(0.05, radius * (1 - taper * (s / sec))); rings.push({ p: pos.clone(), q: q.clone(), r });
+      dir.copy(Y).applyQuaternion(q); pos.addScaledVector(dir, secLen);
+      const g = Math.min(0.16, gn * Math.max(1, 1 / Math.sqrt(Math.max(0.05, r)))); eTmp.set((rng() - 0.5) * g, twist, (rng() - 0.5) * g); q.multiply(qTmp.setFromEuler(eTmp));
+      if (fstr) { dir.copy(Y).applyQuaternion(q); qTmp.setFromUnitVectors(dir, fstr > 0 ? Y : vT.copy(Y).negate()); qF.set(0, 0, 0, 1).slerp(qTmp, Math.min(0.13, Math.abs(fstr) * 6 / Math.max(0.1, r))); q.premultiply(qF); }
+    }
+    const terminal = !(level < opt.levels);
+    // BARK: smooth, indexed rings; twigs (the terminal level of a multi-level tree) are left to the ribbons
+    const emitBark = !(terminal && levels >= 2 && !K.twigBark);
+    if (emitBark) {
+      const sE = Math.max(3, Math.min(seg, K.barkSeg | 0));
+      const base = POS.length / 3;
+      for (let s = 0; s <= sec; s++) {
+        const R = rings[s];
+        for (let j = 0; j <= sE; j++) {
+          const a = j / sE * Math.PI * 2;
+          const nrm = vT.set(Math.cos(a), 0, Math.sin(a)).applyQuaternion(R.q).clone();
+          const p = nrm.clone().multiplyScalar(R.r).add(R.p);
+          vtx(p, nrm, bark, barkU0 + (barkU1 - barkU0) * (j / sE), (s / sec) * length * 0.04, 0);
+        }
+      }
+      for (let s = 0; s < sec; s++) for (let j = 0; j < sE; j++) {
+        const a = base + s * (sE + 1) + j, b = a + sE + 1;
+        IDX.push(a, b, a + 1, a + 1, b, b + 1);
+      }
+    }
+    if (!terminal) {
+      const cl = level + 1, nc = opt.children[level] || 0, st = opt.start[cl] != null ? opt.start[cl] : 0.3;
+      for (let i = 0; i < nc; i++) {
+        const frac = st + (i + rng()) * (1 - st) / Math.max(1, nc), si = Math.min(sec, Math.max(0, Math.round(frac * sec))), ring = rings[si];
+        const radial = Math.PI * 2 * ((i + rng() * 0.6) / Math.max(1, nc)), ang = (opt.angle[cl] || 45) * deg;
+        const cq = ring.q.clone(); cq.multiply(qTmp.setFromAxisAngle(Y, radial)); cq.multiply(qTmp.setFromAxisAngle(X, ang));
+        let clen = opt.length[cl] != null ? opt.length[cl] : length * 0.5; if (opt.evergreen) clen *= Math.max(0.18, 1 - frac);
+        branch(ring.p.clone(), cq, clen, (opt.radius[cl] != null ? opt.radius[cl] : ring.r * 0.6), cl);
+      }
+    } else {
+      // the five draws per leaf the game's walk takes (frac, rotation, size, hue, warmth) - kept so siblings match
+      const lc = opt.leaf_count || 6; let hjS = 0, wS = 0;
+      for (let i = 0; i < lc; i++) { rng(); rng(); rng(); hjS += rng(); wS += 0.7 + rng() * 0.5; }
+      ribbons.push({ rings, length, hj: hjS / lc, warm: wS / lc, lst: opt.leaf_start || 0.2 });
+    }
+  }
+  branch(new THREE.Vector3(0, 0, 0), new THREE.Quaternion(), opt.length[0], opt.radius[0], 0);
+
+  // CANOPY CENTRE: the centroid of the leafy rings (normals point out of the crown from here)
+  const cc = new THREE.Vector3(); let cn = 0;
+  for (const rb of ribbons) for (const R of rb.rings) { cc.add(R.p); cn++; }
+  if (cn) cc.multiplyScalar(1 / cn);
+  let maxD = 1e-3; for (const rb of ribbons) for (const R of rb.rings) maxD = Math.max(maxD, R.p.distanceTo(cc));
+
+  // RIBBONS: two crossed, curved strips per terminal branch, following its rings
+  const [u0, u1] = COLS[tex];
+  const ls = opt.leaf_size || 2;
+  const halfW = ls * K.ribbonW * (tex === 'frond' ? 1.6 : 1.0);
+  for (const rb of ribbons) {
+    const n = rb.rings.length;
+    // where the leaves start along the branch, and how far the spray reaches past the tip
+    const s0 = Math.min(n - 2, Math.max(0, Math.round(rb.lst * (n - 1))));
+    const tip = rb.rings[n - 1], prev = rb.rings[n - 2];
+    const ext = tip.p.clone().add(tip.p.clone().sub(prev.p).normalize().multiplyScalar(ls * K.tipExt));
+    const pts = []; for (let s = s0; s < n; s++) pts.push({ p: rb.rings[s].p, q: rb.rings[s].q }); pts.push({ p: ext, q: tip.q });
+    // texture v: the tip at v=0 (painted at the top of the canvas), length-proportional so leaves keep their aspect
+    let L = 0; for (let k = 1; k < pts.length; k++) L += pts[k].p.distanceTo(pts[k - 1].p);
+    const colW = (u1 - u0) * ATLAS_W, vSpan = Math.min(1, (L / (2 * halfW)) * colW / ATLAS_H);
+    const hueJ = rb.hj, warm = rb.warm;
+    const cTop = [Math.min(1, leafC[0] * (0.9 + hueJ * 0.6) * warm), Math.min(1, leafC[1] * (0.9 + hueJ * 0.4)), Math.min(1, leafC[2] * (0.75 + hueJ * 0.3))];
+    for (let rI = 0; rI < K.ribbons; rI++) {
+      const rot = (rI / K.ribbons) * Math.PI + rb.hj * 1.3;   // crossed planes, a per-branch twist
+      const base = POS.length / 3;
+      let acc = 0;
+      for (let k = 0; k < pts.length; k++) {
+        if (k) acc += pts[k].p.distanceTo(pts[k - 1].p);
+        const side = vT.set(Math.cos(rot), 0, Math.sin(rot)).applyQuaternion(pts[k].q).clone();
+        const t = acc / Math.max(1e-3, L);
+        const w = halfW * (0.55 + 0.45 * Math.sin(Math.min(1, t * 1.15) * Math.PI * 0.5 + 0.35));   // narrower at the base
+        const v = vSpan * (1 - t);
+        for (const sgn of [-1, 1]) {
+          const p = pts[k].p.clone().addScaledVector(side, sgn * w);
+          // inner leaves darker: distance from the crown centre (cheap self-shadow)
+          const ao = K.ao > 0 ? (1 - K.ao) + K.ao * Math.min(1, p.distanceTo(cc) / maxD) : 1;
+          const c = [cTop[0] * ao, cTop[1] * ao, cTop[2] * ao];
+          const pn = p.clone().sub(cc).normalize();
+          vtx(p, pn, c, sgn < 0 ? u0 : u1, v, 1);
+        }
+      }
+      for (let k = 0; k < pts.length - 1; k++) { const a = base + k * 2, b = a + 2; IDX.push(a, b, a + 1, a + 1, b, b + 1); }
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(POS, 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(NRM, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(COL, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(UV, 2));
+  g.setIndex(IDX);
+  // CANOPY NORMALS: ribbon normals blended from their own plane toward "out of the crown"
+  if (K.canopyN < 1) {
+    const flat = g.clone(); flat.computeVertexNormals();
+    const fn = flat.attributes.normal.array, nn = g.attributes.normal.array;
+    for (let i = 0; i < KIND.length; i++) {
+      if (!KIND[i]) continue;
+      let x = fn[i * 3], y = fn[i * 3 + 1], z = fn[i * 3 + 2];
+      const ox = nn[i * 3], oy = nn[i * 3 + 1], oz = nn[i * 3 + 2];
+      if (x * ox + y * oy + z * oz < 0) { x = -x; y = -y; z = -z; }   // face the plane normal outward too
+      const k = K.canopyN;
+      let rx = x * (1 - k) + ox * k, ry = y * (1 - k) + oy * k, rz = z * (1 - k) + oz * k;
+      const l = Math.hypot(rx, ry, rz) || 1; nn[i * 3] = rx / l; nn[i * 3 + 1] = ry / l; nn[i * 3 + 2] = rz / l;
+    }
+    flat.dispose();
+  }
+  g.computeBoundingSphere(); g.computeBoundingBox();
+  return g;
+}
+const SPECIES_TEX = {}; for (const s of SPECIES) SPECIES_TEX[s.seed] = s.tex;
+
+// ── MATERIALS ────────────────────────────────────────────────────────────────────────────────────
+// CURRENT: the game's own _swFoliageMat(0), untouched. NEW: the same material (same sway + distance fade patch)
+// with the atlas, a cut-out, canopy lighting on both faces (no back-face normal flip: the normals already point
+// out of the crown) and alpha coverage kept up at distance (a mip that averages leaf and gap would otherwise
+// fail the cut-out and thin the far canopy).
+let atlas = null, matCur = null, matNew = null, depthNew = null;
+function makeMaterials() {
+  matCur = G.foliageMat(0);
+  matNew = G.foliageMat(0);
+  matNew.map = atlas.tex;
+  matNew.alphaTest = KN.cutoff;
+  matNew.roughness = 0.85;
+  const ob = matNew.onBeforeCompile;
+  matNew.onBeforeCompile = (sh, r) => {
+    ob(sh, r);
+    sh.uniforms.uAtlasPx = { value: new THREE.Vector2(ATLAS_W, ATLAS_H) };
+    sh.uniforms.uCoverK = { value: KN.coverK };
+    matNew.userData.sh = sh;
+    sh.fragmentShader = 'uniform vec2 uAtlasPx;\nuniform float uCoverK;\n' + sh.fragmentShader
+      .replace('#include <alphatest_fragment>',
+        '{ vec2 dx = dFdx(vMapUv * uAtlasPx), dy = dFdy(vMapUv * uAtlasPx);\n' +
+        '  float mip = max(0.0, 0.5 * log2(max(dot(dx, dx), dot(dy, dy))));\n' +
+        '  diffuseColor.a *= 1.0 + mip * uCoverK; }\n' +
+        'if ( diffuseColor.a < alphaTest ) discard;')
+      .replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\n#ifdef DOUBLE_SIDED\n  normal *= faceDirection;\n#endif');
+  };
+  matNew.customProgramCacheKey = () => 'lab-ribbon-v1';
+  depthNew = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking, map: atlas.tex, alphaTest: KN.cutoff, side: THREE.DoubleSide });
+}
+
+// ── SCENE (the archipelago's light, from the live game: ACES 0.78, sun 4.8 fff3e0, hemi 0.3, ambient 0.14, fog) ──
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(2, devicePixelRatio));
+renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 0.78;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.info.autoReset = false;
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xbfe2ec);
+scene.fog = new THREE.FogExp2(0xbfe2ec, 0.000112);
+const camera = new THREE.PerspectiveCamera(60, 1, 1, 30000);
+scene.add(new THREE.AmbientLight(0xffffff, 0.14));
+scene.add(new THREE.HemisphereLight(0x9fc8e8, 0x3a4a2a, 0.3));
+const sun = new THREE.DirectionalLight(0xfff3e0, 4.8);
+const SUN_DIR = new THREE.Vector3(4525, 3804, 6787).normalize();
+sun.castShadow = true; sun.shadow.mapSize.set(2048, 2048); sun.shadow.bias = -0.0004; sun.shadow.normalBias = 1.2;
+scene.add(sun); scene.add(sun.target);
+{ // a soft sky environment for the 0.18 envMapIntensity the game's tree material carries
+  const pm = new THREE.PMREMGenerator(renderer);
+  const es = new THREE.Scene(); es.background = new THREE.Color(0x9fc8e8);
+  const h = new THREE.Mesh(new THREE.SphereGeometry(10, 16, 8), new THREE.MeshBasicMaterial({ color: 0x3a4a2a, side: THREE.BackSide }));
+  h.scale.y = 0.5; h.position.y = -5; es.add(h);
+  scene.environment = pm.fromScene(es, 0.04).texture;
+}
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(60000, 60000), new THREE.MeshStandardMaterial({ color: 0x6f7f4a, roughness: 1 }));
+ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; scene.add(ground);
+
+// ── KNOBS ────────────────────────────────────────────────────────────────────────────────────────
+const KN = {
+  ribbons: 2, ribbonW: 2.6, tipExt: 1.6, barkSeg: 6, twigBark: false, canopyN: 0.7, ao: 0.45,
+  cutoff: 0.42, coverK: 0.22, broadStep: 34, smallStep: 22, frondStep: 12, needleStep: 9, texSeed: 7,
+  forestN: 3000, view: 'split', mode: 'close', species: 0, sway: true,
+};
+
+// ── BUILD ────────────────────────────────────────────────────────────────────────────────────────
+let geoCur = {}, geoNew = {}, closeGrp = null, forestGrp = null;
+function buildGeos() {
+  for (const g of Object.values(geoNew)) g.dispose();
+  geoNew = {};
+  for (const s of SPECIES) {
+    const p = G.presets[s.seed]; if (!p) continue;
+    if (!geoCur[s.seed]) geoCur[s.seed] = G.genTree(p);
+    geoNew[s.seed] = genRibbonTree(p, KN);
+  }
+}
+const tri = (g) => g ? (g.index ? g.index.count : g.attributes.position.count) / 3 : 0;
+const JUNGLE = () => G.fam[3];
+function tintFor(i) { const f = JUNGLE(), b = 0.89 + ((i * 2654435761 >>> 0) % 1000) / 1000 * 0.22; return new THREE.Color(f[0] * b, f[1] * b, f[2] * b); }
+function mkInst(geo, mat, mats, n) {
+  const im = new THREE.InstancedMesh(geo, mat, n);
+  im.castShadow = true; im.receiveShadow = true;
+  if (mat === matNew) im.customDepthMaterial = depthNew;
+  for (let k = 0; k < n; k++) { im.setMatrixAt(k, mats[k]); im.setColorAt(k, tintFor(k + geo.id)); }
+  im.instanceMatrix.needsUpdate = true; im.instanceColor.needsUpdate = true;
+  im.computeBoundingSphere();
+  return im;
+}
+const _m4 = new THREE.Matrix4(), _q = new THREE.Quaternion(), _s = new THREE.Vector3(), _p = new THREE.Vector3();
+function treeMatrix(x, z, rnd) {
+  const s = (2.3 + rnd() * 1.4) * (0.62 + 0.7 * rnd());   // the game's emit(): s0 2.3, s1 1.4, x an ecology scale
+  _q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), rnd() * 6.283);
+  _s.set(s, s * (0.80 + rnd() * 0.46), s); _p.set(x, -6, z);
+  return new THREE.Matrix4().compose(_p, _q, _s);
+}
+function rebuildScene() {
+  for (const grp of [closeGrp, forestGrp]) if (grp) { grp.traverse(o => { if (o.isInstancedMesh) o.dispose(); }); scene.remove(grp); }
+  closeGrp = new THREE.Group(); forestGrp = new THREE.Group();
+  closeGrp.userData.cur = []; closeGrp.userData.nw = []; forestGrp.userData.cur = []; forestGrp.userData.nw = [];
+  // CLOSE-UP: the chosen species, current on the left, new on the right (same scale), or a grid of all species
+  const sp = SPECIES[KN.species];
+  if (KN.mode === 'grid') {
+    let i = 0;
+    for (const s of SPECIES) {
+      const x = (i % 4) * 160 - 240, z = Math.floor(i / 4) * 200 - 100; i++;
+      const mL = [new THREE.Matrix4().compose(new THREE.Vector3(x, -6, z), new THREE.Quaternion(), new THREE.Vector3(2.8, 2.8, 2.8))];
+      const mR = [new THREE.Matrix4().compose(new THREE.Vector3(x, -6, z), new THREE.Quaternion(), new THREE.Vector3(2.8, 2.8, 2.8))];
+      const a = mkInst(geoCur[s.seed], matCur, mL, 1), b = mkInst(geoNew[s.seed], matNew, mR, 1);
+      closeGrp.add(a, b); closeGrp.userData.cur.push(a); closeGrp.userData.nw.push(b);
+    }
+  } else {
+    const mL = [new THREE.Matrix4().compose(new THREE.Vector3(0, -6, 0), new THREE.Quaternion(), new THREE.Vector3(3, 3, 3))];
+    const mR = [new THREE.Matrix4().compose(new THREE.Vector3(0, -6, 0), new THREE.Quaternion(), new THREE.Vector3(3, 3, 3))];
+    const a = mkInst(geoCur[sp.seed], matCur, mL, 1), b = mkInst(geoNew[sp.seed], matNew, mR, 1);
+    closeGrp.add(a, b); closeGrp.userData.cur.push(a); closeGrp.userData.nw.push(b);
+  }
+  // FOREST: the archipelago's mix (shore mangrove / palm / an interior canopy) scattered in clumps over 12 km
+  const rnd = rngOf(1234), N = KN.forestN | 0;
+  const mix = [[1818, 0.42], [1212, 0.30], [1011, 0.14], [1414, 0.08], [4044, 0.06]];
+  const per = {}; for (const [sd] of mix) per[sd] = [];
+  let placed = 0, guard = 0;
+  while (placed < N && guard++ < N * 30) {
+    const x = (rnd() - 0.5) * 12000, z = (rnd() - 0.5) * 12000;
+    const dens = 0.5 + 0.5 * Math.sin(x * 0.0013) * Math.cos(z * 0.0011 + 1.3);   // clumped: islands of forest
+    if (rnd() > dens) continue;
+    let r = rnd(), sd = mix[0][0]; for (const [s, w] of mix) { if (r < w) { sd = s; break; } r -= w; }
+    per[sd].push(treeMatrix(x, z, rnd)); placed++;
+  }
+  for (const [sd] of mix) {
+    if (!per[sd].length || !geoCur[sd]) continue;
+    const a = mkInst(geoCur[sd], matCur, per[sd], per[sd].length), b = mkInst(geoNew[sd], matNew, per[sd], per[sd].length);
+    forestGrp.add(a, b); forestGrp.userData.cur.push(a); forestGrp.userData.nw.push(b);
+  }
+  scene.add(closeGrp); scene.add(forestGrp);
+  applyMode();
+}
+function setVis(grp, cur, nw) { if (!grp) return; for (const m of grp.userData.cur) m.visible = cur; for (const m of grp.userData.nw) m.visible = nw; }
+function applyMode() {
+  const forest = KN.mode === 'forest';
+  closeGrp.visible = !forest; forestGrp.visible = forest;
+  U.uTreeFadeA.value = forest ? 5616 : 1e9; U.uTreeFadeB.value = forest ? 8208 : 1e9 + 1;
+  if (forest) { orbit.r = Math.max(orbit.r, 1200); orbit.minR = 300; orbit.maxR = 9000; }
+  else { orbit.minR = 40; orbit.maxR = 1200; if (orbit.r > 1200) orbit.r = 420; }
+  const sc = sun.shadow.camera, half = forest ? 6800 : 600;
+  sc.left = -half; sc.right = half; sc.top = half; sc.bottom = -half; sc.near = 10; sc.far = forest ? 20000 : 4000; sc.updateProjectionMatrix();
+  document.getElementById('lblL').style.display = document.getElementById('lblR').style.display = (KN.view === 'split') ? '' : 'none';
+  updateBar();
+}
+
+// ── CAMERA: orbit with mouse or gamepad ──────────────────────────────────────────────────────────
+const orbit = { yaw: 0.6, pitch: 0.12, r: 230, minR: 40, maxR: 1200, tx: 0, ty: 60, tz: 0 };
+let drag = null;
+canvas.addEventListener('pointerdown', (e) => { drag = { x: e.clientX, y: e.clientY }; canvas.setPointerCapture(e.pointerId); });
+canvas.addEventListener('pointermove', (e) => { if (!drag) return; orbit.yaw -= (e.clientX - drag.x) * 0.005; orbit.pitch = Math.max(-0.2, Math.min(1.45, orbit.pitch + (e.clientY - drag.y) * 0.004)); drag = { x: e.clientX, y: e.clientY }; });
+canvas.addEventListener('pointerup', () => { drag = null; });
+canvas.addEventListener('wheel', (e) => { orbit.r = Math.max(orbit.minR, Math.min(orbit.maxR, orbit.r * Math.exp(e.deltaY * 0.0012))); e.preventDefault(); }, { passive: false });
+let padA = false;
+function pollPad(dt) {
+  const p = [...(navigator.getGamepads ? navigator.getGamepads() : [])].filter(Boolean)[0]; if (!p) return;
+  const dz = (v) => Math.abs(v) < 0.15 ? 0 : v;
+  orbit.yaw -= dz(p.axes[0]) * dt * 1.6; orbit.pitch = Math.max(-0.2, Math.min(1.45, orbit.pitch - dz(p.axes[1]) * dt * 1.1));
+  orbit.r = Math.max(orbit.minR, Math.min(orbit.maxR, orbit.r * Math.exp(dz(p.axes[3]) * dt * 1.4)));
+  const a = p.buttons[0] && p.buttons[0].pressed; if (a && !padA) cycleView(); padA = a;
+}
+function placeCamera() {
+  const cy = Math.cos(orbit.pitch);
+  camera.position.set(orbit.tx + Math.sin(orbit.yaw) * cy * orbit.r, orbit.ty + Math.sin(orbit.pitch) * orbit.r, orbit.tz + Math.cos(orbit.yaw) * cy * orbit.r);
+  camera.lookAt(orbit.tx, orbit.ty, orbit.tz);
+  // the shadow box centres on what is being looked at: the orbit target up close, the ground under the eye in the forest
+  const forest = KN.mode === 'forest';
+  const tg = forest ? _p.set(camera.position.x, 0, camera.position.z) : _p.set(orbit.tx, 0, orbit.tz);
+  sun.target.position.copy(tg); sun.position.copy(SUN_DIR).multiplyScalar(forest ? 9000 : 1500).add(tg);
+  U.uCam.value.copy(camera.position);
+}
+
+// ── UI ───────────────────────────────────────────────────────────────────────────────────────────
+const bar = document.getElementById('bar');
+const btns = {};
+const addBtn = (key, label, fn) => { const b = document.createElement('button'); b.textContent = label; b.onclick = fn; bar.appendChild(b); btns[key] = b; };
+function cycleView() { KN.view = KN.view === 'cur' ? 'new' : KN.view === 'new' ? 'split' : 'cur'; applyMode(); }
+function updateBar() {
+  for (const k of ['cur', 'new', 'split']) btns[k] && btns[k].classList.toggle('on', KN.view === k);
+  for (const k of ['close', 'grid', 'forest']) btns[k] && btns[k].classList.toggle('on', KN.mode === k);
+  if (btns.sp) btns.sp.textContent = SPECIES[KN.species].name;
+}
+addBtn('cur', '1 current', () => { KN.view = 'cur'; applyMode(); });
+addBtn('new', '2 new', () => { KN.view = 'new'; applyMode(); });
+addBtn('split', '3 split', () => { KN.view = 'split'; applyMode(); });
+addBtn('close', 'close-up', () => { KN.mode = 'close'; rebuildScene(); });
+addBtn('grid', 'G all species', () => { KN.mode = 'grid'; orbit.r = 900; rebuildScene(); });
+addBtn('forest', 'F forest', () => { KN.mode = 'forest'; rebuildScene(); });
+addBtn('prev', '[', () => { KN.species = (KN.species + SPECIES.length - 1) % SPECIES.length; rebuildScene(); });
+addBtn('sp', '', () => { KN.species = (KN.species + 1) % SPECIES.length; rebuildScene(); });
+addBtn('next', ']', () => { KN.species = (KN.species + 1) % SPECIES.length; rebuildScene(); });
+addEventListener('keydown', (e) => {
+  if (e.key === '1') { KN.view = 'cur'; applyMode(); } else if (e.key === '2') { KN.view = 'new'; applyMode(); } else if (e.key === '3') { KN.view = 'split'; applyMode(); }
+  else if (e.key === 'f' || e.key === 'F') { KN.mode = KN.mode === 'forest' ? 'close' : 'forest'; rebuildScene(); }
+  else if (e.key === 'g' || e.key === 'G') { KN.mode = 'grid'; orbit.r = 900; rebuildScene(); }
+  else if (e.key === '[') { KN.species = (KN.species + SPECIES.length - 1) % SPECIES.length; rebuildScene(); }
+  else if (e.key === ']') { KN.species = (KN.species + 1) % SPECIES.length; rebuildScene(); }
+});
+function buildGui() {
+  const gui = new GUI({ title: 'NEW tree knobs' }); gui.close();
+  const regen = () => { buildGeos(); rebuildScene(); };
+  const repaint = () => { const old = atlas.tex; atlas = paintAtlas(KN); matNew.map = atlas.tex; depthNew.map = atlas.tex; matNew.needsUpdate = true; depthNew.needsUpdate = true; old.dispose(); };
+  const f1 = gui.addFolder('shape');
+  f1.add(KN, 'ribbons', 1, 4, 1).onFinishChange(regen);
+  f1.add(KN, 'ribbonW', 0.8, 5, 0.1).onFinishChange(regen);
+  f1.add(KN, 'tipExt', 0, 4, 0.1).onFinishChange(regen);
+  f1.add(KN, 'barkSeg', 3, 10, 1).onFinishChange(regen);
+  f1.add(KN, 'twigBark').onFinishChange(regen);
+  const f2 = gui.addFolder('light');
+  f2.add(KN, 'canopyN', 0, 1, 0.05).onFinishChange(regen);
+  f2.add(KN, 'ao', 0, 0.9, 0.05).onFinishChange(regen);
+  const f3 = gui.addFolder('leaves');
+  f3.add(KN, 'cutoff', 0.1, 0.9, 0.01).onChange(v => { matNew.alphaTest = v; depthNew.alphaTest = v; });
+  f3.add(KN, 'coverK', 0, 0.6, 0.01).onChange(v => { const sh = matNew.userData.sh; if (sh) sh.uniforms.uCoverK.value = v; });
+  f3.add(KN, 'broadStep', 16, 60, 1).onFinishChange(repaint);
+  f3.add(KN, 'smallStep', 10, 40, 1).onFinishChange(repaint);
+  f3.add(KN, 'frondStep', 6, 24, 1).onFinishChange(repaint);
+  f3.add(KN, 'needleStep', 4, 20, 1).onFinishChange(repaint);
+  const f4 = gui.addFolder('forest');
+  f4.add(KN, 'forestN', 500, 8000, 100).onFinishChange(() => { if (KN.mode === 'forest') rebuildScene(); });
+  f4.add(KN, 'sway');
+  gui.add({ atlas: () => { const w = window.open(); if (w) { w.document.body.style.background = '#333'; const img = w.document.createElement('img'); img.src = atlas.canvas.toDataURL(); img.style.width = '100%'; w.document.body.appendChild(img); } } }, 'atlas').name('show leaf atlas');
+}
+
+// ── STATS (draws / triangles / fps / GPU) ────────────────────────────────────────────────────────
+const statsEl = document.getElementById('stats');
+const gl = renderer.getContext(), tq = gl.getExtension('EXT_disjoint_timer_query_webgl2');
+let qPend = [], gpuMs = null, fpsA = [], last = performance.now();
+function stats(now, calls, tris) {
+  fpsA.push(now - last); last = now; if (fpsA.length > 60) fpsA.shift();
+  const fps = 1000 / (fpsA.reduce((a, b) => a + b, 0) / fpsA.length);
+  const sp = SPECIES[KN.species];
+  const tc = tri(geoCur[sp.seed]), tn = tri(geoNew[sp.seed]);
+  let fc = 0, fn = 0; if (forestGrp) { for (const m of forestGrp.userData.cur) fc += m.count * tri(m.geometry); for (const m of forestGrp.userData.nw) fn += m.count * tri(m.geometry); }
+  statsEl.textContent =
+    'view ' + KN.view + ' / ' + KN.mode + '\n' +
+    'fps ' + fps.toFixed(0) + '   GPU ' + (gpuMs != null ? gpuMs.toFixed(2) + ' ms' : '-') + '\n' +
+    'draws ' + calls + '   tris ' + (tris / 1e6).toFixed(2) + ' M (all passes)\n' +
+    sp.name + ': ' + tc + ' -> ' + tn + ' tris/tree (' + (tn / Math.max(1, tc) * 100).toFixed(0) + '%)\n' +
+    'forest (' + (KN.forestN | 0) + ' trees, one pass): ' + (fc / 1e6).toFixed(1) + ' M -> ' + (fn / 1e6).toFixed(1) + ' M';
+}
+
+// ── LOOP ─────────────────────────────────────────────────────────────────────────────────────────
+function resize() {
+  const w = innerWidth, h = innerHeight; renderer.setSize(w, h, false); camera.aspect = (KN.view === 'split' ? w / 2 : w) / h; camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize);
+function frame(now) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (now - (frame.t || now)) / 1000); frame.t = now;
+  pollPad(dt);
+  if (KN.sway) U.uTime.value += dt;
+  placeCamera();
+  const w = innerWidth, h = innerHeight;
+  let q = null;
+  if (tq && !qPend.length) { q = gl.createQuery(); gl.beginQuery(tq.TIME_ELAPSED_EXT, q); }
+  renderer.info.reset();
+  const grp = KN.mode === 'forest' ? forestGrp : closeGrp;
+  if (KN.view === 'split') {
+    camera.aspect = (w / 2) / h; camera.updateProjectionMatrix();
+    renderer.setScissorTest(true);
+    setVis(grp, true, false); renderer.setViewport(0, 0, w / 2, h); renderer.setScissor(0, 0, w / 2, h); renderer.render(scene, camera);
+    setVis(grp, false, true); renderer.setViewport(w / 2, 0, w / 2, h); renderer.setScissor(w / 2, 0, w / 2, h); renderer.render(scene, camera);
+    renderer.setScissorTest(false);
+  } else {
+    camera.aspect = w / h; camera.updateProjectionMatrix();
+    setVis(grp, KN.view === 'cur', KN.view === 'new'); renderer.setViewport(0, 0, w, h); renderer.render(scene, camera);
+  }
+  if (q) { gl.endQuery(tq.TIME_ELAPSED_EXT); qPend.push(q); }
+  if (qPend.length && gl.getQueryParameter(qPend[0], gl.QUERY_RESULT_AVAILABLE)) {
+    const q0 = qPend.shift(); if (!gl.getParameter(tq.GPU_DISJOINT_EXT)) gpuMs = gl.getQueryParameter(q0, gl.QUERY_RESULT) / 1e6; gl.deleteQuery(q0);
+  }
+  stats(now, renderer.info.render.calls, renderer.info.render.triangles);
+}
+
+// ── BOOT ─────────────────────────────────────────────────────────────────────────────────────────
+try {
+  G = await loadGame();
+  atlas = paintAtlas(KN);
+  makeMaterials();
+  buildGeos();
+  rebuildScene();
+  buildGui();
+  resize();
+  say('');
+  window.__lab = { KN, G, geoCur, geoNew, rebuild: () => { buildGeos(); rebuildScene(); }, renderer, scene, camera, orbit };
+  requestAnimationFrame(frame);
+} catch (e) {
+  say('tree lab failed: ' + (e && e.message ? e.message : e), true);
+  console.error(e);
+}
+</script>
+</body>
+</html>
