@@ -3679,6 +3679,11 @@ Hand-editing the ships on a Quest 3 (WebXR, VR or passthrough AR) or with a mous
   - Merge-by-distance was rejected: it CHAINS through a dense mesh and can swallow a region into one point. A cell only collapses what lies inside it.
   - **Measured on Slayer:** the seat went from 16 islands and 36,630 tris to 11 and 13,538 with one big sweep (182 ms including the rebuild), and two undos restored it bit-exact. A 2 cm-cell sweep over a busy hull panel took out 341 tris.
   - Autosave stores whole arrays for a piece once `P.topo` is set.
+- **Any GLB by URL:** `ship_lab_xr.html?file=<url>[&name=<label>]`. The label names the autosave and the `<label>_edit.glb` export. A model with no `*_game_cockpit` piece takes its SEAT height from the whole model.
+  - **The owner's new cockpit** (2026-10-01): `backups/concept_ships/cockpit4.glb` is a Meshy low-poly pod, 10,094 tris, with baked 4k colour / normal / metal-rough PNGs. The owner: *"our cockpit is mangled in every ship... i could remove a lot of the cockpit geometry... there's so much geometry there that we cannot see... let me work on that in vr"*.
+  - Meshy builds it as an UPRIGHT seat facing +Z, head +Y (as the original cockpit.glb was). The lab copy `LSS/backups/cockpit_edit/cockpit4_lab.glb` is rotated into the ships' frame, (x, y, z) -> (-z, y, x): nose -X, so MIRROR (z = 0) splits it left / right.
+  - It carries a guessed `cockpit1` eye at (-0.1, 0.6, 0); the owner drags it with PIECE.
+  - `LSS/backups/` is served locally and never deployed. Open the lab at `?file=backups/cockpit_edit/cockpit4_lab.glb`.
 - ⭐ **EDITS INTO THE GAME: `tools/ship_edit_splice.mjs`** (v50.66, the owner's first edit). Owner: *"tracker_edit.glb is my first edit! ... can you put it in game?"*.
   - **Run:** `node tools/ship_edit_splice.mjs <ship> <edit.glb> [--dry] [--box x0,x1,y0,y1,z0,z1]`, then `node tools/compress_glb.mjs --only ships/<ship>`, then bump `_MODELS_VERSION`.
   - **What it writes:** it compares every lab part with the SHIPPED part it came from and writes only what changed into `assets_src`:
