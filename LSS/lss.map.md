@@ -3660,6 +3660,28 @@ Two traps hit while building it, both worth knowing before editing this file:
   silently produced a table with no patterns. Both are now guarded, plus shape checks that refuse to
   start on a bad slice.
 
+## The ship lab XR — `LSS/ship_lab_xr.html`
+
+Hand-editing the ships on a Quest 3 (WebXR, VR or passthrough AR) or with a mouse: **http://localhost:8099/ship_lab_xr.html** (`?ship=pyro`). Owner: *"i want to be able to squish pieces together like playdough, and grab points and lines and stretch and move them, and paint on color"*. The game does not load it.
+- **What it edits:** the SHIPPED `ships/<ship>.glb`. Every mesh is de-quantised to float32 in SHIP space (the assets_src frame: nose -X, up +Y, mirror plane z = 0). Split vertices are welded into GROUPS by exact position, and every edit moves a group, so a UV seam can never open (the v49.96 slits).
+- **Tools:**
+  - Clay: GRAB (with twist), POKE (the ball is solid and dents), INFLATE, SMOOTH, SQUISH.
+  - POINT / LINE with a SOFT radius, and PIECE (parts plus the gun / thruster / cockpit gems).
+  - PAINT / FILL / DROP.
+  - MIRROR: a vertex the plane runs through gets both weights, and the blend cancels the z pull.
+- **Paint** is a separate RGBA layer per material, mixed in the shader. The base art is never touched.
+  - A dab rasterises each triangle the ball reaches in texel space and measures every texel in 3D. A UV-space circle would bleed across the Meshy atlas islands.
+  - Uploads are `texSubImage2D` of the dirty rectangle.
+- **Saving:** autosave goes to IndexedDB per ship and per ORIGIN (a new preview port is an empty store). EXPORT writes `<ship>_edit.glb`: the pieces, composited colour maps, markers, and the raw layers as `__paint__<material>` nodes. The splice back into assets_src is NOT built yet.
+- ⚠ **`computeBoundsTree()` reorders `geometry.index` in place.** Build any face adjacency AFTER it.
+- ⚠ **three-mesh-bvh 0.8 `closestPointToPoint(p, t, min, max)`: `max` only prunes BOXES.** A farther triangle still comes back, so check `hit.distance` yourself.
+- **Testing in the Browser pane:** it has no headset, and a hidden pane has no requestAnimationFrame.
+  - `XL.tick(dt)` runs one frame.
+  - `XL.stroke(tool, [shipPts])` drives the core.
+  - Synthetic `PointerEvent`s on the canvas drive the desktop path.
+  - `XL.hands.right/left` with `sim = true`, `connected = true`, `pos` / `org` / `quat` / `trig` / `sq`, plus `XL.xrFrame(dt)`, drive the controller code.
+- ⚠ **Not headset-tested yet:** where the wrist menu sits (live knob `window.__xlPanel = { x, y, z, rx }`), the tip offset (`TIP` 5 cm) and the button map (xr-standard: 0 trigger, 1 squeeze, 4 A/X, 5 B/Y).
+
 ## v40.02 — shields reflect again, dimmed rather than hidden
 
 Owner: "i don't see the reflection of shields in the water", then "we had this fix before ... look how

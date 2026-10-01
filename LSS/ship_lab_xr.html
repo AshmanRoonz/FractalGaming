@@ -1,0 +1,1192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LSS Ship Lab XR</title>
+<!--
+  LSS SHIP LAB XR - edit the game's ships BY HAND, on a Quest 3 (WebXR, VR or passthrough AR) or with a mouse.
+  Owner: "could you make an XR html lab that allows us to edit our ships? i want to be able to squish pieces
+  together like playdough, and grab points and lines and stretch and move them, and paint on color"
+
+  It loads the SHIPPED hulls (ships/<ship>.glb, the same bytes the game draws) and turns every mesh into an editable
+  piece: positions de-quantised to float32 in SHIP space (the frame assets_src and the Blender recipe use - nose -X,
+  up +Y, mirror plane z = 0), split vertices welded into GROUPS by exact position so a sculpt never tears a UV seam
+  open (the v49.96 "slits" lesson), one three-mesh-bvh per piece for rays and brush queries.
+
+  TOOLS  clay: GRAB (drag + twist the clay with your hand) / POKE (the brush ball dents what it touches) /
+         INFLATE (swell or shrink) / SMOOTH / SQUISH (pinch toward the ball)
+         edit: POINT and LINE (grab a vertex or an edge and stretch it; SOFT = how far the pull spreads) /
+         PIECE (move a whole part - seat, console, glass - or a gun / thruster / cockpit marker)
+         paint: PAINT (alt = erase) / FILL (a whole part) / DROP (pick a colour off the ship)
+  MIRROR (default on) repeats every clay, point, line and paint edit across z = 0.
+
+  QUEST 3  right trigger = use the tool (pressure-sensitive) · hold left trigger = SMOOTH (clay) or ERASE (paint) ·
+           grip = grab the ship (both grips: scale + turn it) · right stick = size / strength · left stick = tool ·
+           A / B = undo / redo · X = menu · Y = mirror · point the right hand at the menu to press buttons.
+  DESKTOP  left-drag = tool (shift = smooth / erase) · right-drag = orbit · middle-drag = pan · wheel = zoom ·
+           [ ] size · - = strength · ctrl+Z / ctrl+Y · 1-9, 0 tools · M mirror.
+
+  SAVING   every stroke autosaves to this device (IndexedDB, per ship) - RESTORE brings it back after a reload.
+           EXPORT writes <ship>_edit.glb: the edited pieces in ship space, the painted colour maps composited, every
+           marker, and each raw paint layer as a hidden `__paint__<material>` node, so the splice back into
+           assets_src can lay the paint over the full-resolution source maps instead of the 2k shipped ones.
+           Getting it into the GAME is a separate step (a splice like canopy/scripts/seat_splice.mjs) - ask.
+
+  Needs a secure origin for WebXR: http://localhost (Air Link / Quest Link from the PC) or https (the deployed site).
+-->
+<style>
+  :root { --bg:#05070f; --panel:rgba(10,16,28,0.94); --line:rgba(255,170,0,0.28); --ink:#cfe7ff; --dim:#7f93ad; --hot:#ffaa00; --bad:#ff5566; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--ink); font-family:'Rajdhani','Segoe UI',system-ui,sans-serif; overflow:hidden; }
+  #view { position:fixed; inset:0; right:340px; }
+  #view canvas { display:block; touch-action:none; }
+  #side { position:fixed; top:0; right:0; bottom:0; width:340px; background:var(--panel); border-left:1px solid var(--line);
+          padding:10px; overflow-y:auto; overflow-x:hidden; display:flex; flex-direction:column; gap:8px; }
+  #top { display:flex; flex-wrap:wrap; gap:6px; }
+  #top button, #top label { flex:1 1 30%; background:#14203a; color:var(--ink); border:1px solid rgba(120,160,220,0.3); border-radius:6px;
+          padding:7px 4px; font:600 12px/1 'Segoe UI',system-ui,sans-serif; letter-spacing:1px; cursor:pointer; text-align:center; }
+  #top button:hover, #top label:hover { border-color:var(--hot); }
+  #top button:disabled { opacity:0.35; cursor:default; }
+  #top input[type=file] { display:none; }
+  #panel { width:320px; height:450px; border-radius:8px; border:1px solid rgba(120,160,220,0.18); cursor:pointer; touch-action:none; }
+  #status { font-size:12px; color:var(--dim); min-height:32px; white-space:pre-wrap; }
+  #help { font-size:11px; color:var(--dim); line-height:1.45; }
+  #help b { color:var(--ink); font-weight:600; }
+  #banner { position:fixed; left:12px; top:10px; right:352px; font-size:13px; color:var(--hot); pointer-events:none; text-shadow:0 1px 2px #000; }
+  #banner.bad { color:var(--bad); }
+  @media (max-width: 720px) { #view { right:0; bottom:46%; } #side { top:auto; height:46%; width:100%; } #banner { right:12px; } }
+</style>
+</head>
+<body>
+<div id="view"></div>
+<div id="side">
+  <div id="top">
+    <button id="btn-vr" disabled>ENTER VR</button>
+    <button id="btn-ar" disabled>ENTER AR</button>
+    <label>OPEN GLB<input id="file" type="file" accept=".glb,.gltf"></label>
+  </div>
+  <canvas id="panel" width="512" height="720"></canvas>
+  <div id="status">loading...</div>
+  <div id="help">
+    <b>Mouse</b> left-drag = tool (shift = smooth / erase) · right-drag = orbit · middle-drag = pan · wheel = zoom ·
+    <b>[ ]</b> size · <b>- =</b> strength · <b>ctrl+Z / ctrl+Y</b> undo / redo · <b>1-9, 0</b> tools · <b>M</b> mirror<br>
+    <b>Quest 3</b> right trigger = tool · hold left trigger = smooth / erase · grip = hold the ship (both = scale + turn) ·
+    right stick = size / strength · left stick = tool · <b>A / B</b> undo / redo · <b>X</b> menu · <b>Y</b> mirror
+  </div>
+</div>
+<div id="banner"></div>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.min.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.165.0/examples/jsm/",
+  "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.8.3/build/index.module.js"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast, INTERSECTED, NOT_INTERSECTED } from 'three-mesh-bvh';
+THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
+THREE.Mesh.prototype.raycast = acceleratedRaycast;
+
+// ================================================================ STATE
+const SHIPS = ['blaster', 'puncture', 'pyro', 'slayer', 'syphon', 'tracker', 'vortex'];
+const TOOLS = ['grab', 'poke', 'inflate', 'smooth', 'squish', 'point', 'line', 'piece', 'paint', 'fill', 'drop'];
+const TOOL_LABEL = { grab: 'GRAB', poke: 'POKE', inflate: 'INFLATE', smooth: 'SMOOTH', squish: 'SQUISH', point: 'POINT',
+  line: 'LINE', piece: 'PIECE', paint: 'PAINT', fill: 'FILL', drop: 'DROP' };
+const CLAY = new Set(['grab', 'poke', 'inflate', 'smooth', 'squish']);
+const qs = new URLSearchParams(location.search);
+// sizes are WORLD metres (what you feel in the headset), so scaling the ship up is how you do fine work
+const S = {
+  ship: SHIPS.includes(qs.get('ship')) ? qs.get('ship') : 'slayer',
+  tool: 'grab', r: 0.03, strength: 0.5, soft: 0.03, hardness: 0.5, opacity: 1,
+  color: [255, 59, 48], mirror: true, inflateOut: true, menu: true,
+};
+const $ = (id) => document.getElementById(id);
+function banner(t, bad) { const b = $('banner'); b.textContent = t || ''; b.className = bad ? 'bad' : ''; }
+function status(t) { $('status').textContent = t; }
+const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+const V = () => new THREE.Vector3();
+
+// ================================================================ RENDERER + SCENE
+const view = $('view');
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(2, devicePixelRatio));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.xr.enabled = true;
+view.appendChild(renderer.domElement);
+const gl = renderer.getContext();
+const scene = new THREE.Scene();
+const BG = new THREE.Color(0x0b1020);
+scene.background = BG;
+const camera = new THREE.PerspectiveCamera(55, 1, 0.01, 200);
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+scene.add(new THREE.HemisphereLight(0xcfe0ff, 0x202030, 0.7));
+const keyLight = new THREE.DirectionalLight(0xffffff, 1.5); keyLight.position.set(2, 4, 3); scene.add(keyLight);
+const grid = new THREE.GridHelper(6, 24, 0x2a3a5a, 0x16213a); scene.add(grid);
+const shipRoot = new THREE.Group(); shipRoot.name = 'shipRoot'; scene.add(shipRoot);
+const HOME = { pos: new THREE.Vector3(0, 1.1, -0.9), scale: 0.8 };
+const shipInv = new THREE.Matrix4();          // world -> ship, refreshed every frame
+function syncShipInv() { shipRoot.updateMatrixWorld(true); shipInv.copy(shipRoot.matrixWorld).invert(); }
+const shipScale = () => shipRoot.scale.x;      // uniform
+// desktop orbit camera (XR replaces it with the headset)
+const orbit = { target: HOME.pos.clone(), dist: 2.3, az: 0.55, el: 0.3 };
+function placeCamera() {
+  const ce = Math.cos(orbit.el);
+  camera.position.set(orbit.target.x + orbit.dist * Math.sin(orbit.az) * ce, orbit.target.y + orbit.dist * Math.sin(orbit.el),
+    orbit.target.z + orbit.dist * Math.cos(orbit.az) * ce);
+  camera.lookAt(orbit.target);
+}
+function resize() {
+  if (renderer.xr.isPresenting) return;
+  const w = Math.max(1, view.clientWidth), h = Math.max(1, view.clientHeight);
+  renderer.setSize(w, h); camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize);
+
+// ================================================================ THE SHIP: pieces + markers
+// A PIECE is one editable mesh. Positions live in the piece's LOCAL frame (identity under shipRoot until PIECE moves
+// it), float32. Split vertices (UV seams, hard normals) are welded into GROUPS by exact position: every edit moves a
+// group, and the group writes all of its vertices, so a seam can never open.
+let pieces = [], markers = [];
+const ship = { name: '', seatH: 0.24, c1: null };
+const CS = 0.03;                                       // grid cell, local units
+const cellKey = (x, y, z) => (clamp(Math.floor(x / CS) + 512, 0, 1023) * 1048576) + (clamp(Math.floor(y / CS) + 512, 0, 1023) * 1024) + clamp(Math.floor(z / CS) + 512, 0, 1023);
+
+function makePiece(src) {
+  const g0 = src.geometry, M = src.matrixWorld, nv = g0.attributes.position.count;
+  const pa = g0.attributes.position, na = g0.attributes.normal, ta = g0.attributes.uv;
+  const pos = new Float32Array(nv * 3), nrm = new Float32Array(nv * 3), v = V(), nm = new THREE.Matrix3().getNormalMatrix(M);
+  for (let i = 0; i < nv; i++) {
+    v.fromBufferAttribute(pa, i).applyMatrix4(M); pos[i * 3] = v.x; pos[i * 3 + 1] = v.y; pos[i * 3 + 2] = v.z;
+    if (na) { v.fromBufferAttribute(na, i).applyMatrix3(nm).normalize(); nrm[i * 3] = v.x; nrm[i * 3 + 1] = v.y; nrm[i * 3 + 2] = v.z; }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
+  let uv = null;
+  if (ta) { uv = new Float32Array(nv * 2); for (let i = 0; i < nv; i++) { uv[i * 2] = ta.getX(i); uv[i * 2 + 1] = ta.getY(i); } geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2)); }
+  const ia = new Uint32Array(g0.index ? g0.index.count : nv);
+  for (let i = 0; i < ia.length; i++) ia[i] = g0.index ? g0.index.getX(i) : i;
+  geo.setIndex(new THREE.BufferAttribute(ia, 1));
+  if (!na) geo.computeVertexNormals();
+  geo.computeBoundsTree();                             // ⚠ reorders the index IN PLACE - adjacency is built after
+  geo.computeBoundingSphere();
+  const idx = geo.index.array, nf = idx.length / 3;
+  const mat = src.material.clone();
+  const mesh = new THREE.Mesh(geo, mat); mesh.name = src.name || ('piece' + pieces.length);
+  shipRoot.add(mesh);
+  // weld into groups
+  const grp = new Int32Array(nv), wm = new Map(); let ng = 0;
+  for (let i = 0; i < nv; i++) {
+    const k = Math.round(pos[i * 3] * 1e5) + '_' + Math.round(pos[i * 3 + 1] * 1e5) + '_' + Math.round(pos[i * 3 + 2] * 1e5);
+    let gi = wm.get(k); if (gi === undefined) { gi = ng++; wm.set(k, gi); } grp[i] = gi;
+  }
+  const gpos = new Float32Array(ng * 3);
+  for (let i = 0; i < nv; i++) { const g = grp[i] * 3; gpos[g] = pos[i * 3]; gpos[g + 1] = pos[i * 3 + 1]; gpos[g + 2] = pos[i * 3 + 2]; }
+  const csr = (n, count, fill) => {                    // compressed lists: start[n+1], list[]
+    const st = new Int32Array(n + 1); count((g) => st[g + 1]++);
+    for (let g = 0; g < n; g++) st[g + 1] += st[g];
+    const cur = st.slice(0, n), li = new Int32Array(st[n]); fill((g, x) => { li[cur[g]++] = x; }); return [st, li];
+  };
+  const [gvS, gvL] = csr(ng, (c) => { for (let i = 0; i < nv; i++) c(grp[i]); }, (f) => { for (let i = 0; i < nv; i++) f(grp[i], i); });
+  const [gfS, gfL] = csr(ng, (c) => { for (let t = 0; t < nf * 3; t++) c(grp[idx[t]]); }, (f) => { for (let t = 0; t < nf * 3; t++) f(grp[idx[t]], (t / 3) | 0); });
+  const nb = Array.from({ length: ng }, () => []);
+  for (let t = 0; t < nf; t++) {
+    const a = grp[idx[t * 3]], b = grp[idx[t * 3 + 1]], c = grp[idx[t * 3 + 2]];
+    if (a !== b) { nb[a].push(b); nb[b].push(a); } if (b !== c) { nb[b].push(c); nb[c].push(b); } if (c !== a) { nb[c].push(a); nb[a].push(c); }
+  }
+  for (let g = 0; g < ng; g++) if (nb[g].length > 1) nb[g] = [...new Set(nb[g])];
+  const [gnS, gnL] = csr(ng, (c) => { for (let g = 0; g < ng; g++) for (let k = 0; k < nb[g].length; k++) c(g); }, (f) => { for (let g = 0; g < ng; g++) for (const x of nb[g]) f(g, x); });
+  const P = { id: pieces.length, mesh, geo, mat, name: mesh.name, matName: (src.material && src.material.name) || '', pos, nrm, uv, idx, nv, nf,
+    grp, ng, gpos, gvS, gvL, gfS, gfL, gnS, gnL, cell: new Int32Array(ng), grid: new Map(), inv: new THREE.Matrix4(),
+    hasPaint: !!(uv && mat.map), paint: null, uPaint: null, baseColor: mat.color.clone(), moved: new Uint8Array(ng) };
+  for (let g = 0; g < ng; g++) gridPut(P, g);
+  if (P.hasPaint) patchPaintMaterial(P);
+  return P;
+}
+function gridPut(P, g) {
+  const k = cellKey(P.gpos[g * 3], P.gpos[g * 3 + 1], P.gpos[g * 3 + 2]); P.cell[g] = k;
+  let a = P.grid.get(k); if (!a) P.grid.set(k, a = []); a.push(g);
+}
+function gridMove(P, g) {
+  const k = cellKey(P.gpos[g * 3], P.gpos[g * 3 + 1], P.gpos[g * 3 + 2]); if (k === P.cell[g]) return;
+  const a = P.grid.get(P.cell[g]); if (a) { const i = a.indexOf(g); if (i >= 0) { a[i] = a[a.length - 1]; a.pop(); } }
+  P.cell[g] = k; let b = P.grid.get(k); if (!b) P.grid.set(k, b = []); b.push(g);
+}
+// every group of piece P within R of c (LOCAL frame): fn(g, dist)
+function groupsNear(P, c, R, fn) {
+  const x0 = Math.floor(c.x / CS - R / CS), x1 = Math.floor(c.x / CS + R / CS), y0 = Math.floor(c.y / CS - R / CS), y1 = Math.floor(c.y / CS + R / CS);
+  const z0 = Math.floor(c.z / CS - R / CS), z1 = Math.floor(c.z / CS + R / CS), R2 = R * R, gp = P.gpos;
+  if ((x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1) > 40000) { for (let g = 0; g < P.ng; g++) { const dx = gp[g * 3] - c.x, dy = gp[g * 3 + 1] - c.y, dz = gp[g * 3 + 2] - c.z, d2 = dx * dx + dy * dy + dz * dz; if (d2 <= R2) fn(g, Math.sqrt(d2)); } return; }
+  for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) for (let z = z0; z <= z1; z++) {
+    const a = P.grid.get(clamp(x + 512, 0, 1023) * 1048576 + clamp(y + 512, 0, 1023) * 1024 + clamp(z + 512, 0, 1023)); if (!a) continue;
+    for (let i = 0; i < a.length; i++) { const g = a[i], dx = gp[g * 3] - c.x, dy = gp[g * 3 + 1] - c.y, dz = gp[g * 3 + 2] - c.z, d2 = dx * dx + dy * dy + dz * dz; if (d2 <= R2) fn(g, Math.sqrt(d2)); }
+  }
+}
+// frames: world <-> ship (shipRoot) <-> piece local (mesh.matrix under shipRoot)
+function pieceMoved(P) { P.mesh.updateMatrix(); P.inv.copy(P.mesh.matrix).invert(); }
+const toLocal = (P, vShip, out) => out.copy(vShip).applyMatrix4(P.inv);
+const toShip = (P, vLocal, out) => out.copy(vLocal).applyMatrix4(P.mesh.matrix);
+const pieceScale = (P) => P.mesh.scale.x;
+const worldToShip = (v, out) => out.copy(v).applyMatrix4(shipInv);
+const mirrorZ = (v, out) => out.set(v.x, v.y, -v.z);
+function groupNormal(P, g, out) {
+  out.set(0, 0, 0); for (let k = P.gvS[g]; k < P.gvS[g + 1]; k++) { const i = P.gvL[k]; out.x += P.nrm[i * 3]; out.y += P.nrm[i * 3 + 1]; out.z += P.nrm[i * 3 + 2]; }
+  return out.lengthSq() > 0 ? out.normalize() : out.set(0, 1, 0);
+}
+
+// markers: the game's gun / thruster / cockpit empties, as grabbable gems with labels
+const MK_COL = { gun: 0xffa020, thruster: 0x33ddff, cockpit: 0x55ff88 };
+function makeLabel(text, col) {
+  const c = document.createElement('canvas'); c.width = 256; c.height = 64; const x = c.getContext('2d');
+  x.font = '600 38px Segoe UI, system-ui, sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle';
+  x.lineWidth = 8; x.strokeStyle = 'rgba(0,0,0,0.85)'; x.strokeText(text, 128, 32); x.fillStyle = col || '#ffffff'; x.fillText(text, 128, 32);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, depthTest: false, transparent: true })); s.renderOrder = 11; return s;
+}
+function addMarker(name, p) {
+  const type = ((name.match(/^[a-z]+/i) || ['x'])[0]).toLowerCase(), col = MK_COL[type] || 0xff55ff;
+  const vis = new THREE.Mesh(new THREE.OctahedronGeometry(0.012), new THREE.MeshBasicMaterial({ color: col, depthTest: false, transparent: true, opacity: 0.9 }));
+  vis.renderOrder = 10; vis.name = '__mk_' + name; vis.position.copy(p);
+  const lab = makeLabel(name, '#' + col.toString(16).padStart(6, '0')); lab.position.set(0, 0.028, 0); lab.scale.set(0.08, 0.02, 1); vis.add(lab);
+  shipRoot.add(vis); markers.push({ name, vis, type });
+}
+function clearShip() {
+  for (const P of pieces) { shipRoot.remove(P.mesh); P.geo.disposeBoundsTree(); P.geo.dispose(); P.mat.dispose(); if (P.paint) P.paint.tex.dispose(); }
+  for (const m of markers) shipRoot.remove(m.vis);
+  pieces = []; markers = []; undoStack.length = 0; redoStack.length = 0;
+  shipRoot.position.copy(HOME.pos); shipRoot.quaternion.identity(); shipRoot.scale.setScalar(HOME.scale);
+}
+const loader = new GLTFLoader();
+async function loadShip(name, url) {
+  status('loading ' + name + ' ...'); banner('');
+  const gltf = await loader.loadAsync(url || ('ships/' + name + '.glb?t=' + Date.now()));
+  clearShip();
+  const root = gltf.scene; root.updateMatrixWorld(true);
+  const meshes = [], marks = [];
+  root.traverse((o) => { if (o.isMesh) meshes.push(o); else if (o !== root && !o.isScene && !o.children.length) marks.push(o); });
+  for (const m of meshes) pieces.push(makePiece(m));
+  for (const m of marks) addMarker(m.name, V().setFromMatrixPosition(m.matrixWorld));
+  for (const P of pieces) pieceMoved(P);
+  ship.name = name; S.ship = SHIPS.includes(name) ? name : S.ship;
+  const seat = pieces.find((P) => /_game_cockpit$/.test(P.name));
+  if (seat) { seat.geo.computeBoundingBox(); ship.seatH = Math.max(0.05, seat.geo.boundingBox.max.y - seat.geo.boundingBox.min.y); }
+  const c1 = markers.find((m) => /^cockpit1$/i.test(m.name)); ship.c1 = c1 ? c1.vis.position.clone() : null;
+  syncShipInv();
+  const bb = new THREE.Box3().setFromObject(shipRoot); orbit.target.copy(bb.getCenter(V()));
+  const tris = pieces.reduce((a, P) => a + P.nf, 0);
+  status(name + ': ' + pieces.length + ' pieces, ' + tris.toLocaleString() + ' tris, ' + markers.length + ' markers');
+  drawPanel();
+  await offerRestore();
+}
+
+// ================================================================ STROKES + UNDO
+// One stroke = one undo step. Geometry strokes remember each touched group's ORIGINAL position the first time it
+// moves; undo swaps them back (and hands the current ones to redo).
+const undoStack = [], redoStack = [];
+let stroke = null;
+function beginStroke(kind, extra) {
+  if (stroke) endStroke();
+  stroke = Object.assign({ kind, orig: new Map(), dirty: new Map() }, extra || {});
+  return stroke;
+}
+function setGroup(P, g, x, y, z) {
+  const gp = P.gpos, i3 = g * 3;
+  if (stroke) {
+    let m = stroke.orig.get(P.id); if (!m) stroke.orig.set(P.id, m = new Map());
+    if (!m.has(g)) m.set(g, [gp[i3], gp[i3 + 1], gp[i3 + 2]]);
+    let d = stroke.dirty.get(P.id); if (!d) stroke.dirty.set(P.id, d = new Set()); d.add(g);
+  }
+  gp[i3] = x; gp[i3 + 1] = y; gp[i3 + 2] = z;
+  for (let k = P.gvS[g]; k < P.gvS[g + 1]; k++) { const i = P.gvL[k] * 3; P.pos[i] = x; P.pos[i + 1] = y; P.pos[i + 2] = z; }
+  gridMove(P, g); P.moved[g] = 1;
+}
+// smooth normals for the touched groups + their 1-ring (their faces changed too); untouched vertices keep the
+// authored normals the GLB shipped with
+function refreshNormals(P, set) {
+  const ring = new Set(set);
+  for (const g of set) for (let k = P.gnS[g]; k < P.gnS[g + 1]; k++) ring.add(P.gnL[k]);
+  const gp = P.gpos, idx = P.idx, grp = P.grp;
+  for (const g of ring) {
+    let nx = 0, ny = 0, nz = 0;
+    for (let k = P.gfS[g]; k < P.gfS[g + 1]; k++) {
+      const f = P.gfL[k] * 3, a = grp[idx[f]] * 3, b = grp[idx[f + 1]] * 3, c = grp[idx[f + 2]] * 3;
+      const e1x = gp[b] - gp[a], e1y = gp[b + 1] - gp[a + 1], e1z = gp[b + 2] - gp[a + 2];
+      const e2x = gp[c] - gp[a], e2y = gp[c + 1] - gp[a + 1], e2z = gp[c + 2] - gp[a + 2];
+      nx += e1y * e2z - e1z * e2y; ny += e1z * e2x - e1x * e2z; nz += e1x * e2y - e1y * e2x;
+    }
+    const l = Math.hypot(nx, ny, nz); if (l < 1e-20) continue;
+    nx /= l; ny /= l; nz /= l;
+    for (let k = P.gvS[g]; k < P.gvS[g + 1]; k++) { const i = P.gvL[k] * 3; P.nrm[i] = nx; P.nrm[i + 1] = ny; P.nrm[i + 2] = nz; }
+  }
+}
+function flushEdits() {
+  if (!stroke) return;
+  for (const [id, set] of stroke.dirty) {
+    const P = pieces[id]; if (!P || !set.size) continue;
+    refreshNormals(P, set);
+    P.geo.attributes.position.needsUpdate = true; P.geo.attributes.normal.needsUpdate = true;
+    set.clear();
+  }
+}
+function refitPiece(P) { try { P.geo.boundsTree.refit(); } catch (_) {} P.geo.computeBoundingSphere(); }
+function endStroke() {
+  const st = stroke; if (!st) return;
+  flushEdits(); stroke = null;
+  for (const id of st.orig.keys()) refitPiece(pieces[id]);
+  let entry = null;
+  if (st.kind === 'geo' && st.orig.size) entry = { type: 'geo', snap: st.orig };
+  else if (st.kind === 'paint' && st.tiles && st.tiles.size) { finishPaint(st); entry = { type: 'paint', tiles: st.tiles }; }
+  else if (st.kind === 'xform' && st.target) entry = { type: 'xform', target: st.target, before: st.before, after: xformGet(st.target) };
+  else if (st.kind === 'color' && st.target) entry = { type: 'color', target: st.target, before: st.before, after: st.target.mat.color.getHex() };
+  if (entry) { undoStack.push(entry); redoStack.length = 0; if (undoStack.length > 80) undoStack.shift(); scheduleSave(); }
+  drawPanel();
+}
+// apply a geometry snapshot (Map id -> Map g -> xyz) and return the snapshot of what it replaced
+function applyGeoSnap(snap) {
+  const inv = new Map();
+  for (const [id, m] of snap) {
+    const P = pieces[id], back = new Map(), set = new Set();
+    for (const [g, p] of m) { back.set(g, [P.gpos[g * 3], P.gpos[g * 3 + 1], P.gpos[g * 3 + 2]]); setGroup(P, g, p[0], p[1], p[2]); set.add(g); }
+    refreshNormals(P, set); P.geo.attributes.position.needsUpdate = true; P.geo.attributes.normal.needsUpdate = true; refitPiece(P);
+    inv.set(id, back);
+  }
+  return inv;
+}
+function applyEntry(e) {             // returns the entry that reverses it
+  if (e.type === 'geo') return { type: 'geo', snap: applyGeoSnap(e.snap) };
+  if (e.type === 'paint') return { type: 'paint', tiles: applyPaintSnap(e.tiles) };
+  if (e.type === 'xform') { xformSet(e.target, e.before); return { type: 'xform', target: e.target, before: e.after, after: e.before }; }
+  if (e.type === 'color') { e.target.mat.color.setHex(e.before); return { type: 'color', target: e.target, before: e.after, after: e.before }; }
+}
+function undo() { if (stroke) endStroke(); const e = undoStack.pop(); if (!e) return; redoStack.push(applyEntry(e)); scheduleSave(); drawPanel(); }
+function redo() { if (stroke) endStroke(); const e = redoStack.pop(); if (!e) return; undoStack.push(applyEntry(e)); scheduleSave(); drawPanel(); }
+
+// ================================================================ CLAY
+const falloff = (t) => (t >= 1 ? 0 : (1 - t * t) * (1 - t * t));
+const _hits = [], _c = V(), _n = V(), _t = V(), _u = V();
+function piecesNear(cShip, R, fn) {   // fn(P, cLocal, RLocal) for pieces whose bounds the brush reaches
+  for (const P of pieces) {
+    if (!P.mesh.visible) continue;
+    const cl = toLocal(P, cShip, V()), Rl = R / pieceScale(P), bs = P.geo.boundingSphere;
+    if (cl.distanceTo(bs.center) > bs.radius + Rl) continue;
+    fn(P, cl, Rl);
+  }
+}
+// continuous tools, once per frame while the trigger is held. c = brush centre (SHIP space), p = pressure 0..1
+function clayFrame(tool, c, p, dt) {
+  const R = S.r / shipScale(), centres = S.mirror ? [c, mirrorZ(c, V())] : [c];
+  const k = S.strength * p * Math.min(dt, 0.05);
+  for (const cc of centres) piecesNear(cc, R, (P, cl, Rl) => {
+    _hits.length = 0; groupsNear(P, cl, Rl, (g, d) => _hits.push(g, d));
+    const gp = P.gpos;
+    for (let h = 0; h < _hits.length; h += 2) {
+      const g = _hits[h], d = _hits[h + 1], w = falloff(d / Rl), i3 = g * 3;
+      if (w <= 0) continue;
+      _c.fromArray(gp, i3);
+      if (tool === 'inflate') {
+        groupNormal(P, g, _n); _c.addScaledVector(_n, (S.inflateOut ? 1 : -1) * w * k * 1.5 * Rl);
+      } else if (tool === 'smooth') {
+        const n0 = P.gnS[g], n1 = P.gnS[g + 1]; if (n1 <= n0) continue;
+        _t.set(0, 0, 0); for (let q = n0; q < n1; q++) { const j = P.gnL[q] * 3; _t.x += gp[j]; _t.y += gp[j + 1]; _t.z += gp[j + 2]; }
+        _t.multiplyScalar(1 / (n1 - n0)); _c.lerp(_t, clamp(w * k * 10, 0, 1));
+      } else if (tool === 'squish') {
+        groupNormal(P, g, _n); _t.subVectors(cl, _c); _t.addScaledVector(_n, -_t.dot(_n)); _c.addScaledVector(_t, clamp(w * k * 6, 0, 1));
+      } else if (tool === 'poke') {
+        // the brush ball is SOLID: whatever is inside it is pushed out to its surface - a finger in playdough
+        _t.subVectors(_c, cl); const l = _t.length();
+        if (l < 1e-7) { groupNormal(P, g, _n); _t.copy(_n).multiplyScalar(-1); } else _t.multiplyScalar(1 / l);
+        _u.copy(cl).addScaledVector(_t, Rl); _c.lerp(_u, clamp(p * (0.3 + S.strength), 0, 1));
+      }
+      setGroup(P, g, _c.x, _c.y, _c.z);
+    }
+  });
+}
+
+// ================================================================ GRAB / POINT / LINE: a captured set that follows the hand
+// Each captured group remembers where it started (ship space) and two weights: w1 for the real hand, w2 for the
+// mirrored one. A group the mirror plane runs through gets both, and the blend cancels the z pull, so the centre
+// line stays on the plane however you drag.
+let cap = null;
+function capture(feature, R, rigid) {    // feature(v) -> distance in ship units; returns the captured set
+  const list = [], R2 = R;
+  const probe = (cShip, Rs) => piecesNear(cShip, Rs, (P, cl, Rl) => groupsNear(P, cl, Rl, (g) => list.push(P, g)));
+  const centre = feature.centre, reach = feature.reach + R2;
+  probe(centre, reach); if (S.mirror) probe(mirrorZ(centre, V()), reach);
+  const seen = new Set(), out = [], v = V(), m = V();
+  for (let i = 0; i < list.length; i += 2) {
+    const P = list[i], g = list[i + 1], key = P.id * 4194304 + g; if (seen.has(key)) continue; seen.add(key);
+    toShip(P, v.fromArray(P.gpos, g * 3), v);
+    const w = (d) => (d <= rigid ? 1 : (R > 0 ? falloff(d / R) : 0));
+    const w1 = w(feature.dist(v)), w2 = S.mirror ? w(feature.dist(mirrorZ(v, m))) : 0;
+    if (w1 > 0 || w2 > 0) out.push({ P, g, v0: v.clone(), w1, w2 });
+  }
+  return out;
+}
+const _q0inv = new THREE.Quaternion(), _qd = new THREE.Quaternion(), _qm = new THREE.Quaternion();
+function capBegin(kind, tipShip, qShip, feature, R, rigid) {
+  beginStroke('geo');
+  cap = { kind, tip0: tipShip.clone(), q0: qShip ? qShip.clone() : null, list: capture(feature, R, rigid), feature };
+  return cap.list.length;
+}
+function capMove(tipShip, qShip) {
+  if (!cap) return;
+  const twist = cap.kind === 'grab' && qShip && cap.q0;
+  if (twist) { _q0inv.copy(cap.q0).invert(); _qd.multiplyQuaternions(qShip, _q0inv); _qm.set(-_qd.x, -_qd.y, _qd.z, _qd.w); }
+  const t1 = V(), t2 = V(), d1 = V(), d2 = V(), mt0 = mirrorZ(cap.tip0, V()), mtip = mirrorZ(tipShip, V()), out = V();
+  for (const it of cap.list) {
+    // where the hand carries it ...
+    t1.subVectors(it.v0, cap.tip0); if (twist) t1.applyQuaternion(_qd); t1.add(tipShip); d1.subVectors(t1, it.v0);
+    // ... and where the mirrored hand carries it (rotation reflected through z = 0)
+    if (it.w2 > 0) { t2.subVectors(it.v0, mt0); if (twist) t2.applyQuaternion(_qm); t2.add(mtip); d2.subVectors(t2, it.v0); } else d2.set(0, 0, 0);
+    const { w1, w2 } = it;
+    if (w1 > 0 && w2 > 0) { const s = Math.max(w1, w2) / (w1 + w2); out.copy(d1).multiplyScalar(w1 * s).addScaledVector(d2, w2 * s); }
+    else out.copy(d1).multiplyScalar(w1).addScaledVector(d2, w2);
+    out.add(it.v0); toLocal(it.P, out, out); setGroup(it.P, it.g, out.x, out.y, out.z);
+  }
+}
+function capEnd() { cap = null; endStroke(); }
+// features
+const pointFeature = (p) => ({ centre: p.clone(), reach: 0, dist: (v) => v.distanceTo(p) });
+function segFeature(a, b) {
+  const ab = V().subVectors(b, a), L2 = Math.max(ab.lengthSq(), 1e-18), mid = V().addVectors(a, b).multiplyScalar(0.5), tmp = V();
+  return { centre: mid, reach: Math.sqrt(L2) / 2, dist: (v) => { const t = clamp(tmp.subVectors(v, a).dot(ab) / L2, 0, 1); return tmp.copy(a).addScaledVector(ab, t).distanceTo(v); } };
+}
+// nearest vertex group / edge to a point (ship space), within R
+function pickPoint(cShip, R) {
+  let best = null;
+  piecesNear(cShip, R, (P, cl, Rl) => groupsNear(P, cl, Rl, (g, d) => { const ds = d * pieceScale(P); if (!best || ds < best.d) best = { P, g, d: ds }; }));
+  if (best) best.p = toShip(best.P, V().fromArray(best.P.gpos, best.g * 3), V());
+  return best;
+}
+function pickLine(cShip, R) {
+  let best = null; const a = V(), b = V(), ab = V(), t = V();
+  piecesNear(cShip, R * 2, (P, cl, Rl) => groupsNear(P, cl, Rl, (g) => {
+    a.fromArray(P.gpos, g * 3);
+    for (let k = P.gnS[g]; k < P.gnS[g + 1]; k++) {
+      const n = P.gnL[k]; if (n < g) continue;
+      b.fromArray(P.gpos, n * 3); ab.subVectors(b, a); const L2 = ab.lengthSq(); if (L2 < 1e-18) continue;
+      const s = clamp(t.subVectors(cl, a).dot(ab) / L2, 0, 1), d = t.copy(a).addScaledVector(ab, s).distanceTo(cl) * pieceScale(P);
+      if (d <= R && (!best || d < best.d)) best = { P, a: g, b: n, d };
+    }
+  }));
+  if (best) { best.pa = toShip(best.P, V().fromArray(best.P.gpos, best.a * 3), V()); best.pb = toShip(best.P, V().fromArray(best.P.gpos, best.b * 3), V()); }
+  return best;
+}
+
+// ================================================================ PIECE: whole parts and markers
+const xformGet = (t) => (t.kind === 'marker' ? t.m.vis.position.toArray() : t.P.mesh.matrix.toArray());
+function xformSet(t, arr) {
+  if (t.kind === 'marker') { t.m.vis.position.fromArray(arr); return; }
+  t.P.mesh.matrix.fromArray(arr); t.P.mesh.matrix.decompose(t.P.mesh.position, t.P.mesh.quaternion, t.P.mesh.scale); pieceMoved(t.P);
+}
+function pickPiece(cShip, R) {
+  let best = null;
+  for (const m of markers) { const d = m.vis.position.distanceTo(cShip); if (d <= R + 0.012 && (!best || d < best.d)) best = { kind: 'marker', m, d: 0 }; }
+  if (best) return best;
+  for (const P of pieces) {
+    if (!P.mesh.visible) continue;
+    const cl = toLocal(P, cShip, V()), Rl = R / pieceScale(P);
+    const hit = P.geo.boundsTree.closestPointToPoint(cl, {}, 0, Rl);
+    // ⚠ maxThreshold only prunes BOXES - a farther triangle can still come back, so check the distance here
+    if (hit && hit.distance <= Rl && (!best || hit.distance * pieceScale(P) < best.d)) best = { kind: 'piece', P, d: hit.distance * pieceScale(P) };
+  }
+  return best;
+}
+let held = null;   // { target, rel: Matrix4 (hand^-1 * object, ship frame) }
+const _hm = new THREE.Matrix4(), _om = new THREE.Matrix4();
+function pieceBegin(target, handShip) {
+  beginStroke('xform', { target, before: xformGet(target) });
+  _om.copy(target.kind === 'marker' ? new THREE.Matrix4().makeTranslation(target.m.vis.position) : target.P.mesh.matrix);
+  held = { target, rel: _hm.copy(handShip).invert().multiply(_om).clone() };
+}
+function pieceMove(handShip) {
+  if (!held) return;
+  _om.multiplyMatrices(handShip, held.rel);
+  if (held.target.kind === 'marker') held.target.m.vis.position.setFromMatrixPosition(_om);
+  else { const M = held.target.P.mesh; _om.decompose(M.position, M.quaternion, _t); pieceMoved(held.target.P); }
+}
+function pieceEnd() { held = null; endStroke(); }
+
+// ================================================================ PAINT
+// Paint lands on a separate RGBA LAYER per painted material (straight alpha, sRGB), mixed over the base colour map in
+// the shader - the base art is never touched, erase is exact, and export can hand the raw layer to the full-res
+// sources. A dab paints every texel whose 3D surface point lies inside the brush ball: each triangle the ball reaches
+// (three-mesh-bvh shapecast) is rasterised in texel space and every texel is measured in 3D. Painting in UV space
+// instead would bleed across the Meshy atlas, whose islands sit beside parts they don't touch on the hull.
+const TILE = 64;
+const BLANK = new THREE.DataTexture(new Uint8Array([0, 0, 0, 0]), 1, 1); BLANK.needsUpdate = true;
+let dabId = 1;
+const smooth01 = (x) => x * x * (3 - 2 * x);
+function patchPaintMaterial(P) {
+  P.uPaint = { value: BLANK };
+  P.mat.onBeforeCompile = (sh) => {
+    sh.uniforms.uPaint = P.uPaint;
+    sh.fragmentShader = 'uniform sampler2D uPaint;\n' + sh.fragmentShader.replace('#include <map_fragment>',
+      '#include <map_fragment>\n\t{ vec4 pc = texture2D( uPaint, vMapUv ); diffuseColor.rgb = mix( diffuseColor.rgb, pc.rgb, pc.a ); }');
+  };
+  P.mat.customProgramCacheKey = () => 'xlpaint';
+  P.mat.needsUpdate = true;
+}
+function ensurePaint(P) {
+  if (P.paint) return P.paint;
+  const img = P.mat.map && P.mat.map.image;
+  let w = (img && img.width) || 1024, h = (img && img.height) || 1024;
+  const s = Math.min(1, 2048 / Math.max(w, h)); w = Math.max(64, Math.round(w * s)); h = Math.max(64, Math.round(h * s));
+  const data = new Uint8Array(w * h * 4);
+  const tex = new THREE.DataTexture(data, w, h, THREE.RGBAFormat, THREE.UnsignedByteType);
+  tex.colorSpace = THREE.SRGBColorSpace; tex.flipY = false; tex.magFilter = THREE.LinearFilter;
+  tex.minFilter = THREE.LinearMipmapLinearFilter; tex.generateMipmaps = true; tex.needsUpdate = true;
+  P.paint = { w, h, data, tex, stamp: new Uint32Array(w * h), dirty: null, lastMip: 0 };
+  P.uPaint.value = tex;
+  return P.paint;
+}
+function markDirty(pt, x0, y0, x1, y1) {
+  const d = pt.dirty; if (!d) { pt.dirty = { x0, y0, x1, y1 }; return; }
+  d.x0 = Math.min(d.x0, x0); d.y0 = Math.min(d.y0, y0); d.x1 = Math.max(d.x1, x1); d.y1 = Math.max(d.y1, y1);
+}
+// push the dirty rectangle to the GPU (texSubImage2D) - a full 2048^2 re-upload per frame would stall the Quest
+function uploadPaint(P, mip) {
+  const pt = P.paint; if (!pt || !pt.dirty) return;
+  const props = renderer.properties.get(pt.tex);
+  if (!props.__webglTexture || props.__version !== pt.tex.version) { pt.tex.needsUpdate = true; pt.dirty = null; return; }
+  const { x0, y0, x1, y1 } = pt.dirty;
+  renderer.state.bindTexture(gl.TEXTURE_2D, props.__webglTexture);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false); gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+  gl.pixelStorei(gl.UNPACK_ROW_LENGTH, pt.w); gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, x0); gl.pixelStorei(gl.UNPACK_SKIP_ROWS, y0);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, x0, y0, x1 - x0 + 1, y1 - y0 + 1, gl.RGBA, gl.UNSIGNED_BYTE, pt.data);
+  gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 0); gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, 0); gl.pixelStorei(gl.UNPACK_SKIP_ROWS, 0);
+  const now = performance.now();
+  if (mip || now - pt.lastMip > 250) { gl.generateMipmap(gl.TEXTURE_2D); pt.lastMip = now; }
+  pt.dirty = null;
+}
+function uploadAllPaint(mip) { for (const P of pieces) if (P.paint && P.paint.dirty) uploadPaint(P, mip); }
+// undo: the first touch of a 64x64 tile in a stroke copies it
+function snapTiles(P, pt, x0, y0, x1, y1) {
+  if (!stroke || !stroke.tiles) return;
+  for (let ty = (y0 / TILE) | 0; ty <= ((y1 / TILE) | 0); ty++) for (let tx = (x0 / TILE) | 0; tx <= ((x1 / TILE) | 0); tx++) {
+    const key = P.id * 1e6 + ty * 1000 + tx; if (stroke.tiles.has(key)) continue;
+    stroke.tiles.set(key, { P, tx, ty, data: tileGet(pt, tx, ty) });
+  }
+}
+function tileGet(pt, tx, ty) {
+  const x0 = tx * TILE, y0 = ty * TILE, w = Math.min(TILE, pt.w - x0), h = Math.min(TILE, pt.h - y0), out = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y++) out.set(pt.data.subarray(((y0 + y) * pt.w + x0) * 4, ((y0 + y) * pt.w + x0 + w) * 4), y * w * 4);
+  return out;
+}
+function tilePut(pt, tx, ty, src) {
+  const x0 = tx * TILE, y0 = ty * TILE, w = Math.min(TILE, pt.w - x0), h = Math.min(TILE, pt.h - y0);
+  for (let y = 0; y < h; y++) pt.data.set(src.subarray(y * w * 4, (y + 1) * w * 4), ((y0 + y) * pt.w + x0) * 4);
+  markDirty(pt, x0, y0, x0 + w - 1, y0 + h - 1);
+}
+function applyPaintSnap(tiles) {
+  const inv = new Map();
+  for (const [key, t] of tiles) { const pt = ensurePaint(t.P); inv.set(key, { P: t.P, tx: t.tx, ty: t.ty, data: tileGet(pt, t.tx, t.ty) }); tilePut(pt, t.tx, t.ty, t.data); pt.used = true; pt.ver = (pt.ver || 0) + 1; }
+  uploadAllPaint(true);
+  return inv;
+}
+function finishPaint() { uploadAllPaint(true); }
+function rasterTri(P, pt, ti, cl, Rl, erase) {
+  const idx = P.idx, uv = P.uv, pos = P.pos, W = pt.w, H = pt.h;
+  const i0 = idx[ti * 3], i1 = idx[ti * 3 + 1], i2 = idx[ti * 3 + 2];
+  const ax = uv[i0 * 2] * W, ay = uv[i0 * 2 + 1] * H, bx = uv[i1 * 2] * W, by = uv[i1 * 2 + 1] * H, cx = uv[i2 * 2] * W, cy = uv[i2 * 2 + 1] * H;
+  const minx = Math.max(0, Math.floor(Math.min(ax, bx, cx) - 1)), maxx = Math.min(W - 1, Math.ceil(Math.max(ax, bx, cx) + 1));
+  const miny = Math.max(0, Math.floor(Math.min(ay, by, cy) - 1)), maxy = Math.min(H - 1, Math.ceil(Math.max(ay, by, cy) + 1));
+  if (maxx < minx || maxy < miny || (maxx - minx + 1) * (maxy - miny + 1) > 600000) return;
+  const d = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy); if (Math.abs(d) < 1e-9) return;
+  const A2 = Math.abs(d);   // 1-texel conservative edge tolerance, so island borders get a gutter and never show a seam
+  const tA = -Math.hypot(bx - cx, by - cy) / A2, tB = -Math.hypot(cx - ax, cy - ay) / A2, tC = -Math.hypot(ax - bx, ay - by) / A2;
+  const p0x = pos[i0 * 3], p0y = pos[i0 * 3 + 1], p0z = pos[i0 * 3 + 2], p1x = pos[i1 * 3], p1y = pos[i1 * 3 + 1], p1z = pos[i1 * 3 + 2];
+  const p2x = pos[i2 * 3], p2y = pos[i2 * 3 + 1], p2z = pos[i2 * 3 + 2];
+  snapTiles(P, pt, minx, miny, maxx, maxy);
+  const D = pt.data, st = pt.stamp, hard = S.hardness, op = S.opacity, [cr, cg, cb] = S.color;
+  let touched = false;
+  for (let py = miny; py <= maxy; py++) {
+    const sy = py + 0.5;
+    for (let px = minx; px <= maxx; px++) {
+      const sx = px + 0.5;
+      let l0 = ((by - cy) * (sx - cx) + (cx - bx) * (sy - cy)) / d, l1 = ((cy - ay) * (sx - cx) + (ax - cx) * (sy - cy)) / d, l2 = 1 - l0 - l1;
+      if (l0 < tA || l1 < tB || l2 < tC) continue;
+      if (l0 < 0) l0 = 0; if (l1 < 0) l1 = 0; if (l2 < 0) l2 = 0; const s = l0 + l1 + l2; l0 /= s; l1 /= s; l2 /= s;
+      const x = l0 * p0x + l1 * p1x + l2 * p2x - cl.x, y = l0 * p0y + l1 * p1y + l2 * p2y - cl.y, z = l0 * p0z + l1 * p1z + l2 * p2z - cl.z;
+      const dd = Math.sqrt(x * x + y * y + z * z); if (dd >= Rl) continue;
+      const o = py * W + px; if (st[o] === dabId) continue; st[o] = dabId;
+      const t = dd / Rl; const w = (t <= hard ? 1 : 1 - smooth01((t - hard) / Math.max(1e-6, 1 - hard))) * op; if (w <= 0.002) continue;
+      const q = o * 4, a = D[q + 3] / 255;
+      if (erase) D[q + 3] = Math.round(a * (1 - w) * 255);
+      else { const na = w + a * (1 - w), k = a * (1 - w); D[q] = Math.round((cr * w + D[q] * k) / na); D[q + 1] = Math.round((cg * w + D[q + 1] * k) / na); D[q + 2] = Math.round((cb * w + D[q + 2] * k) / na); D[q + 3] = Math.round(na * 255); }
+      touched = true;
+    }
+  }
+  if (touched) { markDirty(pt, minx, miny, maxx, maxy); pt.used = true; pt.ver = (pt.ver || 0) + 1; }
+}
+function paintDab(cShip, erase) {
+  const R = S.r / shipScale(), centres = S.mirror ? [cShip, mirrorZ(cShip, V())] : [cShip], tmp = V();
+  dabId++; let n = 0;
+  for (const cc of centres) piecesNear(cc, R, (P, cl, Rl) => {
+    if (!P.hasPaint) return;
+    const pt = ensurePaint(P);
+    P.geo.boundsTree.shapecast({
+      intersectsBounds: (box) => (box.distanceToPoint(cl) <= Rl ? INTERSECTED : NOT_INTERSECTED),
+      intersectsTriangle: (tri, ti) => { if (tri.closestPointToPoint(cl, tmp).distanceTo(cl) <= Rl) { rasterTri(P, pt, ti, cl, Rl, erase); n++; } return false; },
+    });
+  });
+  uploadAllPaint(false);
+  return n;
+}
+// FILL: a textured part takes the colour over its whole layer; an untextured one (glass, hood, frame) changes colour
+function fillPiece(P) {
+  if (P.hasPaint) {
+    const pt = ensurePaint(P);
+    beginStroke('paint', { tiles: new Map() }); snapTiles(P, pt, 0, 0, pt.w - 1, pt.h - 1);
+    const D = pt.data, w = S.opacity, [cr, cg, cb] = S.color;
+    for (let q = 0; q < D.length; q += 4) { const a = D[q + 3] / 255, na = w + a * (1 - w), k = a * (1 - w); if (na <= 0) continue;
+      D[q] = Math.round((cr * w + D[q] * k) / na); D[q + 1] = Math.round((cg * w + D[q + 1] * k) / na); D[q + 2] = Math.round((cb * w + D[q + 2] * k) / na); D[q + 3] = Math.round(na * 255); }
+    markDirty(pt, 0, 0, pt.w - 1, pt.h - 1); pt.used = true; pt.ver = (pt.ver || 0) + 1; endStroke();
+  } else {
+    beginStroke('color', { target: P, before: P.mat.color.getHex() });
+    P.mat.color.setRGB(S.color[0] / 255, S.color[1] / 255, S.color[2] / 255, THREE.SRGBColorSpace); endStroke();
+  }
+}
+// DROP: the colour you see at the nearest surface point (base map + paint layer), sRGB 0..255
+const _px = document.createElement('canvas'); _px.width = _px.height = 1;
+const _pxc = _px.getContext('2d', { willReadFrequently: true });
+function sampleAt(cShip, reach) {
+  let best = null;
+  for (const P of pieces) {
+    if (!P.mesh.visible) continue;
+    const cl = toLocal(P, cShip, V()), hit = P.geo.boundsTree.closestPointToPoint(cl, {}, 0, reach / pieceScale(P));
+    if (hit && hit.distance <= reach / pieceScale(P) && (!best || hit.distance * pieceScale(P) < best.d)) best = { P, hit, d: hit.distance * pieceScale(P) };
+  }
+  if (!best) return null;
+  const { P, hit } = best;
+  const base = P.mat.color.clone().convertLinearToSRGB(); let rgb = [base.r * 255, base.g * 255, base.b * 255];
+  if (P.uv && P.mat.map && P.mat.map.image) {
+    const f = hit.faceIndex * 3, ia = P.idx[f], ib = P.idx[f + 1], ic = P.idx[f + 2];
+    const bc = new THREE.Triangle(V().fromArray(P.pos, ia * 3), V().fromArray(P.pos, ib * 3), V().fromArray(P.pos, ic * 3)).getBarycoord(hit.point, V());
+    const u = bc.x * P.uv[ia * 2] + bc.y * P.uv[ib * 2] + bc.z * P.uv[ic * 2], v = bc.x * P.uv[ia * 2 + 1] + bc.y * P.uv[ib * 2 + 1] + bc.z * P.uv[ic * 2 + 1];
+    const img = P.mat.map.image, ix = clamp(Math.floor(u * img.width), 0, img.width - 1), iy = clamp(Math.floor(v * img.height), 0, img.height - 1);
+    try { _pxc.clearRect(0, 0, 1, 1); _pxc.drawImage(img, ix, iy, 1, 1, 0, 0, 1, 1); const d = _pxc.getImageData(0, 0, 1, 1).data; rgb = [d[0] * base.r, d[1] * base.g, d[2] * base.b]; } catch (_) {}
+    if (P.paint) {
+      const pt = P.paint, o = (clamp(Math.floor(v * pt.h), 0, pt.h - 1) * pt.w + clamp(Math.floor(u * pt.w), 0, pt.w - 1)) * 4, a = pt.data[o + 3] / 255;
+      rgb = rgb.map((c, k) => c * (1 - a) + pt.data[o + k] * a);
+    }
+  }
+  return rgb.map((c) => clamp(Math.round(c), 0, 255));
+}
+// the base map with its paint layer composited, at the layer's size (export)
+function compositeCanvas(P) {
+  const pt = P.paint, c = document.createElement('canvas'); c.width = pt.w; c.height = pt.h;
+  const x = c.getContext('2d'); x.drawImage(P.mat.map.image, 0, 0, pt.w, pt.h);
+  x.drawImage(layerCanvas(P), 0, 0); return c;
+}
+function layerCanvas(P) {
+  const pt = P.paint, c = document.createElement('canvas'); c.width = pt.w; c.height = pt.h;
+  c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(pt.data.buffer.slice(0)), pt.w, pt.h), 0, 0); return c;
+}
+
+// ================================================================ THE MENU - one canvas for both worlds
+// Drawn once into #panel: the desktop shows that canvas, the headset wears it on the left hand as a texture. One
+// hit-test serves the mouse and the right-hand pointer, so the two menus can never disagree.
+const PALETTE = ['#ff3b30', '#ff9500', '#ffcc00', '#a8e10c', '#34c759', '#00c7be', '#32ade6', '#007aff',
+  '#5856d6', '#af52de', '#ff2d55', '#ffffff', '#a0a4ab', '#5a5f68', '#26292e', '#000000'];
+const panelCanvas = $('panel'), pctx = panelCanvas.getContext('2d');
+const panelTex = new THREE.CanvasTexture(panelCanvas); panelTex.colorSpace = THREE.SRGBColorSpace;
+const ui = { controls: [], hover: null, drag: null, restore: null, toast: '', toastT: 0 };
+const hex2rgb = (h) => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+const rgb2hex = (c) => '#' + c.map((v) => clamp(Math.round(v), 0, 255).toString(16).padStart(2, '0')).join('');
+function hsl() { const c = new THREE.Color(S.color[0] / 255, S.color[1] / 255, S.color[2] / 255), o = {}; c.getHSL(o, THREE.LinearSRGBColorSpace); return o; }
+function setHSL(h, s, l) { const c = new THREE.Color(); c.setHSL(h, s, l, THREE.LinearSRGBColorSpace); S.color = [c.r * 255, c.g * 255, c.b * 255].map(Math.round); }
+const sizeT = { get: () => Math.log(S.r / 0.004) / Math.log(75), set: (t) => { S.r = 0.004 * Math.pow(75, clamp(t, 0, 1)); } };
+const softT = { get: () => (S.soft <= 0 ? 0 : 0.05 + 0.95 * Math.log(S.soft / 0.003) / Math.log(100)), set: (t) => { S.soft = t < 0.05 ? 0 : 0.003 * Math.pow(100, (clamp(t, 0, 1) - 0.05) / 0.95); } };
+function sliderRows() {
+  const t = S.tool, rows = [{ id: 'size', label: t === 'piece' || t === 'point' || t === 'line' ? 'REACH' : 'SIZE', t: sizeT.get(), txt: (S.r * 100).toFixed(1) + ' cm' }];
+  if (CLAY.has(t)) rows.push({ id: 'strength', label: 'STRENGTH', t: S.strength, txt: Math.round(S.strength * 100) + '%' });
+  if (t === 'point' || t === 'line') rows.push({ id: 'soft', label: 'SOFT', t: softT.get(), txt: S.soft <= 0 ? 'rigid' : (S.soft * 100).toFixed(1) + ' cm' });
+  if (t === 'paint' || t === 'fill' || t === 'drop') { rows.push({ id: 'opacity', label: 'OPACITY', t: S.opacity, txt: Math.round(S.opacity * 100) + '%' }); rows.push({ id: 'hardness', label: 'HARDNESS', t: S.hardness, txt: Math.round(S.hardness * 100) + '%' }); }
+  return rows;
+}
+function rr(x, y, w, h, r) { pctx.beginPath(); pctx.roundRect(x, y, w, h, r); }
+function drawPanel() {
+  const c = pctx, W = 512; ui.controls = [];
+  const add = (o) => { ui.controls.push(o); return o; };
+  c.fillStyle = '#0a1020'; c.fillRect(0, 0, W, 720);
+  c.textBaseline = 'middle'; c.textAlign = 'center';
+  const btn = (o, label, on, sub) => {
+    add(o); const hov = ui.hover === o.id;
+    rr(o.x, o.y, o.w, o.h, 10); c.fillStyle = on ? '#ffaa00' : (hov ? '#22345a' : '#141f38'); c.fill();
+    c.lineWidth = 2; c.strokeStyle = on ? '#ffd27a' : (hov ? '#ffaa00' : 'rgba(120,160,220,0.35)'); c.stroke();
+    c.fillStyle = on ? '#101010' : '#dbe9ff'; c.font = '700 ' + (o.fs || 22) + 'px Segoe UI, system-ui, sans-serif';
+    c.fillText(label, o.x + o.w / 2, o.y + o.h / 2 + (sub ? -9 : 1));
+    if (sub) { c.font = '500 15px Segoe UI, system-ui, sans-serif'; c.fillStyle = on ? '#332200' : '#7f93ad'; c.fillText(sub, o.x + o.w / 2, o.y + o.h / 2 + 16); }
+  };
+  // header: ship + restore
+  btn({ id: 'prev', x: 8, y: 8, w: 52, h: 48, act: () => switchShip(-1) }, '◀', false);
+  c.fillStyle = '#ffaa00'; c.font = '700 26px Segoe UI, system-ui, sans-serif'; c.fillText((ship.name || S.ship).toUpperCase(), ui.restore ? 170 : 256, 32);
+  btn({ id: 'next', x: ui.restore ? 272 : 452, y: 8, w: 52, h: 48, act: () => switchShip(1) }, '▶', false);
+  if (ui.restore) btn({ id: 'restore', x: 332, y: 8, w: 172, h: 48, fs: 18, act: () => restoreSession() }, 'RESTORE', false, ui.restore);
+  // tools
+  const subs = { grab: 'drag clay', poke: 'dent it', inflate: S.inflateOut ? 'swell' : 'shrink', smooth: 'relax', squish: 'pinch', point: 'vertex', line: 'edge',
+    piece: 'part / gem', paint: 'alt: erase', fill: 'whole part', drop: 'pick colour' };
+  TOOLS.forEach((t, i) => btn({ id: 'tool_' + t, x: 8 + (i % 4) * 126, y: 64 + Math.floor(i / 4) * 76, w: 118, h: 70, act: () => setTool(t) }, TOOL_LABEL[t], S.tool === t, subs[t]));
+  btn({ id: 'mirror', x: 8 + 3 * 126, y: 64 + 2 * 76, w: 118, h: 70, act: () => { S.mirror = !S.mirror; toast('mirror ' + (S.mirror ? 'on' : 'off')); } }, 'MIRROR', S.mirror, S.mirror ? 'z = 0 on' : 'off');
+  // sliders
+  let y = 300;
+  for (const r of sliderRows()) {
+    const o = add({ id: 's_' + r.id, x: 8, y, w: 496, h: 52, slider: r.id });
+    c.textAlign = 'left'; c.fillStyle = '#7f93ad'; c.font = '600 17px Segoe UI, system-ui, sans-serif'; c.fillText(r.label, 16, y + 14);
+    c.textAlign = 'right'; c.fillStyle = '#dbe9ff'; c.fillText(r.txt, 496, y + 14); c.textAlign = 'center';
+    rr(16, y + 30, 480, 12, 6); c.fillStyle = '#1b2742'; c.fill();
+    rr(16, y + 30, Math.max(12, 480 * clamp(r.t, 0, 1)), 12, 6); c.fillStyle = ui.hover === o.id ? '#ffd27a' : '#ffaa00'; c.fill();
+    y += 56;
+  }
+  if (S.tool === 'inflate') btn({ id: 'inout', x: 8, y, w: 496, h: 44, fs: 18, act: () => { S.inflateOut = !S.inflateOut; } }, S.inflateOut ? 'SWELL  (tap for SHRINK)' : 'SHRINK  (tap for SWELL)', false);
+  // colour
+  y = 476;
+  PALETTE.forEach((h, i) => {
+    const o = add({ id: 'sw_' + i, x: 8 + (i % 8) * 62, y: y + Math.floor(i / 8) * 50, w: 58, h: 44, act: () => { S.color = hex2rgb(h); toast('colour ' + h); } });
+    rr(o.x, o.y, o.w, o.h, 8); c.fillStyle = h; c.fill(); c.lineWidth = rgb2hex(S.color) === h ? 4 : 1.5;
+    c.strokeStyle = rgb2hex(S.color) === h ? '#ffaa00' : 'rgba(255,255,255,0.25)'; c.stroke();
+  });
+  y += 104;
+  const hs = hsl();
+  for (const [id, label, t] of [['hue', 'HUE', hs.h], ['shade', 'SHADE', hs.l]]) {
+    const o = add({ id: 's_' + id, x: 96, y, w: 408, h: 34, slider: id });
+    c.textAlign = 'left'; c.fillStyle = '#7f93ad'; c.font = '600 16px Segoe UI, system-ui, sans-serif'; c.fillText(label, 100, y + 8); c.textAlign = 'center';
+    const g = c.createLinearGradient(100, 0, 500, 0);
+    if (id === 'hue') for (let k = 0; k <= 6; k++) g.addColorStop(k / 6, 'hsl(' + k * 60 + ',100%,50%)');
+    else { g.addColorStop(0, '#000'); g.addColorStop(0.5, 'hsl(' + Math.round(hs.h * 360) + ',' + Math.round(hs.s * 100) + '%,50%)'); g.addColorStop(1, '#fff'); }
+    rr(100, y + 18, 400, 12, 6); c.fillStyle = g; c.fill();
+    c.beginPath(); c.arc(100 + 400 * t, y + 24, 9, 0, Math.PI * 2); c.fillStyle = '#fff'; c.fill(); c.lineWidth = 2; c.strokeStyle = '#000'; c.stroke();
+    y += 38;
+  }
+  rr(8, y - 76, 80, 70, 10); c.fillStyle = rgb2hex(S.color); c.fill(); c.lineWidth = 2; c.strokeStyle = '#ffaa00'; c.stroke();
+  // actions
+  y = 664;
+  const acts = [['undo', 'UNDO', () => undo(), undoStack.length + ''], ['redo', 'REDO', () => redo(), redoStack.length + ''],
+    ['seat', 'SEAT', () => sitInSeat(), 'pilot size'], ['home', 'RESET', () => resetView(), 'view'], ['export', 'EXPORT', () => exportGLB(), '.glb']];
+  acts.forEach(([id, label, fn, sub], i) => btn({ id, x: 8 + i * 101, y, w: 95, h: 50, fs: 18, act: fn }, label, false, sub));
+  if (ui.toast && performance.now() < ui.toastT) { c.fillStyle = 'rgba(0,0,0,0.75)'; rr(56, 258, 400, 38, 10); c.fill(); c.fillStyle = '#ffd27a'; c.font = '600 18px Segoe UI, system-ui, sans-serif'; c.fillText(ui.toast, 256, 277); }
+  panelTex.needsUpdate = true;
+}
+function toast(t) { ui.toast = t; ui.toastT = performance.now() + 1800; drawPanel(); setTimeout(drawPanel, 1850); }
+function panelControlAt(px, py) { for (let i = ui.controls.length - 1; i >= 0; i--) { const o = ui.controls[i]; if (px >= o.x && px <= o.x + o.w && py >= o.y && py <= o.y + o.h) return o; } return null; }
+// phase: 'down' | 'drag' | 'up' | 'hover'
+function panelInput(px, py, phase) {
+  const o = phase === 'drag' ? ui.drag : panelControlAt(px, py);
+  if (phase === 'hover' || phase === 'up') { const id = o ? o.id : null; if (phase === 'up') ui.drag = null; if (id !== ui.hover) { ui.hover = id; drawPanel(); } return !!o; }
+  if (!o) return false;
+  if (phase === 'down') ui.drag = o.slider ? o : null;
+  if (o.slider) {
+    const t = clamp((px - (o.slider === 'hue' || o.slider === 'shade' ? 100 : 16)) / (o.slider === 'hue' || o.slider === 'shade' ? 400 : 480), 0, 1);
+    if (o.slider === 'size') sizeT.set(t); else if (o.slider === 'strength') S.strength = Math.max(0.05, t); else if (o.slider === 'soft') softT.set(t);
+    else if (o.slider === 'opacity') S.opacity = Math.max(0.05, t); else if (o.slider === 'hardness') S.hardness = t;
+    else if (o.slider === 'hue') { const h = hsl(); setHSL(t, Math.max(h.s, 0.6), h.l > 0.92 || h.l < 0.08 ? 0.5 : h.l); }
+    else if (o.slider === 'shade') { const h = hsl(); setHSL(h.h, h.s, t); }
+    drawPanel(); return true;
+  }
+  if (phase === 'down' && o.act) { o.act(); drawPanel(); pulse('right', 0.25, 18); }
+  return true;
+}
+function setTool(t) { if (stroke) endStroke(); S.tool = t; toast(TOOL_LABEL[t]); }
+function switchShip(d) { const i = (SHIPS.indexOf(ship.name) + d + SHIPS.length) % SHIPS.length; loadShip(SHIPS[i >= 0 ? i : 0]).catch((e) => banner('load failed: ' + e.message, true)); }
+// desktop: the same canvas, scaled by CSS
+let panelMouse = false;
+panelCanvas.addEventListener('pointerdown', (e) => { panelMouse = true; try { panelCanvas.setPointerCapture(e.pointerId); } catch (_) {} const p = panelXY(e); panelInput(p.x, p.y, 'down'); });
+panelCanvas.addEventListener('pointermove', (e) => { const p = panelXY(e); panelInput(p.x, p.y, panelMouse && ui.drag ? 'drag' : 'hover'); });
+panelCanvas.addEventListener('pointerup', (e) => { panelMouse = false; const p = panelXY(e); panelInput(p.x, p.y, 'up'); });
+function panelXY(e) { const r = panelCanvas.getBoundingClientRect(); return { x: (e.clientX - r.left) * 512 / r.width, y: (e.clientY - r.top) * 720 / r.height }; }
+
+// ================================================================ HELPERS: brush ball, nearby points / edges, pick
+const brushBall = new THREE.Mesh(new THREE.SphereGeometry(1, 24, 16), new THREE.MeshBasicMaterial({ color: 0xffaa00, transparent: true, opacity: 0.16, depthWrite: false }));
+brushBall.add(new THREE.Mesh(new THREE.SphereGeometry(1, 16, 10), new THREE.MeshBasicMaterial({ color: 0xffd27a, wireframe: true, transparent: true, opacity: 0.35, depthWrite: false })));
+brushBall.renderOrder = 5; brushBall.visible = false; scene.add(brushBall);
+const MAXP = 4000, MAXE = 8000;
+const nearPts = new THREE.Points(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(MAXP * 3), 3)),
+  new THREE.PointsMaterial({ color: 0x9fd8ff, size: 0.006, sizeAttenuation: true, depthTest: false, transparent: true, opacity: 0.85 }));
+const nearEdges = new THREE.LineSegments(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(MAXE * 6), 3)),
+  new THREE.LineBasicMaterial({ color: 0x4f8fd0, depthTest: false, transparent: true, opacity: 0.6 }));
+const pickDot = new THREE.Mesh(new THREE.SphereGeometry(1, 12, 8), new THREE.MeshBasicMaterial({ color: 0xffaa00, depthTest: false }));
+const pickSeg = new THREE.Line(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3)), new THREE.LineBasicMaterial({ color: 0xffaa00, depthTest: false }));
+for (const o of [nearPts, nearEdges, pickDot, pickSeg]) { o.renderOrder = 12; o.visible = false; o.frustumCulled = false; shipRoot.add(o); }
+// shows the vertex points + edges around the tip, and which one a press would take
+function updateHelpers(tipShip) {
+  const show = !!tipShip && (S.tool === 'point' || S.tool === 'line');
+  nearPts.visible = nearEdges.visible = show; pickDot.visible = pickSeg.visible = false;
+  if (!show) return;
+  const R = S.r / shipScale(), reveal = Math.max(R * 2.5, 0.04), pa = nearPts.geometry.attributes.position.array, ea = nearEdges.geometry.attributes.position.array;
+  let np = 0, ne = 0; const a = V(), b = V();
+  piecesNear(tipShip, reveal, (P, cl, Rl) => groupsNear(P, cl, Rl, (g) => {
+    if (np < MAXP) { toShip(P, a.fromArray(P.gpos, g * 3), a); pa[np * 3] = a.x; pa[np * 3 + 1] = a.y; pa[np * 3 + 2] = a.z; np++; }
+    for (let k = P.gnS[g]; k < P.gnS[g + 1] && ne < MAXE; k++) {
+      const n = P.gnL[k]; if (n < g) continue;
+      toShip(P, a.fromArray(P.gpos, g * 3), a); toShip(P, b.fromArray(P.gpos, n * 3), b); ea.set([a.x, a.y, a.z, b.x, b.y, b.z], ne * 6); ne++;
+    }
+  }));
+  nearPts.geometry.setDrawRange(0, np); nearPts.geometry.attributes.position.needsUpdate = true;
+  nearEdges.geometry.setDrawRange(0, ne * 2); nearEdges.geometry.attributes.position.needsUpdate = true;
+  if (cap) return;
+  const ds = Math.max(0.0025, R * 0.08);
+  if (S.tool === 'point') { const h = pickPoint(tipShip, R); if (h) { pickDot.visible = true; pickDot.position.copy(h.p); pickDot.scale.setScalar(ds); } }
+  else { const h = pickLine(tipShip, R); if (h) { pickSeg.visible = true; pickSeg.geometry.attributes.position.array.set([h.pa.x, h.pa.y, h.pa.z, h.pb.x, h.pb.y, h.pb.z]); pickSeg.geometry.attributes.position.needsUpdate = true; } }
+}
+
+// ================================================================ DESKTOP INPUT
+const raycaster = new THREE.Raycaster(); raycaster.firstHitOnly = true;
+const mouse = new THREE.Vector2();
+const desk = { x: 0, y: 0, in: false, btn: -1, shift: false, hit: null, lastDab: null, plane: new THREE.Plane(), mode: null, ox: 0, oy: 0 };
+const cvs = renderer.domElement;
+function castAt(x, y) {
+  const r = cvs.getBoundingClientRect(); mouse.set(((x - r.left) / r.width) * 2 - 1, -((y - r.top) / r.height) * 2 + 1);
+  raycaster.setFromCamera(mouse, camera);
+  const hits = raycaster.intersectObjects(pieces.filter((P) => P.mesh.visible).map((P) => P.mesh), false);
+  return hits[0] || null;
+}
+function planePoint(x, y, out) {   // where the mouse ray meets the drag plane (world)
+  const r = cvs.getBoundingClientRect(); mouse.set(((x - r.left) / r.width) * 2 - 1, -((y - r.top) / r.height) * 2 + 1);
+  raycaster.setFromCamera(mouse, camera); return raycaster.ray.intersectPlane(desk.plane, out);
+}
+const reachShip = () => S.r / shipScale();
+cvs.addEventListener('contextmenu', (e) => e.preventDefault());
+cvs.addEventListener('pointerdown', (e) => {
+  try { cvs.setPointerCapture(e.pointerId); } catch (_) {} desk.btn = e.button; desk.shift = e.shiftKey; desk.ox = e.clientX; desk.oy = e.clientY;
+  if (e.button !== 0) { desk.mode = (e.button === 1 || (e.button === 2 && e.shiftKey)) ? 'pan' : 'orbit'; return; }
+  const hit = castAt(e.clientX, e.clientY); desk.hit = hit; desk.mode = null;
+  const t = S.tool, alt = e.shiftKey;
+  if (!hit && t !== 'piece') return;
+  const hs = hit ? worldToShip(hit.point, V()) : null;
+  desk.plane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(V()).negate(), hit ? hit.point : orbit.target);
+  if (t === 'grab' && !alt) { capBegin('grab', hs, null, pointFeature(hs), reachShip(), 0); desk.mode = 'cap'; }
+  else if (CLAY.has(t)) { beginStroke('geo'); desk.mode = 'clay'; desk.lastDab = null; }
+  else if (t === 'point' || t === 'line') {
+    const h = t === 'point' ? pickPoint(hs, reachShip()) : pickLine(hs, reachShip());
+    if (h) { const f = t === 'point' ? pointFeature(h.p) : segFeature(h.pa, h.pb); capBegin(t, hs, null, f, S.soft / shipScale(), 1e-9); desk.mode = 'cap'; }
+  } else if (t === 'piece') { const h = hs && pickPiece(hs, reachShip()); if (h) { pieceBegin(h, new THREE.Matrix4().makeTranslation(hs)); desk.mode = 'piece'; } }
+  else if (t === 'paint') { beginStroke('paint', { tiles: new Map() }); paintDab(hs, alt); desk.lastDab = hit.point.clone(); desk.mode = 'paint'; }
+  else if (t === 'fill') { const h = pickPiece(hs, reachShip()); if (h && h.kind === 'piece') fillPiece(h.P); }
+  else if (t === 'drop') { const c = sampleAt(hs, reachShip() * 2); if (c) { S.color = c; toast('colour ' + rgb2hex(c)); } }
+});
+cvs.addEventListener('pointermove', (e) => {
+  const dx = e.clientX - desk.x, dy = e.clientY - desk.y; desk.x = e.clientX; desk.y = e.clientY; desk.in = true; desk.shift = e.shiftKey;
+  if (desk.mode === 'orbit') { orbit.az -= dx * 0.008; orbit.el = clamp(orbit.el + dy * 0.008, -1.45, 1.45); return; }
+  if (desk.mode === 'pan') {
+    const k = orbit.dist * 0.0018, right = V().setFromMatrixColumn(camera.matrixWorld, 0), up = V().setFromMatrixColumn(camera.matrixWorld, 1);
+    orbit.target.addScaledVector(right, -dx * k).addScaledVector(up, dy * k); return;
+  }
+  if (desk.mode === 'cap' || desk.mode === 'piece') {
+    const p = planePoint(e.clientX, e.clientY, V()); if (!p) return; const ps = worldToShip(p, V());
+    if (desk.mode === 'cap') { capMove(ps, null); flushEdits(); } else pieceMove(new THREE.Matrix4().makeTranslation(ps));
+  }
+});
+cvs.addEventListener('pointerup', () => {
+  if (desk.mode === 'cap') capEnd(); else if (desk.mode === 'piece') pieceEnd(); else if (desk.mode === 'clay' || desk.mode === 'paint') endStroke();
+  desk.mode = null; desk.btn = -1;
+});
+cvs.addEventListener('pointerleave', () => { desk.in = false; });
+cvs.addEventListener('wheel', (e) => { e.preventDefault(); orbit.dist = clamp(orbit.dist * Math.exp(e.deltaY * 0.0012), 0.02, 30); }, { passive: false });
+addEventListener('keydown', (e) => {
+  if (e.target && e.target.tagName === 'INPUT') return;
+  const k = e.key.toLowerCase();
+  if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
+  if ((e.ctrlKey || e.metaKey) && k === 'y') { e.preventDefault(); redo(); return; }
+  if (k === '[') sizeT.set(sizeT.get() - 0.05); else if (k === ']') sizeT.set(sizeT.get() + 0.05);
+  else if (k === '-') bumpStrength(-0.05); else if (k === '=') bumpStrength(0.05);
+  else if (k === 'm') S.mirror = !S.mirror;
+  else if (/^[0-9]$/.test(k)) { const t = TOOLS[k === '0' ? 9 : +k - 1]; if (t) setTool(t); }
+  else return;
+  drawPanel();
+});
+function bumpStrength(d) { if (S.tool === 'paint' || S.tool === 'fill') S.opacity = clamp(S.opacity + d, 0.05, 1); else S.strength = clamp(S.strength + d, 0.05, 1); }
+// every desktop frame: hover ball + the continuous clay tools under the mouse
+function deskFrame(dt) {
+  let hit = null;
+  if (desk.in && desk.mode !== 'orbit' && desk.mode !== 'pan' && desk.mode !== 'cap' && desk.mode !== 'piece') hit = castAt(desk.x, desk.y);
+  else if (desk.mode === 'cap' || desk.mode === 'piece') hit = desk.hit;
+  brushBall.visible = !!hit && desk.mode !== 'cap' && desk.mode !== 'piece';
+  if (hit) { brushBall.position.copy(hit.point); brushBall.scale.setScalar(S.r); }
+  const hs = hit ? worldToShip(hit.point, V()) : null;
+  if (desk.mode === 'clay' && hit) {
+    const tool = desk.shift ? 'smooth' : S.tool;
+    if (tool === 'poke') {   // the ball sits half into the surface, and only dents while it MOVES (no digging on the spot)
+      if (!desk.lastDab || desk.lastDab.distanceTo(hit.point) > S.r * 0.15) {
+        const c = hit.point.clone().addScaledVector(raycaster.ray.direction, S.r * 0.5);
+        clayFrame('poke', worldToShip(c, V()), 1, dt); desk.lastDab = hit.point.clone();
+      }
+    } else if (tool !== 'grab') clayFrame(tool, hs, 1, dt);
+    flushEdits();
+    if (performance.now() - (desk.refit || 0) > 200) { desk.refit = performance.now(); for (const id of stroke ? stroke.orig.keys() : []) refitPiece(pieces[id]); }
+  } else if (desk.mode === 'paint' && hit && desk.lastDab && desk.lastDab.distanceTo(hit.point) > S.r * 0.25) { paintDab(hs, desk.shift); desk.lastDab = hit.point.clone(); }
+  updateHelpers(desk.mode === 'cap' ? null : hs);
+}
+
+// ================================================================ XR: hands, the menu, world grab, tools
+const hands = {};
+function mkHand(side) {
+  const vis = new THREE.Group();
+  const stylus = new THREE.Mesh(new THREE.ConeGeometry(0.006, 0.05, 10), new THREE.MeshStandardMaterial({ color: side === 'right' ? 0xffaa00 : 0x6fa8ff, roughness: 0.4 }));
+  stylus.rotation.x = -Math.PI / 2; stylus.position.z = -0.025; vis.add(stylus); vis.visible = false; scene.add(vis);
+  return { side, src: null, ctl: null, connected: false, sim: false, pos: V(), org: V(), quat: new THREE.Quaternion(), trig: 0, sq: 0,
+    btn: [], prev: [], axes: [0, 0], stickArmed: true, vis, active: null, lastDab: null, lastPulse: 0 };
+}
+hands.left = mkHand('left'); hands.right = mkHand('right');
+for (let i = 0; i < 2; i++) {
+  const ctl = renderer.xr.getController(i);
+  ctl.addEventListener('connected', (e) => { const h = hands[e.data.handedness]; if (!h) return; h.src = e.data; h.ctl = ctl; h.connected = true; ctl.userData.side = e.data.handedness; });
+  ctl.addEventListener('disconnected', () => { const h = hands[ctl.userData.side]; if (h && h.ctl === ctl) { h.connected = false; h.src = null; h.vis.visible = false; } });
+  scene.add(ctl);
+}
+const TIP = 0.05;   // the brush sits 5 cm ahead of the controller, like the end of a stylus
+function readHand(h) {
+  if (h.sim || !h.connected || !h.ctl) return;
+  h.ctl.updateMatrixWorld(true); h.ctl.matrixWorld.decompose(h.org, h.quat, _t);
+  h.pos.set(0, 0, -TIP).applyQuaternion(h.quat).add(h.org);
+  const gp = h.src && h.src.gamepad;
+  h.prev = h.btn;
+  if (gp) { h.trig = gp.buttons[0] ? gp.buttons[0].value : 0; h.sq = gp.buttons[1] ? gp.buttons[1].value : 0; h.btn = gp.buttons.map((b) => b.pressed); h.axes = [gp.axes[2] || 0, gp.axes[3] || 0]; }
+}
+const pressed = (h, i) => !!h.btn[i] && !h.prev[i];
+function pulse(side, amp, ms) { try { const h = hands[side], a = h && h.src && h.src.gamepad && h.src.gamepad.hapticActuators; if (a && a[0]) a[0].pulse(amp, ms); } catch (_) {} }
+const handWorld = (h) => new THREE.Matrix4().compose(h.pos, h.quat, new THREE.Vector3(1, 1, 1));
+const handShip = (h) => new THREE.Matrix4().multiplyMatrices(shipInv, handWorld(h));
+const qToShip = (q) => { const sq = new THREE.Quaternion(); shipRoot.getWorldQuaternion(sq); return sq.invert().multiply(q); };
+// the menu rides above the left hand (live knob: window.__xlPanel = { x, y, z, rx })
+const panelMesh = new THREE.Mesh(new THREE.PlaneGeometry(0.22, 0.22 * 720 / 512), new THREE.MeshBasicMaterial({ map: panelTex, transparent: true, side: THREE.DoubleSide }));
+panelMesh.visible = false; panelMesh.renderOrder = 20; scene.add(panelMesh);
+const laser = new THREE.Line(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3)), new THREE.LineBasicMaterial({ color: 0xffaa00 }));
+laser.visible = false; laser.frustumCulled = false; scene.add(laser);
+const PANEL = { x: 0.0, y: 0.13, z: -0.06, rx: -0.75 };
+function placePanel() {
+  const L = hands.left, k = Object.assign({}, PANEL, window.__xlPanel || {});
+  panelMesh.visible = renderer.xr.isPresenting && S.menu && L.connected;
+  if (!panelMesh.visible) return;
+  panelMesh.position.set(k.x, k.y, k.z).applyQuaternion(L.quat).add(L.org);
+  panelMesh.quaternion.copy(L.quat).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), k.rx));
+  panelMesh.updateMatrixWorld();
+}
+const _ray = new THREE.Raycaster();
+function panelPointer(R) {   // true while the right hand is pointing at the menu (the tool then rests)
+  laser.visible = false;
+  if (!panelMesh.visible || !R.connected) { if (ui.hover) panelInput(-1, -1, 'hover'); return false; }
+  _ray.set(R.org, V().set(0, 0, -1).applyQuaternion(R.quat));
+  const hit = _ray.intersectObject(panelMesh, false)[0];
+  if (!hit || !hit.uv) { if (ui.drag && R.trig > 0.5) return true; if (ui.hover) panelInput(-1, -1, 'hover'); if (ui.drag) panelInput(-1, -1, 'up'); return false; }
+  const px = hit.uv.x * 512, py = (1 - hit.uv.y) * 720, down = R.trig > 0.5, was = (R.prevTrig || 0) > 0.5;
+  if (down && !was) panelInput(px, py, 'down'); else if (down && ui.drag) panelInput(px, py, 'drag'); else if (!down && was) panelInput(px, py, 'up'); else panelInput(px, py, 'hover');
+  laser.geometry.attributes.position.array.set([R.org.x, R.org.y, R.org.z, hit.point.x, hit.point.y, hit.point.z]); laser.geometry.attributes.position.needsUpdate = true; laser.visible = true;
+  return true;
+}
+// grips hold the ship: one hand carries it (move + turn), two hands scale it and spin it about the vertical
+let wg = null;
+function worldGrab() {
+  const L = hands.left, R = hands.right, lg = L.connected && L.sq > 0.5, rg = R.connected && R.sq > 0.5, mode = lg && rg ? 2 : (lg || rg ? 1 : 0);
+  if (!mode) { wg = null; return; }
+  const hand = lg && !rg ? L : R;
+  if (!wg || wg.mode !== mode || (mode === 1 && wg.hand !== hand)) {
+    shipRoot.updateMatrix(); wg = { mode, hand, ship0: shipRoot.matrix.clone() };
+    if (mode === 1) wg.rel = handWorld(hand).invert().multiply(wg.ship0);
+    else { wg.a0 = L.pos.clone(); wg.b0 = R.pos.clone(); }
+  }
+  if (mode === 1) { handWorld(hand).multiply(wg.rel).decompose(shipRoot.position, shipRoot.quaternion, _t); return; }
+  const m0 = V().addVectors(wg.a0, wg.b0).multiplyScalar(0.5), m1 = V().addVectors(L.pos, R.pos).multiplyScalar(0.5);
+  const v0 = V().subVectors(wg.b0, wg.a0), v1 = V().subVectors(R.pos, L.pos), s = clamp(v1.length() / Math.max(1e-4, v0.length()), 0.02, 50);
+  const yaw = Math.atan2(-v1.z, v1.x) - Math.atan2(-v0.z, v0.x);
+  const M = new THREE.Matrix4().makeTranslation(m1.x, m1.y, m1.z).multiply(new THREE.Matrix4().makeRotationY(yaw)).multiply(new THREE.Matrix4().makeScale(s, s, s))
+    .multiply(new THREE.Matrix4().makeTranslation(-m0.x, -m0.y, -m0.z)).multiply(wg.ship0);
+  M.decompose(shipRoot.position, shipRoot.quaternion, shipRoot.scale);
+  const k = clamp(shipRoot.scale.x, 0.02, 60); shipRoot.scale.setScalar(k);
+}
+function xrTools(R, L, dt, onMenu) {
+  const t = S.tool, alt = L.connected && L.trig > 0.5, trig = onMenu ? 0 : R.trig, on = trig > 0.15, was = !!R.active;
+  syncShipInv();
+  const tip = worldToShip(R.pos, V()), q = qToShip(R.quat);
+  if (on && !was) {                                   // press
+    R.active = t; R.lastDab = null;
+    if (t === 'grab' && !alt) capBegin('grab', tip, q, pointFeature(tip), S.r / shipScale(), 0);
+    else if (CLAY.has(t)) beginStroke('geo');
+    else if (t === 'point' || t === 'line') {
+      const h = t === 'point' ? pickPoint(tip, S.r / shipScale()) : pickLine(tip, S.r / shipScale());
+      if (h) capBegin(t, tip, null, t === 'point' ? pointFeature(h.p) : segFeature(h.pa, h.pb), S.soft / shipScale(), 1e-9); else R.active = 'none';
+    } else if (t === 'piece') { const h = pickPiece(tip, S.r / shipScale()); if (h) pieceBegin(h, handShip(R)); else R.active = 'none'; }
+    else if (t === 'paint') beginStroke('paint', { tiles: new Map() });
+    else if (t === 'fill') { const h = pickPiece(tip, S.r / shipScale()); if (h && h.kind === 'piece') { fillPiece(h.P); pulse('right', 0.5, 40); } R.active = 'none'; }
+    else if (t === 'drop') { const c = sampleAt(tip, S.r * 2 / shipScale()); if (c) { S.color = c; toast('colour ' + rgb2hex(c)); pulse('right', 0.4, 30); } R.active = 'none'; }
+  }
+  if (on && R.active && R.active !== 'none') {         // hold
+    const a = R.active;
+    if (cap) capMove(tip, q);
+    else if (a === 'piece') pieceMove(handShip(R));
+    else if (CLAY.has(a)) clayFrame(alt ? 'smooth' : (a === 'grab' ? 'smooth' : a), tip, trig, dt);
+    else if (a === 'paint' && (!R.lastDab || R.lastDab.distanceTo(R.pos) > S.r * 0.2)) { paintDab(tip, alt); R.lastDab = R.pos.clone(); }
+    flushEdits();
+    if (stroke && stroke.orig && stroke.orig.size && performance.now() - R.lastPulse > 90) { R.lastPulse = performance.now(); pulse('right', 0.12 + 0.2 * trig, 12); }
+  }
+  if (!on && was) { if (cap) capEnd(); else if (held) pieceEnd(); else endStroke(); R.active = null; }
+}
+function xrFrame(dt) {
+  const L = hands.left, R = hands.right;
+  R.prevTrig = R.trig; readHand(L); readHand(R);
+  for (const h of [L, R]) { h.vis.visible = h.connected; if (h.connected) { h.vis.position.copy(h.org); h.vis.quaternion.copy(h.quat); } }
+  worldGrab(); syncShipInv(); placePanel();
+  const onMenu = panelPointer(R);
+  if (!wg || wg.hand !== R || wg.mode === 2) xrTools(R, L, dt, onMenu);
+  // sticks + buttons
+  const [rx, ry] = R.axes;
+  if (Math.abs(ry) > 0.2) { S.r = clamp(S.r * Math.exp(-ry * dt * 1.6), 0.004, 0.3); ui.dirty = true; }
+  if (Math.abs(rx) > 0.2) { bumpStrength(rx * dt * 0.7); ui.dirty = true; }
+  const lx = L.axes[0];
+  if (L.stickArmed && Math.abs(lx) > 0.7) { L.stickArmed = false; const i = TOOLS.indexOf(S.tool); setTool(TOOLS[(i + (lx > 0 ? 1 : -1) + TOOLS.length) % TOOLS.length]); pulse('left', 0.3, 20); }
+  if (Math.abs(lx) < 0.3) L.stickArmed = true;
+  if (pressed(R, 4)) undo(); if (pressed(R, 5)) redo();
+  if (pressed(L, 4)) S.menu = !S.menu; if (pressed(L, 5)) { S.mirror = !S.mirror; toast('mirror ' + (S.mirror ? 'on' : 'off')); }
+  if (ui.dirty && performance.now() - (ui.lastDraw || 0) > 100) { ui.dirty = false; ui.lastDraw = performance.now(); drawPanel(); }
+  brushBall.visible = R.connected && !onMenu; brushBall.position.copy(R.pos); brushBall.scale.setScalar(S.r);
+  brushBall.material.color.setHex(S.tool === 'paint' || S.tool === 'fill' ? (L.trig > 0.5 ? 0x8899aa : rgb2num(S.color)) : 0xffaa00);
+  updateHelpers(R.connected && !onMenu ? worldToShip(R.pos, V()) : null);
+}
+const rgb2num = (c) => (c[0] << 16) | (c[1] << 8) | c[2];
+let xrMode = null;
+async function enterXR(mode) {
+  try {
+    const session = await navigator.xr.requestSession(mode, { optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking'] });
+    renderer.xr.setReferenceSpaceType('local-floor');
+    await renderer.xr.setSession(session);
+    xrMode = mode; const ar = mode === 'immersive-ar';
+    scene.background = ar ? null : BG; grid.visible = !ar; renderer.setClearColor(0x000000, ar ? 0 : 1);
+    session.addEventListener('end', () => { xrMode = null; scene.background = BG; grid.visible = true; renderer.setClearColor(0x000000, 1); panelMesh.visible = false; laser.visible = false; resize(); });
+  } catch (e) { banner('could not enter ' + mode + ': ' + e.message, true); }
+}
+
+// ================================================================ VIEWS
+function resetView() {
+  shipRoot.position.copy(HOME.pos); shipRoot.quaternion.identity(); shipRoot.scale.setScalar(HOME.scale); syncShipInv();
+  const bb = new THREE.Box3().setFromObject(shipRoot); orbit.target.copy(bb.getCenter(V())); orbit.dist = 2.3; orbit.az = 0.55; orbit.el = 0.3;
+}
+// SEAT: pilot size (the seat ~1.25 m tall) with your head on cockpit1, facing the nose
+function sitInSeat() {
+  if (!ship.c1) { toast('this ship has no cockpit1 marker'); return; }
+  const c1 = (markers.find((m) => /^cockpit1$/i.test(m.name)) || {}).vis; const eye = c1 ? c1.position.clone() : ship.c1.clone();
+  if (renderer.xr.isPresenting) {
+    const cam = renderer.xr.getCamera(), H = V(), Q = new THREE.Quaternion(); cam.matrixWorld.decompose(H, Q, _t);
+    const f = V(0, 0, -1).applyQuaternion(Q); f.y = 0; if (f.lengthSq() < 1e-6) f.set(0, 0, -1); f.normalize();
+    const k = clamp(1.25 / ship.seatH, 1, 60); shipRoot.scale.setScalar(k);
+    shipRoot.quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.atan2(f.z, -f.x));
+    shipRoot.position.copy(H).sub(eye.multiplyScalar(k).applyQuaternion(shipRoot.quaternion)); syncShipInv();
+  } else {
+    syncShipInv(); const w = eye.applyMatrix4(shipRoot.matrixWorld), fwd = V(-1, 0, 0).applyQuaternion(shipRoot.quaternion);
+    orbit.target.copy(w); orbit.dist = 0.012; orbit.az = Math.atan2(-fwd.x, -fwd.z); orbit.el = Math.asin(clamp(-fwd.y, -1, 1));
+  }
+  toast('in the seat - RESET to step out');
+}
+
+// ================================================================ EXPORT
+async function exportGLB(opts) {
+  opts = opts || {}; if (stroke) endStroke();
+  const root = new THREE.Group(); root.name = (ship.name || 'ship') + '_edit';
+  for (const P of pieces) {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(P.pos.slice(), 3)); g.setAttribute('normal', new THREE.BufferAttribute(P.nrm.slice(), 3));
+    if (P.uv) g.setAttribute('uv', new THREE.BufferAttribute(P.uv.slice(), 2));
+    g.setIndex(new THREE.BufferAttribute(P.idx.slice(), 1));
+    const mat = P.mat.clone(); mat.onBeforeCompile = () => {};
+    if (P.paint && P.paint.used) { const t = new THREE.CanvasTexture(compositeCanvas(P)); t.flipY = false; t.colorSpace = THREE.SRGBColorSpace; t.name = (P.mat.map.name || P.matName) + '_painted'; mat.map = t; }
+    const m = new THREE.Mesh(g, mat); m.name = P.name; P.mesh.matrix.decompose(m.position, m.quaternion, m.scale); root.add(m);
+  }
+  for (const mk of markers) { const o = new THREE.Object3D(); o.name = mk.name; o.position.copy(mk.vis.position); root.add(o); }
+  for (const P of pieces) if (P.paint && P.paint.used) {   // the raw paint layer, so the splice can lay it over the full-res source map
+    const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(9), 3)); g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(6), 2));
+    const t = new THREE.CanvasTexture(layerCanvas(P)); t.flipY = false; t.colorSpace = THREE.SRGBColorSpace; t.name = '__paint__' + P.matName;
+    const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ map: t, transparent: true, name: '__paint__' + P.matName })); m.name = '__paint__' + P.name; root.add(m);
+  }
+  const buf = await new GLTFExporter().parseAsync(root, { binary: true, onlyVisible: false, maxTextureSize: 4096 });
+  if (opts.download !== false) {
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([buf], { type: 'model/gltf-binary' }));
+    a.download = (ship.name || 'ship') + '_edit.glb'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    toast('exported ' + (ship.name || 'ship') + '_edit.glb (' + (buf.byteLength / 1048576).toFixed(1) + ' MB)');
+  }
+  return buf;
+}
+
+// ================================================================ AUTOSAVE (this device, per ship)
+let dbp = null;
+function db() {
+  if (!dbp) dbp = new Promise((res, rej) => { const r = indexedDB.open('lss_ship_lab', 1); r.onupgradeneeded = () => r.result.createObjectStore('s'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+  return dbp;
+}
+async function idb(mode, fn) { const d = await db(); return new Promise((res, rej) => { const tx = d.transaction('s', mode), st = tx.objectStore('s'), r = fn(st); tx.oncomplete = () => res(r && r.result); tx.onerror = () => rej(tx.error); }); }
+let saveTimer = 0;
+function scheduleSave() { clearTimeout(saveTimer); saveTimer = setTimeout(() => saveSession().catch((e) => console.warn('[ship lab] save failed', e)), 1500); }
+async function saveSession() {
+  if (!ship.name) return;
+  const rec = { ts: Date.now(), pieces: pieces.map((P) => ({ name: P.name, ng: P.ng, gpos: P.moved.some((x) => x) ? P.gpos.slice() : null, matrix: P.mesh.matrix.toArray(), color: P.mat.color.getHex() })),
+    markers: markers.map((m) => ({ name: m.name, pos: m.vis.position.toArray() })), paints: pieces.filter((P) => P.paint && P.paint.used).map((P) => P.name) };
+  await idb('readwrite', (st) => st.put(rec, ship.name + ':geo'));
+  for (const P of pieces) if (P.paint && P.paint.used && P.paint.savedAt !== P.paint.ver) { const pt = P.paint; await idb('readwrite', (st) => st.put({ w: pt.w, h: pt.h, data: pt.data.slice() }, ship.name + ':paint:' + P.name)); pt.savedAt = pt.ver; }
+  if (ui.restore) { ui.restore = null; drawPanel(); }
+}
+async function offerRestore() {
+  try { const rec = await idb('readonly', (st) => st.get(ship.name + ':geo')); ui.restore = rec ? new Date(rec.ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : null; } catch (_) { ui.restore = null; }
+  drawPanel();
+}
+async function restoreSession() {
+  const rec = await idb('readonly', (st) => st.get(ship.name + ':geo')); if (!rec) return;
+  beginStroke('geo');
+  for (const r of rec.pieces) {
+    const P = pieces.find((p) => p.name === r.name); if (!P) continue;
+    if (r.gpos && r.ng === P.ng) { const set = new Set(); for (let g = 0; g < P.ng; g++) { const i = g * 3; if (r.gpos[i] !== P.gpos[i] || r.gpos[i + 1] !== P.gpos[i + 1] || r.gpos[i + 2] !== P.gpos[i + 2]) { setGroup(P, g, r.gpos[i], r.gpos[i + 1], r.gpos[i + 2]); set.add(g); } } }
+    xformSet({ kind: 'piece', P }, r.matrix); P.mat.color.setHex(r.color);
+  }
+  for (const r of rec.markers) { const m = markers.find((x) => x.name === r.name); if (m) m.vis.position.fromArray(r.pos); }
+  endStroke(); undoStack.length = 0; redoStack.length = 0;
+  for (const name of rec.paints || []) {
+    const P = pieces.find((p) => p.name === name), d = await idb('readonly', (st) => st.get(ship.name + ':paint:' + name));
+    if (!P || !d || !P.hasPaint) continue; const pt = ensurePaint(P); if (d.w !== pt.w || d.h !== pt.h) continue;
+    pt.data.set(d.data); pt.used = true; pt.ver = (pt.ver || 0) + 1; pt.savedAt = pt.ver; markDirty(pt, 0, 0, pt.w - 1, pt.h - 1);
+  }
+  uploadAllPaint(true); ui.restore = null; toast('restored the saved session'); drawPanel();
+}
+
+// ================================================================ LOOP + HOOKS + BOOT
+let lastT = performance.now();
+// one frame; the animation loop calls it, and so can a test in a hidden tab (where requestAnimationFrame never fires)
+function tick(dtFixed) {
+  const now = performance.now(), dt = dtFixed || Math.min(0.1, (now - lastT) / 1000); lastT = now;
+  syncShipInv();
+  if (renderer.xr.isPresenting) xrFrame(dt); else { placeCamera(); camera.updateMatrixWorld(); deskFrame(dt); }
+  renderer.render(scene, camera);
+}
+renderer.setAnimationLoop(() => tick());
+// test hooks (the Browser pane has no headset): XL.stroke drives the same core the hands do
+function simStroke(tool, pts, o) {
+  o = o || {}; setTool(tool); const P0 = V().fromArray(pts[0]);
+  if (tool === 'grab' || tool === 'point' || tool === 'line') {
+    let f = pointFeature(P0), R = S.r / shipScale(), rigid = 0;
+    if (tool === 'point') { const h = pickPoint(P0, R); if (!h) return 'no point'; f = pointFeature(h.p); R = S.soft / shipScale(); rigid = 1e-9; }
+    if (tool === 'line') { const h = pickLine(P0, R); if (!h) return 'no line'; f = segFeature(h.pa, h.pb); R = S.soft / shipScale(); rigid = 1e-9; }
+    const n = capBegin(tool, P0, o.q0 || null, f, R, rigid); for (const p of pts.slice(1)) { capMove(V().fromArray(p), o.q1 || null); flushEdits(); } capEnd(); return n;
+  }
+  if (CLAY.has(tool)) { beginStroke('geo'); for (const p of pts) for (let k = 0; k < (o.frames || 10); k++) clayFrame(tool, V().fromArray(p), 1, 1 / 60); flushEdits(); const n = stroke.orig.size; endStroke(); return n; }
+  if (tool === 'paint') { beginStroke('paint', { tiles: new Map() }); let n = 0; for (const p of pts) n += paintDab(V().fromArray(p), !!o.erase); endStroke(); return n; }
+  if (tool === 'piece') { const h = pickPiece(P0, S.r / shipScale()); if (!h) return 'no piece'; pieceBegin(h, new THREE.Matrix4().makeTranslation(P0)); pieceMove(new THREE.Matrix4().makeTranslation(V().fromArray(pts[pts.length - 1]))); pieceEnd(); return h.kind + ':' + (h.P ? h.P.name : h.m.name); }
+  if (tool === 'fill') { const h = pickPiece(P0, S.r / shipScale()); if (h && h.kind === 'piece') { fillPiece(h.P); return h.P.name; } return 'no piece'; }
+  if (tool === 'drop') { const c = sampleAt(P0, S.r * 2 / shipScale()); if (c) S.color = c; return c; }
+}
+window.XL = { S, ship, hands, get pieces() { return pieces; }, get markers() { return markers; }, load: loadShip, setTool, undo, redo, exportGLB, stroke: simStroke,
+  tick, xrFrame, deskFrame, camera, castAt, sit: sitInSeat, reset: resetView, save: saveSession, restore: restoreSession, enterXR, renderer, scene, shipRoot, orbit,
+  stats: () => ({ ship: ship.name, pieces: pieces.map((P) => ({ name: P.name, mat: P.matName, tris: P.nf, groups: P.ng, paint: !!(P.paint && P.paint.used) })), undo: undoStack.length, redo: redoStack.length, markers: markers.map((m) => m.name) }) };
+resize(); placeCamera(); drawPanel();
+if (!window.isSecureContext) banner('WebXR needs https or localhost - VR/AR are off on this address', true);
+if (navigator.xr) for (const [id, mode] of [['btn-vr', 'immersive-vr'], ['btn-ar', 'immersive-ar']]) {
+  navigator.xr.isSessionSupported(mode).then((ok) => { $(id).disabled = !ok; }).catch(() => {});
+  $(id).onclick = () => enterXR(mode);
+}
+$('file').onchange = (e) => { const f = e.target.files[0]; if (f) loadShip(f.name.replace(/\.(glb|gltf)$/i, ''), URL.createObjectURL(f)).catch((x) => banner('load failed: ' + x.message, true)); };
+loadShip(S.ship).catch((e) => { banner('load failed: ' + e.message, true); status(String(e && e.stack || e)); });
+</script>
+</body>
+</html>
