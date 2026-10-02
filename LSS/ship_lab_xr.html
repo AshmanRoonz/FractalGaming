@@ -19,17 +19,37 @@
          MELD (join + simplify: sweep an area and its little shapes and dense lines become one simpler surface)
          DELETE (click = the nearest vertex, drag = everything the ball touches; HOLE leaves a gap, COLLAPSE closes it)
          edit: POINT and LINE (grab a vertex or an edge and stretch it; SOFT = how far the pull spreads) /
-         PIECE (move a whole part - seat, console, glass - or a gun / thruster / cockpit marker)
+         SELECT (brush, box or island: gather any group of vertices) + MOVE (carry the selection - with your hand in
+         VR, or the arrows / rings / boxes on desktop; SOFT blends the move into the surface around it) /
+         PIECE (move a whole PART - seat, console, glass, a shape - or a gun / thruster / cockpit marker)
          paint: PAINT (alt = erase) / FILL (a whole part) / DROP (pick a colour off the ship)
-  MIRROR (default on) repeats every clay, point, line and paint edit across z = 0.
+  MIRROR (default on) repeats every clay, point, line, select and paint edit across z = 0, and a shape placed off the
+         centre line gets a mirrored TWIN that follows it.
 
-  QUEST 3  right trigger = use the tool (pressure-sensitive) · hold left trigger = SMOOTH (clay) or ERASE (paint) ·
-           grip = grab the ship (both grips: scale + turn it) · right stick = size / strength · left stick = tool ·
+  FIT-OUT (2026-10-02, owner: "i want the ships without the cockpit or console... i want to be able to place the objects
+         inside the ships... i want to do the fitting myself"). The seven hulls load BARE: no seat, console, hood or arm
+         panels (hull, glass, canopy frame and tub stay; PARTS page -> AS IN GAME brings the rest back). The ADD page
+         places the SEAT (the owner's edit (6) as the game wears it: straight, reclined 8.6 deg, width x0.85) and the
+         CONSOLE (console1) - each starts exactly where the game has it, from ships/edit/fit_parts.json
+         (tools/fit_parts_prep.mjs) - plus shapes: box, round box, sphere, capsule, cylinder, cone, pyramid, wedge, ring,
+         tube, panel, gem. Every added part is a full piece: sculpt, select, paint, delete it like the hull.
+         PARTS page: the part list (eye = hide; hidden parts are not exported), and for the current part - nudges
+         (move / turn / scale / width / length / height, hold to repeat), LOCK (pitch only, no sideways drift - the seat
+         and console start locked), CENTRE (onto z = 0), RESET, COPY, DELETE, TRIM (cut it along the ship's roof and
+         belly, the game's v50.72 clean trim) and CUT (the part is a cutter: whatever is inside it is cut out of the
+         parts you can see).
+         The pilot's eye (cockpit1) rides the seat when you move it.
+
+  QUEST 3  right trigger = use the tool (pressure-sensitive) · hold left trigger = SMOOTH (clay) / ERASE (paint) /
+           DESELECT (select) · grip = grab the ship (both grips: scale + turn it) · right stick = size / strength, and
+           while you hold a part: up / down = scale it, left / right = width · left stick = tool ·
            A / B = undo / redo · X = menu · Y = mirror · point the right hand at the menu to press buttons.
-  DESKTOP  left-drag = tool (shift = smooth / erase) · right-drag = orbit · middle-drag = pan · wheel = zoom ·
-           [ ] size · - = strength · ctrl+Z / ctrl+Y · 1-9, 0 tools (1 GRAB ... 6 MELD ... 0 PAINT) · M mirror.
+  DESKTOP  left-drag = tool (shift = smooth / erase / deselect) · right-drag = orbit · middle-drag = pan · wheel = zoom ·
+           [ ] size · - = strength · ctrl+Z / ctrl+Y · 1-9, 0 tools (1 GRAB ... 6 MELD ... 9 PIECE, 0 PAINT) · M mirror ·
+           S select · G move · W / E / R = the gizmo's arrows / rings / boxes · Esc = select none.
 
-  SAVING   every stroke autosaves to this device (IndexedDB, per ship) - RESTORE brings it back after a reload.
+  SAVING   every stroke autosaves to this device (IndexedDB, per ship; a FIT-OUT session in its own slot, <ship>~fit) -
+           RESTORE brings it back after a reload, added parts, twins, copies, LOCK and the eye's seat included.
            A save remembers each part's SOURCE geometry, and RESTORE skips any part the game has changed since
            (it says how many, on the button and after). A save from before that (no fingerprints) only skips
            re-meshed parts, and only when the file is newer than the save. A skipped part stays in the save.
@@ -48,13 +68,15 @@
   #view canvas { display:block; touch-action:none; }
   #side { position:fixed; top:0; right:0; bottom:0; width:340px; background:var(--panel); border-left:1px solid var(--line);
           padding:10px; overflow-y:auto; overflow-x:hidden; display:flex; flex-direction:column; gap:8px; }
+  #side > * { flex:none; }   /* the side column scrolls; its children never squash into each other */
   #top { display:flex; flex-wrap:wrap; gap:6px; }
   #top button, #top label { flex:1 1 30%; background:#14203a; color:var(--ink); border:1px solid rgba(120,160,220,0.3); border-radius:6px;
           padding:7px 4px; font:600 12px/1 'Segoe UI',system-ui,sans-serif; letter-spacing:1px; cursor:pointer; text-align:center; }
   #top button:hover, #top label:hover { border-color:var(--hot); }
   #top button:disabled { opacity:0.35; cursor:default; }
   #top input[type=file] { display:none; }
-  #panel { width:320px; height:450px; border-radius:8px; border:1px solid rgba(120,160,220,0.18); cursor:pointer; touch-action:none; }
+  #panel { width:320px; height:500px; border-radius:8px; border:1px solid rgba(120,160,220,0.18); cursor:pointer; touch-action:none; flex:none; }
+  #marquee { position:fixed; display:none; border:1px dashed #ffe14d; background:rgba(255,225,77,0.08); pointer-events:none; z-index:5; }
   #status { font-size:12px; color:var(--dim); min-height:32px; white-space:pre-wrap; }
   #help { font-size:11px; color:var(--dim); line-height:1.45; }
   #help b { color:var(--ink); font-weight:600; }
@@ -70,17 +92,21 @@
     <button id="btn-vr" disabled>ENTER VR</button>
     <button id="btn-ar" disabled>ENTER AR</button>
     <label>OPEN GLB<input id="file" type="file" accept=".glb,.gltf"></label>
+    <input id="addfile" type="file" accept=".glb,.gltf" style="display:none">
   </div>
-  <canvas id="panel" width="512" height="720"></canvas>
+  <canvas id="panel" width="512" height="800"></canvas>
   <div id="status">loading...</div>
   <div id="help">
-    <b>MELD</b> sweeps an area into one simpler surface (release to commit) · <b>DELETE</b> click = nearest vertex, drag = all the ball touches (HOLE / COLLAPSE toggle, shift flips it) · <b>Mouse</b> left-drag = tool (shift = smooth / erase) · right-drag = orbit · middle-drag = pan · wheel = zoom ·
-    <b>[ ]</b> size · <b>- =</b> strength · <b>ctrl+Z / ctrl+Y</b> undo / redo · <b>1-9, 0</b> tools · <b>M</b> mirror<br>
-    <b>Quest 3</b> right trigger = tool · hold left trigger = smooth / erase · grip = hold the ship (both = scale + turn) ·
-    right stick = size / strength · left stick = tool · <b>A / B</b> undo / redo · <b>X</b> menu · <b>Y</b> mirror
+    <b>FIT-OUT</b> ships load bare - <b>ADD</b> places the seat, the console and shapes; <b>PARTS</b> lists them (eye = hide), nudges the current one, LOCK keeps it on the centre line, TRIM cuts it to the roof, CUT uses it as a cutter ·
+    <b>SELECT</b> brush / box / island (shift = deselect, Esc = none) then <b>MOVE</b> drags it or use the gizmo (<b>W E R</b> = arrows / rings / boxes) ·
+    <b>MELD</b> sweeps an area into one simpler surface · <b>DELETE</b> click = nearest vertex, drag = all the ball touches ·
+    <b>Mouse</b> left-drag = tool · right-drag = orbit · middle-drag = pan · wheel = zoom · <b>[ ]</b> size · <b>- =</b> strength · <b>ctrl+Z / ctrl+Y</b> undo / redo · <b>1-9, 0</b> tools · <b>S</b> select · <b>G</b> move · <b>M</b> mirror<br>
+    <b>Quest 3</b> right trigger = tool · hold left trigger = smooth / erase / deselect · grip = hold the ship (both = scale + turn) ·
+    right stick = size / strength (holding a part: scale / width) · left stick = tool · <b>A / B</b> undo / redo · <b>X</b> menu · <b>Y</b> mirror
   </div>
 </div>
 <div id="banner"></div>
+<div id="marquee"></div>
 <script type="importmap">
 { "imports": {
   "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.min.js",
@@ -93,6 +119,8 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { TransformControls } from 'three/addons/controls/TransformControls.js';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast, INTERSECTED, NOT_INTERSECTED } from 'three-mesh-bvh';
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
 THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
@@ -109,19 +137,29 @@ const SHIPS = ['blaster', 'puncture', 'pyro', 'slayer', 'syphon', 'tracker', 'vo
 // `EDIT=<export> ASIS=1 node --input-type=module < ../backups/concept_ships/canopy/scripts/cockpit4_swap2.mjs` from tools/.
 // (Before: v50.70-72's lab copy carried the owner's freehand 21 deg PIECE turn, which the game never had.) Remake this
 // file with `node tools/ship_lab_model.mjs <seat.glb> LSS/ships/edit/cockpit4_lab.glb --name cockpit4_game_cockpit`.
-const EXTRA_MODELS = { cockpit4: 'ships/edit/cockpit4_lab.glb' };
+// console1 (2026-10-02): the game's console as a model of its own, from tools/fit_parts_prep.mjs - the FIT-OUT ADD page
+// places the same file into a ship.
+const EXTRA_MODELS = { cockpit4: 'ships/edit/cockpit4_lab.glb', console1: 'ships/edit/console1_lab.glb' };
 const MODELS = SHIPS.concat(Object.keys(EXTRA_MODELS));
-const TOOLS = ['grab', 'poke', 'inflate', 'smooth', 'squish', 'meld', 'point', 'line', 'piece', 'paint', 'fill', 'drop', 'delete'];
+// select + move ride at the END so the number keys keep their places (1 GRAB ... 9 PIECE, 0 PAINT)
+const TOOLS = ['grab', 'poke', 'inflate', 'smooth', 'squish', 'meld', 'point', 'line', 'piece', 'paint', 'fill', 'drop', 'delete', 'select', 'move'];
 const TOOL_LABEL = { grab: 'GRAB', poke: 'POKE', inflate: 'INFLATE', smooth: 'SMOOTH', squish: 'SQUISH', meld: 'MELD', delete: 'DELETE', point: 'POINT',
-  line: 'LINE', piece: 'PIECE', paint: 'PAINT', fill: 'FILL', drop: 'DROP' };
+  line: 'LINE', piece: 'PIECE', paint: 'PAINT', fill: 'FILL', drop: 'DROP', select: 'SELECT', move: 'MOVE', add: 'ADD' };
 const CLAY = new Set(['grab', 'poke', 'inflate', 'smooth', 'squish']);
 const qs = new URLSearchParams(location.search);
+const lsGet = (k, d) => { try { const v = localStorage.getItem(k); return v === null ? d : v; } catch (_) { return d; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (_) {} };
 // sizes are WORLD metres (what you feel in the headset), so scaling the ship up is how you do fine work
 const S = {
   ship: MODELS.includes(qs.get('ship')) ? qs.get('ship') : 'slayer',
   tool: 'grab', r: 0.03, strength: 0.5, soft: 0.03, hardness: 0.5, opacity: 1, meld: 0.35, delCollapse: false,
   color: [255, 59, 48], mirror: true, inflateOut: true, menu: true,
+  // FIT-OUT: ships load without seat / console / hood / arm panels (owner: "i want to do the fitting myself")
+  fit: qs.has('fit') ? qs.get('fit') !== '0' : lsGet('xl_fit', '1') !== '0',
+  page: 'tools', shape: 'box', shapeHi: true, align: 'ship', selMode: 'brush', selXray: false, twist: true,
+  gizmo: 'translate', step: 1, eyeFollow: true, listTop: 0,
 };
+if (S.fit && SHIPS.includes(S.ship) && !qs.get('file')) S.page = 'add';
 const $ = (id) => document.getElementById(id);
 function banner(t, bad) { const b = $('banner'); b.textContent = t || ''; b.className = bad ? 'bad' : ''; }
 function status(t) { $('status').textContent = t; }
@@ -185,7 +223,12 @@ function geoSig(pos, nIdx) {
   for (let i = 0; i < u.length; i++) { h ^= u[i]; h = Math.imul(h, 0x01000193); }
   return (h >>> 0).toString(36) + '.' + (pos.length / 3) + '.' + nIdx;
 }
-function makePiece(src) {
+// src: a mesh (its matrixWorld is baked into the piece). opts: name, matName (the GAME's material name, so an export
+// meets the splice's name + material match), paintRes (the paint layer's size when the map is only a white stand-in),
+// shape (FILL changes its colour instead of painting its whole layer). The piece joins `pieces` at its id; a removed
+// piece stays in the array (dead) so every undo entry's piece id stays valid.
+function makePiece(src, opts) {
+  opts = opts || {};
   const g0 = src.geometry, M = src.matrixWorld, nv = g0.attributes.position.count;
   const pa = g0.attributes.position, na = g0.attributes.normal, ta = g0.attributes.uv;
   const pos = new Float32Array(nv * 3), nrm = new Float32Array(nv * 3), v = V(), nm = new THREE.Matrix3().getNormalMatrix(M);
@@ -203,14 +246,18 @@ function makePiece(src) {
   geo.setIndex(new THREE.BufferAttribute(ia, 1));
   if (!na) geo.computeVertexNormals();
   const mat = src.material.clone();
-  const mesh = new THREE.Mesh(geo, mat); mesh.name = src.name || ('piece' + pieces.length);
+  if (opts.matName) mat.name = opts.matName;
+  const mesh = new THREE.Mesh(geo, mat); mesh.name = opts.name || src.name || ('piece' + pieces.length);
   shipRoot.add(mesh);
-  const P = { id: pieces.length, mesh, geo, mat, name: mesh.name, matName: (src.material && src.material.name) || '', src: geoSig(pos, ia.length), pos: geo.attributes.position.array,
-    nrm: geo.attributes.normal.array, uv, inv: new THREE.Matrix4(), hasPaint: !!(uv && mat.map), paint: null, uPaint: null, baseColor: mat.color.clone(), topo: false };
+  const P = { id: pieces.length, mesh, geo, mat, name: mesh.name, matName: mat.name || '', src: geoSig(pos, ia.length), pos: geo.attributes.position.array,
+    nrm: geo.attributes.normal.array, uv, inv: new THREE.Matrix4(), hasPaint: !!(uv && mat.map), paint: null, uPaint: null, baseColor: mat.color.clone(), topo: false,
+    paintRes: opts.paintRes || 0, isShape: !!opts.shape, part: null, dead: false };
   buildTopology(P);
   if (P.hasPaint) patchPaintMaterial(P);
+  pieces.push(P);
   return P;
 }
+const live = (P) => !!P && !P.dead && P.mesh.visible;
 // everything that depends on the TRIANGLES: the BVH, the welded groups, adjacency and the grid. Runs at load, and again
 // whenever MELD (or its undo) changes the triangles.
 function buildTopology(P) {
@@ -252,6 +299,7 @@ function setPieceArrays(P, pos, nrm, uv, idx) {
   geo.setIndex(new THREE.BufferAttribute(idx, 1));
   P.pos = pos; P.nrm = nrm; P.uv = uv;
   buildTopology(P);
+  selDropPiece(P);                                     // group ids are re-dealt: a selection on this piece means nothing now
 }
 const topoSnap = (P) => ({ pos: P.pos.slice(), nrm: P.nrm.slice(), uv: P.uv ? P.uv.slice() : null, idx: P.idx.slice() });
 function gridPut(P, g) {
@@ -302,38 +350,67 @@ function addMarker(name, p) {
   shipRoot.add(vis); markers.push({ name, vis, type });
 }
 function clearShip() {
-  for (const P of pieces) { shipRoot.remove(P.mesh); P.geo.disposeBoundsTree(); P.geo.dispose(); P.mat.dispose(); if (P.paint) P.paint.tex.dispose(); }
+  if (stroke) endStroke();
+  for (const P of pieces) { if (P.mesh.parent) P.mesh.parent.remove(P.mesh); if (P.geo.boundsTree) P.geo.disposeBoundsTree(); P.geo.dispose(); P.mat.dispose(); if (P.paint) P.paint.tex.dispose(); }
   for (const m of markers) shipRoot.remove(m.vis);
-  pieces = []; markers = []; undoStack.length = 0; redoStack.length = 0;
+  pieces = []; markers = []; parts = []; undoStack.length = 0; redoStack.length = 0;
+  curPart = null; eyeLink.part = null; selClear(); gizmoDetach();
   shipRoot.position.copy(HOME.pos); shipRoot.quaternion.identity(); shipRoot.scale.setScalar(HOME.scale);
 }
-function statusLine() { const tris = pieces.reduce((a, P) => a + P.nf, 0); status(ship.name + ': ' + pieces.length + ' pieces, ' + tris.toLocaleString() + ' tris, ' + markers.length + ' markers'); }
+function statusLine() {
+  const lp = pieces.filter((P) => !P.dead), tris = lp.reduce((a, P) => a + (P.mesh.visible ? P.nf : 0), 0), added = parts.filter((p) => !p.dead && p.kind !== 'ship').length;
+  status(ship.name + (ship.fit ? ' (fit-out)' : '') + ': ' + parts.filter((p) => !p.dead && p.kind === 'ship').length + ' parts' + (added ? ' + ' + added + ' added' : '') + ', ' + tris.toLocaleString() + ' tris, ' + markers.length + ' markers'
+    + (ship.removed && ship.removed.length ? '\nleft out: ' + ship.removed.map((n) => n.replace(/^[a-z0-9]+_game_/, '')).join(', ') + ' (PARTS -> AS IN GAME brings them back)' : ''));
+}
 const loader = new GLTFLoader();
 // the file's Last-Modified, for dating a save that predates the per-part fingerprints; null when the server does not say
 async function fileStamp(src) {
   if (!src || /^blob:/.test(src)) return null;
   try { const r = await fetch(src, { method: 'HEAD', cache: 'no-store' }); const lm = r.ok && r.headers.get('last-modified'); return lm ? (Date.parse(lm) || null) : null; } catch (_) { return null; }
 }
+// FIT-OUT leaves these out of the seven ships: the seat, the console, and what was built around the console (the hood
+// over it - compress_glb joined the pedestal into it - and the arm panels that extend its arms)
+const FIT_OUT = /_game_(cockpit|console|hood|armpanel|pedestal)$/;
+let FIT = null;                                        // ships/edit/fit_parts.json: where each part starts in each ship
+const fitReady = fetch('ships/edit/fit_parts.json?t=' + Date.now(), { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)).then((j) => { FIT = j; }).catch(() => {});
 async function loadShip(name, url) {
+  if (stroke) endStroke();
+  await flushSave();                                   // the model on screen's pending save, into ITS slot
   status('loading ' + name + ' ...'); banner('');
   const src = url || (EXTRA_MODELS[name] || 'ships/' + name + '.glb');
   const stamp = fileStamp(src);
   const gltf = await loader.loadAsync(url || (src + '?t=' + Date.now()));
+  await fitReady;
   clearShip();
   const root = gltf.scene; root.updateMatrixWorld(true);
   const meshes = [], marks = [];
   root.traverse((o) => { if (o.isMesh) meshes.push(o); else if (o !== root && !o.isScene && !o.children.length) marks.push(o); });
-  for (const m of meshes) pieces.push(makePiece(m));
+  // one PART per source node: a node with a multi-primitive mesh arrives as a Group of meshes (the console's body +
+  // screens) and must move as one
+  const groups = new Map();
+  for (const m of meshes) {
+    const node = (m.parent && m.parent !== root && !m.parent.isScene && m.parent.children.length > 1 && m.parent.children.every((c) => c.isMesh)) ? m.parent : m;
+    let g = groups.get(node); if (!g) groups.set(node, g = []); g.push(m);
+  }
+  ship.fit = S.fit && SHIPS.includes(name) && !url; ship.removed = []; ship.gameSeatH = 0;
+  for (const [node, ms] of groups) {
+    const pname = node.name || ms[0].name;
+    if (/_game_cockpit$/.test(pname)) { const bb = new THREE.Box3(); for (const m of ms) bb.expandByObject(m); ship.gameSeatH = bb.max.y - bb.min.y; }
+    if (ship.fit && FIT_OUT.test(pname)) { ship.removed.push(pname); continue; }
+    const part = newPart({ kind: 'ship', name: pname, label: pname.replace(/^[a-z0-9]+_game_/, '').replace(/_/g, ' ').toUpperCase() });
+    for (const m of ms) partAddPiece(part, makePiece(m));
+    partInit(part);
+  }
   for (const m of marks) addMarker(m.name, V().setFromMatrixPosition(m.matrixWorld));
   for (const P of pieces) pieceMoved(P);
   ship.name = name; S.ship = MODELS.includes(name) ? name : S.ship; ship.fileTs = await stamp;
-  const seat = pieces.find((P) => /_game_cockpit$/.test(P.name));
-  if (seat) { seat.geo.computeBoundingBox(); ship.seatH = Math.max(0.05, seat.geo.boundingBox.max.y - seat.geo.boundingBox.min.y); }
+  if (ship.gameSeatH) ship.seatH = Math.max(0.05, ship.gameSeatH);
   else { const bb = new THREE.Box3(); for (const P of pieces) { P.geo.computeBoundingBox(); bb.union(P.geo.boundingBox); } ship.seatH = Math.max(0.05, bb.max.y - bb.min.y); }   // not a ship: the whole model's height
   const c1 = markers.find((m) => /^cockpit1$/i.test(m.name)); ship.c1 = c1 ? c1.vis.position.clone() : null;
   syncShipInv();
-  const bb = new THREE.Box3().setFromObject(shipRoot); orbit.target.copy(bb.getCenter(V()));
+  const bb = new THREE.Box3(); for (const P of pieces) bb.expandByObject(P.mesh); orbit.target.copy(bb.getCenter(V()));
   statusLine();
+  if (ship.fit) toast('fit-out: ' + ship.removed.length + ' parts left out - ADD places the seat + console');
   drawPanel();
   await offerRestore();
 }
@@ -380,6 +457,7 @@ function refreshNormals(P, set) {
 }
 function flushEdits() {
   if (!stroke) return;
+  if (sel.n && stroke.dirty.size) sel.dirty = true;   // the selection dots ride the surface they mark
   for (const [id, set] of stroke.dirty) {
     const P = pieces[id]; if (!P || !set.size) continue;
     refreshNormals(P, set);
@@ -395,7 +473,15 @@ function endStroke() {
   let entry = null;
   if (st.kind === 'geo' && st.orig.size) entry = { type: 'geo', snap: st.orig };
   else if (st.kind === 'paint' && st.tiles && st.tiles.size) { finishPaint(st); entry = { type: 'paint', tiles: st.tiles }; }
-  else if (st.kind === 'xform' && st.target) entry = { type: 'xform', target: st.target, before: st.before, after: xformGet(st.target) };
+  else if (st.kind === 'xform' && st.target && st.target.kind === 'part') {
+    // a stretch along one axis (gizmo boxes, WIDTH, stick) is BAKED into the part's geometry so its matrix keeps one
+    // scale - every brush measures in the piece's local units through that one scale
+    const k = bakePart(st.target.part), after = xformGet(st.target);
+    entry = k ? { type: 'bake', parts: k.parts, k: k.k, before: st.before, after } : { type: 'xform', target: st.target, before: st.before, after };
+  }
+  else if (st.kind === 'xform' && st.target) { entry = { type: 'xform', target: st.target, before: st.before, after: xformGet(st.target) }; if (isEye(st.target)) linkEye(eyeLink.part); }
+  else if (st.kind === 'add' && st.parts && st.parts.length) entry = { type: 'add', parts: st.parts };
+  else if (st.kind === 'multi' && st.entries && st.entries.length) entry = { type: 'multi', entries: st.entries };
   else if (st.kind === 'color' && st.target) entry = { type: 'color', target: st.target, before: st.before, after: st.target.mat.color.getHex() };
   else if (st.kind === 'topo' && st.meld && st.meld.size) {
     const r = meldCommit(st);
@@ -424,15 +510,28 @@ function applyEntry(e) {             // returns the entry that reverses it
   if (e.type === 'geo') return { type: 'geo', snap: applyGeoSnap(e.snap) };
   if (e.type === 'paint') return { type: 'paint', tiles: applyPaintSnap(e.tiles) };
   if (e.type === 'xform') { xformSet(e.target, e.before); return { type: 'xform', target: e.target, before: e.after, after: e.before }; }
+  // a stretch baked into geometry: un-stretch it (x 1/k) and put the matrices back; the reverse entry stretches again
+  if (e.type === 'bake') {
+    const inv = e.k.map((v) => 1 / v);
+    for (const part of e.parts) bakePartScale(part, inv);
+    xapply(e.before);
+    return { type: 'bake', parts: e.parts, k: inv, before: e.after, after: e.before };
+  }
   if (e.type === 'color') { e.target.mat.color.setHex(e.before); return { type: 'color', target: e.target, before: e.after, after: e.before }; }
   if (e.type === 'topo') {
     const inv = new Map();
     for (const [id, snap] of e.snaps) { const P = pieces[id]; inv.set(id, topoSnap(P)); setPieceArrays(P, snap.pos.slice(), snap.nrm.slice(), snap.uv ? snap.uv.slice() : null, snap.idx.slice()); P.topo = true; }
     return { type: 'topo', snaps: inv };
   }
+  if (e.type === 'add') { for (const part of e.parts) partKill(part); return { type: 'del', parts: e.parts }; }
+  if (e.type === 'del') { for (const part of e.parts) partRevive(part); return { type: 'add', parts: e.parts }; }
+  if (e.type === 'vis') { const inv = e.list.map(([part]) => [part, part.visible]); for (const [part, v] of e.list) partShow(part, v); return { type: 'vis', list: inv }; }
+  if (e.type === 'multi') { const inv = []; for (let i = e.entries.length - 1; i >= 0; i--) inv.push(applyEntry(e.entries[i])); return { type: 'multi', entries: inv }; }
 }
-function undo() { if (stroke) endStroke(); const e = undoStack.pop(); if (!e) return; redoStack.push(applyEntry(e)); scheduleSave(); drawPanel(); if (e.type === 'topo') statusLine(); }
-function redo() { if (stroke) endStroke(); const e = redoStack.pop(); if (!e) return; undoStack.push(applyEntry(e)); scheduleSave(); drawPanel(); if (e.type === 'topo') statusLine(); }
+function afterHistory(e) { scheduleSave(); sel.dirty = true; drawPanel(); if (e.type !== 'geo' && e.type !== 'paint' && e.type !== 'color') statusLine(); }
+function undo() { if (stroke) endStroke(); const e = undoStack.pop(); if (!e) return; redoStack.push(applyEntry(e)); afterHistory(e); }
+function redo() { if (stroke) endStroke(); const e = redoStack.pop(); if (!e) return; undoStack.push(applyEntry(e)); afterHistory(e); }
+function pushEntry(entry) { if (!entry) return; undoStack.push(entry); redoStack.length = 0; if (undoStack.length > 80) undoStack.shift(); scheduleSave(); }
 
 // ================================================================ CLAY
 const falloff = (t) => (t >= 1 ? 0 : (1 - t * t) * (1 - t * t));
@@ -655,9 +754,15 @@ function capBegin(kind, tipShip, qShip, feature, R, rigid) {
   cap = { kind, tip0: tipShip.clone(), q0: qShip ? qShip.clone() : null, list: capture(feature, R, rigid), feature };
   return cap.list.length;
 }
+// MOVE: the same carry, over a list made by selCapture (the selection + its SOFT zone)
+function capBeginList(kind, tipShip, qShip, list) {
+  beginStroke('geo');
+  cap = { kind, tip0: tipShip.clone(), q0: qShip ? qShip.clone() : null, list };
+  return list.length;
+}
 function capMove(tipShip, qShip) {
   if (!cap) return;
-  const twist = cap.kind === 'grab' && qShip && cap.q0;
+  const twist = (cap.kind === 'grab' || cap.kind === 'move') && qShip && cap.q0;
   if (twist) { _q0inv.copy(cap.q0).invert(); _qd.multiplyQuaternions(qShip, _q0inv); _qm.set(-_qd.x, -_qd.y, _qd.z, _qd.w); }
   const t1 = V(), t2 = V(), d1 = V(), d2 = V(), mt0 = mirrorZ(cap.tip0, V()), mtip = mirrorZ(tipShip, V()), out = V();
   for (const it of cap.list) {
@@ -671,7 +776,7 @@ function capMove(tipShip, qShip) {
     out.add(it.v0); toLocal(it.P, out, out); setGroup(it.P, it.g, out.x, out.y, out.z);
   }
 }
-function capEnd() { cap = null; endStroke(); }
+function capEnd() { const k = cap && cap.kind; cap = null; endStroke(); if (k === 'move') { sel.dirty = true; drawPanel(); } }
 // features
 const pointFeature = (p) => ({ centre: p.clone(), reach: 0, dist: (v) => v.distanceTo(p) });
 function segFeature(a, b) {
@@ -700,22 +805,151 @@ function pickLine(cShip, R) {
   return best;
 }
 
+// ================================================================ PARTS: what moves as one
+// A PART is what PIECE grabs and the PARTS page lists: one node of the ship's file (the console's body + screens are
+// two pieces of ONE part), or one thing placed from the ADD page (seat, console, a shape, a GLB). Its pieces share one
+// matrix under shipRoot; geometry edits stay per piece, in its local frame.
+//   pivot  the local point the nudges turn and scale about, and where the desktop gizmo sits (its box centre)
+//   lock   the part only pitches (no yaw, no roll) and never drifts sideways - the seat and console start locked;
+//          v50.90 had to strip an 18 deg yaw + 7 deg roll + a 0.17 side slide a freehand grab left in the owner's seat
+//   twin   a part placed off the centre with MIRROR on gets a mirrored twin (its geometry mirrored, its matrix
+//          Z M Z): while MIRROR is on, moving either moves the other
+let parts = [];
+let curPart = null;                                    // what the PARTS page, the nudges and the desktop gizmo act on
+const ZS = new THREE.Matrix4().makeScale(1, 1, -1);   // the mirror plane z = 0, as a matrix
+const AXIS_X = new THREE.Vector3(1, 0, 0), AXIS_Y = new THREE.Vector3(0, 1, 0), AXIS_Z = new THREE.Vector3(0, 0, 1);
+function newPart(o) {
+  const part = Object.assign({ id: parts.length, kind: 'ship', name: '', label: '', pieces: [], twin: null, visible: true, dead: false, lock: false,
+    pivot: new THREE.Vector3(), spawn: null }, o);
+  parts.push(part); return part;
+}
+function partAddPiece(part, P) { part.pieces.push(P); P.part = part; }
+// after its pieces are in: pivot = their box centre (local), spawn = where RESET takes it, lock if it sits on the centre line
+function partInit(part, lock) {
+  const bb = new THREE.Box3(); for (const P of part.pieces) { P.geo.computeBoundingBox(); bb.union(P.geo.boundingBox); }
+  bb.getCenter(part.pivot); part.size = bb.getSize(V()).length() || 1;
+  part.spawn = partM(part).toArray();
+  part.lock = lock !== undefined ? lock : (part.kind === 'ship' && Math.abs(part.pivot.clone().applyMatrix4(partM(part)).z) < 1e-3);
+}
+const partM = (part) => part.pieces[0].mesh.matrix;
+const partScale = (part) => part.pieces[0].mesh.scale.x;
+function partSetM(part, M) {
+  for (const P of part.pieces) { M.decompose(P.mesh.position, P.mesh.quaternion, P.mesh.scale); pieceMoved(P); }
+  sel.dirty = true;
+}
+function pieceSetM(P, arr) { new THREE.Matrix4().fromArray(arr).decompose(P.mesh.position, P.mesh.quaternion, P.mesh.scale); pieceMoved(P); }
+// the eye rides the seat: cockpit1 keeps its place in the seat's frame while the seat moves (the v50.06 lesson: "the
+// PILOT must move with the seat")
+const eyeLink = { part: null, rel: new THREE.Vector3() };
+const eyeMarker = () => markers.find((m) => /^cockpit1$/i.test(m.name)) || null;
+const isEye = (t) => t && t.kind === 'marker' && /^cockpit1$/i.test(t.m.name);
+function linkEye(part) {
+  const e = eyeMarker(); if (!e || !part || part.dead) { eyeLink.part = null; return; }
+  eyeLink.part = part; eyeLink.rel.copy(e.vis.position).applyMatrix4(partM(part).clone().invert());
+}
+function eyeFollow(part) { if (!S.eyeFollow || eyeLink.part !== part) return; const e = eyeMarker(); if (e) e.vis.position.copy(eyeLink.rel).applyMatrix4(partM(part)); }
+// move a part (and its twin while MIRROR is on, and the eye if it rides it)
+function partPlace(part, M) {
+  partSetM(part, M); eyeFollow(part);
+  const tw = part.twin;
+  if (S.mirror && tw && !tw.dead) { partSetM(tw, new THREE.Matrix4().multiplyMatrices(ZS, M).multiply(ZS)); eyeFollow(tw); }
+}
+// LOCK: the part's own +X kept in the ship's XY plane - only pitch survives - and its pivot HELD at the sideways offset it
+// has now (the game seat sits 2 mm-units off its box centre, where v50.71's profile fit put it: re-centring by the box
+// would shove it and the eye riding it off the centre line). centre = true (CENTRE) puts the pivot on z = 0.
+function lockM(part, M, centre) {
+  const p = V(), q = new THREE.Quaternion(), s = V(); M.decompose(p, q, s);
+  const fx = AXIS_X.clone().applyQuaternion(q), th = Math.atan2(fx.y, fx.x);
+  // the anchor: the box centre for CENTRE, else the point the part turns + scales about (its centre line when it has one)
+  const a = centre ? part.pivot.clone() : centreLocal(part), c = a.clone().applyMatrix4(M);
+  c.z = centre ? 0 : a.clone().applyMatrix4(partM(part)).z;
+  q.setFromAxisAngle(AXIS_Z, th); M.compose(V(), q, s);
+  const off = a.applyMatrix4(M);
+  return M.setPosition(c.x - off.x, c.y - off.y, c.z - off.z);
+}
+// where a part turns and scales about (LOCAL): its box centre - but a locked part that sits ON the centre line turns and
+// scales about the centre line itself, so SIZE / WIDTH keep it (and the eye riding a seat) symmetric. Scaling about the
+// box centre walked the eye 0.03 mm-units off z = 0 per 2% step: the seat's box centre is not its centre line.
+function centreLocal(part) {
+  const M = partM(part), c = part.pivot.clone().applyMatrix4(M);
+  if (part.lock && Math.abs(c.z) < 0.05 * part.size * partScale(part)) c.z = 0;
+  return c.applyMatrix4(M.clone().invert());
+}
+// everything a part move touches, for undo: the part, its twin, the eye
+function xstate(part) {
+  const st = { parts: [[part, partM(part).toArray()]], eye: null };
+  if (part.twin && !part.twin.dead) st.parts.push([part.twin, partM(part.twin).toArray()]);
+  const e = eyeMarker(); if (e) st.eye = e.vis.position.toArray();
+  return st;
+}
+function xapply(st) {
+  for (const [part, arr] of st.parts) partSetM(part, new THREE.Matrix4().fromArray(arr));
+  const e = eyeMarker(); if (e && st.eye) e.vis.position.fromArray(st.eye);
+  if (eyeLink.part) linkEye(eyeLink.part);
+}
+// stretch a piece's LOCAL geometry by k = [kx, ky, kz] (normals through the inverse-transpose); exact both ways
+function bakeScale(P, k) {
+  const pos = P.pos, nrm = P.nrm, gp = P.gpos;
+  for (let i = 0; i < pos.length; i += 3) {
+    pos[i] *= k[0]; pos[i + 1] *= k[1]; pos[i + 2] *= k[2];
+    const x = nrm[i] / k[0], y = nrm[i + 1] / k[1], z = nrm[i + 2] / k[2], l = Math.hypot(x, y, z) || 1; nrm[i] = x / l; nrm[i + 1] = y / l; nrm[i + 2] = z / l;
+  }
+  for (let g = 0; g < P.ng; g++) { gp[g * 3] *= k[0]; gp[g * 3 + 1] *= k[1]; gp[g * 3 + 2] *= k[2]; }
+  P.grid = new Map(); for (let g = 0; g < P.ng; g++) gridPut(P, g); P.moved.fill(1);
+  P.geo.attributes.position.needsUpdate = true; P.geo.attributes.normal.needsUpdate = true; refitPiece(P);
+  sel.dirty = true;
+}
+function bakePartScale(part, k) { for (const P of part.pieces) bakeScale(P, k); part.pivot.multiply(new THREE.Vector3(k[0], k[1], k[2])); }
+// M = T R diag(s) with s uneven -> the geometry takes the stretch and M keeps one scale: the HEIGHT axis's, so WIDTH and
+// LENGTH reshape a seat without changing the pilot SEAT sizes from it (HEIGHT and SIZE do)
+function bakePart(part) {
+  const list = [part].concat(part.twin && !part.twin.dead ? [part.twin] : []), done = []; let K = null;
+  for (const pt of list) {
+    const p = V(), q = new THREE.Quaternion(), s = V(); partM(pt).decompose(p, q, s);
+    if (Math.abs(s.x - s.y) <= 1e-7 * Math.abs(s.x) && Math.abs(s.y - s.z) <= 1e-7 * Math.abs(s.x)) continue;
+    const u = Math.abs(s.y) || 1e-9, k = [s.x / u, s.y / u, s.z / u];
+    bakePartScale(pt, k);
+    partSetM(pt, new THREE.Matrix4().compose(p, q, new THREE.Vector3(u, u, u)));
+    K = k; done.push(pt);
+  }
+  if (!K) return null;
+  if (eyeLink.part) linkEye(eyeLink.part);
+  return { k: K, parts: done };
+}
+// a part out of the scene (deleted / undone add) or back in; the pieces keep their ids and arrays
+function partKill(part) {
+  part.dead = true;
+  for (const P of part.pieces) { P.dead = true; P.mesh.visible = false; if (P.mesh.parent) P.mesh.parent.remove(P.mesh); selDropPiece(P); }
+  if (curPart === part) curPart = null;
+  if (eyeLink.part === part) eyeLink.part = null;
+}
+function partRevive(part) {
+  part.dead = false;
+  for (const P of part.pieces) { P.dead = false; P.mesh.visible = part.visible; shipRoot.add(P.mesh); }
+  if (part.kind === 'asset' && part.asset === 'seat' && !eyeLink.part) linkEye(part);
+}
+function partShow(part, v) { part.visible = v; for (const P of part.pieces) { P.mesh.visible = v && !P.dead; if (!v) selDropPiece(P); } }
+function setCurPart(part) { curPart = part && !part.dead ? part : null; drawPanel(); }
+// names key the autosave and the export (and the splice matches an export to the game by name + material), so they
+// must be unique among ALL pieces, dead ones included
+function uniqueName(base) { const used = new Set(pieces.map((P) => P.name)); if (!used.has(base)) return base; for (let i = 2; ; i++) if (!used.has(base + '_' + i)) return base + '_' + i; }
+
 // ================================================================ PIECE: whole parts and markers
-const xformGet = (t) => (t.kind === 'marker' ? t.m.vis.position.toArray() : t.P.mesh.matrix.toArray());
-function xformSet(t, arr) {
-  if (t.kind === 'marker') { t.m.vis.position.fromArray(arr); return; }
-  t.P.mesh.matrix.fromArray(arr); t.P.mesh.matrix.decompose(t.P.mesh.position, t.P.mesh.quaternion, t.P.mesh.scale); pieceMoved(t.P);
+const xformGet = (t) => (t.kind === 'marker' ? t.m.vis.position.toArray() : xstate(t.part));
+function xformSet(t, v) {
+  if (t.kind === 'marker') { t.m.vis.position.fromArray(v); if (isEye(t) && eyeLink.part) linkEye(eyeLink.part); return; }
+  xapply(v);
 }
 function pickPiece(cShip, R) {
   let best = null;
   for (const m of markers) { const d = m.vis.position.distanceTo(cShip); if (d <= R + 0.012 && (!best || d < best.d)) best = { kind: 'marker', m, d: 0 }; }
   if (best) return best;
   for (const P of pieces) {
-    if (!P.mesh.visible) continue;
+    if (!live(P)) continue;
     const cl = toLocal(P, cShip, V()), Rl = R / pieceScale(P);
     const hit = P.geo.boundsTree.closestPointToPoint(cl, {}, 0, Rl);
     // ⚠ maxThreshold only prunes BOXES - a farther triangle can still come back, so check the distance here
-    if (hit && hit.distance <= Rl && (!best || hit.distance * pieceScale(P) < best.d)) best = { kind: 'piece', P, d: hit.distance * pieceScale(P) };
+    if (hit && hit.distance <= Rl && (!best || hit.distance * pieceScale(P) < best.d)) best = { kind: 'part', part: P.part, P, d: hit.distance * pieceScale(P) };
   }
   return best;
 }
@@ -723,16 +957,639 @@ let held = null;   // { target, rel: Matrix4 (hand^-1 * object, ship frame) }
 const _hm = new THREE.Matrix4(), _om = new THREE.Matrix4();
 function pieceBegin(target, handShip) {
   beginStroke('xform', { target, before: xformGet(target) });
-  _om.copy(target.kind === 'marker' ? new THREE.Matrix4().makeTranslation(target.m.vis.position) : target.P.mesh.matrix);
+  _om.copy(target.kind === 'marker' ? new THREE.Matrix4().makeTranslation(target.m.vis.position) : partM(target.part));
   held = { target, rel: _hm.copy(handShip).invert().multiply(_om).clone() };
+  if (target.kind === 'part') { curPart = target.part; drawPanel(); }
 }
 function pieceMove(handShip) {
   if (!held) return;
   _om.multiplyMatrices(handShip, held.rel);
-  if (held.target.kind === 'marker') held.target.m.vis.position.setFromMatrixPosition(_om);
-  else { const M = held.target.P.mesh; _om.decompose(M.position, M.quaternion, _t); pieceMoved(held.target.P); }
+  if (held.target.kind === 'marker') { held.target.m.vis.position.setFromMatrixPosition(_om); return; }
+  const part = held.target.part, M = _om.clone();
+  partPlace(part, part.lock ? lockM(part, M) : M);
+}
+// while a part is held in VR the right stick scales it about its pivot: up / down = all over, left / right = width
+function heldScale(kAll, kWidth) {
+  if (!held || held.target.kind !== 'part') return;
+  const pv = centreLocal(held.target.part);
+  held.rel.multiply(new THREE.Matrix4().makeTranslation(pv.x, pv.y, pv.z)).multiply(new THREE.Matrix4().makeScale(kAll, kAll, kAll * kWidth)).multiply(new THREE.Matrix4().makeTranslation(-pv.x, -pv.y, -pv.z));
 }
 function pieceEnd() { held = null; endStroke(); }
+
+// ================================================================ ADD: the seat, the console, shapes, any GLB
+// The seat and the console start EXACTLY where the game has them in this ship (fit_parts.json, made by
+// tools/fit_parts_prep.mjs from the shipped files: verified vertex for vertex), so fitting starts from the last state the
+// owner flew. Their pieces take the game's names (<ship>_game_cockpit, <ship>_game_console_1/_2) and materials
+// (cockpit_CP_seat4 ...), so an EXPORT meets ship_edit_splice.mjs's name + material match.
+const assetCache = new Map();
+const loadAsset = (url) => { let p = assetCache.get(url); if (!p) { p = loader.loadAsync(url); assetCache.set(url, p); p.catch(() => assetCache.delete(url)); } return p; };
+function shipBox() { const bb = new THREE.Box3(); for (const P of pieces) if (live(P)) { P.geo.computeBoundingBox(); bb.union(P.geo.boundingBox.clone().applyMatrix4(P.mesh.matrix)); } return bb; }
+function partBox(part) { const bb = new THREE.Box3(); for (const P of part.pieces) if (!P.dead) { P.geo.computeBoundingBox(); bb.union(P.geo.boundingBox.clone().applyMatrix4(P.mesh.matrix)); } return bb; }
+function spawnMatrix(kind, localBox) {
+  const f = FIT && FIT.ships && FIT.ships[ship.name] && FIT.ships[ship.name][kind];
+  if (f) return new THREE.Matrix4().compose(new THREE.Vector3().fromArray(f.t), new THREE.Quaternion(), new THREE.Vector3(f.s, f.s, f.s));
+  // not one of the seven: a seat ~1/4 of the model's height, at cockpit1 (or the view centre)
+  const bb = shipBox(), H = bb.isEmpty() ? 1 : bb.max.y - bb.min.y, lh = (localBox.max.y - localBox.min.y) || 1, s = (kind === 'seat' ? 0.25 : 0.12) * H / lh;
+  const c = ship.c1 ? ship.c1.clone() : worldToShip(orbit.target, V()), lc = localBox.getCenter(V()).multiplyScalar(s);
+  return new THREE.Matrix4().compose(c.sub(lc), new THREE.Quaternion(), new THREE.Vector3(s, s, s));
+}
+// a name for a part whose pieces are <base> (one) or <base>_1.._n (several) - none of them taken
+function uniquePartName(base, n) {
+  const used = new Set(pieces.map((P) => P.name)), free = (b) => !used.has(b) && (n < 2 || ![...Array(n).keys()].some((i) => used.has(b + '_' + (i + 1))));
+  if (free(base)) return base; for (let i = 2; ; i++) if (free(base + '_' + i)) return base + '_' + i;
+}
+async function addAsset(kind, o) {   // kind 'seat' | 'console'; o (restore): { name, pieceNames, matrix }
+  o = o || {};
+  const def = FIT && FIT[kind], url = (def && def.url) || (kind === 'seat' ? 'ships/edit/cockpit4_lab.glb' : 'ships/edit/console1_lab.glb');
+  const gltf = await loadAsset(url); gltf.scene.updateMatrixWorld(true);
+  const meshes = []; gltf.scene.traverse((m) => { if (m.isMesh) meshes.push(m); });
+  const prefix = (SHIPS.includes(ship.name) ? ship.name : 'lab') + '_game_', name = o.name || uniquePartName(prefix + (kind === 'seat' ? 'cockpit' : 'console'), meshes.length);
+  const part = newPart({ kind: 'asset', asset: kind, name, label: kind === 'seat' ? 'SEAT' : 'CONSOLE' });
+  meshes.forEach((m, i) => {
+    const nm = o.pieceNames ? o.pieceNames[i] : (meshes.length > 1 ? name + '_' + (i + 1) : name);
+    partAddPiece(part, makePiece(m, { name: nm, matName: kind === 'seat' ? ((def && def.material) || 'cockpit_CP_seat4') : undefined }));
+  });
+  partInit(part, true);
+  const M = o.matrix ? new THREE.Matrix4().fromArray(o.matrix) : spawnMatrix(kind, (() => { const b = new THREE.Box3(); for (const P of part.pieces) { P.geo.computeBoundingBox(); b.union(P.geo.boundingBox); } return b; })());
+  partSetM(part, M);
+  part.spawn = (o.spawn || M.toArray()).slice(); part.spawnScale = new THREE.Vector3().setFromMatrixScale(new THREE.Matrix4().fromArray(part.spawn)).x;
+  return part;
+}
+async function addAssetUI(kind) {
+  if (stroke) endStroke();
+  toast('placing the ' + kind + ' ...');
+  try {
+    const part = await addAsset(kind);
+    if (kind === 'seat' && S.eyeFollow && (!eyeLink.part || eyeLink.part.dead)) linkEye(part);
+    pushEntry({ type: 'add', parts: [part] }); setCurPart(part); statusLine();
+    toast((kind === 'seat' ? 'SEAT' : 'CONSOLE') + (FIT && FIT.ships && FIT.ships[ship.name] ? ' - where the game has it' : ' placed') + ' · PARTS page to nudge');
+  } catch (e) { banner('could not load the ' + kind + ': ' + e.message, true); }
+}
+// any GLB from disk (desktop), at its own coordinates - an exported lab part lands exactly where it was
+async function addGLB(buf, label, o) {
+  o = o || {};
+  const gltf = await loader.parseAsync(buf.slice(0), ''); gltf.scene.updateMatrixWorld(true);
+  const meshes = []; gltf.scene.traverse((m) => { if (m.isMesh && !/^__paint__/.test(m.name)) meshes.push(m); });
+  if (!meshes.length) throw new Error('no meshes in it');
+  const base = 'glb_' + label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, ''), name = o.name || uniquePartName(base, meshes.length);
+  const part = newPart({ kind: 'glb', name, label: label.toUpperCase().slice(0, 18), glb: true });
+  meshes.forEach((m, i) => partAddPiece(part, makePiece(m, { name: o.pieceNames ? o.pieceNames[i] : (meshes.length > 1 ? name + '_' + (i + 1) : name) })));
+  partInit(part, false);
+  const M = o.matrix ? new THREE.Matrix4().fromArray(o.matrix) : new THREE.Matrix4();
+  partSetM(part, M); part.spawn = (o.spawn || M.toArray()).slice();
+  if (!o.restore) idb('readwrite', (st) => st.put(buf, skey() + ':glb:' + name)).catch(() => {});
+  return part;
+}
+
+// ---------------------------------------------------------------- shapes
+// Owner: "add some creative tools... like ability to add and manipulate various shapes". Each shape is a closed solid
+// in a 2-unit box (local -1..1, centred, symmetric about its local z = 0), placed at SIZE (half-width) and becoming a
+// full piece: sculpt, select, paint, delete it like the hull. Its UVs are repacked so no two faces share texels (three's
+// box / cylinder faces all map to the same 0..1 square - one dab would land on every face), and it carries a white
+// stand-in map so the paint layer has UVs to live on.
+const SHAPES = ['box', 'roundbox', 'sphere', 'capsule', 'cylinder', 'cone', 'pyramid', 'wedge', 'torus', 'tube', 'panel', 'gem'];
+const SHAPE_LABEL = { box: 'BOX', roundbox: 'ROUND BOX', sphere: 'SPHERE', capsule: 'CAPSULE', cylinder: 'CYLINDER', cone: 'CONE', pyramid: 'PYRAMID',
+  wedge: 'WEDGE', torus: 'RING', tube: 'TUBE', panel: 'PANEL', gem: 'GEM' };
+const WHITE_MAP = (() => { const c = document.createElement('canvas'); c.width = c.height = 4; const x = c.getContext('2d'); x.fillStyle = '#ffffff'; x.fillRect(0, 0, 4, 4); const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t; })();
+// a patch f(u, v) on an nu x nv grid with its own UV square; wound so its normal at the centre agrees with out(p)
+function patch(b, f, nu, nv, out) {
+  const base = b.pos.length / 3, e = 1e-4, c = f(0.5, 0.5), fu = f(0.5 + e, 0.5).map((x, k) => x - f(0.5 - e, 0.5)[k]), fv = f(0.5, 0.5 + e).map((x, k) => x - f(0.5, 0.5 - e)[k]);
+  const n = [fu[1] * fv[2] - fu[2] * fv[1], fu[2] * fv[0] - fu[0] * fv[2], fu[0] * fv[1] - fu[1] * fv[0]], o = out(c), flip = n[0] * o[0] + n[1] * o[1] + n[2] * o[2] < 0;
+  for (let j = 0; j <= nv; j++) for (let i = 0; i <= nu; i++) { const p = f(i / nu, j / nv); b.pos.push(p[0], p[1], p[2]); b.uv.push(i / nu, j / nv); }
+  const P = b.pos, area = (a, q, r) => { const ux = P[q * 3] - P[a * 3], uy = P[q * 3 + 1] - P[a * 3 + 1], uz = P[q * 3 + 2] - P[a * 3 + 2], vx = P[r * 3] - P[a * 3], vy = P[r * 3 + 1] - P[a * 3 + 1], vz = P[r * 3 + 2] - P[a * 3 + 2];
+    return Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx); };
+  const tri = (a, q, r) => { if (area(a, q, r) < 1e-12) return; if (flip) b.idx.push(a, r, q); else b.idx.push(a, q, r); };
+  for (let j = 0; j < nv; j++) for (let i = 0; i < nu; i++) { const a = base + j * (nu + 1) + i, q = a + 1, r = a + nu + 1, d = r + 1; tri(a, q, r); tri(q, d, r); }
+}
+function fromPatches(b) {
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(b.pos, 3)); g.setAttribute('uv', new THREE.Float32BufferAttribute(b.uv, 2));
+  g.setIndex(b.idx); g.computeVertexNormals(); return g;
+}
+// a ramp: flat floor, a back wall, the slope rising from the front edge to the top of the back wall
+function wedgeGeometry(n) {
+  const b = { pos: [], uv: [], idx: [] };
+  patch(b, (u, v) => [-1 + 2 * u, -1, -1 + 2 * v], n, n, () => [0, -1, 0]);
+  patch(b, (u, v) => [1, -1 + 2 * u, -1 + 2 * v], n, n, () => [1, 0, 0]);
+  patch(b, (u, v) => [-1 + 2 * v, -1 + 2 * v, -1 + 2 * u], n, n, () => [-1, 1, 0]);
+  patch(b, (u, v) => [-1 + 2 * u, -1 + 2 * u * v, 1], n, n, () => [0, 0, 1]);      // the sides are triangles: the u = 0 edge collapses
+  patch(b, (u, v) => [-1 + 2 * u, -1 + 2 * u * v, -1], n, n, () => [0, 0, -1]);
+  return fromPatches(b);
+}
+// a pipe: outer and inner walls, two flat rings
+function tubeGeometry(nr, nh) {
+  const b = { pos: [], uv: [], idx: [] }, ring = (r, y, a) => [r * Math.cos(a), y, r * Math.sin(a)], R1 = 1, R0 = 0.62, TAU = Math.PI * 2;
+  patch(b, (u, v) => ring(R1, -1 + 2 * v, TAU * u), nr, nh, (p) => [p[0], 0, p[2]]);
+  patch(b, (u, v) => ring(R0, -1 + 2 * v, TAU * u), nr, nh, (p) => [-p[0], 0, -p[2]]);
+  patch(b, (u, v) => ring(R0 + (R1 - R0) * v, 1, TAU * u), nr, 2, () => [0, 1, 0]);
+  patch(b, (u, v) => ring(R0 + (R1 - R0) * v, -1, TAU * u), nr, 2, () => [0, -1, 0]);
+  return fromPatches(b);
+}
+// normals of coincident vertices that lie within ~25 deg of each other are averaged (a pipe's u = 0 / 1 seam), harder
+// creases (a box's edges, a wedge's) stay sharp
+function smoothSeams(g) {
+  const p = g.attributes.position.array, n = g.attributes.normal.array, map = new Map();
+  for (let i = 0; i < p.length / 3; i++) { const k = Math.round(p[i * 3] * 1e5) + '_' + Math.round(p[i * 3 + 1] * 1e5) + '_' + Math.round(p[i * 3 + 2] * 1e5); let a = map.get(k); if (!a) map.set(k, a = []); a.push(i); }
+  for (const a of map.values()) {
+    if (a.length < 2) continue;
+    for (const i of a) {
+      let x = 0, y = 0, z = 0;
+      for (const j of a) if (n[i * 3] * n[j * 3] + n[i * 3 + 1] * n[j * 3 + 1] + n[i * 3 + 2] * n[j * 3 + 2] > 0.9) { x += n[j * 3]; y += n[j * 3 + 1]; z += n[j * 3 + 2]; }
+      const l = Math.hypot(x, y, z) || 1; g.userData.sm = g.userData.sm || []; g.userData.sm.push(i, x / l, y / l, z / l);
+    }
+  }
+  const sm = g.userData.sm || []; for (let k = 0; k < sm.length; k += 4) { n[sm[k] * 3] = sm[k + 1]; n[sm[k] * 3 + 1] = sm[k + 2]; n[sm[k] * 3 + 2] = sm[k + 3]; }
+  delete g.userData.sm;
+}
+// every chart (vertices joined by shared triangles) gets its own cell of a square grid, so no texel is on two faces
+function atlasUV(g) {
+  const idx = g.index.array, n = g.attributes.position.count, uv = g.attributes.uv.array, par = new Int32Array(n);
+  for (let i = 0; i < n; i++) par[i] = i;
+  const find = (x) => { while (par[x] !== x) { par[x] = par[par[x]]; x = par[x]; } return x; };
+  for (let t = 0; t < idx.length; t += 3) { const a = find(idx[t]); for (const v of [idx[t + 1], idx[t + 2]]) { const r = find(v); if (r !== a) par[r] = a; } }
+  const used = new Uint8Array(n); for (const i of idx) used[i] = 1;
+  const charts = new Map();
+  for (let i = 0; i < n; i++) {
+    if (!used[i]) continue; const r = find(i); let c = charts.get(r);
+    if (!c) charts.set(r, c = { k: charts.size, u0: Infinity, v0: Infinity, u1: -Infinity, v1: -Infinity });
+    c.u0 = Math.min(c.u0, uv[i * 2]); c.u1 = Math.max(c.u1, uv[i * 2]); c.v0 = Math.min(c.v0, uv[i * 2 + 1]); c.v1 = Math.max(c.v1, uv[i * 2 + 1]);
+  }
+  const cols = Math.ceil(Math.sqrt(charts.size)), rows = Math.ceil(charts.size / cols), pad = 0.035;
+  for (let i = 0; i < n; i++) {
+    if (!used[i]) continue; const c = charts.get(find(i)), cx = c.k % cols, cy = (c.k / cols) | 0;
+    uv[i * 2] = (cx + pad + (1 - 2 * pad) * (uv[i * 2] - c.u0) / ((c.u1 - c.u0) || 1)) / cols;
+    uv[i * 2 + 1] = (cy + pad + (1 - 2 * pad) * (uv[i * 2 + 1] - c.v0) / ((c.v1 - c.v0) || 1)) / rows;
+  }
+}
+function shapeGeometry(type, hi) {
+  let g;
+  switch (type) {
+    case 'box': g = new THREE.BoxGeometry(2, 2, 2, hi ? 8 : 1, hi ? 8 : 1, hi ? 8 : 1); break;
+    case 'roundbox': g = new RoundedBoxGeometry(2, 2, 2, hi ? 4 : 1, 0.35); break;
+    case 'sphere': g = new THREE.SphereGeometry(1, hi ? 48 : 12, hi ? 32 : 8); break;
+    case 'capsule': g = new THREE.CapsuleGeometry(0.6, 0.8, hi ? 10 : 3, hi ? 32 : 10); break;
+    case 'cylinder': g = new THREE.CylinderGeometry(1, 1, 2, hi ? 48 : 12, hi ? 8 : 1); break;
+    case 'cone': g = new THREE.ConeGeometry(1, 2, hi ? 48 : 12, hi ? 8 : 1); break;
+    case 'pyramid': g = new THREE.ConeGeometry(Math.SQRT2, 2, 4, hi ? 8 : 1); g.rotateY(Math.PI / 4); break;
+    case 'wedge': g = wedgeGeometry(hi ? 8 : 1); break;
+    case 'torus': g = new THREE.TorusGeometry(0.7, 0.3, hi ? 20 : 8, hi ? 64 : 16); g.rotateX(Math.PI / 2); break;
+    case 'tube': g = tubeGeometry(hi ? 48 : 12, hi ? 8 : 1); break;
+    case 'panel': g = new THREE.BoxGeometry(2, 0.12, 2, hi ? 10 : 1, 1, hi ? 10 : 1); break;
+    case 'gem': g = new THREE.IcosahedronGeometry(1, hi ? 1 : 0); break;
+    default: g = new THREE.BoxGeometry(2, 2, 2);
+  }
+  if (!g.index) { const n = g.attributes.position.count, a = new Uint32Array(n); for (let i = 0; i < n; i++) a[i] = i; g.setIndex(new THREE.BufferAttribute(a, 1)); }
+  if (type !== 'gem') smoothSeams(g);
+  atlasUV(g);
+  return g;
+}
+let shapeSeq = 0;
+function addShape(type, cShip, size, q, o) {
+  o = o || {};
+  const hi = o.hi !== undefined ? o.hi : S.shapeHi, name = o.name || uniquePartName('shape_' + type, 1);
+  const col = o.color !== undefined ? new THREE.Color(o.color) : new THREE.Color().setRGB(S.color[0] / 255, S.color[1] / 255, S.color[2] / 255, THREE.SRGBColorSpace);
+  const g = shapeGeometry(type, hi), mat = new THREE.MeshStandardMaterial({ color: col, roughness: 0.55, metalness: 0.15, map: WHITE_MAP, side: THREE.DoubleSide, name: 'lab_' + name });
+  const src = new THREE.Mesh(g, mat); src.name = name; src.updateMatrixWorld(true);
+  const part = newPart({ kind: 'shape', shape: { type, hi }, name, label: o.label || (SHAPE_LABEL[type] + ' ' + (++shapeSeq)) });
+  partAddPiece(part, makePiece(src, { name, paintRes: 1024, shape: true }));
+  g.dispose(); mat.dispose();
+  partInit(part, false);
+  const M = o.matrix ? new THREE.Matrix4().fromArray(o.matrix) : new THREE.Matrix4().compose(cShip, q || new THREE.Quaternion(), new THREE.Vector3(size, size, size));
+  partSetM(part, M); part.spawn = (o.spawn || M.toArray()).slice();
+  return part;
+}
+// a piece's CURRENT arrays as a new piece (same material, its paint layer copied); mirror = through the local z = 0
+function pieceFromArrays(srcP, pos, nrm, uv, idx, name) {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3)); g.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
+  if (uv) g.setAttribute('uv', new THREE.BufferAttribute(uv, 2)); g.setIndex(new THREE.BufferAttribute(idx, 1));
+  const m = new THREE.Mesh(g, srcP ? srcP.mat : new THREE.MeshStandardMaterial({ color: 0x9aa0a8 })); m.name = name; m.updateMatrixWorld(true);
+  const Q = makePiece(m, { name, matName: srcP ? srcP.matName : 'lab_part', paintRes: srcP ? srcP.paintRes : 0, shape: srcP ? srcP.isShape : false });
+  g.dispose();
+  if (srcP && srcP.paint && srcP.paint.used && Q.hasPaint) { const pt = ensurePaint(Q); if (pt.w === srcP.paint.w && pt.h === srcP.paint.h) { pt.data.set(srcP.paint.data); pt.used = true; pt.ver = 1; markDirty(pt, 0, 0, pt.w - 1, pt.h - 1); } }
+  return Q;
+}
+function mirrorPiece(P, name) {
+  const pos = P.pos.slice(), nrm = P.nrm.slice(), idx = P.idx.slice();
+  for (let i = 2; i < pos.length; i += 3) { pos[i] = -pos[i]; nrm[i] = -nrm[i]; }
+  for (let t = 0; t < idx.length; t += 3) { const x = idx[t + 1]; idx[t + 1] = idx[t + 2]; idx[t + 2] = x; }   // mirrored -> re-wound so it still faces out
+  return pieceFromArrays(P, pos, nrm, P.uv ? P.uv.slice() : null, idx, name);
+}
+// the mirrored twin of a part: geometry mirrored, matrix Z M Z, linked both ways
+function makeTwin(part, o) {
+  o = o || {};
+  const tw = newPart({ kind: part.kind, shape: part.shape, asset: part.asset, name: o.name || uniquePartName(part.name + '_m', part.pieces.length), label: part.label + ' ↔', lock: false });
+  part.pieces.filter((P) => !P.dead).forEach((P, i) => partAddPiece(tw, mirrorPiece(P, o.pieceNames ? o.pieceNames[i] : (part.pieces.length > 1 ? tw.name + '_' + (i + 1) : tw.name))));
+  partInit(tw, false); tw.pivot.copy(part.pivot).multiply(new THREE.Vector3(1, 1, -1));
+  const M = o.matrix ? new THREE.Matrix4().fromArray(o.matrix) : new THREE.Matrix4().multiplyMatrices(ZS, partM(part)).multiply(ZS);
+  partSetM(tw, M); tw.spawn = new THREE.Matrix4().multiplyMatrices(ZS, new THREE.Matrix4().fromArray(part.spawn)).multiply(ZS).toArray();
+  part.twin = tw; tw.twin = part; tw.isTwin = true; tw.srcPieces = part.pieces.filter((P) => !P.dead).map((P) => P.name);
+  return tw;
+}
+// the ADD tool: press = a shape at the tip / the surface, drag = grow it, release = done (a twin if it ended off the centre)
+let adding = null;
+function addBegin(cShip, qShip) {
+  if (stroke) endStroke();
+  const size = S.r / shipScale(), part = addShape(S.shape, cShip, size, qShip);
+  adding = { part, c: cShip.clone(), q: qShip ? qShip.clone() : new THREE.Quaternion(), size0: size, size };
+  setCurPart(part);
+}
+function addDrag(pShip) {
+  if (!adding) return;
+  const s = Math.max(adding.size0, pShip.distanceTo(adding.c)); if (Math.abs(s - adding.size) < 1e-9) return;
+  adding.size = s; partSetM(adding.part, new THREE.Matrix4().compose(adding.c, adding.q, new THREE.Vector3(s, s, s)));
+}
+function addEnd() {
+  if (!adding) return; const a = adding; adding = null;
+  a.part.spawn = partM(a.part).toArray();
+  const list = [a.part];
+  if (S.mirror && Math.abs(a.c.z) > 0.6 * a.size) list.push(makeTwin(a.part));
+  pushEntry({ type: 'add', parts: list }); statusLine(); drawPanel();
+  toast(a.part.label + (list.length > 1 ? ' + its mirror twin' : '') + ' · PARTS page to nudge, CUT, TRIM');
+}
+// COPY: the part as it is now (sculpt, paint and all), a little behind the original; a twin is copied as a twin
+function copyPart(part) {
+  if (!part || part.dead) return;
+  if (stroke) endStroke();
+  const mk = (p) => {
+    const lp = p.pieces.filter((P) => !P.dead), np = newPart({ kind: 'copy', name: uniquePartName(p.name + '_copy', lp.length), label: p.label + ' COPY', lock: p.lock });
+    lp.forEach((P, i) => partAddPiece(np, pieceFromArrays(P, P.pos.slice(), P.nrm.slice(), P.uv ? P.uv.slice() : null, P.idx.slice(), lp.length > 1 ? np.name + '_' + (i + 1) : np.name)));
+    np.srcPieces = lp.map((P) => P.name);
+    partInit(np, p.lock); np.pivot.copy(p.pivot);
+    return np;
+  };
+  const np = mk(part), bb = partBox(part), dx = Math.max(0.01, (bb.max.x - bb.min.x) * 0.3);
+  const M = new THREE.Matrix4().makeTranslation(dx, 0, 0).multiply(partM(part)); partSetM(np, M); np.spawn = M.toArray();
+  const list = [np];
+  if (part.twin && !part.twin.dead && S.mirror) { const nt = mk(part.twin); const Mt = new THREE.Matrix4().multiplyMatrices(ZS, M).multiply(ZS); partSetM(nt, Mt); nt.spawn = Mt.toArray(); np.twin = nt; nt.twin = np; list.push(nt); }
+  pushEntry({ type: 'add', parts: list }); setCurPart(np); statusLine();
+  toast('copied ' + part.label + (list.length > 1 ? ' + twin' : ''));
+}
+function deletePart(part) {
+  if (!part || part.dead) return;
+  if (part.kind === 'ship') { toast('a ship part: hide it with its eye (hidden parts are not exported)'); return; }
+  if (stroke) endStroke();
+  const list = [part].concat(S.mirror && part.twin && !part.twin.dead ? [part.twin] : []);
+  for (const p of list) partKill(p);
+  pushEntry({ type: 'del', parts: list }); statusLine(); drawPanel();
+  toast('deleted ' + list.map((p) => p.label).join(' + ') + ' (undo brings it back)');
+}
+
+// ---------------------------------------------------------------- the PARTS page's nudges: small exact steps, hold to repeat
+const STEPS = [{ name: 'FINE', mv: 0.001, deg: 0.5, k: 0.005 }, { name: 'MID', mv: 0.005, deg: 2, k: 0.02 }, { name: 'BIG', mv: 0.02, deg: 10, k: 0.1 }];
+function nudge(kind, dir) {
+  const part = curPart; if (!part || part.dead) { toast('pick a part first (the list, or PIECE)'); return; }
+  if (part.lock && (kind === 'z' || kind === 'yaw' || kind === 'roll')) { toast('LOCK is on: centre line, pitch only'); return; }
+  if (stroke) endStroke();
+  const st = STEPS[S.step], before = xstate(part), M = partM(part).clone(), lp = centreLocal(part), pv = lp.clone().applyMatrix4(M);
+  const about = (R) => new THREE.Matrix4().makeTranslation(pv.x, pv.y, pv.z).multiply(R).multiply(new THREE.Matrix4().makeTranslation(-pv.x, -pv.y, -pv.z));
+  const local = (Sc) => new THREE.Matrix4().makeTranslation(lp.x, lp.y, lp.z).multiply(Sc).multiply(new THREE.Matrix4().makeTranslation(-lp.x, -lp.y, -lp.z));
+  let N;
+  if (kind === 'x' || kind === 'y' || kind === 'z') { const d = V(); d[kind] = dir * st.mv; N = new THREE.Matrix4().makeTranslation(d.x, d.y, d.z).multiply(M); }
+  else if (kind === 'pitch' || kind === 'yaw' || kind === 'roll') N = about(new THREE.Matrix4().makeRotationAxis(kind === 'pitch' ? AXIS_Z : kind === 'yaw' ? AXIS_Y : AXIS_X, dir * st.deg * Math.PI / 180)).multiply(M);
+  else {
+    const k = 1 + dir * st.k, s = kind === 'size' ? [k, k, k] : kind === 'width' ? [1, 1, k] : kind === 'length' ? [k, 1, 1] : [1, k, 1];
+    N = M.clone().multiply(local(new THREE.Matrix4().makeScale(s[0], s[1], s[2])));
+  }
+  partPlace(part, part.lock ? lockM(part, N) : N);
+  const kb = bakePart(part), after = xstate(part);
+  pushEntry(kb ? { type: 'bake', parts: kb.parts, k: kb.k, before, after } : { type: 'xform', target: { kind: 'part', part }, before, after });
+  drawPanel();
+}
+function partToSpawn(part) {
+  if (!part || part.dead || !part.spawn) return; if (stroke) endStroke();
+  const before = xstate(part); partPlace(part, new THREE.Matrix4().fromArray(part.spawn));
+  pushEntry({ type: 'xform', target: { kind: 'part', part }, before, after: xstate(part) }); toast(part.label + ' back where it started'); drawPanel();
+}
+// LOCK switched on: straighten (pitch only) where it stands - no sideways shove
+function partStraighten(part) {
+  if (!part || part.dead) return; if (stroke) endStroke();
+  const before = xstate(part); partPlace(part, lockM(part, partM(part).clone(), false));
+  pushEntry({ type: 'xform', target: { kind: 'part', part }, before, after: xstate(part) }); toast(part.label + ' locked: pitch only, held at its sideways place'); drawPanel();
+}
+function partCentre(part) {
+  if (!part || part.dead) return; if (stroke) endStroke();
+  const before = xstate(part); partPlace(part, lockM(part, partM(part).clone(), true));
+  pushEntry({ type: 'xform', target: { kind: 'part', part }, before, after: xstate(part) }); toast(part.label + ' centred on z = 0 (by its box), pitch only'); drawPanel();
+}
+function partInfo(part) {
+  const p = V(), q = new THREE.Quaternion(), s = V(); partM(part).decompose(p, q, s);
+  const c = part.pivot.clone().applyMatrix4(partM(part)), e = new THREE.Euler().setFromQuaternion(q, 'ZYX'), d = (r) => (r * 180 / Math.PI).toFixed(1);
+  const sc = part.spawn ? new THREE.Vector3().setFromMatrixScale(new THREE.Matrix4().fromArray(part.spawn)).x : 1;
+  return 'at ' + [c.x, c.y, c.z].map((v) => v.toFixed(3)).join(', ') + '   pitch ' + d(e.z) + '  yaw ' + d(e.y) + '  roll ' + d(e.x) + '   size x' + (s.x / (sc || 1)).toFixed(3);
+}
+
+// ================================================================ SELECT + MOVE: any group of vertices, carried as one
+// Owner: "it'd be cool to be able to select a group of vertexes and move them together". A selection is a set of
+// welded vertex GROUPS per piece, each flagged 1 (picked) or 2 (picked by the MIRROR side) or both; MOVE carries flag-1
+// groups with the hand / gizmo and flag-2 groups with its mirror image (the GRAB rule, so the centre line stays put).
+// SOFT pulls the unselected surface around the selection along with it, fading out over SOFT.
+const sel = { m: new Map(), n: 0, dirty: false, last: null, ver: 0 };
+let selPts = null;
+const selMat = new THREE.PointsMaterial({ color: 0xffe14d, size: 0.004, sizeAttenuation: true, depthTest: false, transparent: true, opacity: 0.95 });
+const selMap = (P, make) => { let m = sel.m.get(P.id); if (!m && make) sel.m.set(P.id, m = new Map()); return m; };
+function selAdd(P, g, flag) { const m = selMap(P, true), f = m.get(g) || 0; sel.last = P; if ((f | flag) === f) return; if (!f) sel.n++; m.set(g, f | flag); sel.dirty = true; }
+function selDel(P, g) { const m = selMap(P); if (m && m.delete(g)) { sel.n--; sel.dirty = true; } }
+function selClear() { if (!sel.m.size) return; sel.m.clear(); sel.n = 0; sel.dirty = true; }
+function selDropPiece(P) { const m = sel.m.get(P.id); if (!m) return; sel.n -= m.size; sel.m.delete(P.id); sel.dirty = true; }
+function selDraw() {
+  if (!sel.dirty) return; sel.dirty = false; sel.ver++;
+  let n = 0; for (const [id, m] of sel.m) if (live(pieces[id])) n += m.size;
+  if (!selPts || selPts.geometry.attributes.position.count < n) {
+    if (selPts) { shipRoot.remove(selPts); selPts.geometry.dispose(); }
+    selPts = new THREE.Points(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(Math.max(4096, Math.ceil(n * 1.5)) * 3), 3)), selMat);
+    selPts.renderOrder = 13; selPts.frustumCulled = false; shipRoot.add(selPts);
+  }
+  const a = selPts.geometry.attributes.position.array, v = V(); let k = 0;
+  for (const [id, m] of sel.m) { const P = pieces[id]; if (!live(P)) continue; for (const g of m.keys()) { toShip(P, v.fromArray(P.gpos, g * 3), v); a[k++] = v.x; a[k++] = v.y; a[k++] = v.z; } }
+  selPts.geometry.setDrawRange(0, k / 3); selPts.geometry.attributes.position.needsUpdate = true; selPts.visible = k > 0;
+  selMat.size = clamp(viewRef() * 0.008, 0.00003, 0.005);
+}
+function selCentroid() {
+  const c = V(), v = V(); let n = 0;
+  for (const [id, m] of sel.m) { const P = pieces[id]; if (!live(P)) continue; for (const [g, f] of m) if (f & 1) { c.add(toShip(P, v.fromArray(P.gpos, g * 3), v)); n++; } }
+  if (!n) for (const [id, m] of sel.m) { const P = pieces[id]; if (!live(P)) continue; for (const g of m.keys()) { c.add(toShip(P, v.fromArray(P.gpos, g * 3), v)); n++; } }
+  return n ? c.multiplyScalar(1 / n) : null;
+}
+function selBrush(cShip, remove) {
+  const R = S.r / shipScale(), centres = S.mirror ? [[cShip, 1], [mirrorZ(cShip, V()), 2]] : [[cShip, 1]];
+  for (const [cc, flag] of centres) piecesNear(cc, R, (P, cl, Rl) => groupsNear(P, cl, Rl, (g) => { if (remove) selDel(P, g); else selAdd(P, g, flag); }));
+}
+// ISLAND: everything joined to the vertex you point at (a loose plate, a fin, the whole seat shell)
+function selIsland(cShip, remove) {
+  const take = (c, flag) => {
+    const h = pickNear(pickPoint, c); if (!h) return 0;
+    const P = h.P, seen = new Uint8Array(P.ng), st = [h.g]; seen[h.g] = 1; let n = 0;
+    while (st.length) { const g = st.pop(); n++; if (remove) selDel(P, g); else selAdd(P, g, flag); for (let k = P.gnS[g]; k < P.gnS[g + 1]; k++) { const x = P.gnL[k]; if (!seen[x]) { seen[x] = 1; st.push(x); } } }
+    return n;
+  };
+  const n = take(cShip, 1); if (S.mirror) take(mirrorZ(cShip, V()), 2); return n;
+}
+// BOX in ship space (VR: corner to corner with the tip): inside = flag 1, inside the mirrored box = flag 2
+function selInBox(box, remove) {
+  const mb = new THREE.Box3(new THREE.Vector3(box.min.x, box.min.y, -box.max.z), new THREE.Vector3(box.max.x, box.max.y, -box.min.z)), v = V();
+  for (const P of pieces) {
+    if (!live(P)) continue;
+    for (let g = 0; g < P.ng; g++) {
+      toShip(P, v.fromArray(P.gpos, g * 3), v);
+      if (box.containsPoint(v)) { if (remove) selDel(P, g); else selAdd(P, g, 1); }
+      if (S.mirror && mb.containsPoint(v)) { if (remove) selDel(P, g); else selAdd(P, g, 2); }
+    }
+  }
+}
+// BOX on screen (desktop marquee): what you can SEE inside the rectangle (X-RAY: through the hull too). With MIRROR, a
+// vertex whose mirror image is inside (and visible) joins as the mirror side - that works even where the hull is not
+// perfectly symmetric
+function selRect(x0, y0, x1, y1, remove) {
+  const r = cvs.getBoundingClientRect(), nx0 = (Math.min(x0, x1) - r.left) / r.width * 2 - 1, nx1 = (Math.max(x0, x1) - r.left) / r.width * 2 - 1;
+  const ny0 = -((Math.max(y0, y1) - r.top) / r.height * 2 - 1), ny1 = -((Math.min(y0, y1) - r.top) / r.height * 2 - 1);
+  camera.updateMatrixWorld(); const vp = new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse), q = V(), w = V(), m = V();
+  const inRect = (p) => { q.copy(p).applyMatrix4(vp); return q.z > -1 && q.z < 1 && q.x >= nx0 && q.x <= nx1 && q.y >= ny0 && q.y <= ny1; };
+  const meshes = pieces.filter(live).map((P) => P.mesh), ray = new THREE.Raycaster(); ray.firstHitOnly = true;
+  const seen = (p, slack) => {
+    if (S.selXray) return true;
+    const dir = V().subVectors(p, camera.position), d = dir.length(); ray.set(camera.position, dir.multiplyScalar(1 / d)); ray.far = d + slack;
+    const h = ray.intersectObjects(meshes, false)[0]; return !h || h.distance >= d - Math.max(slack, d * 2e-3);
+  };
+  const slackM = 0.004 * shipScale();   // the mirror image of a vertex is near, not on, the other side's surface
+  let n = 0;
+  for (const P of pieces) {
+    if (!live(P)) continue;
+    for (let g = 0; g < P.ng; g++) {
+      toShip(P, w.fromArray(P.gpos, g * 3), w);
+      const ww = w.clone().applyMatrix4(shipRoot.matrixWorld);
+      if (inRect(ww) && seen(ww, 1e-5)) { if (remove) selDel(P, g); else selAdd(P, g, 1); n++; }
+      if (S.mirror) { mirrorZ(w, m).applyMatrix4(shipRoot.matrixWorld); if (inRect(m) && seen(m, slackM)) { if (remove) selDel(P, g); else selAdd(P, g, 2); } }
+    }
+  }
+  return n;
+}
+function selAll() {
+  const part = curPart && !curPart.dead ? curPart : (sel.last && sel.last.part);
+  if (!part || part.dead) { toast('ALL takes the current part: pick one first'); return; }
+  for (const P of part.pieces) if (live(P)) for (let g = 0; g < P.ng; g++) selAdd(P, g, 1);
+  toast('selected all of ' + part.label);
+}
+function selGrow() {
+  const add = [];
+  for (const [id, m] of sel.m) { const P = pieces[id]; if (!live(P)) continue; for (const [g, f] of m) for (let k = P.gnS[g]; k < P.gnS[g + 1]; k++) { const x = P.gnL[k]; if (!m.has(x)) add.push(P, x, f); } }
+  for (let i = 0; i < add.length; i += 3) selAdd(add[i], add[i + 1], add[i + 2]);
+}
+function selInvert() {
+  for (const [id, m] of [...sel.m]) { const P = pieces[id]; if (!live(P)) continue; const nm = new Map(); for (let g = 0; g < P.ng; g++) if (!m.has(g)) nm.set(g, 1); sel.n += nm.size - m.size; sel.m.set(id, nm); }
+  sel.dirty = true;
+}
+// DELETE the selected vertices (HOLE or COLLAPSE, as the DELETE tool), one undo step
+function selDelete() {
+  if (!sel.n) { toast('nothing selected'); return; }
+  if (stroke) endStroke();
+  const st = beginStroke('topo', { del: new Map(), collapse: S.delCollapse, snaps: new Map(), areas: [] });
+  for (const [id, m] of sel.m) {
+    const P = pieces[id]; if (!live(P) || !m.size) continue;
+    st.del.set(P.id, new Set(m.keys())); st.snaps.set(P.id, topoSnap(P));
+    const c = V(), v = V(); let r = 0; for (const g of m.keys()) c.add(toShip(P, v.fromArray(P.gpos, g * 3), v)); c.multiplyScalar(1 / m.size);
+    for (const g of m.keys()) r = Math.max(r, toShip(P, v.fromArray(P.gpos, g * 3), v).distanceTo(c));
+    st.areas.push({ c, R: r + 0.002 });
+  }
+  selClear(); endStroke();
+}
+// SPLIT: the triangles whose three corners are selected become a part of their own (move it, copy it, mirror it)
+function selSplit() {
+  if (!sel.n) { toast('nothing selected'); return; }
+  if (stroke) endStroke();
+  const snaps = new Map(), made = new Map();   // source part -> new part
+  for (const [id, m] of [...sel.m]) {
+    const P = pieces[id]; if (!live(P) || !m.size) continue;
+    const keep = [], take = [];
+    for (let f = 0; f < P.nf; f++) { const a = P.idx[f * 3], b = P.idx[f * 3 + 1], c = P.idx[f * 3 + 2]; (m.has(P.grp[a]) && m.has(P.grp[b]) && m.has(P.grp[c]) ? take : keep).push(a, b, c); }
+    if (!take.length) continue;
+    const remap = new Map(), pos = [], nrm = [], uv = P.uv ? [] : null, idx = [];
+    for (const i of take) { let j = remap.get(i); if (j === undefined) { j = remap.size; remap.set(i, j); pos.push(P.pos[i * 3], P.pos[i * 3 + 1], P.pos[i * 3 + 2]); nrm.push(P.nrm[i * 3], P.nrm[i * 3 + 1], P.nrm[i * 3 + 2]); if (uv) uv.push(P.uv[i * 2], P.uv[i * 2 + 1]); } idx.push(j); }
+    let np = made.get(P.part);
+    if (!np) { np = newPart({ kind: 'copy', name: uniquePartName(P.part.name + '_split', 1), label: P.part.label + ' SPLIT', lock: false }); np.srcPieces = []; made.set(P.part, np); }
+    const Q = pieceFromArrays(P, Float32Array.from(pos), Float32Array.from(nrm), uv ? Float32Array.from(uv) : null, Uint32Array.from(idx), uniqueName(np.name + (np.pieces.length ? '_' + (np.pieces.length + 1) : '')));
+    partAddPiece(np, Q); np.srcPieces.push(P.name);
+    snaps.set(P.id, topoSnap(P)); applyFaces(P, keep); P.topo = true;
+    Q.mesh.matrix.copy(P.mesh.matrix);
+  }
+  if (!made.size) { toast('SPLIT takes whole triangles: select all three corners'); return; }
+  for (const np of made.values()) { partInit(np, false); const M = np.pieces[0].mesh.matrix.clone(); partSetM(np, M); np.spawn = M.toArray(); }
+  selClear();
+  pushEntry({ type: 'multi', entries: [{ type: 'topo', snaps }, { type: 'add', parts: [...made.values()] }] });
+  setCurPart([...made.values()][0]); statusLine();
+  toast('split off ' + [...made.values()].map((p) => p.pieces.reduce((a, Q) => a + Q.nf, 0)).reduce((a, b) => a + b, 0) + ' tris as a part - PIECE moves it');
+}
+// what MOVE carries: the selection (weights from its flags) + with SOFT, the unselected surface near it, fading out.
+// The soft zone is measured from the selection's BOUNDARY groups only - an outside vertex's nearest selected one is
+// always on the boundary - so a big selection costs what its rim costs
+function selCapture() {
+  const list = [], R = S.soft / shipScale(), seen = new Set(), v = V();
+  for (const [id, m] of sel.m) { const P = pieces[id]; if (!live(P)) continue; for (const [g, f] of m) { list.push({ P, g, v0: toShip(P, V().fromArray(P.gpos, g * 3), V()), w1: f & 1 ? 1 : 0, w2: f & 2 ? 1 : 0 }); seen.add(P.id * 4194304 + g); } }
+  if (R > 0) {
+    const soft = new Map();
+    for (const it of list.slice()) {
+      const P = it.P, m = sel.m.get(P.id); let rim = false;
+      for (let k = P.gnS[it.g]; k < P.gnS[it.g + 1] && !rim; k++) if (!m.has(P.gnL[k])) rim = true;
+      if (!rim) continue;
+      piecesNear(it.v0, R, (Q, cl, Rl) => groupsNear(Q, cl, Rl, (g, d) => {
+        const key = Q.id * 4194304 + g; if (seen.has(key)) return;
+        let s = soft.get(key); if (!s) soft.set(key, s = { P: Q, g, d1: Infinity, d2: Infinity });
+        const ds = d * pieceScale(Q); if (it.w1 && ds < s.d1) s.d1 = ds; if (it.w2 && ds < s.d2) s.d2 = ds;
+      }));
+    }
+    for (const s of soft.values()) {
+      const w1 = s.d1 < R ? falloff(s.d1 / R) : 0, w2 = s.d2 < R ? falloff(s.d2 / R) : 0;
+      if (w1 > 0 || w2 > 0) list.push({ P: s.P, g: s.g, v0: toShip(s.P, v.fromArray(s.P.gpos, s.g * 3), V()), w1, w2 });
+    }
+  }
+  return list;
+}
+// apply a ship-space matrix D (the gizmo's change since the press) to a captured list; the mirror side gets Z D Z
+function selApply(list, D) {
+  const Dm = new THREE.Matrix4().multiplyMatrices(ZS, D).multiply(ZS), d1 = V(), d2 = V(), out = V();
+  for (const it of list) {
+    d1.copy(it.v0).applyMatrix4(D).sub(it.v0);
+    if (it.w2 > 0) d2.copy(it.v0).applyMatrix4(Dm).sub(it.v0); else d2.set(0, 0, 0);
+    const { w1, w2 } = it;
+    if (w1 > 0 && w2 > 0) { const s = Math.max(w1, w2) / (w1 + w2); out.copy(d1).multiplyScalar(w1 * s).addScaledVector(d2, w2 * s); }
+    else out.copy(d1).multiplyScalar(w1).addScaledVector(d2, w2);
+    out.add(it.v0); toLocal(it.P, out, out); setGroup(it.P, it.g, out.x, out.y, out.z);
+  }
+  sel.dirty = true;
+}
+const selBoxHelper = new THREE.Box3Helper(new THREE.Box3(), 0xffe14d); selBoxHelper.visible = false; selBoxHelper.renderOrder = 12; shipRoot.add(selBoxHelper);
+
+// ================================================================ CUT + TRIM: clip parts along a surface
+// One clipper for both (the v50.72 seat trim, cockpit4_swap2.mjs, brought into the lab): f(q) > 0 = cut away. A
+// triangle wholly kept keeps its vertices byte for byte, one wholly cut goes, one that straddles is cut along f = 0
+// (Sutherland-Hodgman on the signed value; new corners interpolate position, normal and UV). Every triangle is tested
+// at its corners, edge midpoints and centre, and a big straddler is split in four first (down to SPLIT), so a cutter
+// smaller than a hull plate still bites a clean edge.
+//   TRIM  f = above the ship's roof (the highest hull / glass / canopy-frame surface over each 1.5 mm column, min of the
+//         3x3 neighbours) or below its belly, 2 mm inside - a column with no roof is outside (the Syphon side-wall rule)
+//   CUT   f = inside the cutter part (ray parity, three directions, majority); the distance to its surface sets the cut
+const RAYS = [new THREE.Vector3(0.577, 0.577, 0.577), new THREE.Vector3(-0.267, 0.802, -0.534), new THREE.Vector3(0.802, -0.267, -0.534)].map((d) => d.normalize());
+const _cray = new THREE.Ray();
+function insideOf(C, ql) {
+  let odd = 0;
+  for (const d of RAYS) { _cray.set(ql, d); const hits = C.geo.boundsTree.raycast(_cray, THREE.DoubleSide); if (hits.length & 1) odd++; }
+  return odd >= 2;
+}
+function cutField(cutters) {
+  const hit = {};
+  return {
+    side: (q) => { for (const C of cutters) if (insideOf(C, toLocal(C, q, V()))) return true; return false; },
+    sd: (q) => {
+      let best = -Infinity;
+      for (const C of cutters) { const ql = toLocal(C, q, V()), h = C.geo.boundsTree.closestPointToPoint(ql, hit), d = (h ? h.distance : 1e3) * pieceScale(C); const s = insideOf(C, ql) ? d : -d; if (s > best) best = s; }
+      return best;
+    },
+  };
+}
+function shellField(box, skip) {
+  const cell = 0.0015, top = new Map(), bot = new Map(), ix = (v) => Math.floor(v / cell), key = (i, j) => i * 100003 + j, MARGIN = 0.002;
+  let any = false; const a = V(), b = V(), c = V();
+  for (const P of pieces) {
+    if (!live(P) || P.part === skip) continue;
+    const isHull = /_hull_game$/.test(P.matName), isRoof = isHull || P.matName === 'canopy_glass' || P.matName === 'canopy_frame';
+    if (!isRoof) continue; any = true;
+    const M = P.mesh.matrix, pos = P.pos, idx = P.idx;
+    for (let f = 0; f < idx.length; f += 3) {
+      a.fromArray(pos, idx[f] * 3).applyMatrix4(M); b.fromArray(pos, idx[f + 1] * 3).applyMatrix4(M); c.fromArray(pos, idx[f + 2] * 3).applyMatrix4(M);
+      const x0 = Math.min(a.x, b.x, c.x), x1 = Math.max(a.x, b.x, c.x), z0 = Math.min(a.z, b.z, c.z), z1 = Math.max(a.z, b.z, c.z);
+      if (x1 < box[0] || x0 > box[1] || z1 < box[2] || z0 > box[3]) continue;
+      const nn = Math.max(1, Math.ceil(Math.max(x1 - x0, z1 - z0) / (cell * 0.6)));
+      for (let i = 0; i <= nn; i++) for (let j = 0; i + j <= nn; j++) {
+        const u = i / nn, v = j / nn, w = 1 - u - v, x = a.x * w + b.x * u + c.x * v, y = a.y * w + b.y * u + c.y * v, z = a.z * w + b.z * u + c.z * v, k = key(ix(x), ix(z));
+        const ct = top.get(k); if (ct === undefined || y > ct) top.set(k, y);
+        if (isHull) { const cb = bot.get(k); if (cb === undefined || y < cb) bot.set(k, y); }
+      }
+    }
+  }
+  if (!any) return null;
+  const near = (Mp, x, z, pick) => { const i0 = ix(x), j0 = ix(z); let r; for (let i = i0 - 1; i <= i0 + 1; i++) for (let j = j0 - 1; j <= j0 + 1; j++) { const v = Mp.get(key(i, j)); if (v === undefined) return undefined; r = r === undefined ? v : pick(r, v); } return r; };
+  const out = (q) => {
+    const r = near(top, q.x, q.z, Math.min), f = near(bot, q.x, q.z, Math.max);
+    return Math.max(r === undefined ? 1 : q.y - (r - MARGIN), f === undefined ? 1 : (f + MARGIN) - q.y);
+  };
+  return { side: (q) => out(q) > 0, sd: out };
+}
+// clip one piece: F.side / F.sd take SHIP points; box (ship) = where F can be > 0 (null = anywhere); split = local units;
+// big = also split a big triangle whose samples are all kept (a cutter inside a plate)
+function clipPiece(P, F, box, split, big) {
+  const M = P.mesh.matrix, pos = P.pos, nrm = P.nrm, uv = P.uv, idx = P.idx, nv = pos.length / 3;
+  const NP = Array.from(pos), NN = Array.from(nrm), NU = uv ? Array.from(uv) : null, I = [];
+  const sideC = new Int8Array(nv), sdC = new Float64Array(nv).fill(NaN), w = V(), tri3 = new THREE.Triangle(V(), V(), V());
+  const ship = (v) => w.set(v.p[0], v.p[1], v.p[2]).applyMatrix4(M);
+  const vtx = (i) => ({ i, p: [pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]], n: [nrm[i * 3], nrm[i * 3 + 1], nrm[i * 3 + 2]], u: uv ? [uv[i * 2], uv[i * 2 + 1]] : null });
+  const lerp = (a, b, t) => ({ i: -1, p: a.p.map((x, j) => x + (b.p[j] - x) * t), n: a.n.map((x, j) => x + (b.n[j] - x) * t), u: a.u ? a.u.map((x, j) => x + (b.u[j] - x) * t) : null });
+  const sideOf = (v) => { if (v.i >= 0) { if (!sideC[v.i]) sideC[v.i] = F.side(ship(v)) ? 1 : -1; return sideC[v.i] > 0; } if (v.s === undefined) v.s = F.side(ship(v)); return v.s; };
+  const sdOf = (v) => { if (v.i >= 0) { if (Number.isNaN(sdC[v.i])) sdC[v.i] = F.sd(ship(v)); return sdC[v.i]; } if (v.sd === undefined) v.sd = F.sd(ship(v)); return v.sd; };
+  const emitV = (v) => {
+    if (v.i >= 0) return v.i; if (v.k !== undefined) return v.k;
+    const l = Math.hypot(v.n[0], v.n[1], v.n[2]) || 1; NP.push(v.p[0], v.p[1], v.p[2]); NN.push(v.n[0] / l, v.n[1] / l, v.n[2] / l); if (NU) NU.push(v.u[0], v.u[1]);
+    return (v.k = NP.length / 3 - 1);
+  };
+  const emit = (poly) => { if (poly.length < 3) return; const ids = poly.map(emitV); for (let k = 1; k + 1 < ids.length; k++) I.push(ids[0], ids[k], ids[k + 1]); };
+  const clip = (poly) => { const o = []; for (let i = 0; i < poly.length; i++) { const a = poly[i], b = poly[(i + 1) % poly.length], sa = sdOf(a), sb = sdOf(b); if (sa <= 0) o.push(a); if ((sa <= 0) !== (sb <= 0)) o.push(lerp(a, b, sa / (sa - sb))); } return o; };
+  const elen = (a, b) => Math.hypot(a.p[0] - b.p[0], a.p[1] - b.p[1], a.p[2] - b.p[2]);
+  const inBox = (a, b, c) => { if (!box) return true; tri3.a.set(...a.p).applyMatrix4(M); tri3.b.set(...b.p).applyMatrix4(M); tri3.c.set(...c.p).applyMatrix4(M); return box.intersectsTriangle(tri3); };
+  let cut = 0, gone = 0, splits = 0, changed = false;
+  function tri(a, b, c, depth) {
+    const L = Math.max(elen(a, b), elen(b, c), elen(c, a)), canSplit = depth < 6 && L > split;
+    const m1 = lerp(a, b, 0.5), m2 = lerp(b, c, 0.5), m3 = lerp(c, a, 0.5), cc = lerp(m1, c, 1 / 3);
+    const s = [a, b, c, m1, m2, m3, cc].map(sideOf), any = s.some(Boolean), all = s.every(Boolean);
+    if (!any && !(big && canSplit && inBox(a, b, c))) { emit([a, b, c]); return; }
+    if (all && !canSplit) { gone++; changed = true; return; }
+    if (canSplit) { splits++; changed = true; tri(a, m1, m3, depth + 1); tri(m1, b, m2, depth + 1); tri(m3, m2, c, depth + 1); tri(m1, m2, m3, depth + 1); return; }
+    cut++; changed = true; emit(clip([a, b, c]));
+  }
+  for (let f = 0; f < idx.length; f += 3) {
+    const a = vtx(idx[f]), b = vtx(idx[f + 1]), c = vtx(idx[f + 2]);
+    if (!inBox(a, b, c)) { I.push(idx[f], idx[f + 1], idx[f + 2]); continue; }
+    tri(a, b, c, 0);
+  }
+  const before = P.nf;
+  if (!changed) return { changed, cut, gone, splits, before, after: before };
+  // drop the vertices nothing uses any more, swap the arrays in
+  const remap = new Int32Array(NP.length / 3).fill(-1); let n = 0; for (const i of I) if (remap[i] < 0) remap[i] = n++;
+  const pa = new Float32Array(n * 3), na = new Float32Array(n * 3), ua = NU ? new Float32Array(n * 2) : null;
+  for (let i = 0; i < remap.length; i++) { const j = remap[i]; if (j < 0) continue; pa[j * 3] = NP[i * 3]; pa[j * 3 + 1] = NP[i * 3 + 1]; pa[j * 3 + 2] = NP[i * 3 + 2]; na[j * 3] = NN[i * 3]; na[j * 3 + 1] = NN[i * 3 + 1]; na[j * 3 + 2] = NN[i * 3 + 2]; if (ua) { ua[j * 2] = NU[i * 2]; ua[j * 2 + 1] = NU[i * 2 + 1]; } }
+  setPieceArrays(P, pa, na, ua, Uint32Array.from(I, (i) => remap[i])); P.topo = true;
+  return { changed, cut, gone, splits, before, after: P.nf };
+}
+// CUT: the part (and its twin, MIRROR on) cuts away what is inside it from every part you can SEE; then it hides
+function cutWith(part) {
+  if (!part || part.dead) { toast('pick the cutter part first'); return; }
+  if (stroke) endStroke();
+  const cutParts = [part].concat(S.mirror && part.twin && !part.twin.dead ? [part.twin] : []), cutters = cutParts.flatMap((p) => p.pieces.filter(live));
+  if (!cutters.length) { toast('the cutter is hidden'); return; }
+  const box = new THREE.Box3(); for (const C of cutters) { C.geo.computeBoundingBox(); box.union(C.geo.boundingBox.clone().applyMatrix4(C.mesh.matrix)); }
+  const ext = box.getSize(V()), splitShip = Math.max(1e-5, Math.min(ext.x, ext.y, ext.z) / 3), F = cutField(cutters), snaps = new Map(), t0 = performance.now(), hitParts = new Set();
+  let before = 0, after = 0;
+  for (const P of pieces) {
+    if (!live(P) || cutParts.includes(P.part)) continue;
+    const bs = P.geo.boundingSphere.clone().applyMatrix4(P.mesh.matrix); if (!box.intersectsSphere(bs)) continue;
+    const snap = topoSnap(P), r = clipPiece(P, F, box, splitShip / pieceScale(P), true);
+    if (r.changed) { snaps.set(P.id, snap); before += r.before; after += r.after; hitParts.add(P.part.label); }
+  }
+  if (!snaps.size) { toast('nothing visible inside the cutter'); return; }
+  const vis = cutParts.map((p) => [p, p.visible]); for (const p of cutParts) partShow(p, false);
+  pushEntry({ type: 'multi', entries: [{ type: 'topo', snaps }, { type: 'vis', list: vis }] }); statusLine(); drawPanel();
+  toast('cut ' + [...hitParts].join(', ') + ': ' + before.toLocaleString() + ' -> ' + after.toLocaleString() + ' tris (' + Math.round(performance.now() - t0) + ' ms) · cutter hidden');
+}
+// TRIM: the part cut along the ship's roof and belly (what the game's seat gets: "it shouldn't protrude out the top")
+function trimPart(part) {
+  if (!part || part.dead) { toast('pick a part first'); return; }
+  if (stroke) endStroke();
+  const lp = part.pieces.filter(live); if (!lp.length) { toast('that part is hidden'); return; }
+  const bb = partBox(part), F = shellField([bb.min.x - 0.02, bb.max.x + 0.02, bb.min.z - 0.02, bb.max.z + 0.02], part);
+  if (!F) { toast('no hull / glass here to trim against'); return; }
+  const snaps = new Map(), t0 = performance.now(); let before = 0, after = 0;
+  for (const P of lp) { const snap = topoSnap(P), r = clipPiece(P, F, null, 0.006 / pieceScale(P), false); if (r.changed) { snaps.set(P.id, snap); before += r.before; after += r.after; } }
+  if (!snaps.size) { toast(part.label + ' is already inside the hull'); return; }
+  pushEntry({ type: 'topo', snaps }); statusLine(); drawPanel();
+  toast('trimmed ' + part.label + ' to the roof + belly: ' + before.toLocaleString() + ' -> ' + after.toLocaleString() + ' tris (' + Math.round(performance.now() - t0) + ' ms)');
+}
 
 // ================================================================ PAINT
 // Paint lands on a separate RGBA LAYER per painted material (straight alpha, sRGB), mixed over the base colour map in
@@ -757,7 +1614,7 @@ function patchPaintMaterial(P) {
 function ensurePaint(P) {
   if (P.paint) return P.paint;
   const img = P.mat.map && P.mat.map.image;
-  let w = (img && img.width) || 1024, h = (img && img.height) || 1024;
+  let w = P.paintRes || (img && img.width) || 1024, h = P.paintRes || (img && img.height) || 1024;   // a shape's map is a 4 px white stand-in
   const s = Math.min(1, 2048 / Math.max(w, h)); w = Math.max(64, Math.round(w * s)); h = Math.max(64, Math.round(h * s));
   const data = new Uint8Array(w * h * 4);
   const tex = new THREE.DataTexture(data, w, h, THREE.RGBAFormat, THREE.UnsignedByteType);
@@ -862,7 +1719,7 @@ function paintDab(cShip, erase) {
 }
 // FILL: a textured part takes the colour over its whole layer; an untextured one (glass, hood, frame) changes colour
 function fillPiece(P) {
-  if (P.hasPaint) {
+  if (P.hasPaint && !P.isShape) {                      // a shape's FILL is its base colour (its paint stays on top)
     const pt = ensurePaint(P);
     beginStroke('paint', { tiles: new Map() }); snapTiles(P, pt, 0, 0, pt.w - 1, pt.h - 1);
     const D = pt.data, w = S.opacity, [cr, cg, cb] = S.color;
@@ -901,9 +1758,9 @@ function sampleAt(cShip, reach) {
   return rgb.map((c) => clamp(Math.round(c), 0, 255));
 }
 // the base map with its paint layer composited, at the layer's size (export)
-function compositeCanvas(P) {
+function compositeCanvas(P, fill) {   // fill: a shape's colour under its paint (its map is a white stand-in)
   const pt = P.paint, c = document.createElement('canvas'); c.width = pt.w; c.height = pt.h;
-  const x = c.getContext('2d'); x.drawImage(P.mat.map.image, 0, 0, pt.w, pt.h);
+  const x = c.getContext('2d'); if (fill) { x.fillStyle = fill; x.fillRect(0, 0, pt.w, pt.h); } else x.drawImage(P.mat.map.image, 0, 0, pt.w, pt.h);
   x.drawImage(layerCanvas(P), 0, 0); return c;
 }
 function layerCanvas(P) {
@@ -931,87 +1788,169 @@ const softT = { get: () => (S.soft <= 0 ? 0 : 0.05 + 0.95 * Math.log(S.soft / SO
   set: (t) => { S.soft = t < 0.05 ? 0 : SOFT_MIN * Math.pow(R_MAX / SOFT_MIN, (clamp(t, 0, 1) - 0.05) / 0.95); } };
 const fmtLen = (m) => (m >= 0.01 ? (m * 100).toFixed(1) + ' cm' : m >= 0.001 ? (m * 1000).toFixed(1) + ' mm' : (m * 1000).toFixed(2) + ' mm');
 function sliderRows() {
-  const t = S.tool, rows = [{ id: 'size', label: t === 'piece' || t === 'point' || t === 'line' || t === 'delete' ? 'REACH' : 'SIZE', t: sizeT.get(), txt: fmtLen(S.r) }];
+  const t = S.tool, rows = [];
+  if (t !== 'move') rows.push({ id: 'size', label: t === 'piece' || t === 'point' || t === 'line' || t === 'delete' ? 'REACH' : t === 'select' ? 'BRUSH' : 'SIZE', t: sizeT.get(), txt: fmtLen(S.r) });
   if (CLAY.has(t)) rows.push({ id: 'strength', label: 'STRENGTH', t: S.strength, txt: Math.round(S.strength * 100) + '%' });
-  if (t === 'point' || t === 'line') rows.push({ id: 'soft', label: 'SOFT', t: softT.get(), txt: S.soft <= 0 ? 'rigid' : fmtLen(S.soft) });
+  if (t === 'point' || t === 'line' || t === 'move') rows.push({ id: 'soft', label: t === 'move' ? 'SOFT (the surface around it follows)' : 'SOFT', t: softT.get(), txt: S.soft <= 0 ? 'rigid' : fmtLen(S.soft) });
   if (t === 'meld') rows.push({ id: 'meld', label: 'MELD (cell size)', t: S.meld, txt: fmtLen(S.r * (0.05 + 0.6 * S.meld)) });
   if (t === 'paint' || t === 'fill' || t === 'drop') { rows.push({ id: 'opacity', label: 'OPACITY', t: S.opacity, txt: Math.round(S.opacity * 100) + '%' }); rows.push({ id: 'hardness', label: 'HARDNESS', t: S.hardness, txt: Math.round(S.hardness * 100) + '%' }); }
   return rows;
 }
 function rr(x, y, w, h, r) { pctx.beginPath(); pctx.roundRect(x, y, w, h, r); }
+// three pages on one 512 x 800 canvas (it was 720 tall before the FIT-OUT pages): TOOLS, ADD, PARTS; the header and the
+// UNDO ... EXPORT row are on every page
+const PW = 512, PH = 800, FONT = 'px Segoe UI, system-ui, sans-serif';
 function drawPanel() {
-  const c = pctx, W = 512; ui.controls = [];
+  const c = pctx, W = PW; ui.controls = [];
   const add = (o) => { ui.controls.push(o); return o; };
-  c.fillStyle = '#0a1020'; c.fillRect(0, 0, W, 720);
+  c.fillStyle = '#0a1020'; c.fillRect(0, 0, W, PH);
   c.textBaseline = 'middle'; c.textAlign = 'center';
   const btn = (o, label, on, sub) => {
     add(o); const hov = ui.hover === o.id;
     rr(o.x, o.y, o.w, o.h, 10); c.fillStyle = on ? '#ffaa00' : (hov ? '#22345a' : '#141f38'); c.fill();
     c.lineWidth = 2; c.strokeStyle = on ? '#ffd27a' : (hov ? '#ffaa00' : 'rgba(120,160,220,0.35)'); c.stroke();
-    c.fillStyle = on ? '#101010' : '#dbe9ff'; c.font = '700 ' + (o.fs || 22) + 'px Segoe UI, system-ui, sans-serif';
+    c.fillStyle = on ? '#101010' : '#dbe9ff'; c.font = '700 ' + (o.fs || 22) + FONT;
     c.fillText(label, o.x + o.w / 2, o.y + o.h / 2 + (sub ? -9 : 1));
-    if (sub) { c.font = '500 ' + (o.fs ? 13 : 15) + 'px Segoe UI, system-ui, sans-serif'; c.fillStyle = on ? '#332200' : '#7f93ad'; c.fillText(sub, o.x + o.w / 2, o.y + o.h / 2 + 16); }
+    if (sub) { c.font = '500 ' + (o.fs ? 13 : 15) + FONT; c.fillStyle = on ? '#332200' : '#7f93ad'; c.fillText(sub, o.x + o.w / 2, o.y + o.h / 2 + 16); }
+  };
+  const text = (s, x, y, o) => { o = o || {}; c.textAlign = o.align || 'left'; c.fillStyle = o.col || '#7f93ad'; c.font = o.font || ('600 15' + FONT); c.fillText(s, x, y); c.textAlign = 'center'; };
+  const slider = (r, y) => {
+    const o = add({ id: 's_' + r.id, x: 8, y, w: 496, h: 52, slider: r.id });
+    text(r.label, 16, y + 14, { font: '600 17' + FONT }); text(r.txt, 496, y + 14, { align: 'right', col: '#dbe9ff', font: '600 17' + FONT });
+    rr(16, y + 30, 480, 12, 6); c.fillStyle = '#1b2742'; c.fill();
+    rr(16, y + 30, Math.max(12, 480 * clamp(r.t, 0, 1)), 12, 6); c.fillStyle = ui.hover === o.id ? '#ffd27a' : '#ffaa00'; c.fill();
+    return y + 56;
+  };
+  const row = (items, y, h) => {   // [id, label, on, act, sub?] side by side across the panel
+    const n = items.length, w = (496 - (n - 1) * 6) / n;
+    items.forEach(([id, label, on, fn, sub], i) => btn({ id, x: 8 + i * (w + 6), y, w, h: h || 44, fs: 16, act: fn }, label, on, sub));
+    return y + (h || 44) + 6;
   };
   // header: ship + restore
   btn({ id: 'prev', x: 8, y: 8, w: 52, h: 48, act: () => switchShip(-1) }, '◀', false);
-  c.fillStyle = '#ffaa00'; c.font = '700 26px Segoe UI, system-ui, sans-serif'; c.fillText((ship.name || S.ship).toUpperCase(), ui.restore ? 170 : 256, 32);
+  c.fillStyle = '#ffaa00'; c.font = '700 26' + FONT; c.fillText((ship.name || S.ship).toUpperCase() + (ship.fit ? ' · FIT' : ''), ui.restore ? 170 : 256, 32);
   btn({ id: 'next', x: ui.restore ? 272 : 452, y: 8, w: 52, h: 48, act: () => switchShip(1) }, '▶', false);
   if (ui.restore) btn({ id: 'restore', x: 332, y: 8, w: 172, h: 48, fs: 18, act: () => restoreSession() }, 'RESTORE', false,
     ui.restore + (ui.restoreStale ? ' · ' + ui.restoreStale + ' OLD PART' + (ui.restoreStale > 1 ? 'S' : '') : ''));
-  // tools
-  const subs = { grab: 'drag clay', poke: 'dent it', inflate: S.inflateOut ? 'swell' : 'shrink', smooth: 'relax', squish: 'pinch', meld: 'join + simplify',
-    point: 'vertex', line: 'edge', piece: 'part / gem', paint: 'alt: erase', fill: 'whole part', drop: 'pick colour', delete: S.delCollapse ? 'collapse' : 'hole' };
-  const SLOT = { grab: [0, 0], poke: [1, 0], inflate: [2, 0], smooth: [3, 0], squish: [4, 0], meld: [0, 1], point: [1, 1], line: [2, 1], piece: [3, 1],
-    delete: [4, 1], paint: [0, 2], fill: [1, 2], drop: [2, 2] };
-  const cell = (cx, cy) => ({ x: 8 + cx * 101, y: 64 + cy * 76, w: 95, h: 70, fs: 19 });
-  TOOLS.forEach((t) => btn(Object.assign(cell(...SLOT[t]), { id: 'tool_' + t, act: () => setTool(t) }), TOOL_LABEL[t], S.tool === t, subs[t]));
-  btn(Object.assign(cell(4, 2), { id: 'mirror', act: () => { S.mirror = !S.mirror; toast('mirror ' + (S.mirror ? 'on' : 'off')); } }), 'MIRROR', S.mirror, S.mirror ? 'z = 0 on' : 'off');
-  // sliders
-  let y = 300;
-  for (const r of sliderRows()) {
-    const o = add({ id: 's_' + r.id, x: 8, y, w: 496, h: 52, slider: r.id });
-    c.textAlign = 'left'; c.fillStyle = '#7f93ad'; c.font = '600 17px Segoe UI, system-ui, sans-serif'; c.fillText(r.label, 16, y + 14);
-    c.textAlign = 'right'; c.fillStyle = '#dbe9ff'; c.fillText(r.txt, 496, y + 14); c.textAlign = 'center';
-    rr(16, y + 30, 480, 12, 6); c.fillStyle = '#1b2742'; c.fill();
-    rr(16, y + 30, Math.max(12, 480 * clamp(r.t, 0, 1)), 12, 6); c.fillStyle = ui.hover === o.id ? '#ffd27a' : '#ffaa00'; c.fill();
-    y += 56;
-  }
-  if (S.tool === 'delete') btn({ id: 'delmode', x: 8, y, w: 496, h: 44, fs: 18, act: () => { S.delCollapse = !S.delCollapse; } }, S.delCollapse ? 'COLLAPSE - closes the gap  (tap for HOLE)' : 'HOLE - leaves a gap  (tap for COLLAPSE)', false);
-  if (S.tool === 'inflate') btn({ id: 'inout', x: 8, y, w: 496, h: 44, fs: 18, act: () => { S.inflateOut = !S.inflateOut; } }, S.inflateOut ? 'SWELL  (tap for SHRINK)' : 'SHRINK  (tap for SWELL)', false);
-  // colour
-  y = 476;
-  PALETTE.forEach((h, i) => {
-    const o = add({ id: 'sw_' + i, x: 8 + (i % 8) * 62, y: y + Math.floor(i / 8) * 50, w: 58, h: 44, act: () => { S.color = hex2rgb(h); toast('colour ' + h); } });
-    rr(o.x, o.y, o.w, o.h, 8); c.fillStyle = h; c.fill(); c.lineWidth = rgb2hex(S.color) === h ? 4 : 1.5;
-    c.strokeStyle = rgb2hex(S.color) === h ? '#ffaa00' : 'rgba(255,255,255,0.25)'; c.stroke();
-  });
-  y += 104;
-  const hs = hsl();
-  for (const [id, label, t] of [['hue', 'HUE', hs.h], ['shade', 'SHADE', hs.l]]) {
-    const o = add({ id: 's_' + id, x: 96, y, w: 408, h: 34, slider: id });
-    c.textAlign = 'left'; c.fillStyle = '#7f93ad'; c.font = '600 16px Segoe UI, system-ui, sans-serif'; c.fillText(label, 100, y + 8); c.textAlign = 'center';
-    const g = c.createLinearGradient(100, 0, 500, 0);
-    if (id === 'hue') for (let k = 0; k <= 6; k++) g.addColorStop(k / 6, 'hsl(' + k * 60 + ',100%,50%)');
-    else { g.addColorStop(0, '#000'); g.addColorStop(0.5, 'hsl(' + Math.round(hs.h * 360) + ',' + Math.round(hs.s * 100) + '%,50%)'); g.addColorStop(1, '#fff'); }
-    rr(100, y + 18, 400, 12, 6); c.fillStyle = g; c.fill();
-    c.beginPath(); c.arc(100 + 400 * t, y + 24, 9, 0, Math.PI * 2); c.fillStyle = '#fff'; c.fill(); c.lineWidth = 2; c.strokeStyle = '#000'; c.stroke();
-    y += 38;
-  }
-  rr(8, y - 76, 80, 70, 10); c.fillStyle = rgb2hex(S.color); c.fill(); c.lineWidth = 2; c.strokeStyle = '#ffaa00'; c.stroke();
-  // actions
-  y = 664;
+  [['tools', 'TOOLS'], ['add', 'ADD'], ['parts', 'PARTS']].forEach(([id, label], i) => btn({ id: 'tab_' + id, x: 8 + i * 168, y: 62, w: 160, h: 40, fs: 20, act: () => { S.page = id; } }, label, S.page === id));
+  if (S.page === 'add') addPage(); else if (S.page === 'parts') partsPage(); else toolsPage();
+  // actions, every page
   const acts = [['undo', 'UNDO', () => undo(), undoStack.length + ''], ['redo', 'REDO', () => redo(), redoStack.length + ''],
+    ['mirror', 'MIRROR', () => { S.mirror = !S.mirror; toast('mirror ' + (S.mirror ? 'on' : 'off')); }, S.mirror ? 'z = 0' : 'off', S.mirror],
     ['seat', 'SEAT', () => sitInSeat(), 'pilot size'], ['home', 'RESET', () => resetView(), 'view'], ['export', 'EXPORT', () => exportGLB(), '.glb']];
-  acts.forEach(([id, label, fn, sub], i) => btn({ id, x: 8 + i * 101, y, w: 95, h: 50, fs: 18, act: fn }, label, false, sub));
-  if (ui.toast && performance.now() < ui.toastT) { c.fillStyle = 'rgba(0,0,0,0.85)'; rr(40, 10, 432, 44, 10); c.fill(); c.fillStyle = '#ffd27a'; c.font = '600 18px Segoe UI, system-ui, sans-serif'; c.fillText(ui.toast, 256, 32); }
+  acts.forEach(([id, label, fn, sub, on], i) => btn({ id, x: 8 + i * 83.4, y: 744, w: 78, h: 50, fs: 17, act: fn }, label, !!on, sub));
+  if (ui.toast && performance.now() < ui.toastT) { c.fillStyle = 'rgba(0,0,0,0.88)'; rr(20, 10, 472, 44, 10); c.fill(); c.fillStyle = '#ffd27a'; c.font = '600 17' + FONT; c.fillText(ui.toast.length > 54 ? ui.toast.slice(0, 53) + '…' : ui.toast, 256, 32); }
   panelTex.needsUpdate = true;
+
+  function palette(y0) {
+    PALETTE.forEach((h, i) => {
+      const o = add({ id: 'sw_' + i, x: 8 + (i % 8) * 62, y: y0 + Math.floor(i / 8) * 50, w: 58, h: 44, act: () => { S.color = hex2rgb(h); toast('colour ' + h); } });
+      rr(o.x, o.y, o.w, o.h, 8); c.fillStyle = h; c.fill(); c.lineWidth = rgb2hex(S.color) === h ? 4 : 1.5;
+      c.strokeStyle = rgb2hex(S.color) === h ? '#ffaa00' : 'rgba(255,255,255,0.25)'; c.stroke();
+    });
+    let y = y0 + 104; const hs = hsl();
+    for (const [id, label, t] of [['hue', 'HUE', hs.h], ['shade', 'SHADE', hs.l]]) {
+      add({ id: 's_' + id, x: 96, y, w: 408, h: 34, slider: id });
+      text(label, 100, y + 8, { font: '600 16' + FONT });
+      const g = c.createLinearGradient(100, 0, 500, 0);
+      if (id === 'hue') for (let k = 0; k <= 6; k++) g.addColorStop(k / 6, 'hsl(' + k * 60 + ',100%,50%)');
+      else { g.addColorStop(0, '#000'); g.addColorStop(0.5, 'hsl(' + Math.round(hs.h * 360) + ',' + Math.round(hs.s * 100) + '%,50%)'); g.addColorStop(1, '#fff'); }
+      rr(100, y + 18, 400, 12, 6); c.fillStyle = g; c.fill();
+      c.beginPath(); c.arc(100 + 400 * t, y + 24, 9, 0, Math.PI * 2); c.fillStyle = '#fff'; c.fill(); c.lineWidth = 2; c.strokeStyle = '#000'; c.stroke();
+      y += 38;
+    }
+    rr(8, y0 + 104, 80, 70, 10); c.fillStyle = rgb2hex(S.color); c.fill(); c.lineWidth = 2; c.strokeStyle = '#ffaa00'; c.stroke();
+  }
+  function toolsPage() {
+    const subs = { grab: 'drag clay', poke: 'dent it', inflate: S.inflateOut ? 'swell' : 'shrink', smooth: 'relax', squish: 'pinch', meld: 'join + simplify',
+      point: 'vertex', line: 'edge', piece: 'part / gem', paint: 'alt: erase', fill: 'whole part', drop: 'pick colour', delete: S.delCollapse ? 'collapse' : 'hole',
+      select: S.selMode + (sel.n ? ' · ' + sel.n.toLocaleString() : ''), move: sel.n ? sel.n.toLocaleString() + ' verts' : 'select first' };
+    const SLOT = { grab: [0, 0], poke: [1, 0], inflate: [2, 0], smooth: [3, 0], squish: [4, 0], meld: [0, 1], point: [1, 1], line: [2, 1], select: [3, 1], move: [4, 1],
+      piece: [0, 2], delete: [1, 2], paint: [2, 2], fill: [3, 2], drop: [4, 2] };
+    TOOLS.forEach((t) => { const [cx, cy] = SLOT[t]; btn({ id: 'tool_' + t, x: 8 + cx * 101, y: 110 + cy * 76, w: 95, h: 70, fs: 19, act: () => setTool(t) }, TOOL_LABEL[t], S.tool === t, subs[t]); });
+    let y = 346;
+    for (const r of sliderRows()) y = slider(r, y);
+    if (S.tool === 'delete') y = row([['delmode', S.delCollapse ? 'COLLAPSE - closes the gap  (tap for HOLE)' : 'HOLE - leaves a gap  (tap for COLLAPSE)', false, () => { S.delCollapse = !S.delCollapse; }]], y);
+    if (S.tool === 'inflate') y = row([['inout', S.inflateOut ? 'SWELL  (tap for SHRINK)' : 'SHRINK  (tap for SWELL)', false, () => { S.inflateOut = !S.inflateOut; }]], y);
+    if (S.tool === 'select') {
+      y = row([['sm_brush', 'BRUSH', S.selMode === 'brush', () => { S.selMode = 'brush'; }], ['sm_box', 'BOX', S.selMode === 'box', () => { S.selMode = 'box'; }],
+        ['sm_island', 'ISLAND', S.selMode === 'island', () => { S.selMode = 'island'; }], ['sm_xray', 'X-RAY', S.selXray, () => { S.selXray = !S.selXray; }]], y);
+      y = row([['so_all', 'ALL', false, selAll], ['so_none', 'NONE', false, selClear], ['so_grow', 'GROW', false, selGrow], ['so_inv', 'INVERT', false, selInvert],
+        ['so_split', 'SPLIT', false, selSplit], ['so_del', 'DELETE', false, selDelete]], y);
+    }
+    if (S.tool === 'move' || S.tool === 'piece') {
+      y = row([['gz_t', 'ARROWS', S.gizmo === 'translate', () => { S.gizmo = 'translate'; }], ['gz_r', 'RINGS', S.gizmo === 'rotate', () => { S.gizmo = 'rotate'; }],
+        ['gz_s', 'BOXES', S.gizmo === 'scale', () => { S.gizmo = 'scale'; }],
+        S.tool === 'move' ? ['twist', 'TWIST', S.twist, () => { S.twist = !S.twist; }, 'VR hand'] : ['topart', curPart ? curPart.label.slice(0, 10) : 'NO PART', false, () => { S.page = 'parts'; }, 'PARTS ▶']], y, 50);
+    }
+    palette(524);
+  }
+  function addPage() {
+    text('COCKPIT PARTS · each starts where the game has it', 12, 120);
+    btn({ id: 'add_seat', x: 8, y: 134, w: 160, h: 64, fs: 21, act: () => addAssetUI('seat') }, 'SEAT', false, 'your edit (6)');
+    btn({ id: 'add_console', x: 176, y: 134, w: 160, h: 64, fs: 21, act: () => addAssetUI('console') }, 'CONSOLE', false, 'console1');
+    btn({ id: 'add_glb', x: 344, y: 134, w: 160, h: 64, fs: 21, act: () => { if (renderer.xr.isPresenting) toast('GLB FILE works on the desktop'); else $('addfile').click(); } }, 'GLB FILE', false, 'from disk');
+    text('SHAPES · tap one, then click / trigger in the ship (drag = bigger)', 12, 212);
+    SHAPES.forEach((s, i) => btn({ id: 'shape_' + s, x: 8 + (i % 4) * 125, y: 222 + Math.floor(i / 4) * 62, w: 120, h: 56, fs: 17, act: () => { S.shape = s; setTool('add'); } },
+      SHAPE_LABEL[s], S.tool === 'add' && S.shape === s));
+    row([['shape_hi', S.shapeHi ? 'SMOOTH (sculptable)' : 'LOW-POLY (crisp)', false, () => { S.shapeHi = !S.shapeHi; }],
+      ['shape_align', S.align === 'ship' ? 'ALIGN: SHIP AXES' : (renderer.xr.isPresenting ? 'ALIGN: YOUR HAND' : 'ALIGN: THE SURFACE'), false, () => { S.align = S.align === 'ship' ? 'surface' : 'ship'; }]], 408);
+    slider({ id: 'size', label: 'SIZE (half-width)', t: sizeT.get(), txt: fmtLen(S.r) }, 458);
+    palette(524);
+  }
+  function partsPage() {
+    const bare = SHIPS.includes(ship.name) ? (S.fit ? 'BARE SHIP (fit-out)' : 'AS IN GAME') : 'NOT A SHIP';
+    row([['fitmode', bare, false, () => toggleFit(), 'tap to switch (reloads)'], ['eyefollow', 'EYE RIDES SEAT', S.eyeFollow, () => {
+      S.eyeFollow = !S.eyeFollow; if (S.eyeFollow && (!eyeLink.part || eyeLink.part.dead)) { const seat = parts.find((p) => !p.dead && p.asset === 'seat'); if (seat) linkEye(seat); } }, S.eyeFollow ? 'cockpit1 moves with it' : 'off']], 108, 42);
+    const list = parts.filter((p) => !p.dead), ROWS = 7, top = clamp(S.listTop, 0, Math.max(0, list.length - ROWS)), wl = list.length > ROWS ? 396 : 446;
+    S.listTop = top;
+    for (let i = 0; i < ROWS && top + i < list.length; i++) {
+      const p = list[top + i], y = 158 + i * 34, on = p === curPart;
+      btn({ id: 'vis_' + p.id, x: 8, y, w: 44, h: 30, fs: 14, act: () => { partShow(p, !p.visible); statusLine(); scheduleSave(); } }, p.visible ? 'ON' : 'off', p.visible);
+      const o = add({ id: 'pick_' + p.id, x: 58, y, w: wl, h: 30, act: () => setCurPart(p) });
+      rr(o.x, o.y, o.w, o.h, 7); c.fillStyle = on ? '#3a2a08' : (ui.hover === o.id ? '#22345a' : '#141f38'); c.fill();
+      c.lineWidth = on ? 2 : 1; c.strokeStyle = on ? '#ffaa00' : 'rgba(120,160,220,0.25)'; c.stroke();
+      text(p.label + (p.twin && !p.twin.dead ? '  ↔' : '') + (p.lock ? '  ⊥' : ''), o.x + 10, y + 15, { col: p.visible ? '#dbe9ff' : '#5a6a80', font: '600 16' + FONT });
+      text(p.pieces.reduce((a, P) => a + (P.dead ? 0 : P.nf), 0).toLocaleString() + ' tris', o.x + o.w - 10, y + 15, { align: 'right', font: '500 13' + FONT });
+    }
+    if (list.length > ROWS) {
+      btn({ id: 'list_up', x: 460, y: 158, w: 44, h: 100, fs: 18, act: () => { S.listTop = Math.max(0, S.listTop - 3); } }, '▲', false);
+      btn({ id: 'list_dn', x: 460, y: 290, w: 44, h: 100, fs: 18, act: () => { S.listTop += 3; } }, '▼', false);
+    }
+    const p = curPart && !curPart.dead ? curPart : null;
+    if (!p) { text('pick a part above (or grab one with PIECE) to nudge, copy, trim or cut it', 12, 420, { col: '#cfe7ff' }); return; }
+    text(p.label + (p.kind === 'ship' ? '  (ship part)' : ''), 12, 410, { col: '#ffaa00', font: '700 18' + FONT });
+    text(partInfo(p), 12, 432, { col: '#cfe7ff', font: '500 13' + FONT });
+    const y0 = 448;
+    [['x', 'MOVE X'], ['y', 'MOVE Y'], ['z', 'MOVE Z'], ['pitch', 'PITCH'], ['yaw', 'YAW'], ['roll', 'ROLL'], ['size', 'SIZE'], ['width', 'WIDTH'], ['length', 'LENGTH'], ['height', 'HEIGHT']]
+      .forEach(([k, label], i) => {
+        const x = 8 + (i % 3) * 168, y = y0 + ((i / 3) | 0) * 46, off = p.lock && (k === 'z' || k === 'yaw' || k === 'roll');
+        btn({ id: 'n_' + k + '_m', x, y, w: 42, h: 42, fs: 18, repeat: true, act: () => nudge(k, -1) }, '◀', false);
+        rr(x + 44, y, 76, 42, 6); c.fillStyle = '#0f1830'; c.fill(); text(label, x + 82, y + 21, { align: 'center', col: off ? '#4a5568' : '#dbe9ff', font: '700 13' + FONT });
+        btn({ id: 'n_' + k + '_p', x: x + 122, y, w: 42, h: 42, fs: 18, repeat: true, act: () => nudge(k, 1) }, '▶', false);
+      });
+    const st = STEPS[S.step];
+    btn({ id: 'step', x: 176, y: y0 + 138, w: 164, h: 42, fs: 15, act: () => { S.step = (S.step + 1) % STEPS.length; } }, 'STEP: ' + st.name, false, st.mv + ' · ' + st.deg + '° · ' + (st.k * 100) + '%');
+    btn({ id: 'lock', x: 344, y: y0 + 138, w: 160, h: 42, fs: 15, act: () => { p.lock = !p.lock; if (p.lock) partStraighten(p); else toast(p.label + ' is free: any turn, any side'); scheduleSave(); } },
+      p.lock ? 'LOCK: ON' : 'LOCK: FREE', p.lock, p.lock ? 'pitch only, no sideways' : 'any turn');
+    const acts = [['p_centre', 'CENTRE', () => partCentre(p)], ['p_reset', 'RESET', () => partToSpawn(p)], ['p_copy', 'COPY', () => copyPart(p)], ['p_del', 'DELETE', () => deletePart(p)],
+      ['p_trim', 'TRIM', () => trimPart(p)], ['p_cut', 'CUT', () => cutWith(p)], ['p_focus', 'FOCUS', () => focusPart(p)]], w = (496 - 6 * 5) / 7;
+    acts.forEach(([id, label, fn], i) => btn({ id, x: 8 + i * (w + 5), y: 638, w, h: 46, fs: 14, act: fn }, label, false));
+    text('hold ◀ ▶ to repeat · CENTRE = onto z = 0 · TRIM = cut to the roof + belly ·', 12, 702, { font: '500 12' + FONT });
+    text('CUT = this part cuts away what is inside it (parts you can see), then hides', 12, 720, { font: '500 12' + FONT });
+  }
 }
 function toast(t) { ui.toast = t; ui.toastT = performance.now() + 1800; drawPanel(); setTimeout(drawPanel, 1850); }
 function panelControlAt(px, py) { for (let i = ui.controls.length - 1; i >= 0; i--) { const o = ui.controls[i]; if (px >= o.x && px <= o.x + o.w && py >= o.y && py <= o.y + o.h) return o; } return null; }
 // phase: 'down' | 'drag' | 'up' | 'hover'
 function panelInput(px, py, phase) {
   const o = phase === 'drag' ? ui.drag : panelControlAt(px, py);
-  if (phase === 'hover' || phase === 'up') { const id = o ? o.id : null; if (phase === 'up') ui.drag = null; if (id !== ui.hover) { ui.hover = id; drawPanel(); } return !!o; }
+  if (phase === 'hover' || phase === 'up') {
+    const id = o ? o.id : null;
+    if (phase === 'up') { ui.drag = null; ui.rep = null; } else if (ui.rep && ui.rep.id !== id) ui.rep = null;   // slid off a held nudge
+    if (id !== ui.hover) { ui.hover = id; drawPanel(); }
+    return !!o;
+  }
   if (!o) return false;
   if (phase === 'down') ui.drag = o.slider ? o : null;
   if (o.slider) {
@@ -1022,17 +1961,38 @@ function panelInput(px, py, phase) {
     else if (o.slider === 'shade') { const h = hsl(); setHSL(h.h, h.s, t); }
     drawPanel(); return true;
   }
-  if (phase === 'down' && o.act) { o.act(); drawPanel(); pulse('right', 0.25, 18); }
+  if (phase === 'down' && o.act) { o.act(); if (o.repeat) ui.rep = { id: o.id, t: performance.now() + 420 }; drawPanel(); pulse('right', 0.25, 18); }
   return true;
 }
-function setTool(t) { if (stroke) endStroke(); S.tool = t; toast(TOOL_LABEL[t]); }
+// a held nudge repeats (mouse button or trigger still down on it); the control is looked up by id because every redraw
+// makes new ones
+function panelRepeat() {
+  const r = ui.rep; if (!r) return; const now = performance.now(); if (now < r.t) return; r.t = now + 75;
+  const o = ui.controls.find((x) => x.id === r.id); if (!o) { ui.rep = null; return; } o.act(); drawPanel();
+}
+function setTool(t) {
+  if (stroke) endStroke(); if (adding) addEnd();
+  S.tool = t; toast(t === 'add' ? 'ADD ' + SHAPE_LABEL[S.shape] + ' - click / trigger to place it' : TOOL_LABEL[t]);
+}
 function switchShip(d) { const i = (MODELS.indexOf(ship.name) + d + MODELS.length) % MODELS.length; loadShip(MODELS[i >= 0 ? i : 0]).catch((e) => banner('load failed: ' + e.message, true)); }
+// BARE (fit-out) <-> AS IN GAME: a reload of the same ship; each keeps its own autosave, so nothing is lost
+function toggleFit() {
+  S.fit = !S.fit; lsSet('xl_fit', S.fit ? '1' : '0');
+  if (SHIPS.includes(ship.name)) loadShip(ship.name).catch((e) => banner('load failed: ' + e.message, true));   // loadShip flushes a pending save first
+  toast(S.fit ? 'fit-out: ships load bare' : 'ships load as in the game');
+}
+function focusPart(part) {
+  if (!part || part.dead) return;
+  if (renderer.xr.isPresenting) { toast('FOCUS is for the desktop view'); return; }
+  syncShipInv(); const c = part.pivot.clone().applyMatrix4(partM(part)).applyMatrix4(shipRoot.matrixWorld), bb = partBox(part);
+  orbit.target.copy(c); orbit.dist = clamp(bb.getSize(V()).length() * shipScale() * 1.6, 0.01, 30);
+}
 // desktop: the same canvas, scaled by CSS
 let panelMouse = false;
 panelCanvas.addEventListener('pointerdown', (e) => { panelMouse = true; try { panelCanvas.setPointerCapture(e.pointerId); } catch (_) {} const p = panelXY(e); panelInput(p.x, p.y, 'down'); });
 panelCanvas.addEventListener('pointermove', (e) => { const p = panelXY(e); panelInput(p.x, p.y, panelMouse && ui.drag ? 'drag' : 'hover'); });
 panelCanvas.addEventListener('pointerup', (e) => { panelMouse = false; const p = panelXY(e); panelInput(p.x, p.y, 'up'); });
-function panelXY(e) { const r = panelCanvas.getBoundingClientRect(); return { x: (e.clientX - r.left) * 512 / r.width, y: (e.clientY - r.top) * 720 / r.height }; }
+function panelXY(e) { const r = panelCanvas.getBoundingClientRect(); return { x: (e.clientX - r.left) * PW / r.width, y: (e.clientY - r.top) * PH / r.height }; }
 
 // ================================================================ HELPERS: brush ball, nearby points / edges, pick
 const brushBall = new THREE.Mesh(new THREE.SphereGeometry(1, 24, 16), new THREE.MeshBasicMaterial({ color: 0xffaa00, transparent: true, opacity: 0.16, depthWrite: false }));
@@ -1080,7 +2040,7 @@ function triPick(kind, cShip, maxR) {
 }
 // shows the vertex points + edges around the tip, and which one a press would take
 function updateHelpers(tipShip) {
-  const show = !!tipShip && (S.tool === 'point' || S.tool === 'line' || S.tool === 'meld' || S.tool === 'delete');
+  const show = !!tipShip && (S.tool === 'point' || S.tool === 'line' || S.tool === 'meld' || S.tool === 'delete' || S.tool === 'select');
   nearPts.visible = nearEdges.visible = show; pickDot.visible = pickSeg.visible = false;
   if (!show) return;
   const R = S.r / shipScale(), reveal = Math.max(R * 3, viewRef() * 0.25 / shipScale()), pa = nearPts.geometry.attributes.position.array, ea = nearEdges.geometry.attributes.position.array;
@@ -1095,9 +2055,9 @@ function updateHelpers(tipShip) {
   nearPts.material.size = clamp(viewRef() * 0.01, 0.00003, 0.006);
   nearPts.geometry.setDrawRange(0, np); nearPts.geometry.attributes.position.needsUpdate = true;
   nearEdges.geometry.setDrawRange(0, ne * 2); nearEdges.geometry.attributes.position.needsUpdate = true;
-  if (cap || S.tool === 'meld') return;
+  if (cap || S.tool === 'meld' || (S.tool === 'select' && S.selMode !== 'island')) return;
   const ds = Math.max(R * 0.3, viewRef() * 0.008 / shipScale());
-  if (S.tool === 'point' || S.tool === 'delete') { const h = pickNear(pickPoint, tipShip); if (h) { pickDot.visible = true; pickDot.position.copy(h.p); pickDot.scale.setScalar(ds); } }
+  if (S.tool === 'point' || S.tool === 'delete' || S.tool === 'select') { const h = pickNear(pickPoint, tipShip); if (h) { pickDot.visible = true; pickDot.position.copy(h.p); pickDot.scale.setScalar(ds); } }
   else { const h = pickNear(pickLine, tipShip); if (h) { pickSeg.visible = true; pickSeg.geometry.attributes.position.array.set([h.pa.x, h.pa.y, h.pa.z, h.pb.x, h.pb.y, h.pb.z]); pickSeg.geometry.attributes.position.needsUpdate = true; } }
 }
 
@@ -1118,14 +2078,79 @@ function planePoint(x, y, out) {   // where the mouse ray meets the drag plane (
 }
 const reachShip = () => S.r / shipScale();
 cvs.addEventListener('contextmenu', (e) => e.preventDefault());
+// THE GIZMO (desktop): arrows / rings / boxes (W / E / R) on the current part (PIECE tool) or on the selection (MOVE).
+// It drives a proxy under shipRoot: for a part, proxy = part matrix x its pivot; for a selection, proxy = the centroid,
+// and every change is the matrix since the press, applied to the captured groups (the mirror side gets Z D Z).
+const gizmo = new TransformControls(camera, renderer.domElement);
+gizmo.setSize(0.85); gizmo.setSpace('local'); scene.add(gizmo);
+const gProxy = new THREE.Object3D(); gProxy.name = '__gizmo_proxy'; shipRoot.add(gProxy);
+let gz = null, gizmoKind = null, gizmoSelVer = -1;
+function gizmoDetach() { if (gizmo.object) gizmo.detach(); gizmoKind = null; }
+function gizmoSync() {
+  if (renderer.xr.isPresenting || gz) { if (renderer.xr.isPresenting) gizmoDetach(); return; }
+  let want = null;
+  if (S.tool === 'piece' && curPart && !curPart.dead && curPart.visible) want = 'part';
+  else if (S.tool === 'move' && sel.n > 0) want = 'sel';
+  if (!want) { gizmoDetach(); return; }
+  if (want === 'part') {
+    const cl = centreLocal(curPart), M = partM(curPart).clone().multiply(new THREE.Matrix4().makeTranslation(cl.x, cl.y, cl.z));
+    M.decompose(gProxy.position, gProxy.quaternion, gProxy.scale);
+  } else if (gizmoKind !== 'sel' || gizmoSelVer !== sel.ver) {
+    const c = selCentroid(); if (!c) { gizmoDetach(); return; }
+    gProxy.position.copy(c); gProxy.quaternion.identity(); gProxy.scale.set(1, 1, 1); gizmoSelVer = sel.ver;
+  }
+  gProxy.updateMatrix();
+  if (gizmo.object !== gProxy) gizmo.attach(gProxy);
+  gizmoKind = want;
+  if (gizmo.mode !== S.gizmo) gizmo.setMode(S.gizmo);
+  const lk = want === 'part' && curPart.lock;            // LOCK: no sideways move, only the pitch ring
+  gizmo.showX = !(lk && S.gizmo === 'rotate'); gizmo.showY = !(lk && S.gizmo === 'rotate'); gizmo.showZ = !(lk && S.gizmo === 'translate');
+}
+gizmo.addEventListener('mouseDown', () => {
+  if (gizmoKind === 'part' && curPart) { gz = { kind: 'part', part: curPart, cl: centreLocal(curPart) }; beginStroke('xform', { target: { kind: 'part', part: curPart }, before: xstate(curPart) }); }
+  else if (gizmoKind === 'sel') { gProxy.updateMatrix(); gz = { kind: 'sel', M0inv: gProxy.matrix.clone().invert(), list: selCapture() }; beginStroke('geo'); }
+});
+gizmo.addEventListener('objectChange', () => {
+  if (!gz) return; gProxy.updateMatrix();
+  if (gz.kind === 'part') { const p = gz.part, pv = gz.cl, M = gProxy.matrix.clone().multiply(new THREE.Matrix4().makeTranslation(-pv.x, -pv.y, -pv.z)); partPlace(p, p.lock ? lockM(p, M) : M); }
+  else { selApply(gz.list, new THREE.Matrix4().multiplyMatrices(gProxy.matrix, gz.M0inv)); flushEdits(); }
+});
+gizmo.addEventListener('mouseUp', () => { if (!gz) return; gz = null; endStroke(); sel.dirty = true; gizmoSelVer = -1; drawPanel(); });
+const marquee = $('marquee');
 cvs.addEventListener('pointerdown', (e) => {
+  if (e.button === 0 && gizmo.object && gizmo.axis) return;   // the gizmo has this press
   try { cvs.setPointerCapture(e.pointerId); } catch (_) {} desk.btn = e.button; desk.shift = e.shiftKey; desk.ox = e.clientX; desk.oy = e.clientY;
   if (e.button !== 0) { desk.mode = (e.button === 1 || (e.button === 2 && e.shiftKey)) ? 'pan' : 'orbit'; return; }
   const hit = castAt(e.clientX, e.clientY); desk.hit = hit; desk.mode = null;
   const t = S.tool, alt = e.shiftKey;
+  desk.plane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(V()).negate(), hit ? hit.point : orbit.target);
+  // the tools that work in empty space too
+  if (t === 'select' && S.selMode === 'box') { desk.mode = 'marquee'; Object.assign(marquee.style, { display: 'block', left: e.clientX + 'px', top: e.clientY + 'px', width: '0px', height: '0px' }); return; }
+  if (t === 'add') {
+    let c = hit ? hit.point.clone() : planePoint(e.clientX, e.clientY, V()); if (!c) return;
+    let q = null;
+    if (hit && S.align === 'surface' && hit.face) {   // the shape's up (+Y) along the surface
+      const n = hit.face.normal.clone().transformDirection(hit.object.matrixWorld), sq = new THREE.Quaternion(); shipRoot.getWorldQuaternion(sq);
+      q = new THREE.Quaternion().setFromUnitVectors(AXIS_Y, n.applyQuaternion(sq.invert()));
+    }
+    desk.plane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(V()).negate(), c);
+    addBegin(worldToShip(c, V()), q); desk.mode = 'add'; return;
+  }
+  if (t === 'move') {
+    if (!sel.n) { toast('SELECT some vertices first'); return; }
+    // drag on the view plane through what you pressed (or through the selection, pressing empty space); the anchor is
+    // the point under the mouse on that plane - anchoring at the selection's centre made the first move jump the gap
+    const w = hit ? hit.point.clone() : selCentroid().applyMatrix4(shipRoot.matrixWorld);
+    desk.plane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(V()).negate(), w);
+    const a = hit ? w : planePoint(e.clientX, e.clientY, V()); if (!a) return;
+    capBeginList('move', worldToShip(a, V()), null, selCapture()); desk.mode = 'cap'; return;
+  }
   if (!hit && t !== 'piece') return;
   const hs = hit ? worldToShip(hit.point, V()) : null;
-  desk.plane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(V()).negate(), hit ? hit.point : orbit.target);
+  if (t === 'select') {
+    if (S.selMode === 'island') { selIsland(hs, alt); drawPanel(); return; }
+    selBrush(hs, alt); desk.mode = 'selbrush'; desk.lastDab = hit.point.clone(); return;
+  }
   if (t === 'grab' && !alt) { capBegin('grab', hs, null, pointFeature(hs), reachShip(), 0); desk.mode = 'cap'; }
   else if (t === 'delete') { beginStroke('topo', { del: new Map(), collapse: S.delCollapse !== alt, snaps: new Map(), areas: [] }); deleteAt(hs, true); desk.mode = 'delete'; desk.lastDab = hit.point.clone(); }
   else if (t === 'meld' && !alt) { beginStroke('topo', { meld: new Map(), snaps: new Map(), areas: [] }); desk.mode = 'meld'; }
@@ -1135,7 +2160,7 @@ cvs.addEventListener('pointerdown', (e) => {
     if (h) { const f = t === 'point' ? pointFeature(h.p) : segFeature(h.pa, h.pb); capBegin(t, hs, null, f, S.soft / shipScale(), 1e-9); desk.mode = 'cap'; }
   } else if (t === 'piece') { const h = hs && pickPiece(hs, reachShip()); if (h) { pieceBegin(h, new THREE.Matrix4().makeTranslation(hs)); desk.mode = 'piece'; } }
   else if (t === 'paint') { beginStroke('paint', { tiles: new Map() }); paintDab(hs, alt); desk.lastDab = hit.point.clone(); desk.mode = 'paint'; }
-  else if (t === 'fill') { const h = pickPiece(hs, reachShip()); if (h && h.kind === 'piece') fillPiece(h.P); }
+  else if (t === 'fill') { const h = pickPiece(hs, reachShip()); if (h && h.kind === 'part') fillPiece(h.P); }
   else if (t === 'drop') { const c = sampleAt(hs, reachShip() * 2); if (c) { S.color = c; toast('colour ' + rgb2hex(c)); } }
 });
 cvs.addEventListener('pointermove', (e) => {
@@ -1145,13 +2170,24 @@ cvs.addEventListener('pointermove', (e) => {
     const k = orbit.dist * 0.0018, right = V().setFromMatrixColumn(camera.matrixWorld, 0), up = V().setFromMatrixColumn(camera.matrixWorld, 1);
     orbit.target.addScaledVector(right, -dx * k).addScaledVector(up, dy * k); return;
   }
-  if (desk.mode === 'cap' || desk.mode === 'piece') {
+  if (desk.mode === 'marquee') {
+    Object.assign(marquee.style, { left: Math.min(desk.ox, e.clientX) + 'px', top: Math.min(desk.oy, e.clientY) + 'px', width: Math.abs(e.clientX - desk.ox) + 'px', height: Math.abs(e.clientY - desk.oy) + 'px' });
+    return;
+  }
+  if (desk.mode === 'cap' || desk.mode === 'piece' || desk.mode === 'add') {
     const p = planePoint(e.clientX, e.clientY, V()); if (!p) return; const ps = worldToShip(p, V());
-    if (desk.mode === 'cap') { capMove(ps, null); flushEdits(); } else pieceMove(new THREE.Matrix4().makeTranslation(ps));
+    if (desk.mode === 'cap') { capMove(ps, null); flushEdits(); } else if (desk.mode === 'add') addDrag(ps); else pieceMove(new THREE.Matrix4().makeTranslation(ps));
   }
 });
-cvs.addEventListener('pointerup', () => {
-  if (desk.mode === 'cap') capEnd(); else if (desk.mode === 'piece') pieceEnd(); else if (desk.mode === 'clay' || desk.mode === 'paint' || desk.mode === 'meld' || desk.mode === 'delete') endStroke();
+cvs.addEventListener('pointerup', (e) => {
+  if (desk.mode === 'cap') capEnd(); else if (desk.mode === 'piece') pieceEnd(); else if (desk.mode === 'add') addEnd();
+  else if (desk.mode === 'marquee') {
+    marquee.style.display = 'none';
+    if (Math.abs(e.clientX - desk.ox) > 3 || Math.abs(e.clientY - desk.oy) > 3) { const t0 = performance.now(), n = selRect(desk.ox, desk.oy, e.clientX, e.clientY, e.shiftKey); toast((e.shiftKey ? 'deselected ' : 'selected ') + n.toLocaleString() + ' (' + Math.round(performance.now() - t0) + ' ms)'); }
+    else if (!e.shiftKey) selClear();                 // a click in BOX mode clears
+  }
+  else if (desk.mode === 'clay' || desk.mode === 'paint' || desk.mode === 'meld' || desk.mode === 'delete') endStroke();
+  if (desk.mode === 'selbrush' || desk.mode === 'marquee') drawPanel();
   desk.mode = null; desk.btn = -1;
 });
 cvs.addEventListener('pointerleave', () => { desk.in = false; });
@@ -1166,23 +2202,36 @@ addEventListener('keydown', (e) => {
   const k = e.key.toLowerCase();
   if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
   if ((e.ctrlKey || e.metaKey) && k === 'y') { e.preventDefault(); redo(); return; }
+  if (e.ctrlKey || e.metaKey || e.altKey) return;      // ctrl+R reloads, it does not pick the scale boxes
   if (k === '[') sizeT.set(sizeT.get() - 0.05); else if (k === ']') sizeT.set(sizeT.get() + 0.05);
   else if (k === '-') bumpStrength(-0.05); else if (k === '=') bumpStrength(0.05);
   else if (k === 'm') S.mirror = !S.mirror;
   else if (/^[0-9]$/.test(k)) { const t = TOOLS[k === '0' ? 9 : +k - 1]; if (t) setTool(t); }
+  else if (k === 's') setTool('select'); else if (k === 'g') setTool('move');
+  else if (k === 'w') S.gizmo = 'translate'; else if (k === 'e') S.gizmo = 'rotate'; else if (k === 'r') S.gizmo = 'scale';
+  else if (k === 'escape') selClear();
   else return;
   drawPanel();
 });
 function bumpStrength(d) { if (S.tool === 'paint' || S.tool === 'fill') S.opacity = clamp(S.opacity + d, 0.05, 1); else S.strength = clamp(S.strength + d, 0.05, 1); }
+// what the ball looks like for each tool
+function ballColour(alt) {
+  const t = S.tool;
+  if (t === 'paint' || t === 'fill') return alt ? 0x8899aa : rgb2num(S.color);
+  if (t === 'add') return rgb2num(S.color);
+  return t === 'meld' ? 0x33ddff : t === 'delete' ? 0xff4040 : t === 'select' ? (alt ? 0x8899aa : 0xffe14d) : 0xffaa00;
+}
 // every desktop frame: hover ball + the continuous clay tools under the mouse
 function deskFrame(dt) {
   let hit = null;
-  if (desk.in && desk.mode !== 'orbit' && desk.mode !== 'pan' && desk.mode !== 'cap' && desk.mode !== 'piece') hit = castAt(desk.x, desk.y);
+  const still = desk.mode === 'cap' || desk.mode === 'piece' || desk.mode === 'add' || desk.mode === 'marquee';
+  if (desk.in && desk.mode !== 'orbit' && desk.mode !== 'pan' && !still && !(gizmo.object && (gizmo.axis || gz))) hit = castAt(desk.x, desk.y);
   else if (desk.mode === 'cap' || desk.mode === 'piece') hit = desk.hit;
   const gem = Math.min(1, orbit.dist * 0.006 / (0.012 * shipScale())); for (const m of markers) m.vis.scale.setScalar(gem);
-  brushBall.visible = !!hit && desk.mode !== 'cap' && desk.mode !== 'piece';
-  if (hit) { brushBall.position.copy(hit.point); brushBall.scale.setScalar(S.r); brushBall.material.color.setHex(S.tool === 'meld' ? 0x33ddff : S.tool === 'delete' ? 0xff4040 : (S.tool === 'paint' || S.tool === 'fill' ? rgb2num(S.color) : 0xffaa00)); }
+  brushBall.visible = !!hit && !still && S.tool !== 'move' && !(S.tool === 'select' && S.selMode === 'box');
+  if (hit) { brushBall.position.copy(hit.point); brushBall.scale.setScalar(S.r); brushBall.material.color.setHex(ballColour(desk.shift)); }
   const hs = hit ? worldToShip(hit.point, V()) : null;
+  if (desk.mode === 'selbrush' && hit && desk.lastDab && desk.lastDab.distanceTo(hit.point) > S.r * 0.2) { selBrush(hs, desk.shift); desk.lastDab = hit.point.clone(); }
   if (desk.mode === 'clay' && hit) {
     const tool = desk.shift || S.tool === 'meld' ? 'smooth' : S.tool;
     if (tool === 'poke') {   // the ball sits half into the surface, and only dents while it MOVES (no digging on the spot)
@@ -1230,7 +2279,7 @@ const handWorld = (h) => new THREE.Matrix4().compose(h.pos, h.quat, new THREE.Ve
 const handShip = (h) => new THREE.Matrix4().multiplyMatrices(shipInv, handWorld(h));
 const qToShip = (q) => { const sq = new THREE.Quaternion(); shipRoot.getWorldQuaternion(sq); return sq.invert().multiply(q); };
 // the menu rides above the left hand (live knob: window.__xlPanel = { x, y, z, rx })
-const panelMesh = new THREE.Mesh(new THREE.PlaneGeometry(0.22, 0.22 * 720 / 512), new THREE.MeshBasicMaterial({ map: panelTex, transparent: true, side: THREE.DoubleSide }));
+const panelMesh = new THREE.Mesh(new THREE.PlaneGeometry(0.22, 0.22 * PH / PW), new THREE.MeshBasicMaterial({ map: panelTex, transparent: true, side: THREE.DoubleSide }));
 panelMesh.visible = false; panelMesh.renderOrder = 20; scene.add(panelMesh);
 const laser = new THREE.Line(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3)), new THREE.LineBasicMaterial({ color: 0xffaa00 }));
 laser.visible = false; laser.frustumCulled = false; scene.add(laser);
@@ -1250,7 +2299,7 @@ function panelPointer(R) {   // true while the right hand is pointing at the men
   _ray.set(R.org, V().set(0, 0, -1).applyQuaternion(R.quat));
   const hit = _ray.intersectObject(panelMesh, false)[0];
   if (!hit || !hit.uv) { if (ui.drag && R.trig > 0.5) return true; if (ui.hover) panelInput(-1, -1, 'hover'); if (ui.drag) panelInput(-1, -1, 'up'); return false; }
-  const px = hit.uv.x * 512, py = (1 - hit.uv.y) * 720, down = R.trig > 0.5, was = (R.prevTrig || 0) > 0.5;
+  const px = hit.uv.x * PW, py = (1 - hit.uv.y) * PH, down = R.trig > 0.5, was = (R.prevTrig || 0) > 0.5;
   if (down && !was) panelInput(px, py, 'down'); else if (down && ui.drag) panelInput(px, py, 'drag'); else if (!down && was) panelInput(px, py, 'up'); else panelInput(px, py, 'hover');
   laser.geometry.attributes.position.array.set([R.org.x, R.org.y, R.org.z, hit.point.x, hit.point.y, hit.point.z]); laser.geometry.attributes.position.needsUpdate = true; laser.visible = true;
   return true;
@@ -1281,7 +2330,14 @@ function xrTools(R, L, dt, onMenu) {
   const tip = worldToShip(R.pos, V()), q = qToShip(R.quat);
   if (on && !was) {                                   // press
     R.active = t; R.lastDab = null;
-    if (t === 'grab' && !alt) capBegin('grab', tip, q, pointFeature(tip), S.r / shipScale(), 0);
+    if (t === 'select') {
+      if (S.selMode === 'island') { selIsland(tip, alt); R.active = 'none'; pulse('right', 0.4, 30); drawPanel(); }
+      else if (S.selMode === 'box') { R.box0 = tip.clone(); selBoxHelper.box.setFromPoints([tip, tip]); selBoxHelper.visible = true; }
+      else { selBrush(tip, alt); R.lastDab = R.pos.clone(); }
+    }
+    else if (t === 'move') { if (sel.n) capBeginList('move', tip, S.twist ? q : null, selCapture()); else { toast('SELECT some vertices first'); R.active = 'none'; } }
+    else if (t === 'add') addBegin(tip, S.align === 'surface' ? q : null);
+    else if (t === 'grab' && !alt) capBegin('grab', tip, q, pointFeature(tip), S.r / shipScale(), 0);
     else if (t === 'delete') { beginStroke('topo', { del: new Map(), collapse: S.delCollapse !== alt, snaps: new Map(), areas: [] }); deleteAt(tip, true); R.lastDab = R.pos.clone(); }
     else if (t === 'meld' && !alt) beginStroke('topo', { meld: new Map(), snaps: new Map(), areas: [] });
     else if (CLAY.has(t) || t === 'meld') beginStroke('geo');
@@ -1290,12 +2346,17 @@ function xrTools(R, L, dt, onMenu) {
       if (h) capBegin(t, tip, null, t === 'point' ? pointFeature(h.p) : segFeature(h.pa, h.pb), S.soft / shipScale(), 1e-9); else R.active = 'none';
     } else if (t === 'piece') { const h = pickPiece(tip, S.r / shipScale()); if (h) pieceBegin(h, handShip(R)); else R.active = 'none'; }
     else if (t === 'paint') beginStroke('paint', { tiles: new Map() });
-    else if (t === 'fill') { const h = pickPiece(tip, S.r / shipScale()); if (h && h.kind === 'piece') { fillPiece(h.P); pulse('right', 0.5, 40); } R.active = 'none'; }
+    else if (t === 'fill') { const h = pickPiece(tip, S.r / shipScale()); if (h && h.kind === 'part') { fillPiece(h.P); pulse('right', 0.5, 40); } R.active = 'none'; }
     else if (t === 'drop') { const c = sampleAt(tip, S.r * 2 / shipScale()); if (c) { S.color = c; toast('colour ' + rgb2hex(c)); pulse('right', 0.4, 30); } R.active = 'none'; }
   }
   if (on && R.active && R.active !== 'none') {         // hold
     const a = R.active;
     if (cap) capMove(tip, q);
+    else if (a === 'select') {
+      if (S.selMode === 'box' && R.box0) selBoxHelper.box.setFromPoints([R.box0, tip]);
+      else if (S.selMode === 'brush' && (!R.lastDab || R.lastDab.distanceTo(R.pos) > S.r * 0.2)) { selBrush(tip, alt); R.lastDab = R.pos.clone(); }
+    }
+    else if (a === 'add') addDrag(tip);
     else if (a === 'piece') pieceMove(handShip(R));
     else if (a === 'delete') { if (R.lastDab && R.lastDab.distanceTo(R.pos) > S.r * 0.3) { deleteAt(tip, false); R.lastDab = R.pos.clone(); } }
     else if (a === 'meld' && stroke && stroke.kind === 'topo') meldFrame(tip, trig, dt);
@@ -1304,7 +2365,12 @@ function xrTools(R, L, dt, onMenu) {
     flushEdits();
     if (stroke && stroke.orig && stroke.orig.size && performance.now() - R.lastPulse > 90) { R.lastPulse = performance.now(); pulse('right', 0.12 + 0.2 * trig, 12); }
   }
-  if (!on && was) { if (cap) capEnd(); else if (held) pieceEnd(); else endStroke(); R.active = null; }
+  if (!on && was) {
+    if (R.active === 'select' && S.selMode === 'box' && R.box0) { selBoxHelper.visible = false; selInBox(selBoxHelper.box.clone(), alt); R.box0 = null; pulse('right', 0.4, 30); }
+    if (R.active === 'select') drawPanel();
+    if (cap) capEnd(); else if (held) pieceEnd(); else if (adding) addEnd(); else endStroke();
+    R.active = null;
+  }
 }
 function xrFrame(dt) {
   const L = hands.left, R = hands.right;
@@ -1313,18 +2379,23 @@ function xrFrame(dt) {
   worldGrab(); syncShipInv(); placePanel();
   const onMenu = panelPointer(R);
   if (!wg || wg.hand !== R || wg.mode === 2) xrTools(R, L, dt, onMenu);
-  // sticks + buttons
+  // sticks + buttons; while a PART is held the right stick sizes it instead (up / down = all over, left / right = width)
   const [rx, ry] = R.axes;
-  if (Math.abs(ry) > 0.2) { S.r = clamp(S.r * Math.exp(-ry * dt * 1.6), R_MIN, R_MAX); ui.dirty = true; }
-  if (Math.abs(rx) > 0.2) { bumpStrength(rx * dt * 0.7); ui.dirty = true; }
+  if (held && held.target.kind === 'part') {
+    if (Math.abs(ry) > 0.2 || Math.abs(rx) > 0.2) { heldScale(Math.abs(ry) > 0.2 ? Math.exp(-ry * dt * 0.6) : 1, Math.abs(rx) > 0.2 ? Math.exp(rx * dt * 0.6) : 1); pieceMove(handShip(R)); ui.dirty = true; }
+  } else {
+    if (Math.abs(ry) > 0.2) { S.r = clamp(S.r * Math.exp(-ry * dt * 1.6), R_MIN, R_MAX); ui.dirty = true; }
+    if (Math.abs(rx) > 0.2) { bumpStrength(rx * dt * 0.7); ui.dirty = true; }
+  }
   const lx = L.axes[0];
   if (L.stickArmed && Math.abs(lx) > 0.7) { L.stickArmed = false; const i = TOOLS.indexOf(S.tool); setTool(TOOLS[(i + (lx > 0 ? 1 : -1) + TOOLS.length) % TOOLS.length]); pulse('left', 0.3, 20); }
   if (Math.abs(lx) < 0.3) L.stickArmed = true;
   if (pressed(R, 4)) undo(); if (pressed(R, 5)) redo();
   if (pressed(L, 4)) S.menu = !S.menu; if (pressed(L, 5)) { S.mirror = !S.mirror; toast('mirror ' + (S.mirror ? 'on' : 'off')); }
   if (ui.dirty && performance.now() - (ui.lastDraw || 0) > 100) { ui.dirty = false; ui.lastDraw = performance.now(); drawPanel(); }
-  brushBall.visible = R.connected && !onMenu; brushBall.position.copy(R.pos); brushBall.scale.setScalar(S.r);
-  brushBall.material.color.setHex(S.tool === 'paint' || S.tool === 'fill' ? (L.trig > 0.5 ? 0x8899aa : rgb2num(S.color)) : (S.tool === 'meld' ? 0x33ddff : S.tool === 'delete' ? 0xff4040 : 0xffaa00));
+  brushBall.visible = R.connected && !onMenu && S.tool !== 'move'; brushBall.position.copy(R.pos); brushBall.scale.setScalar(S.r);
+  brushBall.material.color.setHex(ballColour(L.trig > 0.5));
+  for (const m of markers) m.vis.scale.setScalar(1);
   updateHelpers(R.connected && !onMenu ? worldToShip(R.pos, V()) : null);
 }
 const rgb2num = (c) => (c[0] << 16) | (c[1] << 8) | c[2];
@@ -1335,7 +2406,7 @@ async function enterXR(mode) {
     camera.near = 0.005; camera.far = 200; camera.updateProjectionMatrix();
     renderer.xr.setReferenceSpaceType('local-floor');
     await renderer.xr.setSession(session);
-    xrMode = mode; const ar = mode === 'immersive-ar'; for (const m of markers) m.vis.scale.setScalar(1);
+    xrMode = mode; const ar = mode === 'immersive-ar'; for (const m of markers) m.vis.scale.setScalar(1); gizmoDetach();
     scene.background = ar ? null : BG; grid.visible = !ar; renderer.setClearColor(0x000000, ar ? 0 : 1);
     session.addEventListener('end', () => { xrMode = null; scene.background = BG; grid.visible = true; renderer.setClearColor(0x000000, 1); panelMesh.visible = false; laser.visible = false; resize(); });
   } catch (e) { banner('could not enter ' + mode + ': ' + e.message, true); }
@@ -1344,20 +2415,25 @@ async function enterXR(mode) {
 // ================================================================ VIEWS
 function resetView() {
   shipRoot.position.copy(HOME.pos); shipRoot.quaternion.identity(); shipRoot.scale.setScalar(HOME.scale); syncShipInv();
-  const bb = new THREE.Box3().setFromObject(shipRoot); orbit.target.copy(bb.getCenter(V())); orbit.dist = 2.3; orbit.az = 0.55; orbit.el = 0.3;
+  const bb = new THREE.Box3(); for (const P of pieces) if (live(P)) bb.expandByObject(P.mesh);
+  orbit.target.copy(bb.isEmpty() ? HOME.pos : bb.getCenter(V())); orbit.dist = 2.3; orbit.az = 0.55; orbit.el = 0.3;
 }
 // SEAT: pilot size (the seat ~1.25 m tall) with your head on cockpit1, facing the nose
 function sitInSeat() {
   if (!ship.c1) { toast('this ship has no cockpit1 marker'); return; }
   const c1 = (markers.find((m) => /^cockpit1$/i.test(m.name)) || {}).vis; const eye = c1 ? c1.position.clone() : ship.c1.clone();
+  // the pilot is sized by the seat: a fitted seat scaled up or down takes the pilot with it
+  const seat = eyeLink.part && !eyeLink.part.dead ? eyeLink.part : null, seatH = ship.seatH * (seat && seat.spawnScale ? partScale(seat) / seat.spawnScale : 1);
+  // (2026-10-02) these two directions were V(0, 0, -1) / V(-1, 0, 0) - but V() takes no arguments, so both were ZERO:
+  // the headset fell back to world -Z instead of the way you face, and the desktop view looked sideways, not at the nose
   if (renderer.xr.isPresenting) {
     const cam = renderer.xr.getCamera(), H = V(), Q = new THREE.Quaternion(); cam.matrixWorld.decompose(H, Q, _t);
-    const f = V(0, 0, -1).applyQuaternion(Q); f.y = 0; if (f.lengthSq() < 1e-6) f.set(0, 0, -1); f.normalize();
-    const k = clamp(1.25 / ship.seatH, 1, 60); shipRoot.scale.setScalar(k);
+    const f = new THREE.Vector3(0, 0, -1).applyQuaternion(Q); f.y = 0; if (f.lengthSq() < 1e-6) f.set(0, 0, -1); f.normalize();
+    const k = clamp(1.25 / seatH, 1, 60); shipRoot.scale.setScalar(k);
     shipRoot.quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.atan2(f.z, -f.x));
     shipRoot.position.copy(H).sub(eye.multiplyScalar(k).applyQuaternion(shipRoot.quaternion)); syncShipInv();
   } else {
-    syncShipInv(); const w = eye.applyMatrix4(shipRoot.matrixWorld), fwd = V(-1, 0, 0).applyQuaternion(shipRoot.quaternion);
+    syncShipInv(); const w = eye.applyMatrix4(shipRoot.matrixWorld), fwd = new THREE.Vector3(-1, 0, 0).applyQuaternion(shipRoot.quaternion);
     orbit.target.copy(w); orbit.dist = 0.012; orbit.az = Math.atan2(-fwd.x, -fwd.z); orbit.el = Math.asin(clamp(-fwd.y, -1, 1));
   }
   toast('in the seat - RESET to step out');
@@ -1366,18 +2442,27 @@ function sitInSeat() {
 // ================================================================ EXPORT
 async function exportGLB(opts) {
   opts = opts || {}; if (stroke) endStroke();
-  const root = new THREE.Group(); root.name = (ship.name || 'ship') + '_edit';
-  for (const P of pieces) {
+  const root = new THREE.Group(); root.name = (ship.name || 'ship') + (ship.fit ? '_fit' : '_edit');
+  // FIT-OUT: what the export left out and why, for whoever splices it (a hidden part is not exported)
+  root.userData.lab = { ship: ship.name, fit: !!ship.fit, removed: ship.removed || [], hidden: parts.filter((p) => !p.dead && !p.visible).map((p) => p.name) };
+  const out = pieces.filter((P) => !P.dead && P.mesh.visible);
+  for (const P of out) {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(P.pos.slice(), 3)); g.setAttribute('normal', new THREE.BufferAttribute(P.nrm.slice(), 3));
     if (P.uv) g.setAttribute('uv', new THREE.BufferAttribute(P.uv.slice(), 2));
     g.setIndex(new THREE.BufferAttribute(P.idx.slice(), 1));
     const mat = P.mat.clone(); mat.onBeforeCompile = () => {};
-    if (P.paint && P.paint.used) { const t = new THREE.CanvasTexture(compositeCanvas(P)); t.flipY = false; t.colorSpace = THREE.SRGBColorSpace; t.name = (P.mat.map.name || P.matName) + '_painted'; mat.map = t; }
-    const m = new THREE.Mesh(g, mat); m.name = P.name; P.mesh.matrix.decompose(m.position, m.quaternion, m.scale); root.add(m);
+    if (P.isShape) {   // a shape's map is only a white stand-in: export its colour, or (painted) the colour + paint baked into one map
+      if (P.paint && P.paint.used) { const cv = compositeCanvas(P, '#' + P.mat.color.getHexString(THREE.SRGBColorSpace)), t = new THREE.CanvasTexture(cv); t.flipY = false; t.colorSpace = THREE.SRGBColorSpace; t.name = P.name + '_painted'; mat.map = t; mat.color.set(0xffffff); }
+      else mat.map = null;
+    } else if (P.paint && P.paint.used) { const t = new THREE.CanvasTexture(compositeCanvas(P)); t.flipY = false; t.colorSpace = THREE.SRGBColorSpace; t.name = (P.mat.map.name || P.matName) + '_painted'; mat.map = t; }
+    const m = new THREE.Mesh(g, mat); m.name = P.name; P.mesh.matrix.decompose(m.position, m.quaternion, m.scale);
+    const pt = P.part;
+    if (pt && pt.kind !== 'ship') m.userData.lab = { part: pt.name, kind: pt.kind, asset: pt.asset || null, shape: pt.shape || null, twin: pt.twin && !pt.twin.dead ? pt.twin.name : null, lock: !!pt.lock };
+    root.add(m);
   }
   for (const mk of markers) { const o = new THREE.Object3D(); o.name = mk.name; o.position.copy(mk.vis.position); root.add(o); }
-  for (const P of pieces) if (P.paint && P.paint.used) {   // the raw paint layer, so the splice can lay it over the full-res source map
+  for (const P of out) if (P.paint && P.paint.used && !P.isShape) {   // the raw paint layer, so the splice can lay it over the full-res source map
     const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(9), 3)); g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(6), 2));
     const t = new THREE.CanvasTexture(layerCanvas(P)); t.flipY = false; t.colorSpace = THREE.SRGBColorSpace; t.name = '__paint__' + P.matName;
     const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ map: t, transparent: true, name: '__paint__' + P.matName })); m.name = '__paint__' + P.name; root.add(m);
@@ -1385,8 +2470,8 @@ async function exportGLB(opts) {
   const buf = await new GLTFExporter().parseAsync(root, { binary: true, onlyVisible: false, maxTextureSize: 4096 });
   if (opts.download !== false) {
     const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([buf], { type: 'model/gltf-binary' }));
-    a.download = (ship.name || 'ship') + '_edit.glb'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
-    toast('exported ' + (ship.name || 'ship') + '_edit.glb (' + (buf.byteLength / 1048576).toFixed(1) + ' MB)');
+    a.download = root.name + '.glb'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    toast('exported ' + root.name + '.glb (' + (buf.byteLength / 1048576).toFixed(1) + ' MB)');
   }
   return buf;
 }
@@ -1399,14 +2484,28 @@ function db() {
 }
 async function idb(mode, fn) { const d = await db(); return new Promise((res, rej) => { const tx = d.transaction('s', mode), st = tx.objectStore('s'), r = fn(st); tx.oncomplete = () => res(r && r.result); tx.onerror = () => rej(tx.error); }); }
 let saveTimer = 0;
-function scheduleSave() { clearTimeout(saveTimer); saveTimer = setTimeout(() => saveSession().catch((e) => console.warn('[ship lab] save failed', e)), 1500); }
+function scheduleSave() { clearTimeout(saveTimer); saveTimer = setTimeout(() => { saveTimer = 0; saveSession().catch((e) => console.warn('[ship lab] save failed', e)); }, 1500); }
+// before the model changes (◀ ▶, BARE <-> AS IN GAME, OPEN GLB): write a PENDING save now, into the slot it belongs to.
+// Only a pending one - an unconditional save here wrote the fresh, unedited model over that slot's older session, and a
+// timer left running wrote the NEXT model's state under ITS name
+async function flushSave() { if (!saveTimer) return; clearTimeout(saveTimer); saveTimer = 0; try { await saveSession(); } catch (e) { console.warn('[ship lab] save failed', e); } }
+// the save slot: a FIT-OUT session keeps its own (<ship>~fit), so switching BARE <-> AS IN GAME never overwrites the other
+const skey = () => ship.name + (ship.fit ? '~fit' : '');
 async function saveSession() {
   if (!ship.name) return;
-  const rec = { v: 2, ts: Date.now(), pieces: pieces.map((P) => ({ name: P.name, src: P.src, ng: P.ng, gpos: !P.topo && P.moved.some((x) => x) ? P.gpos.slice() : null,
+  const lp = pieces.filter((P) => !P.dead);
+  const rec = { v: 3, ts: Date.now(), pieces: lp.map((P) => ({ name: P.name, src: P.src, ng: P.ng, gpos: !P.topo && P.moved.some((x) => x) ? P.gpos.slice() : null,
       topo: P.topo ? topoSnap(P) : null, matrix: P.mesh.matrix.toArray(), color: P.mat.color.getHex() })),
-    markers: markers.map((m) => ({ name: m.name, pos: m.vis.position.toArray() })), paints: pieces.filter((P) => P.paint && P.paint.used).map((P) => P.name) };
-  await idb('readwrite', (st) => st.put(rec, ship.name + ':geo'));
-  for (const P of pieces) if (P.paint && P.paint.used && P.paint.savedAt !== P.paint.ver) { const pt = P.paint; await idb('readwrite', (st) => st.put({ w: pt.w, h: pt.h, data: pt.data.slice() }, ship.name + ':paint:' + P.name)); pt.savedAt = pt.ver; }
+    markers: markers.map((m) => ({ name: m.name, pos: m.vis.position.toArray() })), paints: lp.filter((P) => P.paint && P.paint.used).map((P) => P.name),
+    // v3: the parts the ADD page placed (rebuilt from their source on RESTORE, then the piece records above apply), hidden
+    // parts, LOCK, and the seat the eye rides
+    added: parts.filter((p) => !p.dead && p.kind !== 'ship').map((p) => ({ name: p.name, kind: p.kind, asset: p.asset || null, shape: p.shape || null, label: p.label,
+      pieceNames: p.pieces.map((P) => P.name), srcPieces: p.srcPieces || null, twin: p.twin && !p.twin.dead ? p.twin.name : null, spawn: p.spawn, matrix: partM(p).toArray(),
+      color: p.pieces[0].mat.color.getHex(), isTwin: !!p.isTwin, arrays: p.kind === 'copy' || p.isTwin ? p.pieces.map((P) => topoSnap(P)) : null })),
+    hidden: parts.filter((p) => !p.dead && !p.visible).map((p) => p.name), locks: parts.filter((p) => !p.dead).map((p) => [p.name, !!p.lock]),
+    eye: eyeLink.part && !eyeLink.part.dead ? eyeLink.part.name : null };
+  await idb('readwrite', (st) => st.put(rec, skey() + ':geo'));
+  for (const P of lp) if (P.paint && P.paint.used && P.paint.savedAt !== P.paint.ver) { const pt = P.paint; await idb('readwrite', (st) => st.put({ w: pt.w, h: pt.h, data: pt.data.slice() }, skey() + ':paint:' + P.name)); pt.savedAt = pt.ver; }
   if (ui.restore) { ui.restore = null; drawPanel(); }
 }
 // A saved part whose source is not the part on screen: its fingerprint differs, or (a save from before fingerprints) it was
@@ -1418,33 +2517,68 @@ function staleRec(rec, r, P) {
 async function offerRestore() {
   ui.restoreStale = 0;
   try {
-    const rec = await idb('readonly', (st) => st.get(ship.name + ':geo'));
+    const rec = await idb('readonly', (st) => st.get(skey() + ':geo'));
     ui.restore = rec ? new Date(rec.ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : null;
     if (rec) for (const r of rec.pieces) { const P = pieces.find((p) => p.name === r.name); if (P && staleRec(rec, r, P)) ui.restoreStale++; }
   } catch (_) { ui.restore = null; }
   drawPanel();
 }
+// rebuild one saved added part (before the piece records apply): an asset / shape / GLB from its source, a copy from
+// its saved arrays (the material comes from the piece it was copied from)
+async function restorePart(a) {
+  const o = { name: a.name, pieceNames: a.pieceNames, matrix: a.matrix, spawn: a.spawn, restore: true };
+  // copies, splits and twins have no source to rebuild from (a twin is MIRRORED - rebuilt as a plain shape its vertex
+  // order would not match its saved edits): they come back from the arrays they were saved with
+  if (a.arrays) {
+    const p = newPart({ kind: a.kind, asset: a.asset || undefined, shape: a.shape || undefined, name: a.name, label: a.label, lock: false });
+    p.srcPieces = a.srcPieces; p.isTwin = !!a.isTwin;
+    a.arrays.forEach((t, i) => {
+      const src = pieces.find((P) => !P.dead && a.srcPieces && P.name === a.srcPieces[Math.min(i, a.srcPieces.length - 1)]) || null;
+      const Q = pieceFromArrays(src, t.pos, t.nrm, t.uv, t.idx, a.pieceNames[i]); Q.fromArrays = true; partAddPiece(p, Q);
+    });
+    partInit(p, false); partSetM(p, new THREE.Matrix4().fromArray(a.matrix)); p.spawn = a.spawn; return p;
+  }
+  if (a.kind === 'asset') return addAsset(a.asset, o);
+  if (a.kind === 'shape') return addShape(a.shape.type, null, 1, null, Object.assign(o, { hi: a.shape.hi, label: a.label, color: a.color }));
+  if (a.kind === 'glb') { const buf = await idb('readonly', (st) => st.get(skey() + ':glb:' + a.name)); if (!buf) return null; const p = await addGLB(buf, a.label || a.name, o); p.label = a.label || p.label; return p; }
+  return null;
+}
 async function restoreSession() {
-  const rec = await idb('readonly', (st) => st.get(ship.name + ':geo')); if (!rec) return;
-  const skipped = new Set();
+  const rec = await idb('readonly', (st) => st.get(skey() + ':geo')); if (!rec) return;
+  const skipped = new Set(), lost = [];
+  if (stroke) endStroke();
+  // 1. the added parts, in the order they were made (a copy needs its source), then their twin links
+  const made = new Map();
+  for (const a of rec.added || []) {
+    if (pieces.some((P) => !P.dead && a.pieceNames.includes(P.name))) continue;   // already here (a second RESTORE)
+    try { const p = await restorePart(a); if (p) { p.label = a.label || p.label; made.set(a.name, p); } else lost.push(a.label || a.name); } catch (e) { lost.push(a.label || a.name); console.warn('[ship lab] restore part', a.name, e); }
+  }
+  for (const a of rec.added || []) { const p = made.get(a.name), t = a.twin && (made.get(a.twin) || parts.find((x) => !x.dead && x.name === a.twin)); if (p && t) { p.twin = t; t.twin = p; } }
   beginStroke('geo');
   for (const r of rec.pieces) {
-    const P = pieces.find((p) => p.name === r.name); if (!P) continue;
+    const P = pieces.find((p) => p.name === r.name && !p.dead); if (!P) continue;
+    if (P.fromArrays) { pieceSetM(P, r.matrix); P.mat.color.setHex(r.color); continue; }   // rebuilt from its saved arrays: already current
     if (staleRec(rec, r, P)) { skipped.add(P.name); continue; }   // changed in the game since this save: keep the game's
     if (r.topo) { setPieceArrays(P, r.topo.pos, r.topo.nrm, r.topo.uv, r.topo.idx); P.topo = true; }
     else if (r.gpos && r.ng === P.ng) { const set = new Set(); for (let g = 0; g < P.ng; g++) { const i = g * 3; if (r.gpos[i] !== P.gpos[i] || r.gpos[i + 1] !== P.gpos[i + 1] || r.gpos[i + 2] !== P.gpos[i + 2]) { setGroup(P, g, r.gpos[i], r.gpos[i + 1], r.gpos[i + 2]); set.add(g); } } }
-    xformSet({ kind: 'piece', P }, r.matrix); P.mat.color.setHex(r.color);
+    pieceSetM(P, r.matrix); P.mat.color.setHex(r.color);
   }
   for (const r of rec.markers) { const m = markers.find((x) => x.name === r.name); if (m) m.vis.position.fromArray(r.pos); }
   endStroke(); undoStack.length = 0; redoStack.length = 0;
+  for (const P of pieces) if (!P.dead) P.geo.computeBoundingBox();
+  for (const p of parts) if (!p.dead && p.pieces.length) { const bb = new THREE.Box3(); for (const P of p.pieces) bb.union(P.geo.boundingBox); bb.getCenter(p.pivot); }   // pivots = the restored boxes
+  for (const name of rec.hidden || []) { const p = parts.find((x) => !x.dead && x.name === name); if (p) partShow(p, false); }
+  for (const [name, lk] of rec.locks || []) { const p = parts.find((x) => !x.dead && x.name === name); if (p) p.lock = lk; }
+  if (rec.eye) { const p = parts.find((x) => !x.dead && x.name === rec.eye); if (p) linkEye(p); }
   for (const name of rec.paints || []) {
     if (skipped.has(name)) continue;   // its UVs may not be the part on screen's
-    const P = pieces.find((p) => p.name === name), d = await idb('readonly', (st) => st.get(ship.name + ':paint:' + name));
+    const P = pieces.find((p) => p.name === name && !p.dead), d = await idb('readonly', (st) => st.get(skey() + ':paint:' + name));
     if (!P || !d || !P.hasPaint) continue; const pt = ensurePaint(P); if (d.w !== pt.w || d.h !== pt.h) continue;
     pt.data.set(d.data); pt.used = true; pt.ver = (pt.ver || 0) + 1; pt.savedAt = pt.ver; markDirty(pt, 0, 0, pt.w - 1, pt.h - 1);
   }
-  uploadAllPaint(true); ui.restore = null; ui.restoreStale = 0;
-  toast(skipped.size ? 'restored · kept the game\'s ' + [...skipped].map((n) => n.replace(/^[a-z0-9]+_game_/, '')).join(', ') : 'restored the saved session');
+  uploadAllPaint(true); ui.restore = null; ui.restoreStale = 0; sel.dirty = true; statusLine();
+  toast((skipped.size ? 'restored · kept the game\'s ' + [...skipped].map((n) => n.replace(/^[a-z0-9]+_game_/, '')).join(', ') : 'restored the saved session')
+    + (made.size ? ' + ' + made.size + ' added part' + (made.size > 1 ? 's' : '') : '') + (lost.length ? ' · could not rebuild ' + lost.join(', ') : ''));
   if (skipped.size) console.info('[ship lab] restore skipped parts changed since the save:', [...skipped]);
   drawPanel();
 }
@@ -1455,7 +2589,8 @@ let lastT = performance.now();
 function tick(dtFixed) {
   const now = performance.now(), dt = dtFixed || Math.min(0.1, (now - lastT) / 1000); lastT = now;
   syncShipInv();
-  if (renderer.xr.isPresenting) xrFrame(dt); else { placeCamera(); camera.updateMatrixWorld(); deskFrame(dt); }
+  if (renderer.xr.isPresenting) xrFrame(dt); else { placeCamera(); camera.updateMatrixWorld(); deskFrame(dt); gizmoSync(); }
+  panelRepeat(); selDraw();
   renderer.render(scene, camera);
 }
 renderer.setAnimationLoop(() => tick());
@@ -1473,12 +2608,27 @@ function simStroke(tool, pts, o) {
   if (CLAY.has(tool)) { beginStroke('geo'); for (const p of pts) for (let k = 0; k < (o.frames || 10); k++) clayFrame(tool, V().fromArray(p), 1, 1 / 60); flushEdits(); const n = stroke.orig.size; endStroke(); return n; }
   if (tool === 'paint') { beginStroke('paint', { tiles: new Map() }); let n = 0; for (const p of pts) n += paintDab(V().fromArray(p), !!o.erase); endStroke(); return n; }
   if (tool === 'piece') { const h = pickPiece(P0, S.r / shipScale()); if (!h) return 'no piece'; pieceBegin(h, new THREE.Matrix4().makeTranslation(P0)); pieceMove(new THREE.Matrix4().makeTranslation(V().fromArray(pts[pts.length - 1]))); pieceEnd(); return h.kind + ':' + (h.P ? h.P.name : h.m.name); }
-  if (tool === 'fill') { const h = pickPiece(P0, S.r / shipScale()); if (h && h.kind === 'piece') { fillPiece(h.P); return h.P.name; } return 'no piece'; }
+  if (tool === 'fill') { const h = pickPiece(P0, S.r / shipScale()); if (h && h.kind === 'part') { fillPiece(h.P); return h.P.name; } return 'no piece'; }
   if (tool === 'drop') { const c = sampleAt(P0, S.r * 2 / shipScale()); if (c) S.color = c; return c; }
+  // select: o.mode brush (default) / island / box (pts[0], pts[1] = corners); o.remove deselects
+  if (tool === 'select') {
+    if (o.mode === 'box') { selInBox(new THREE.Box3().setFromPoints([P0, V().fromArray(pts[1])]), !!o.remove); return sel.n; }
+    if (o.mode === 'island') { selIsland(P0, !!o.remove); return sel.n; }
+    for (const p of pts) selBrush(V().fromArray(p), !!o.remove); return sel.n;
+  }
+  // move: carry the selection from pts[0] through the rest (o.q0 / o.q1 twist it, as a hand would)
+  if (tool === 'move') { if (!sel.n) return 'nothing selected'; const n = capBeginList('move', P0, o.q0 || null, selCapture()); for (const p of pts.slice(1)) { capMove(V().fromArray(p), o.q1 || null); flushEdits(); } capEnd(); return n; }
+  // add: S.shape at pts[0], grown to pts[last]
+  if (tool === 'add') { addBegin(P0, o.q || null); for (const p of pts.slice(1)) addDrag(V().fromArray(p)); const part = adding.part; addEnd(); return part.name; }
 }
 window.XL = { S, ship, hands, get pieces() { return pieces; }, get markers() { return markers; }, load: loadShip, setTool, undo, redo, exportGLB, stroke: simStroke,
   tick, xrFrame, deskFrame, camera, castAt, sit: sitInSeat, reset: resetView, save: saveSession, restore: restoreSession, enterXR, renderer, scene, shipRoot, orbit,
-  stats: () => ({ ship: ship.name, pieces: pieces.map((P) => ({ name: P.name, mat: P.matName, tris: P.nf, groups: P.ng, paint: !!(P.paint && P.paint.used) })), undo: undoStack.length, redo: redoStack.length, markers: markers.map((m) => m.name) }) };
+  // FIT-OUT / creative hooks
+  get parts() { return parts; }, get cur() { return curPart; }, setPart: setCurPart, addAsset: addAssetUI, addShape, nudge, cut: cutWith, trim: trimPart, copy: copyPart,
+  del: deletePart, centre: partCentre, sel, selAll, selClear, selGrow, selInvert, selSplit, selDelete, selRect, gizmo, gizmoSync, get FIT() { return FIT; }, toggleFit, drawPanel,
+  panel: (px, py, phase) => panelInput(px, py, phase || 'down'), get eye() { return eyeLink; },
+  stats: () => ({ ship: ship.name, fit: !!ship.fit, removed: ship.removed, parts: parts.filter((p) => !p.dead).map((p) => ({ name: p.name, kind: p.kind, label: p.label, visible: p.visible, lock: p.lock, twin: p.twin && !p.twin.dead ? p.twin.name : null,
+      pieces: p.pieces.map((P) => ({ name: P.name, mat: P.matName, tris: P.nf, groups: P.ng, paint: !!(P.paint && P.paint.used) })) })), sel: sel.n, undo: undoStack.length, redo: redoStack.length, markers: markers.map((m) => m.name) }) };
 resize(); placeCamera(); drawPanel();
 if (!window.isSecureContext) banner('WebXR needs https or localhost - VR/AR are off on this address', true);
 if (navigator.xr) for (const [id, mode] of [['btn-vr', 'immersive-vr'], ['btn-ar', 'immersive-ar']]) {
@@ -1486,6 +2636,12 @@ if (navigator.xr) for (const [id, mode] of [['btn-vr', 'immersive-vr'], ['btn-ar
   $(id).onclick = () => enterXR(mode);
 }
 $('file').onchange = (e) => { const f = e.target.files[0]; if (f) loadShip(f.name.replace(/\.(glb|gltf)$/i, ''), URL.createObjectURL(f)).catch((x) => banner('load failed: ' + x.message, true)); };
+// ADD -> GLB FILE: a part from disk, at its own coordinates (its bytes ride the autosave so RESTORE can rebuild it)
+$('addfile').onchange = async (e) => {
+  const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+  try { if (stroke) endStroke(); const part = await addGLB(await f.arrayBuffer(), f.name.replace(/\.(glb|gltf)$/i, '')); pushEntry({ type: 'add', parts: [part] }); setCurPart(part); statusLine(); toast('added ' + part.label + ' - PARTS page to place it'); }
+  catch (x) { banner('could not add ' + f.name + ': ' + x.message, true); }
+};
 // ?file=<url>[&name=<label>] opens any GLB the server can reach (e.g. backups/cockpit_edit/cockpit4_lab.glb - LSS/backups/
 // is served locally but never deployed); the label names its autosave and its <label>_edit.glb export
 const fileQ = qs.get('file');
