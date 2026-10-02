@@ -30,6 +30,9 @@
            [ ] size · - = strength · ctrl+Z / ctrl+Y · 1-9, 0 tools (1 GRAB ... 6 MELD ... 0 PAINT) · M mirror.
 
   SAVING   every stroke autosaves to this device (IndexedDB, per ship) - RESTORE brings it back after a reload.
+           A save remembers each part's SOURCE geometry, and RESTORE skips any part the game has changed since
+           (it says how many, on the button and after). A save from before that (no fingerprints) only skips
+           re-meshed parts, and only when the file is newer than the save. A skipped part stays in the save.
            EXPORT writes <ship>_edit.glb: the edited pieces in ship space, the painted colour maps composited, every
            marker, and each raw paint layer as a hidden `__paint__<material>` node, so the splice back into
            assets_src can lay the paint over the full-resolution source maps instead of the 2k shipped ones.
@@ -100,6 +103,10 @@ const SHIPS = ['blaster', 'puncture', 'pyro', 'slayer', 'syphon', 'tracker', 'vo
 // models that aren't ships but ride the same ◀ ▶ list, so the headset never needs a URL typed (owner, on the Quest: "the app
 // gives the ships, does it give the cockpit?"). They live in ships/edit/ so they DEPLOY (LSS/backups/ never does), at
 // 2k WebP so they fit Cloudflare Pages' 25 MiB-a-file cap - an edit only feeds geometry back to the game.
+// 2026-10-01: cockpit4 is the owner's EDITED seat (backups/cockpit_edit/cockpit4_edit4.glb, 6,827 tris) - the source the
+// game's seat is cut from in all seven ships (v50.70-50.72). It was the unedited Meshy original (10,094 tris) until the
+// lab was synced to the game; that copy is backups/cockpit_edit/cockpit4_lab_2k_preedit_*.glb. Remake this file with
+// `node tools/ship_lab_model.mjs <edit.glb> LSS/ships/edit/cockpit4_lab.glb --name cockpit4_game_cockpit`.
 const EXTRA_MODELS = { cockpit4: 'ships/edit/cockpit4_lab.glb' };
 const MODELS = SHIPS.concat(Object.keys(EXTRA_MODELS));
 const TOOLS = ['grab', 'poke', 'inflate', 'smooth', 'squish', 'meld', 'point', 'line', 'piece', 'paint', 'fill', 'drop', 'delete'];
@@ -163,10 +170,19 @@ addEventListener('resize', resize);
 // it), float32. Split vertices (UV seams, hard normals) are welded into GROUPS by exact position: every edit moves a
 // group, and the group writes all of its vertices, so a seam can never open.
 let pieces = [], markers = [];
-const ship = { name: '', seatH: 0.24, c1: null };
+const ship = { name: '', seatH: 0.24, c1: null, fileTs: null };   // fileTs: the GLB's Last-Modified (ms), when the server says
 const CS = 0.03;                                       // grid cell, local units
 const cellKey = (x, y, z) => (clamp(Math.floor(x / CS) + 512, 0, 1023) * 1048576) + (clamp(Math.floor(y / CS) + 512, 0, 1023) * 1024) + clamp(Math.floor(z / CS) + 512, 0, 1023);
 
+// What a piece's SOURCE geometry was: FNV-1a over its ship-space positions (the float bits, in file order) and its index
+// count. Two loads of the same file agree; a part the game has changed since does not - which is what lets RESTORE
+// refuse to put a save made on an older ship onto a newer one.
+function geoSig(pos, nIdx) {
+  const u = new Uint32Array(pos.buffer, pos.byteOffset, pos.length);
+  let h = (0x811c9dc5 ^ nIdx) >>> 0;
+  for (let i = 0; i < u.length; i++) { h ^= u[i]; h = Math.imul(h, 0x01000193); }
+  return (h >>> 0).toString(36) + '.' + (pos.length / 3) + '.' + nIdx;
+}
 function makePiece(src) {
   const g0 = src.geometry, M = src.matrixWorld, nv = g0.attributes.position.count;
   const pa = g0.attributes.position, na = g0.attributes.normal, ta = g0.attributes.uv;
@@ -187,7 +203,7 @@ function makePiece(src) {
   const mat = src.material.clone();
   const mesh = new THREE.Mesh(geo, mat); mesh.name = src.name || ('piece' + pieces.length);
   shipRoot.add(mesh);
-  const P = { id: pieces.length, mesh, geo, mat, name: mesh.name, matName: (src.material && src.material.name) || '', pos: geo.attributes.position.array,
+  const P = { id: pieces.length, mesh, geo, mat, name: mesh.name, matName: (src.material && src.material.name) || '', src: geoSig(pos, ia.length), pos: geo.attributes.position.array,
     nrm: geo.attributes.normal.array, uv, inv: new THREE.Matrix4(), hasPaint: !!(uv && mat.map), paint: null, uPaint: null, baseColor: mat.color.clone(), topo: false };
   buildTopology(P);
   if (P.hasPaint) patchPaintMaterial(P);
@@ -291,9 +307,16 @@ function clearShip() {
 }
 function statusLine() { const tris = pieces.reduce((a, P) => a + P.nf, 0); status(ship.name + ': ' + pieces.length + ' pieces, ' + tris.toLocaleString() + ' tris, ' + markers.length + ' markers'); }
 const loader = new GLTFLoader();
+// the file's Last-Modified, for dating a save that predates the per-part fingerprints; null when the server does not say
+async function fileStamp(src) {
+  if (!src || /^blob:/.test(src)) return null;
+  try { const r = await fetch(src, { method: 'HEAD', cache: 'no-store' }); const lm = r.ok && r.headers.get('last-modified'); return lm ? (Date.parse(lm) || null) : null; } catch (_) { return null; }
+}
 async function loadShip(name, url) {
   status('loading ' + name + ' ...'); banner('');
-  const gltf = await loader.loadAsync(url || ((EXTRA_MODELS[name] || 'ships/' + name + '.glb') + '?t=' + Date.now()));
+  const src = url || (EXTRA_MODELS[name] || 'ships/' + name + '.glb');
+  const stamp = fileStamp(src);
+  const gltf = await loader.loadAsync(url || (src + '?t=' + Date.now()));
   clearShip();
   const root = gltf.scene; root.updateMatrixWorld(true);
   const meshes = [], marks = [];
@@ -301,7 +324,7 @@ async function loadShip(name, url) {
   for (const m of meshes) pieces.push(makePiece(m));
   for (const m of marks) addMarker(m.name, V().setFromMatrixPosition(m.matrixWorld));
   for (const P of pieces) pieceMoved(P);
-  ship.name = name; S.ship = MODELS.includes(name) ? name : S.ship;
+  ship.name = name; S.ship = MODELS.includes(name) ? name : S.ship; ship.fileTs = await stamp;
   const seat = pieces.find((P) => /_game_cockpit$/.test(P.name));
   if (seat) { seat.geo.computeBoundingBox(); ship.seatH = Math.max(0.05, seat.geo.boundingBox.max.y - seat.geo.boundingBox.min.y); }
   else { const bb = new THREE.Box3(); for (const P of pieces) { P.geo.computeBoundingBox(); bb.union(P.geo.boundingBox); } ship.seatH = Math.max(0.05, bb.max.y - bb.min.y); }   // not a ship: the whole model's height
@@ -931,7 +954,8 @@ function drawPanel() {
   btn({ id: 'prev', x: 8, y: 8, w: 52, h: 48, act: () => switchShip(-1) }, '◀', false);
   c.fillStyle = '#ffaa00'; c.font = '700 26px Segoe UI, system-ui, sans-serif'; c.fillText((ship.name || S.ship).toUpperCase(), ui.restore ? 170 : 256, 32);
   btn({ id: 'next', x: ui.restore ? 272 : 452, y: 8, w: 52, h: 48, act: () => switchShip(1) }, '▶', false);
-  if (ui.restore) btn({ id: 'restore', x: 332, y: 8, w: 172, h: 48, fs: 18, act: () => restoreSession() }, 'RESTORE', false, ui.restore);
+  if (ui.restore) btn({ id: 'restore', x: 332, y: 8, w: 172, h: 48, fs: 18, act: () => restoreSession() }, 'RESTORE', false,
+    ui.restore + (ui.restoreStale ? ' · ' + ui.restoreStale + ' OLD PART' + (ui.restoreStale > 1 ? 'S' : '') : ''));
   // tools
   const subs = { grab: 'drag clay', poke: 'dent it', inflate: S.inflateOut ? 'swell' : 'shrink', smooth: 'relax', squish: 'pinch', meld: 'join + simplify',
     point: 'vertex', line: 'edge', piece: 'part / gem', paint: 'alt: erase', fill: 'whole part', drop: 'pick colour', delete: S.delCollapse ? 'collapse' : 'hole' };
@@ -1376,22 +1400,35 @@ let saveTimer = 0;
 function scheduleSave() { clearTimeout(saveTimer); saveTimer = setTimeout(() => saveSession().catch((e) => console.warn('[ship lab] save failed', e)), 1500); }
 async function saveSession() {
   if (!ship.name) return;
-  const rec = { ts: Date.now(), pieces: pieces.map((P) => ({ name: P.name, ng: P.ng, gpos: !P.topo && P.moved.some((x) => x) ? P.gpos.slice() : null,
+  const rec = { v: 2, ts: Date.now(), pieces: pieces.map((P) => ({ name: P.name, src: P.src, ng: P.ng, gpos: !P.topo && P.moved.some((x) => x) ? P.gpos.slice() : null,
       topo: P.topo ? topoSnap(P) : null, matrix: P.mesh.matrix.toArray(), color: P.mat.color.getHex() })),
     markers: markers.map((m) => ({ name: m.name, pos: m.vis.position.toArray() })), paints: pieces.filter((P) => P.paint && P.paint.used).map((P) => P.name) };
   await idb('readwrite', (st) => st.put(rec, ship.name + ':geo'));
   for (const P of pieces) if (P.paint && P.paint.used && P.paint.savedAt !== P.paint.ver) { const pt = P.paint; await idb('readwrite', (st) => st.put({ w: pt.w, h: pt.h, data: pt.data.slice() }, ship.name + ':paint:' + P.name)); pt.savedAt = pt.ver; }
   if (ui.restore) { ui.restore = null; drawPanel(); }
 }
+// A saved part whose source is not the part on screen: its fingerprint differs, or (a save from before fingerprints) it was
+// re-meshed and the file is newer than the save. Restoring one would put an older ship's geometry over the game's.
+function staleRec(rec, r, P) {
+  if (r.src) return r.src !== P.src;
+  return !!(r.topo && ship.fileTs && rec.ts < ship.fileTs);
+}
 async function offerRestore() {
-  try { const rec = await idb('readonly', (st) => st.get(ship.name + ':geo')); ui.restore = rec ? new Date(rec.ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : null; } catch (_) { ui.restore = null; }
+  ui.restoreStale = 0;
+  try {
+    const rec = await idb('readonly', (st) => st.get(ship.name + ':geo'));
+    ui.restore = rec ? new Date(rec.ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : null;
+    if (rec) for (const r of rec.pieces) { const P = pieces.find((p) => p.name === r.name); if (P && staleRec(rec, r, P)) ui.restoreStale++; }
+  } catch (_) { ui.restore = null; }
   drawPanel();
 }
 async function restoreSession() {
   const rec = await idb('readonly', (st) => st.get(ship.name + ':geo')); if (!rec) return;
+  const skipped = new Set();
   beginStroke('geo');
   for (const r of rec.pieces) {
     const P = pieces.find((p) => p.name === r.name); if (!P) continue;
+    if (staleRec(rec, r, P)) { skipped.add(P.name); continue; }   // changed in the game since this save: keep the game's
     if (r.topo) { setPieceArrays(P, r.topo.pos, r.topo.nrm, r.topo.uv, r.topo.idx); P.topo = true; }
     else if (r.gpos && r.ng === P.ng) { const set = new Set(); for (let g = 0; g < P.ng; g++) { const i = g * 3; if (r.gpos[i] !== P.gpos[i] || r.gpos[i + 1] !== P.gpos[i + 1] || r.gpos[i + 2] !== P.gpos[i + 2]) { setGroup(P, g, r.gpos[i], r.gpos[i + 1], r.gpos[i + 2]); set.add(g); } } }
     xformSet({ kind: 'piece', P }, r.matrix); P.mat.color.setHex(r.color);
@@ -1399,11 +1436,15 @@ async function restoreSession() {
   for (const r of rec.markers) { const m = markers.find((x) => x.name === r.name); if (m) m.vis.position.fromArray(r.pos); }
   endStroke(); undoStack.length = 0; redoStack.length = 0;
   for (const name of rec.paints || []) {
+    if (skipped.has(name)) continue;   // its UVs may not be the part on screen's
     const P = pieces.find((p) => p.name === name), d = await idb('readonly', (st) => st.get(ship.name + ':paint:' + name));
     if (!P || !d || !P.hasPaint) continue; const pt = ensurePaint(P); if (d.w !== pt.w || d.h !== pt.h) continue;
     pt.data.set(d.data); pt.used = true; pt.ver = (pt.ver || 0) + 1; pt.savedAt = pt.ver; markDirty(pt, 0, 0, pt.w - 1, pt.h - 1);
   }
-  uploadAllPaint(true); ui.restore = null; toast('restored the saved session'); drawPanel();
+  uploadAllPaint(true); ui.restore = null; ui.restoreStale = 0;
+  toast(skipped.size ? 'restored · kept the game\'s ' + [...skipped].map((n) => n.replace(/^[a-z0-9]+_game_/, '')).join(', ') : 'restored the saved session');
+  if (skipped.size) console.info('[ship lab] restore skipped parts changed since the save:', [...skipped]);
+  drawPanel();
 }
 
 // ================================================================ LOOP + HOOKS + BOOT

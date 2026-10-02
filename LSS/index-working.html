@@ -1692,6 +1692,34 @@ body:has(#ship-select.active) #lss-version-badge { display: none !important; }
 .skin-card.trying { box-shadow: 0 0 0 1px rgba(255,196,57,0.95), 0 0 10px rgba(255,196,57,0.35); }
 .skin-card.premium::after { content: ''; position: absolute; top: 2px; right: 2px; width: 4px; height: 4px;
   border-radius: 50%; background: #ffc439; box-shadow: 0 0 4px rgba(255,196,57,0.8); pointer-events: none; }
+/* (v50.82) SECONDARY: the trim row under the liveries - the same cards, plus a hue slider that shows only under COLOR. */
+#ship-preview-skin .trim-label { margin-top: 2px; }
+#trim-grid {
+  display: flex; flex-wrap: wrap; justify-content: center; align-items: center;
+  gap: 8px; min-height: 30px; max-width: 100%; padding: 2px;
+}
+#trim-hue {
+  display: none; width: 210px; max-width: 80vw; height: 16px; margin: 1px 0 2px;
+  -webkit-appearance: none; appearance: none; background: transparent; cursor: pointer;
+}
+#trim-hue.on { display: block; }
+#trim-hue::-webkit-slider-runnable-track {
+  height: 8px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.25);
+  background: linear-gradient(90deg, hsl(0,75%,45%), hsl(60,75%,45%), hsl(120,75%,45%), hsl(180,75%,45%),
+                                     hsl(240,75%,45%), hsl(300,75%,45%), hsl(360,75%,45%));
+}
+#trim-hue::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 12px; height: 16px; margin-top: -5px; border-radius: 3px;
+  background: #f4f6fa; border: 1px solid rgba(0,0,0,0.65); box-shadow: 0 0 4px rgba(0,0,0,0.6);
+}
+#trim-hue::-moz-range-track {
+  height: 8px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.25);
+  background: linear-gradient(90deg, hsl(0,75%,45%), hsl(60,75%,45%), hsl(120,75%,45%), hsl(180,75%,45%),
+                                     hsl(240,75%,45%), hsl(300,75%,45%), hsl(360,75%,45%));
+}
+#trim-hue::-moz-range-thumb {
+  width: 12px; height: 16px; border-radius: 3px; background: #f4f6fa; border: 1px solid rgba(0,0,0,0.65);
+}
 /* The buy strip. A SIBLING of #ship-preview-skin in #ship-select-body (owner: the first cut, inside the
    panel, "covers the ship and you can't preview it properly") - one row under the nameplate, where the
    collapsed grid was; top is written by _lssBuyPlace() from #ship-hero's rect, like _skinPanelPlace.
@@ -6659,6 +6687,11 @@ body.lss-land-lobby #lss-version-badge {
       <div class="perks-label">SKIN THEME</div>
       <div id="skin-grid"></div>
       <div id="skin-desc"></div>
+      <!-- (v50.82) SECONDARY - the trim on the black plating (SHIP_TRIMS). _renderTrimPicker fills #trim-grid with the
+           same .skin-card swatches and shows #trim-hue only under COLOR. -->
+      <div class="perks-label trim-label">SECONDARY</div>
+      <div id="trim-grid"></div>
+      <input type="range" id="trim-hue" min="0" max="359" step="1" value="200" aria-label="Secondary colour hue">
     </div>
     <!-- (v35.20) LEFT COLUMN: the fleets run vertically down the left edge —
          your fleet over enemy fleet, chips wrapping into a grid. The left side
@@ -7239,7 +7272,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "50.80";
+const LSS_BUILD = "50.86";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -8163,6 +8196,83 @@ function _setStoredSkinId(id) {
   try { localStorage.setItem('lss_ship_skin', id); } catch (_) {}
   if (typeof player !== 'undefined' && player) player.skinId = id;
 }
+// ⭐⭐ (v50.82) THE SECONDARY SKIN: THE BLACK PARTS GET A FINISH OF THEIR OWN. Owner, right after v50.81 made a livery
+// cover only the paint: "the black parts should be a secondary skin, dark metallic, chrome, gold, and a color/hue
+// slider". So a hull wears two choices now: the LIVERY on its paint (SHIP_SKINS, unchanged) and a TRIM on everything
+// the paint mask leaves - the black plating. BLACK is the factory plating and the default. The others replace the
+// plating's colour and finish per texel in the hull shader (lssTrim / uTrim*, see _trimSet) and keep its detail: the
+// colour is shaded by the plating's own value against its typical value (the v49.26 ratio shade), and the roughness
+// map's variation survives about the trim's level. Same rules as the livery: ONE global choice, not per hull (an
+// identity you keep as you cycle ships), its own key (lss_ship_trim, stored in the wire form 'chrome' /
+// 'color:200'), uniforms only - no recompile, no new program - and it rides every loadout announce as `trim`, so
+// peers build your hull in it (an old client ignores the field and builds BLACK). Only `<ship>_hull_game` (the outer
+// hull) takes it; the cockpit interior and the canopy frame stay factory.
+//   col          the finish colour (sRGB hex; a metal's colour is its reflectance)
+//   metal/rough  its PBR finish, flat over the plating (the factory metal map is the black paint's, not chrome's)
+//   env          its environment strength (absolute envMapIntensity; the factory hull runs at 0.45)
+//   hsl          COLOR only: [saturation, lightness] of the slider's hue (sRGB HSL)
+// Live: window.__trim() reads; __trim('chrome') / __trim('color:120') wears one; __trim({ gold: { rough: 0.1 } })
+// retunes the table; __trim({ shade: { keep, floor, cap } }) retunes how much plating detail shows. All re-apply live.
+const SHIP_TRIMS = {
+  black:     { name: 'BLACK',      desc: 'factory plating', restore: true, swatch: '#16181c' },
+  // (v50.85) Owner: "it'd be cool to have the secondary skin to have a really dark... that 'dark metal' isn't even dark,
+  // it looks white". Two really dark finishes, and DARK METAL made dark (below).
+  blackchrome: { name: 'BLACK CHROME', desc: 'black mirror polish', col: 0x1e2024, metal: 1.0, rough: 0.06, env: 0.8,
+                 swatch: 'linear-gradient(135deg, #4a4f57 0%, #0b0c0e 45%, #2a2d33 60%, #050506 100%)' },
+  matteblack:  { name: 'MATTE BLACK',  desc: 'flat black, no shine', col: 0x101114, metal: 0.0, rough: 0.85, env: 0.3,
+                 swatch: '#0d0e10' },
+  // Tuned in game on VORTEX (Overworld, day), four variants each side by side: DARK METAL at the first cut's 0x50565f /
+  // rough .34 / env 1.0 could not be told from BLACK, so it is brighter and glossier; CHROME was right from env 0.8 to
+  // 1.4 in game (the lower end shows the ground in the lower panels, which is what sells a mirror) and flat white in
+  // the picker's soft gradient at 1.4; GOLD at 0xf2c25a read lemon - the deeper amber reads as gold under a pale sky.
+  // ⚠ (v50.85) A METAL IS ITS REFLECTION, so the picker is the harder test, not the game: its environment is a soft
+  // bright gradient (v50.77) and its lights run x2.2, where the in-game sky is darker and has a ground. DARK METAL at
+  // 0x5d6673 / env 1.5 read dark metallic in flight and near-WHITE in ship select - the owner's "it looks white"; even
+  // the factory plating reads mid-grey there. These values were judged in the picker, side by side.
+  darkmetal: { name: 'DARK METAL', desc: 'gunmetal, satin finish', col: 0x3a3f47, metal: 0.95, rough: 0.3, env: 0.8,
+               swatch: 'linear-gradient(135deg, #5a616b 0%, #24282e 55%, #444a53 100%)' },
+  chrome:    { name: 'CHROME',     desc: 'mirror polish', col: 0xdde2e8, metal: 1.0, rough: 0.05, env: 0.9,
+               swatch: 'linear-gradient(135deg, #ffffff 0%, #8d96a1 42%, #eef2f6 58%, #5f6872 100%)' },
+  gold:      { name: 'GOLD',       desc: 'polished gold', col: 0xd9952a, metal: 1.0, rough: 0.2, env: 1.35,
+               swatch: 'linear-gradient(135deg, #ffe08a 0%, #d08a1e 50%, #7a4a08 100%)' },
+  color:     { name: 'COLOR',      desc: 'metallic paint - the slider picks the hue', hsl: [0.75, 0.42], metal: 0.6, rough: 0.3, env: 0.9 },
+};
+const SHIP_TRIM_DEFAULT = 'black';
+// The plating detail under a trim: the texel's value over the plating's typical value, ^keep, clamped to floor..cap.
+// roughRef = the plating's typical roughness (measured 0.36-0.49 across the seven factory maps).
+const _TRIM_SHADE = { keep: 0.6, floor: 0.25, cap: 1.6, roughRef: 0.42 };
+// Any form -> { id, hue }: an { id, hue } object, the wire / storage string ('chrome', 'color:200'), or nothing (BLACK).
+// An unknown id (another build's, a hostile peer's) becomes BLACK here and never reaches the material code.
+function _trimNorm(t) {
+  let id = SHIP_TRIM_DEFAULT, hue = 200;
+  if (typeof t === 'string') { const q = t.split(':'); id = q[0]; if (q.length > 1) hue = +q[1]; }
+  else if (t && typeof t === 'object') { id = t.id; if (t.hue != null) hue = +t.hue; }
+  if (typeof id !== 'string' || !Object.prototype.hasOwnProperty.call(SHIP_TRIMS, id)) id = SHIP_TRIM_DEFAULT;
+  hue = isFinite(hue) ? ((Math.round(hue) % 360) + 360) % 360 : 200;
+  return { id: id, hue: hue };
+}
+// The wire / storage form, which is also the identity two trims are compared by (the hue only counts under COLOR).
+function _trimWire(t) { const n = _trimNorm(t); return (n.id === 'color') ? ('color:' + n.hue) : n.id; }
+function _getStoredTrim() {
+  try { const v = localStorage.getItem('lss_ship_trim'); if (v) return _trimNorm(v); } catch (_) {}
+  return _trimNorm(null);
+}
+function _setStoredTrim(t) {
+  const n = _trimNorm(t);
+  try { localStorage.setItem('lss_ship_trim', _trimWire(n)); } catch (_) {}
+  if (typeof player !== 'undefined' && player) player.trim = n;
+  return n;
+}
+// A card's swatch: the table's for the finishes, the live hue for COLOR.
+function _trimSwatch(id, hue) {
+  const T = SHIP_TRIMS[id];
+  if (!T) return '#16181c';
+  if (id === 'color') {
+    const hsl = T.hsl || [0.75, 0.42];
+    return 'hsl(' + hue + ', ' + Math.round(hsl[0] * 100) + '%, ' + Math.round(hsl[1] * 100) + '%)';
+  }
+  return T.swatch || '#16181c';
+}
 
 const LOADOUTS = {
   VORTEX: {
@@ -8330,6 +8440,7 @@ const player = {
   // localStorage, hands it to createShipMesh and broadcasts it with the loadout;
   // swapToModelMeshWhenReady reads it off the owner on the GLB swap-in.
   skinId: SHIP_SKIN_DEFAULT,
+  trim: null,   // (v50.82) the secondary skin ({ id, hue }, see SHIP_TRIMS); null = BLACK. Same path as skinId.
   chassis: null,
   team: LSS.TEAM_FLEET_A,
   health: 0, maxHealth: 0,
@@ -8691,6 +8802,7 @@ const input = {
     // table, so a key that is only in KB_DEFAULTS stays undefined for every existing player (the dispatcher's
     // 'k' fallback still fires, but Settings > Keyboard showed the row unbound).
     skinNext:   'k',
+    trimNext:   'j',        // (v50.82) next SECONDARY skin (the trim) - see _lssNextTrim
   },
 };
 
@@ -11510,6 +11622,7 @@ async function joinRoom() {
         // or a peer who never opened the picker) — updateNetworkPlayer hands it
         // straight to _shipSkinDef, which resolves anything unknown to FACTORY.
         peer.skinId = data.skinId;
+        peer.trim = data.trim;   // (v50.82) the secondary skin - same contract (updateNetworkPlayer normalizes it)
         // (v43.13) and adopt the room's speed rule from whoever committed
         try {
           // (v44.18) The loadout commit carries the dial too - same precedence as speed_mode.
@@ -17376,10 +17489,13 @@ function _lssWearStoredSkin() {
   try {
     if (typeof player === 'undefined' || !player || !player.mesh) return false;
     const id = _getStoredSkinId();
+    const tr = _getStoredTrim(), trW = _trimWire(tr);   // (v50.82) the secondary skin travels the same way
     const worn = player.mesh.userData ? player.mesh.userData.skinId : undefined;
-    if (worn === id && player.skinId === id) return false;
+    const wornT = _trimWire(player.mesh.userData ? player.mesh.userData.trim : null);
+    if (worn === id && player.skinId === id && wornT === trW && _trimWire(player.trim) === trW) return false;
     player.skinId = id;
-    _applyShipSkin(player.mesh, id);
+    player.trim = tr;
+    _applyShipSkin(player.mesh, id, tr);
     try { _lssAnnounceLoadout(); } catch (_) {}
     return true;
   } catch (e) {
@@ -19111,7 +19227,7 @@ function showShipSelectWaiting() {
 const _npFlipY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI);
 const _npMeshTgt = new THREE.Quaternion();
 class NetworkPlayer {
-  constructor(peerId, loadoutKey, team, skinId) {
+  constructor(peerId, loadoutKey, team, skinId, trim) {
     // (v38.60) own-property lookup: a peer sending loadoutKey 'constructor' /
     // 'toString' used to get past `if (!loadout)` and throw on CHASSIS[undefined].
     const loadout = (typeof loadoutKey === 'string' && Object.prototype.hasOwnProperty.call(LOADOUTS, loadoutKey)) ? LOADOUTS[loadoutKey] : null;
@@ -19125,6 +19241,7 @@ class NetworkPlayer {
     // unknown / hostile id can never reach the material code — it becomes
     // FACTORY here and stays that way for the GLB swap-in below.
     this.skinId = _shipSkinDef(skinId).id;
+    this.trim = _trimNorm(trim);   // (v50.82) the secondary skin, normalized the same way (unknown -> BLACK)
     this.loadout = loadout;
     this.chassis = chassisData;
     this.team = team;
@@ -19155,7 +19272,7 @@ class NetworkPlayer {
     this._cloaked = false;
 
     const teamColor = team === LSS.TEAM_FLEET_A ? 0xff4444 : 0x44bb44;
-    this.mesh = createShipMesh(chassisData, teamColor, loadoutKey, this.skinId);
+    this.mesh = createShipMesh(chassisData, teamColor, loadoutKey, this.skinId, this.trim);
     this.mesh.position.copy(this.position);
     this.mesh.userData.bot = this;
     scene.add(this.mesh);
@@ -19646,6 +19763,7 @@ function _lssSendLoadoutTo(peerId) {
       // (v36.31) Same livery field as the commit-time broadcast, so a peer
       // who joins AFTER we committed still builds our ship skinned.
       skinId: player.skinId || SHIP_SKIN_DEFAULT,
+      trim: _trimWire(player.trim),   // (v50.82) the secondary skin ('chrome', 'color:200'); an old client ignores it
       // (v43.13) MATCH SPEED RIDES THE LOADOUT. The standalone speed_mode event works once a
       // match is live, but in the LOBBY it did not cross - measured with two clients both
       // showing PEER: the clicker flipped, the other sat at OFF. Rather than chase that
@@ -19740,7 +19858,15 @@ function updateNetworkPlayer(peerId, data) {
     // net.networkPlayers or peer.networkPlayer) - was frozen for the whole session: re-announcing
     // the identical loadout returned right here and rebuilt nothing. That is what made the v44.61
     // loadout_req pull necessary AND insufficient on its own.
-    if (_lssNpUsable(np0) && np0.loadoutKey === data.loadoutKey && np0.team === _team && np0.skinId === _skin) return;
+    if (_lssNpUsable(np0) && np0.loadoutKey === data.loadoutKey && np0.team === _team && np0.skinId === _skin) {
+      // (v50.82) a new SECONDARY skin alone re-dresses the hull in place: uniforms only, where a rebuild would put the
+      // peer's ship back at the origin (the v38.63 reason this guard exists)
+      try {
+        const _tr = _trimNorm(data.trim);
+        if (_trimWire(np0.trim) !== _trimWire(_tr)) { np0.trim = _tr; if (np0.mesh) _applyShipSkin(np0.mesh, np0.skinId, _tr); }
+      } catch (_) {}
+      return;
+    }
   }
 
   // Remove old NetworkPlayer if loadout changed
@@ -19753,7 +19879,7 @@ function updateNetworkPlayer(peerId, data) {
   }
 
   // Create new NetworkPlayer
-  const np = new NetworkPlayer(peerId, data.loadoutKey, data.team || LSS.TEAM_FLEET_B, data.skinId);
+  const np = new NetworkPlayer(peerId, data.loadoutKey, data.team || LSS.TEAM_FLEET_B, data.skinId, data.trim);
   peer.networkPlayer = np;
   net.networkPlayers.push(np);
   // (v44.15) A peer's ship exists, so this match is networked no matter who is still here at the
@@ -34550,7 +34676,9 @@ function _rplActor(R, key, ent) {
     const mon = _rplIsMon(ent);   // (v48.27) a leviathan: its def key, its seat, its own size for the cameras
     A = R.actors[key] = { key: key, lo: ent.loadoutKey || null, team: ent.team, name: mon ? _rplMonName(ent.def.key) : _rplName(ent, key),
                           hull: (ent.chassis && ent.chassis.hullLength) || (mon ? MONSTER_SIZE : 100),
-                          skin: (key === 'me' && ent.skinId && ent.skinId !== 'factory') ? ent.skinId : null, buf: [] };
+                          skin: (key === 'me' && ent.skinId && ent.skinId !== 'factory') ? ent.skinId : null,
+                          trim: (key === 'me' && ent.trim && _trimWire(ent.trim) !== SHIP_TRIM_DEFAULT) ? _trimWire(ent.trim) : null,   // (v50.82)
+                          buf: [] };
     if (mon) { A.mon = ent.def.key; A.mid = ent.monId; }
   }
   A.ent = ent;
@@ -36022,7 +36150,7 @@ function _rplSerialize(R) {
   for (const k in R.actors) {
     const A = R.actors[k], b = A.buf, o = new Array(b.length);
     for (let i = 0; i < b.length; i++) { const f = i % 9; o[i] = (f === 0) ? r4(b[i] - t0) : (f <= 3 ? r1(b[i]) : (f <= 7 ? r4(b[i]) : b[i])); }
-    actors[k] = { lo: A.lo, team: A.team, name: A.name, hull: A.hull, skin: A.skin || null, stride: 't,x,y,z,qx,qy,qz,qw,alive', buf: o,
+    actors[k] = { lo: A.lo, team: A.team, name: A.name, hull: A.hull, skin: A.skin || null, trim: A.trim || null, stride: 't,x,y,z,qx,qy,qz,qw,alive', buf: o,
                   sx: (A.sx || []).map((v, i) => (i % 3 === 0) ? r4(v - t0) : v) };   // (v48.01) t, shield, doomed
     if (A.mon) { actors[k].mon = A.mon; actors[k].mid = A.mid; }   // (v48.27) a leviathan: which one, and its seat
   }
@@ -36049,6 +36177,7 @@ function _rplDeserialize(o) {
   for (const k in o.actors) {
     const A = o.actors[k] || {};
     R.actors[k] = { key: k, lo: A.lo || null, team: A.team, name: A.name || k, hull: A.hull || 100, skin: A.skin || null,
+                    trim: (typeof A.trim === 'string') ? A.trim : null,   // (v50.82) _trimNorm vets it at build
                     buf: Array.isArray(A.buf) ? A.buf : [], sx: Array.isArray(A.sx) ? A.sx : [] };
     if (A.mon && typeof A.mid === 'number') { R.actors[k].mon = String(A.mon); R.actors[k].mid = A.mid; }   // (v48.27)
   }
@@ -36228,10 +36357,11 @@ function _rplPuppet(st, key) {
     const ch = CHASSIS[LOADOUTS[lo].chassis]; if (!ch) return;
     const col = (key === 'me') ? 0xff4444 : ((A.team === LSS.TEAM_FLEET_A) ? 0xff4444 : 0x44bb44);
     const skin = A.skin || null;
-    let m = (!skin && typeof _botShipPoolTake === 'function') ? _botShipPoolTake(lo + '|' + col + '|') : null;
-    if (!m) m = createShipMesh(ch, col, lo, skin || undefined);
+    const trim = A.trim || null;   // (v50.82) the secondary skin, recorded like the livery
+    let m = (!skin && !trim && typeof _botShipPoolTake === 'function') ? _botShipPoolTake(lo + '|' + col + '|') : null;
+    if (!m) m = createShipMesh(ch, col, lo, skin || undefined, trim || undefined);
     if (!m) return;
-    const owner = { loadoutKey: lo, chassis: ch, skinId: skin, mesh: m, alive: true, _rplPuppet: true };
+    const owner = { loadoutKey: lo, chassis: ch, skinId: skin, trim: trim, mesh: m, alive: true, _rplPuppet: true };
     scene.add(m);
     if (m.userData && m.userData.isProceduralFallback) { try { swapToModelMeshWhenReady(owner, col); } catch (_) {} }
     st.pup[key] = { owner: owner, A: A, alive: false, label: null };
@@ -36288,7 +36418,7 @@ function _rplPuppetFree(P) {
   // (v48.03) ...and SOLID: a pooled hull left at ghost opacity would make the next bot dealt it one
   try { if (P.cloak) { P.cloak = false; _setShipMeshOpacity(m, 1.0); } } catch (_) {}
   try {
-    const pooled = !o.skinId && typeof _botShipPoolPut === 'function' && _botShipPoolPut({ mesh: m });
+    const pooled = !o.skinId && !o.trim && typeof _botShipPoolPut === 'function' && _botShipPoolPut({ mesh: m });
     if (!pooled) _disposeShipGroup(m);
   } catch (_) { try { if (m.parent) m.parent.remove(m); } catch (__) {} }
   try { if (P.label && P.label.parentNode) P.label.parentNode.removeChild(P.label); } catch (_) {}
@@ -71754,7 +71884,7 @@ function _applyShipPreviewModel(key) {
     // on the next render — a wasted compile plus a visible hitch the first time
     // each hull is shown. The unconditional re-apply below still runs for the
     // cached-root case; _applyShipSkin is idempotent.
-    try { _applyShipSkin(modelRoot, _getStoredSkinId()); } catch (_) {}
+    try { _applyShipSkin(modelRoot, _getStoredSkinId(), _getStoredTrim()); } catch (_) {}
     try {
       if (typeof s.renderer.compileAsync === 'function') {
         // ⚠ (v40.73) ARGUMENT ORDER. three.js is compileAsync(scene, camera, targetScene); this call
@@ -71791,7 +71921,7 @@ function _applyShipPreviewModel(key) {
   // (v36.31) Livery. Applied on EVERY show, not just on first build, because
   // modelByKey caches the per-ship root for the session: cycling ships would
   // otherwise hand back whatever skin that root wore last time.
-  try { _applyShipSkin(modelRoot, _getStoredSkinId()); } catch (_) {}
+  try { _applyShipSkin(modelRoot, _getStoredSkinId(), _getStoredTrim()); } catch (_) {}
   // Fit camera dolly to the model's bbox so small ships don't look tiny and
   // large ships don't clip. We aim 3/4 down-angled for a good silhouette.
   const box = new THREE.Box3().setFromObject(modelRoot);
@@ -71907,7 +72037,7 @@ function _applyShipPreviewModel(key) {
 function setShipPreviewSkin(skinId) {
   const s = _shipPreview3D;
   if (!s || !s.model) return;
-  try { _applyShipSkin(s.model, skinId); } catch (_) {}
+  try { _applyShipSkin(s.model, skinId, _getStoredTrim()); } catch (_) {}   // (v50.82) + the stored secondary skin
 }
 
 function _animateShipPreview() {
@@ -73033,6 +73163,61 @@ const _SKIN_HUE_PARS = [
   '  vec3 p = abs(fract(vec3(h) + vec3(1.0, 0.6666666, 0.3333333)) * 6.0 - 3.0);',
   '  return val * mix(vec3(1.0), clamp(p - 1.0, 0.0, 1.0), sat);',
   '}',
+  // ⭐⭐ (v50.81) THE LIVERY COVERS THE PAINT, NOT THE BLACK - see _SKIN_MASK. lssPaintMask is 1 where this texel is
+  // the hull's own paint (its measured hue, saturated, not near-black) and 0 on the black/grey plating; a livery is
+  // mixed back to the factory texel by it, and so are the finish terms a livery sets for the whole material
+  // (metalness, roughness, environment strength, its emissive floor), so the black is the black it always was.
+  'uniform float uSkinMaskOn;',     // 1 = a livery is on and covers only the paint
+  'uniform float uSkinMaskHue;',    // the paint's hue (linear HSV 0..1); < 0 = this material carries no paint
+  'uniform float uSkinMaskWin;',    // hue half-window around it
+  'uniform vec4  uSkinMaskSV;',     // saturation ramp (x..y) and value ramp (z..w) a texel must clear to be paint
+  'uniform float uSkinMaskDbg;',    // 1 = draw the mask itself (white = livery, black = factory)
+  'uniform float uSkinMulInv;',     // 1 / the livery's `mul`: the black gets its factory colour back
+  'uniform float uSkinBaseMetal;',  // the factory metalness / roughness factors, for the unpainted texels
+  'uniform float uSkinBaseRough;',
+  'uniform float uSkinEnvK;',       // factory envMapIntensity / the livery's, for the unpainted texels
+  'uniform vec3  uSkinEmFloor;',    // the livery's emissive floor (linear), taken back off the unpainted texels
+  'uniform float uSkinMaskLod;',    // (v50.84) mip bias the mask classifies at: 0 = per texel, 3 = an 8-texel blur
+  'uniform float uSkinMaskMode;',   // (v50.86) 1 = the sRGB CHROMA gate (uSkinMaskSV.xy = its ramp), 0 = the v50.81 linear sat/val gate
+  'uniform float uSkinMaskGrow;',   // (v50.84) 0..1: how far a partial mask is pushed to full paint (the livery grows)
+  'float lssPaintMask(vec3 c){',
+  '  if (uSkinMaskHue < 0.0) return 0.0;',
+  '  float mx = max(c.r, max(c.g, c.b));',
+  '  float mn = min(c.r, min(c.g, c.b));',
+  '  float d = mx - mn;',
+  '  if (mx <= 1e-5 || d <= 1e-6) return 0.0;',
+  '  float h;',
+  '  if (mx == c.r)      h = mod((c.g - c.b) / d, 6.0);',
+  '  else if (mx == c.g) h = (c.b - c.r) / d + 2.0;',
+  '  else                h = (c.r - c.g) / d + 4.0;',
+  '  h /= 6.0;',
+  '  float dh = h - uSkinMaskHue; dh -= floor(dh + 0.5);',
+  '  float hw = 1.0 - smoothstep(uSkinMaskWin * 0.6, uSkinMaskWin, abs(dh));',
+  // (v50.86) CHROMA: how colourful the texel LOOKS - max - min of its sRGB-encoded channels (the exact sRGB curve, so it
+  // agrees with _skinTexPaint, which reads the texture's own bytes). A dark grey with a faint cast has almost none; in
+  // linear HSV the same texel measured as strongly saturated, which is what kept PYRO's plating "paint".
+  '  if (uSkinMaskMode > 0.5) {',
+  '    vec3 g = clamp(c, 0.0, 1.0);',
+  '    g = mix(g * 12.92, 1.055 * pow(g, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), g));',
+  '    float ch = max(g.r, max(g.g, g.b)) - min(g.r, min(g.g, g.b));',
+  '    return hw * smoothstep(uSkinMaskSV.x, uSkinMaskSV.y, ch);',
+  '  }',
+  '  return hw * smoothstep(uSkinMaskSV.x, uSkinMaskSV.y, d / mx) * smoothstep(uSkinMaskSV.z, uSkinMaskSV.w, mx);',
+  '}',
+  // ⭐⭐ (v50.82) THE SECONDARY SKIN - see SHIP_TRIMS. The unpainted texels (1 - lssPaintM) take the trim's colour,
+  // shaded by the plating's own value against its typical value (uTrimLum: the v49.26 ratio shade, so panel lines,
+  // grime and seams survive in any finish), and its metal / roughness / environment strength, which arrive through
+  // uSkinBaseMetal / uSkinBaseRough / uSkinEnvK - the slots that hand the factory finish back when no trim is on.
+  'uniform float uTrimOn;',      // 1 = this material's black plating wears a trim
+  'uniform vec3  uTrimCol;',     // the finish colour, linear (a metal's colour is its reflectance)
+  'uniform float uTrimLum;',     // the black plating's typical luminance, linear (measured per albedo texture)
+  'uniform vec3  uTrimShade;',   // x = ratio exponent, y = floor, z = cap
+  'uniform float uTrimRoughK;',  // 1 / the plating's typical roughness: the roughness map's detail about 1
+  'vec3 lssTrim(vec3 raw){',
+  '  float l = dot(raw, vec3(0.2126, 0.7152, 0.0722));',
+  '  float s = clamp(pow(max(l / max(uTrimLum, 1e-4), 0.0), uTrimShade.x), uTrimShade.y, uTrimShade.z);',
+  '  return min(uTrimCol * s, vec3(1.0));',
+  '}',
 ].join('\n');
 
 // Vertex side of the patch. Ship-space position + normal are the ONLY things
@@ -73165,6 +73350,15 @@ function _skinPatchHueShader(m) {
     // (v50.77) the theme lift (see _THEME_LIFT); uPaintLiftAmt 0 = off, which is every material until _applyShipSkin says
     uPaintLiftAmt: { value: 0 }, uPaintLiftHue: { value: 0 }, uPaintLiftTo: { value: 0 }, uPaintLiftWin: { value: 0.08 },
     uPaintLiftSat: { value: 0.9 }, uPaintLiftVal: { value: 0.8 }, uPaintLiftShift: { value: 0 },
+    // (v50.81) the paint mask (see _SKIN_MASK); uSkinMaskOn 0 = a livery covers the whole material, as before
+    uSkinMaskOn: { value: 0 }, uSkinMaskHue: { value: -1 }, uSkinMaskWin: { value: 0.12 },
+    uSkinMaskSV: { value: new THREE.Vector4(0.18, 0.40, 0.012, 0.045) }, uSkinMaskDbg: { value: 0 },
+    uSkinMulInv: { value: 1 }, uSkinBaseMetal: { value: 1 }, uSkinBaseRough: { value: 1 }, uSkinEnvK: { value: 1 },
+    uSkinEmFloor: { value: new THREE.Color(0, 0, 0) }, uSkinMaskLod: { value: 0 }, uSkinMaskGrow: { value: 0 },   // (v50.84)
+    uSkinMaskMode: { value: 0 },   // (v50.86)
+    // (v50.82) the secondary skin (see SHIP_TRIMS); uTrimOn 0 = the black plating stays the factory black
+    uTrimOn: { value: 0 }, uTrimCol: { value: new THREE.Color(0x16181c) }, uTrimLum: { value: 0.035 },
+    uTrimShade: { value: new THREE.Vector3(0.6, 0.25, 1.6) }, uTrimRoughK: { value: 2.4 },
   };
   // ⭐⭐ (v49.56) NOT ENUMERABLE - IT HOLDS A TEXTURE, AND three.js JSON-COPIES userData ON EVERY CLONE.
   // Owner: "there's now a hitch when we switch to first person view from third person". Measured on
@@ -73205,9 +73399,37 @@ function _skinPatchHueShader(m) {
       // still sharing ONE program with every skinned hull in the scene.
       .replace('#include <map_fragment>',
         '#include <map_fragment>\n\tvec3 lssRaw = diffuseColor.rgb;'   // (v49.26) the hull's own paint, for the ratio shade
+        + '\n\tfloat lssPaintM = 1.0;'   // (v50.81) the paint mask - 1 everywhere unless a masked livery is on
+        // ⭐ (v50.84) ...classified on a BLURRED copy of the albedo (a mip bias), so a seam, a scratch or a grime fleck
+        // inside a painted panel no longer punches the livery full of holes, then GROWN toward the paint (see _SKIN_MASK)
+        + '\n\tif (uSkinMaskOn > 0.5) {\n\t\tvec3 lssMc = lssRaw;'
+        + '\n#ifdef USE_MAP\n\t\tif (uSkinMaskLod > 0.01) lssMc = diffuse * texture2D(map, vMapUv, uSkinMaskLod).rgb;\n#endif'
+        + '\n\t\tlssPaintM = clamp(lssPaintMask(lssMc * uSkinMulInv) / max(1.0 - uSkinMaskGrow, 0.05), 0.0, 1.0);\n\t}'
         + '\n\tdiffuseColor.rgb = lssSkinHue(diffuseColor.rgb, uSkinHue, uSkinMix, uSkinSat, uSkinLift);'
         + '\n\tif (uSkinPatMix > 0.001) diffuseColor.rgb = lssSkinPattern(diffuseColor.rgb, lssRaw);'
-        + '\n\tif (uPaintLiftAmt > 0.001) diffuseColor.rgb = lssThemeLift(diffuseColor.rgb);')   // (v50.77)
+        + '\n\tif (uSkinMaskOn > 0.5) diffuseColor.rgb = mix(lssRaw * uSkinMulInv, diffuseColor.rgb, lssPaintM);'   // (v50.81)
+        + '\n\tif (uPaintLiftAmt > 0.001) diffuseColor.rgb = lssThemeLift(diffuseColor.rgb);'   // (v50.77)
+        // (v50.82) the SECONDARY skin on the unpainted texels. After the theme lift, so a trim near the paint's hue is
+        // never lifted as if it were paint; the mask's debug view moved below it so it still shows the mask alone.
+        + '\n\tvec3 lssTrimA = vec3(0.0);'
+        + '\n\tif (uTrimOn > 0.5) { lssTrimA = lssTrim(lssRaw * uSkinMulInv); diffuseColor.rgb = mix(lssTrimA, diffuseColor.rgb, lssPaintM); }'
+        + '\n\tif (uSkinMaskDbg > 0.5) diffuseColor.rgb = vec3(lssPaintM);')
+      // (v50.81) the finish a livery sets for the WHOLE material, handed back to the unpainted texels
+      .replace('#include <roughnessmap_fragment>',
+        '#include <roughnessmap_fragment>\n\tif (uSkinMaskOn > 0.5) {\n\t\tfloat lssRf = uSkinBaseRough;'
+        // (v50.82) under a trim the map keeps its DETAIL (its variation about the plating's typical roughness), not its level
+        + '\n#ifdef USE_ROUGHNESSMAP\n\t\tlssRf *= (uTrimOn > 0.5) ? clamp(texelRoughness.g * uTrimRoughK, 0.5, 1.6) : texelRoughness.g;\n#endif'
+        + '\n\t\troughnessFactor = mix(lssRf, roughnessFactor, lssPaintM);\n\t}')
+      .replace('#include <metalnessmap_fragment>',
+        '#include <metalnessmap_fragment>\n\tif (uSkinMaskOn > 0.5) {\n\t\tfloat lssMf = uSkinBaseMetal;'
+        // (v50.82) ...and a trim IS its metal: the factory map's 0.2-0.5 on the black is the black paint's, not chrome's
+        + '\n#ifdef USE_METALNESSMAP\n\t\tif (uTrimOn < 0.5) lssMf *= texelMetalness.b;\n#endif'
+        + '\n\t\tmetalnessFactor = mix(lssMf, metalnessFactor, lssPaintM);\n\t}')
+      .replace('#include <lights_fragment_maps>',
+        '#include <lights_fragment_maps>\n\tif (uSkinMaskOn > 0.5) {\n\t\tfloat lssEK = mix(uSkinEnvK, 1.0, lssPaintM);'
+        + '\n#if defined( RE_IndirectDiffuse )\n\t\tiblIrradiance *= lssEK;\n#endif'
+        + '\n#if defined( RE_IndirectSpecular )\n\t\tradiance *= lssEK;\n#endif'
+        + '\n\t}')
       // (v44.29) Owner: "the water doesn't reflect skins if they are being applied". The mirror pass
       // brightens every hull for the reflection by setting emissive = colour x reflShipLift with the
       // ALBEDO as the emissive map (the lift block in _swBuildHubWater) - an unlit copy of the paint
@@ -73222,9 +73444,17 @@ function _skinPatchHueShader(m) {
       // after; everywhere else the emissive (engine and cabin glows, the team tint) is the ship's own.
       .replace('#include <emissivemap_fragment>',
         '#include <emissivemap_fragment>\n\tif (uSkinReflPass > 0.5) {'
+        + '\n\tvec3 lssEm0 = totalEmissiveRadiance;'   // (v50.81)
         + '\n\ttotalEmissiveRadiance = lssSkinHue(totalEmissiveRadiance, uSkinHue, uSkinMix, uSkinSat, 0.0);'
         + '\n\tif (uSkinPatMix > 0.001) totalEmissiveRadiance = lssSkinPattern(totalEmissiveRadiance, totalEmissiveRadiance);'
+        + '\n\tif (uSkinMaskOn > 0.5) totalEmissiveRadiance = mix(lssEm0, totalEmissiveRadiance, lssPaintM);'   // (v50.81)
         + '\n\tif (uPaintLiftAmt > 0.001) totalEmissiveRadiance = lssThemeLift(totalEmissiveRadiance);'   // (v50.77) the mirror copy too
+        // (v50.82) ...and the trim, at the pass's own lift: this texel's emissive over its albedo (emissive = colour x L
+        // with the albedo as its map, so the ratio IS the lift), clamped so a texel with its own glow cannot run away
+        + '\n\tif (uTrimOn > 0.5) { float lssLk = clamp(dot(lssEm0, vec3(0.2126, 0.7152, 0.0722)) / max(dot(lssRaw * uSkinMulInv, vec3(0.2126, 0.7152, 0.0722)), 1e-4), 0.0, 4.0);'
+        + ' totalEmissiveRadiance = mix(lssTrimA * lssLk, totalEmissiveRadiance, lssPaintM); }'
+        + '\n\t} else if (uSkinMaskOn > 0.5) {'   // (v50.81) the livery's emissive floor comes back off the black
+        + '\n\ttotalEmissiveRadiance = max(vec3(0.0), totalEmissiveRadiance - uSkinEmFloor * (1.0 - lssPaintM));'
         + '\n\t}');
   };
   const prevKey = m.customProgramCacheKey;
@@ -73430,9 +73660,256 @@ if (typeof window !== 'undefined') window.__themeLift = function (cfg) {
   for (const k in _THEME_LIFT) if (k !== 'on') out[k] = Object.assign({}, _THEME_LIFT[k]);
   return out;
 };
-function _applyShipSkin(root, skinId) {
+// ⭐⭐⭐ (v50.81) THE LIVERY COVERS THE PAINT, NOT THE BLACK. Owner: "let's think of the way the skins should cover the
+// ships... all the ships now have two colors, black and their color... let's make the skins just cover the same spots
+// where the color is, and leave the black as black". Until now a livery recoloured every opaque hull material edge to
+// edge (the v49.26 ratio shade kept the hull's VALUES, but the black plating still took the camo's colours).
+// Now the shader (lssPaintMask, in _SKIN_HUE_PARS) masks it: a texel is PAINT when its hue sits near the hull's own
+// paint hue (measured per albedo texture by _skinTexHue, the theme lift's measurement, so a Ship Lab repaint stays
+// right), it is saturated, and it is not near-black; the livery is mixed back to the factory texel everywhere else.
+// The black keeps more than its colour: the finish a livery sets for the whole material (metalness, roughness,
+// envMapIntensity, the emissive floor) is handed back per texel too, so a CHROMIUM hull does not turn its black
+// plating to chrome. Only `<ship>_hull_game` carries paint; every other hull material (the cockpit interior, the
+// canopy frame) measures as no paint (uSkinMaskHue -1) and stays factory under any livery.
+// The ratio shade (v49.26) now normalises by the PAINT's own typical luminance (_skinTexPaint), not the whole hull's,
+// so the camo sits at its nominal brightness on the panels it covers instead of being keyed to the black.
+// Live: window.__skinMask() reads, __skinMask({ win, sat0, sat1, val0, val1 }) retunes + re-skins every ship on screen,
+// __skinMask({ debug: true }) draws the mask itself (white = livery, black = factory), __skinMask(false) = the old
+// full coverage. win = hue half-window (0..1); sat0..sat1 / val0..val1 = linear HSV ramps a texel must clear.
+// ⭐ (v50.84) lod / grow. Owner, browsing liveries on v50.83: "the primary skins look too broken up... i think the
+// secondary bleeds in too much", then "or the other colors make me realize how bad of a paint job was done
+// originally". Both true. Per texel, every dark seam, scratch and grime fleck inside a painted panel read as BLACK, so
+// the livery came out pinholed with the plating (now the secondary) showing through; and the paint itself sits in
+// scattered patches on these generated atlases, which a livery makes obvious where the factory colours hid it. `lod`
+// classifies on a blurred copy of the albedo (a mip bias: 2 = a 4-texel blur, 3 = 8), which closes the pinholes and
+// drops the speckle; `grow` pushes the soft edge that leaves toward the paint (0 = as classified, 0.5 = anything
+// half paint is paint). Neither can redraw where the paint was put - that is the texture's layout.
+// (v50.85) lod 3.5 / grow 0.7 - what the owner had on screen when they said "this looks much better" (v50.84 shipped
+// 2.5 / 0.5). `lod` is authored against a 2048 atlas and scaled per texture (_skinMaskLod).
+// ⭐⭐ (v50.86) THE GATE IS CHROMA, AND EACH HULL GETS ITS OWN CUTOFF. Owner, PYRO red + a GOLD secondary: "the secondary
+// skin is not changing all the black panels, or only part of some panels... you can see how much black is left over",
+// "the other ships, the same thing as pyro here", "a lot of it is not black, but grey, is maybe why". It was: the
+// v50.81 gate tested saturation in LINEAR HSV, where a dark grey with a faint cast is strongly saturated (sRGB 52/46/44
+// -> 0.26), so PYRO's warm-grey plating was "red paint" (the mask covered 47% of its atlas against ~17% that is red),
+// and v50.85's blur + grow then spread paint into the black at every edge. The gate is now CHROMA - max - min of the
+// sRGB channels, i.e. how colourful the texel LOOKS - so every grey, light or dark, tinted or not, is the secondary's.
+// One global cutoff could not serve all seven: BLASTER's light steel-blue panels (its colour) sit at chroma ~0.1, the
+// warm greys of PYRO / TRACKER / PUNCTURE at up to ~0.06. Each hull's in-window chroma histogram has a clear gap between
+// its plating and its paint, so the cutoff is measured per texture (Otsu, `_skinTexPaint().chromaT`), clamped to
+// chromaMin..chromaMax: measured at 256px PYRO / SYPHON / TRACKER / PUNCTURE 0.16 (clamped), VORTEX 0.10, SLAYER 0.08,
+// BLASTER 0.06. `chroma` overrides it for every hull; `chromaSoft` is the ramp half-width. With a gate that no longer
+// eats the plating, lod / grow come back to 2 / 0.4 (a 4-texel blur still closes scratches inside a painted panel).
+// gate: 'linear' = the v50.81 test (sat0..val1).
+const _SKIN_MASK = { on: true, win: 0.12, sat0: 0.18, sat1: 0.40, val0: 0.012, val1: 0.045, debug: false, lod: 2, grow: 0.4,
+                     gate: 'chroma', chroma: null, chromaSoft: 0.03, chromaMin: 0.05, chromaMax: 0.16 };
+// The gate uniforms for one material: the chroma ramp around this texture's own cutoff, or the linear sat / val ramps.
+function _skinMaskGate(hu, K, P) {
+  if (K.gate === 'linear') { hu.uSkinMaskMode.value = 0; hu.uSkinMaskSV.value.set(K.sat0, K.sat1, K.val0, K.val1); return; }
+  const t = (K.chroma != null) ? +K.chroma : ((P && P.chromaT != null) ? P.chromaT : 0.1);
+  const w = Math.max(0.005, +K.chromaSoft || 0.03);
+  hu.uSkinMaskMode.value = 1;
+  hu.uSkinMaskSV.value.set(Math.max(0, t - w), t + w, 0, 1);
+}
+// The mip bias for one material: K.lod less log2(2048 / its albedo's width), so a smaller texture (the mobile hull set)
+// takes the same blur in UV terms and a livery covers the same panels on every device.
+function _skinMaskLod(m, K) {
+  const im = m && m.map && m.map.image;
+  const w = (im && (im.width || im.naturalWidth)) || 2048;
+  return Math.max(0, (+K.lod || 0) - Math.log2(2048 / w));
+}
+const _skinTexPaintC = new Map();
+// The paint on one albedo texture, as the shader's mask sees it: { hue, lum (log-mean linear luminance of the masked
+// texels), cover (masked share of the texture), blk (v50.82: the same for everything the mask leaves - the black
+// plating a trim covers - atlas padding skipped), chromaT (v50.86: this texture's chroma cutoff, see _SKIN_MASK) }.
+// A texture with no paint reports hue null and is all plating. (v50.86) Read at 128 px: at 64 the downsample already
+// mixes paint into plating and fills the gap the cutoff is found in.
+function _skinTexPaint(tex) {
+  if (!tex || !tex.image) return null;
+  const K = _SKIN_MASK;
+  const key = tex.uuid + '|' + K.win + '|' + K.gate + '|' + K.sat0 + '|' + K.sat1 + '|' + K.val0 + '|' + K.val1
+    + '|' + K.chroma + '|' + K.chromaSoft + '|' + K.chromaMin + '|' + K.chromaMax;
+  if (_skinTexPaintC.has(key)) return _skinTexPaintC.get(key);
+  let out = null;
+  try {
+    const hue = _skinTexHue(tex);
+    const S = 128, cv = document.createElement('canvas'); cv.width = S; cv.height = S;
+    const cx = cv.getContext('2d', { willReadFrequently: true });
+    cx.drawImage(tex.image, 0, 0, S, S);
+    const d = cx.getImageData(0, 0, S, S).data;
+    const lin = (c) => { c /= 255; return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
+    const ss = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / ((b - a) || 1e-6))); return t * t * (3 - 2 * t); };
+    const hueW = (r, g, b) => {
+      if (hue == null) return 0;
+      const h = _lssLinHue(r, g, b); if (h == null) return 0;
+      let dh = h - hue; dh -= Math.floor(dh + 0.5);
+      return 1 - ss(K.win * 0.6, K.win, Math.abs(dh));
+    };
+    // (v50.86) the cutoff: Otsu over the chroma of the texels in the paint's hue window (32 bins of 0.02), clamped
+    let chromaT = null;
+    if (hue != null) {
+      const hist = new Float64Array(32);
+      for (let i = 0; i < d.length; i += 4) {
+        if (Math.max(d[i], d[i + 1], d[i + 2]) < 8) continue;   // atlas padding
+        if (hueW(lin(d[i]), lin(d[i + 1]), lin(d[i + 2])) < 0.5) continue;
+        const ch = (Math.max(d[i], d[i + 1], d[i + 2]) - Math.min(d[i], d[i + 1], d[i + 2])) / 255;
+        hist[Math.min(31, Math.floor(ch / 0.02))] += 1;
+      }
+      let n = 0, sum = 0; for (let i = 0; i < 32; i++) { n += hist[i]; sum += i * hist[i]; }
+      let w0 = 0, s0 = 0, best = -1, bt = 0;
+      for (let t = 1; t < 32; t++) {
+        w0 += hist[t - 1]; s0 += (t - 1) * hist[t - 1];
+        const w1 = n - w0; if (!w0 || !w1) continue;
+        const m0 = s0 / w0, m1 = (sum - s0) / w1, v = w0 * w1 * (m0 - m1) * (m0 - m1);
+        if (v > best) { best = v; bt = t; }
+      }
+      if (best > 0) chromaT = Math.min(K.chromaMax, Math.max(K.chromaMin, bt * 0.02));
+    }
+    const cT = (K.chroma != null) ? +K.chroma : ((chromaT != null) ? chromaT : 0.1), cW = Math.max(0.005, +K.chromaSoft || 0.03);
+    let ws = 0, ls = 0, bs = 0, bl = 0;
+    for (let i = 0; i < d.length; i += 4) {
+      const r = lin(d[i]), g = lin(d[i + 1]), b = lin(d[i + 2]);
+      const mx = Math.max(r, g, b), mn = Math.min(r, g, b), dd = mx - mn;
+      const L = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      let w = 0;
+      if (hue != null && mx > 1e-5 && dd > 1e-6) {
+        const hw = hueW(r, g, b);
+        if (hw > 0) {
+          if (K.gate === 'linear') w = hw * ss(K.sat0, K.sat1, dd / mx) * ss(K.val0, K.val1, mx);
+          else w = hw * ss(cT - cW, cT + cW, (Math.max(d[i], d[i + 1], d[i + 2]) - Math.min(d[i], d[i + 1], d[i + 2])) / 255);
+        }
+      }
+      if (w > 0.001) { ws += w; ls += w * Math.log(Math.max(1e-4, L)); }
+      if (w < 0.999 && L > 0.001) { bs += 1 - w; bl += (1 - w) * Math.log(L); }   // (v50.82) the plating
+    }
+    out = { hue: hue, lum: ws > 0 ? Math.exp(ls / ws) : null, cover: ws / (S * S), blk: bs > 0 ? Math.exp(bl / bs) : null, chromaT: chromaT };
+  } catch (_) { out = null; }
+  _skinTexPaintC.set(key, out);
+  return out;
+}
+function _skinMaskSet(m, hu, sk, b, pid) {
+  const K = _SKIN_MASK;
+  if (!K.on) { hu.uSkinMaskOn.value = 0; hu.uSkinMaskDbg.value = 0; return; }
+  const isHull = /_hull_game$/i.test((m && m.name) || '');
+  const P = (isHull && m.map) ? _skinTexPaint(m.map) : null;
+  const mul = (sk.mul != null && sk.mul > 0) ? sk.mul : 1;
+  hu.uSkinMaskOn.value = 1;
+  hu.uSkinMaskHue.value = (P && P.hue != null) ? P.hue : -1;
+  hu.uSkinMaskWin.value = K.win;
+  _skinMaskGate(hu, K, P);   // (v50.86)
+  hu.uSkinMaskDbg.value = K.debug ? 1 : 0;
+  hu.uSkinMaskLod.value = _skinMaskLod(m, K); hu.uSkinMaskGrow.value = Math.min(0.95, Math.max(0, +K.grow || 0));   // (v50.84)
+  hu.uSkinMulInv.value = 1 / mul;
+  hu.uSkinBaseMetal.value = (b.metalness != null) ? b.metalness : 1;
+  hu.uSkinBaseRough.value = (b.roughness != null) ? b.roughness : 1;
+  hu.uSkinEnvK.value = (sk.envMapIntensity > 0 && b.envMapIntensity != null) ? Math.min(20, b.envMapIntensity / sk.envMapIntensity) : 1;
+  hu.uSkinEmFloor.value.setHex((sk.emissive != null) ? sk.emissive : 0);
+  // the ratio shade keyed to the paint it now covers (see the note above)
+  if (pid && P && P.lum) {
+    const c = b.color || m.color;
+    const cl = c ? (0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b) : 1;
+    hu.uSkinHullLum.value = P.lum * cl * mul;
+  }
+}
+// (v50.84) window.__skinTry('bone', 'chrome') dresses the ship-select hero ONLY - nothing stored, nothing announced -
+// for side-by-side looks; any picker re-render puts the stored pair back. __skinTry() reports what the hero wears.
+if (typeof window !== 'undefined') window.__skinTry = function (skinId, trim) {
+  const s = (typeof _shipPreview3D !== 'undefined') ? _shipPreview3D : null;
+  if (!s || !s.model) return 'no hero on the stage';
+  if (skinId !== undefined) _applyShipSkin(s.model, skinId || _getStoredSkinId(), (trim !== undefined) ? trim : _getStoredTrim());
+  const ud = s.model.userData || {};
+  return { ship: s.lastKey || null, skin: ud.skinId || null, trim: _trimWire(ud.trim) };
+};
+if (typeof window !== 'undefined') window.__skinMask = function (cfg) {
+  if (cfg === false || cfg === true) _SKIN_MASK.on = cfg;
+  else if (cfg && typeof cfg === 'object') Object.assign(_SKIN_MASK, cfg);
+  _skinTexPaintC.clear();
+  try {
+    const cur = _getStoredSkinId();
+    if (typeof setShipPreviewSkin === 'function') setShipPreviewSkin(cur);
+    if (typeof scene !== 'undefined' && scene && scene.traverse) {
+      scene.traverse(o => {
+        if (o && o.userData && o.userData.isModelShip && o.userData.skinId) { try { _applyShipSkin(o, o.userData.skinId); } catch (_) {} }
+      });
+    }
+    if (typeof player !== 'undefined' && player && player.mesh) _applyShipSkin(player.mesh, cur);
+  } catch (_) {}
+  // (v50.86) what each hull on screen measured: its paint hue (deg), chroma cutoff, painted share of the atlas
+  const per = {};
+  try {
+    _skinTexPaintC.forEach((v, k) => { if (v) per[k.split('|')[0].slice(0, 8)] = { hue: v.hue != null ? Math.round(v.hue * 360) : null, chromaT: v.chromaT, cover: +(v.cover || 0).toFixed(3) }; });
+  } catch (_) {}
+  return Object.assign({ textures: per }, _SKIN_MASK);
+};
+// (v50.82) The secondary skin on one material - see SHIP_TRIMS. Runs after the livery branch of _applyShipSkin, so the
+// material's own envMapIntensity is final. A trim rides the paint mask, so under FACTORY it switches the mask on itself
+// (with nothing to hand back: FACTORY's finish IS the material's); BLACK leaves every uniform as the livery set it.
+function _trimSet(m, hu, sk, b, tr) {
+  hu.uTrimOn.value = 0;
+  const T = SHIP_TRIMS[tr.id];
+  if (!T || T.restore || !_SKIN_MASK.on) return;
+  if (!/_hull_game$/i.test((m && m.name) || '')) return;   // the outer hull only (see the table note)
+  const P = m.map ? _skinTexPaint(m.map) : null;
+  if (sk.restore) {
+    const K = _SKIN_MASK;
+    hu.uSkinMaskOn.value = 1;
+    hu.uSkinMaskHue.value = (P && P.hue != null) ? P.hue : -1;
+    hu.uSkinMaskWin.value = K.win;
+    _skinMaskGate(hu, K, P);   // (v50.86)
+    hu.uSkinMaskDbg.value = K.debug ? 1 : 0;
+    hu.uSkinMaskLod.value = _skinMaskLod(m, K); hu.uSkinMaskGrow.value = Math.min(0.95, Math.max(0, +K.grow || 0));   // (v50.84)
+    hu.uSkinMulInv.value = 1;
+    hu.uSkinEmFloor.value.setRGB(0, 0, 0);
+  }
+  if (!(hu.uSkinMaskOn.value > 0.5)) return;
+  if (tr.id === 'color') {
+    const hsl = T.hsl || [0.75, 0.42];
+    hu.uTrimCol.value.setHSL(tr.hue / 360, hsl[0], hsl[1], THREE.SRGBColorSpace);
+  } else hu.uTrimCol.value.setHex(T.col);   // sRGB hex -> the linear working space, as diffuseColor is
+  const c = b.color || m.color;
+  const cl = c ? (0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b) : 1;
+  hu.uTrimLum.value = Math.max(1e-3, ((P && P.blk) ? P.blk : 0.035) * cl);
+  hu.uTrimShade.value.set(_TRIM_SHADE.keep, _TRIM_SHADE.floor, _TRIM_SHADE.cap);
+  hu.uTrimRoughK.value = 1 / Math.max(0.05, _TRIM_SHADE.roughRef || 0.42);
+  hu.uSkinBaseMetal.value = T.metal;
+  hu.uSkinBaseRough.value = T.rough;
+  hu.uSkinEnvK.value = Math.min(20, T.env / Math.max(0.01, m.envMapIntensity || 0));
+  hu.uTrimOn.value = 1;
+}
+if (typeof window !== 'undefined') window.__trim = function (cfg) {
+  const wear = (typeof cfg === 'string');
+  if (wear) _setStoredTrim(cfg);
+  else if (cfg && typeof cfg === 'object') {
+    for (const k in cfg) {
+      if (k === 'shade' && cfg.shade && typeof cfg.shade === 'object') Object.assign(_TRIM_SHADE, cfg.shade);
+      else if (SHIP_TRIMS[k] && cfg[k] && typeof cfg[k] === 'object') Object.assign(SHIP_TRIMS[k], cfg[k]);
+    }
+  }
+  const cur = _getStoredTrim();
+  try {
+    if (typeof _renderTrimPicker === 'function') _renderTrimPicker();
+    if (typeof setShipPreviewSkin === 'function') setShipPreviewSkin(_getStoredSkinId());
+    const pm = (typeof player !== 'undefined' && player) ? player.mesh : null;
+    if (pm) {
+      if (wear) { player.trim = cur; _applyShipSkin(pm, player.skinId, cur); try { _lssAnnounceLoadout(); } catch (_) {} }
+      else _applyShipSkin(pm, player.skinId);
+    }
+    // every other trimmed hull on screen re-asserts its OWN trim against the retuned table
+    if (typeof scene !== 'undefined' && scene && scene.traverse) {
+      scene.traverse((o) => {
+        const ud = o && o.userData;
+        if (!ud || !ud.isModelShip || o === pm || !ud.trim || ud.trim.id === SHIP_TRIM_DEFAULT) return;
+        try { _applyShipSkin(o, ud.skinId, ud.trim); } catch (_) {}
+      });
+    }
+  } catch (_) {}
+  return { stored: _trimWire(cur), shade: Object.assign({}, _TRIM_SHADE), table: JSON.parse(JSON.stringify(SHIP_TRIMS)) };
+};
+function _applyShipSkin(root, skinId, trim) {
   if (!root) return null;
   const sk = _shipSkinDef(skinId);
+  // (v50.82) the secondary skin: the one passed, else whatever this hull already wears - so every caller that re-asserts
+  // only a livery (__skinTune, __skinMask, the K key, a picker re-render) keeps it - else BLACK
+  const tr = _trimNorm((trim !== undefined) ? trim : (root.userData ? root.userData.trim : null));
   let mats;
   try { mats = _shipSkinHullMats(root); } catch (_) { return null; }
   // (v36.37) Ship space for the pattern layer. Runs BEFORE the per-material
@@ -73466,6 +73943,7 @@ function _applyShipSkin(root, skinId) {
       hu.uSkinHue.value = 0; hu.uSkinMix.value = 0; hu.uSkinSat.value = 1; hu.uSkinLift.value = 0;
       hu._cyc = null; _skinCycle.delete(hu);   // (v40.04) FACTORY stops the cycle with everything else
       try { _themeLiftSet(m, hu); } catch (_) { hu.uPaintLiftAmt.value = 0; }   // (v50.77) the class colour, brighter
+      hu.uSkinMaskOn.value = 0; hu.uSkinMaskDbg.value = 0;   // (v50.81) FACTORY is the paint itself
       // (v36.37) FACTORY is an EXACT passthrough, so the pattern branch has to
       // be switched off by its own mix, not merely by leaving stale colours.
       hu.uSkinPat.value = 0; hu.uSkinPatMix.value = 0;
@@ -73522,6 +74000,7 @@ function _applyShipSkin(root, skinId) {
           hu.uSkinPatC0.value.setHex(_mc); hu.uSkinPatC1.value.setHex(_mc); hu.uSkinPatC2.value.setHex(_mc);
         } else hu.uSkinPatTex.value = _skinDefaultTex();
       }
+      try { _skinMaskSet(m, hu, sk, b, pid); } catch (_) { hu.uSkinMaskOn.value = 0; }   // (v50.81) the paint only
       if (m.color) {
         m.color.copy(b.color);
         if (sk.mul != null && sk.mul !== 1) m.color.multiplyScalar(sk.mul);
@@ -73538,6 +74017,7 @@ function _applyShipSkin(root, skinId) {
       m.roughness = sk.roughness;
       m.envMapIntensity = sk.envMapIntensity;
     }
+    try { _trimSet(m, hu, sk, b, tr); } catch (_) { hu.uTrimOn.value = 0; }   // (v50.82) the black plating's finish
     // ⚠ _dimHullMat (doomed-state dimming) latches _baseHullColor /
     // _baseEmissiveI on its FIRST call and thereafter writes
     // base*dim every frame — so a skin applied after it latched would be
@@ -73550,6 +74030,7 @@ function _applyShipSkin(root, skinId) {
   }
   if (!root.userData) root.userData = {};
   root.userData.skinId = sk.id;
+  root.userData.trim = tr;   // (v50.82)
   return sk;
 }
 
@@ -73585,6 +74066,8 @@ if (typeof window !== 'undefined') window.__skinProbe = function (opt) {
     };
     out.stored = _getStoredSkinId();
     out.playerSkinId = (typeof player !== 'undefined' && player) ? player.skinId : null;
+    out.storedTrim = _trimWire(_getStoredTrim());   // (v50.82)
+    out.playerTrim = (typeof player !== 'undefined' && player && player.mesh && player.mesh.userData) ? _trimWire(player.mesh.userData.trim) : null;
     out.previewKey = (_shipPreview3D && _shipPreview3D.lastKey) || null;
     out.preview = dump(_shipPreview3D && _shipPreview3D.model);
     out.playerShip = dump((typeof player !== 'undefined' && player) ? player.mesh : null);
@@ -73644,7 +74127,7 @@ function _engineOrbPos(node, ox, group, out) {
 // not ask for two tones; v50.12 built them, v50.13 cleaned the seam, v50.14 moved it per pixel, and the owner's
 // answer was "the line is back, with the blue on the lower half of the screen". The real cause is in
 // _lssApplyShipRig's cockpit glass note (v50.15).
-function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId) {
+function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId, trim) {
   const group = new THREE.Group();
   const proto = shipModelCache.loaded[loadoutKey];
   const teamCol = new THREE.Color(teamColor);
@@ -73834,7 +74317,9 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId) {
   group.add(model);
   group.userData.hullMats = hullMats;
   // (v38.97) pool identity for bots: same hull, team tint and skin -> interchangeable group.
-  group.userData._poolKey = loadoutKey + '|' + teamColor + '|' + (skinId || '');
+  // (v50.82) ...and secondary skin: a trimmed hull is never interchangeable with a bare one
+  group.userData._poolKey = loadoutKey + '|' + teamColor + '|' + (skinId || '')
+    + ((trim && _trimWire(trim) !== SHIP_TRIM_DEFAULT) ? '|' + _trimWire(trim) : '');
   // (v32.21) Stash the GLB weapon-muzzle marker nodes (gun1, gun2, ...) so bot
   // + peer gunfire can originate at the real barrels (see shipMuzzleWorld).
   // They are empty nodes inside `model`, so they ride the ship transform.
@@ -74032,7 +74517,7 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId) {
   // helper prefers that list) and so nothing built after it can re-write the
   // hull params. FACTORY restores the exact values set above, so an unskinned
   // ship is byte-identical to pre-v36.31.
-  try { _applyShipSkin(group, skinId); } catch (_) {}
+  try { _applyShipSkin(group, skinId, trim); } catch (_) {}   // (v50.82) + the secondary skin
   return group;
 }
 
@@ -74180,7 +74665,7 @@ function swapToModelMeshWhenReady(owner, teamColor) {
     // (v36.31) Carry the owner's livery across the GLB swap-in. This is the
     // path a cold-start player/peer actually takes (placeholder -> real model),
     // so without it the skin would only ever appear on warm rebuilds.
-    owner.mesh = createShipMesh(owner.chassis, capturedTeam, capturedKey, owner.skinId);
+    owner.mesh = createShipMesh(owner.chassis, capturedTeam, capturedKey, owner.skinId, owner.trim);   // (v50.82) + trim
     owner.mesh.position.copy(pos);
     owner.mesh.quaternion.copy(quat);
     owner.mesh.visible = visible;
@@ -74192,7 +74677,8 @@ function swapToModelMeshWhenReady(owner, teamColor) {
 // (v36.31) `skinId` is optional everywhere: omitted / unknown / stale ids all
 // resolve to FACTORY inside _shipSkinDef, so no call site can throw and bots,
 // hub traffic and the warmup ghosts keep the stock hull by simply not passing one.
-function createShipMesh(chassisData, teamColor, loadoutKey, skinId) {
+// (v50.82) `trim` (the secondary skin, any _trimNorm form) is optional the same way: omitted = BLACK.
+function createShipMesh(chassisData, teamColor, loadoutKey, skinId, trim) {
   // GLB-only ship build path. The procedural fallback was
   // removed (~16KB) ; every playable ship has a GLB in SHIP_MODELS, so the
   // fallback only ever ran during cold-start while GLBs were still
@@ -74202,7 +74688,7 @@ function createShipMesh(chassisData, teamColor, loadoutKey, skinId) {
   // fixing in the catalog ; we log it and still spawn invisible so the
   // game keeps running.
   if (loadoutKey && shipModelCache.loaded[loadoutKey]) {
-    return buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId);
+    return buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId, trim);
   }
   const haveSpec = !!(loadoutKey && typeof SHIP_MODELS !== 'undefined' && SHIP_MODELS[loadoutKey]);
   if (!haveSpec) {
@@ -103795,6 +104281,7 @@ function _lssAnnounceLoadout() {
       team: player.team,
       peerId: net.myPeerId,
       skinId: player.skinId || SHIP_SKIN_DEFAULT,
+      trim: _trimWire(player.trim),   // (v50.82) the secondary skin ('chrome', 'color:200'); an old client ignores it
       // (v43.13) MATCH SPEED RIDES THE LOADOUT. The standalone speed_mode event works once a
       // match is live, but in the LOBBY it did not cross - measured with two clients both
       // showing PEER: the clicker flipped, the other sat at OFF. Rather than chase that
@@ -104114,7 +104601,8 @@ function commitLoadout(key) {
   // a between-rounds ship swap and the campaign D-pad hot-swap take. Set BEFORE
   // the build so swapToModelMeshWhenReady's cold-start upgrade sees it too.
   player.skinId = _getStoredSkinId();
-  player.mesh = createShipMesh(ch, 0xff4444, key, player.skinId);
+  player.trim = _getStoredTrim();   // (v50.82) the secondary skin, same contract
+  player.mesh = createShipMesh(ch, 0xff4444, key, player.skinId, player.trim);
   player.mesh.visible = false;
   scene.add(player.mesh);
   swapToModelMeshWhenReady(player, 0xff4444);
@@ -104345,6 +104833,7 @@ function commitLoadout(key) {
       // so peers build our ship in the right colors on the first try instead of
       // popping from factory to skinned. An old build simply ignores the field.
       skinId: player.skinId || SHIP_SKIN_DEFAULT,
+      trim: _trimWire(player.trim),   // (v50.82) the secondary skin ('chrome', 'color:200'); an old client ignores it
       // (v43.13) MATCH SPEED RIDES THE LOADOUT. The standalone speed_mode event works once a
       // match is live, but in the LOBBY it did not cross - measured with two clients both
       // showing PEER: the clicker flipped, the other sat at OFF. Rather than chase that
@@ -126993,7 +127482,54 @@ function _renderSkinPicker() {
   // reason other than a click (ship change, re-entering ship select).
   // (v49.57) ...unless a locked livery is being tried on in the buy bar - a catalog refresh landing
   // mid-try-on must not snap the hero back to the equipped skin.
+  try { _renderTrimPicker(); } catch (_) {}   // (v50.82) the SECONDARY row under it
   try { setShipPreviewSkin((_lssBuyFocus && SHIP_SKINS[_lssBuyFocus]) ? _lssBuyFocus : curId); } catch (_) {}
+}
+// ⭐ (v50.82) THE SECONDARY ROW - see SHIP_TRIMS. The same cards in the same panel, one rail under the liveries; the
+// hue slider shows only under COLOR. Every change is uniforms on the hero (setShipPreviewSkin reads the stored trim),
+// so a slider drag recolours the rotating hull live with no rebuild. As with a livery picked here, the hull you fly
+// takes it at CONFIRM or the next launch (commitLoadout / _lssWearStoredSkin), and every peer with it.
+function _renderTrimPicker() {
+  const grid = document.getElementById('trim-grid');
+  const hueEl = document.getElementById('trim-hue');
+  const desc = document.getElementById('skin-desc');
+  if (!grid) return;
+  const cur = _getStoredTrim();
+  const hero = () => { try { setShipPreviewSkin((_lssBuyFocus && SHIP_SKINS[_lssBuyFocus]) ? _lssBuyFocus : _getStoredSkinId()); } catch (_) {} };
+  grid.innerHTML = '';
+  for (const id of Object.keys(SHIP_TRIMS)) {
+    const T = SHIP_TRIMS[id];
+    const card = document.createElement('div');
+    card.className = 'perk-card skin-card trim-card' + (id === cur.id ? ' selected' : '');
+    card.dataset.trimId = id;
+    card.title = T.name + ' — ' + T.desc;
+    card.innerHTML = '<span class="skin-sw" style="background:' + _trimSwatch(id, cur.hue) + ';"></span>';
+    card.addEventListener('click', (e) => {
+      e.stopPropagation();   // ⚠ load-bearing, as on the livery cards: the re-render detaches the clicked card
+      _setStoredTrim({ id: id, hue: _getStoredTrim().hue });
+      _renderTrimPicker();
+      hero();
+    });
+    card.addEventListener('mouseenter', () => { if (desc) desc.textContent = T.name + ' — ' + T.desc; });
+    card.addEventListener('mouseleave', () => {
+      const c = SHIP_SKINS[_getStoredSkinId()];
+      if (desc && c) desc.textContent = c.name + ' — ' + c.desc;
+    });
+    grid.appendChild(card);
+  }
+  if (!hueEl) return;
+  hueEl.classList.toggle('on', cur.id === 'color');
+  if (+hueEl.value !== cur.hue) hueEl.value = String(cur.hue);
+  if (hueEl._lssWired) return;
+  hueEl._lssWired = true;
+  hueEl.addEventListener('click', (e) => e.stopPropagation());
+  // A drag writes the store and the hero on every step (uniform writes, no re-render), and repaints COLOR's swatch.
+  hueEl.addEventListener('input', () => {
+    const t = _setStoredTrim({ id: 'color', hue: +hueEl.value });
+    const sw = document.querySelector('#trim-grid .trim-card[data-trim-id="color"] .skin-sw');
+    if (sw) sw.style.background = _trimSwatch('color', t.hue);
+    hero();
+  });
 }
 
 // Legacy entry point: anywhere still calling selectLoadout(key) jumps straight to
@@ -130797,6 +131333,38 @@ function _lssNextSkin(dir) {
   } catch (_) { return null; }
 }
 if (typeof window !== 'undefined') window.__nextSkin = _lssNextSkin;
+// ⭐ (v50.82) THE NEXT-SECONDARY KEY. Owner, the moment SECONDARY landed: "hot key for swapping the secondary skin...".
+// Default J (beside K's livery key; L is the campaign quick-equip hold), rebindable under Settings > Keyboard
+// (KB_ACTION_LABELS.trimNext). It walks SHIP_TRIMS in the picker's order and acts in the same two places as K:
+//   - SHIP SELECT: exactly a card click (store, repaint the SECONDARY row, re-skin the hero live).
+//   - IN FLIGHT, any mode: re-dress your own hull in place and ANNOUNCE it. A trim-only change re-skins a peer's copy
+//     in place too (updateNetworkPlayer), so nothing is rebuilt anywhere.
+// COLOR keeps the hue the slider last left. ⚠ NO BANNER, as with K (the v48.10/48.11 callout rule): the hull shows it.
+function _lssNextTrim(dir) {
+  try {
+    const ids = Object.keys(SHIP_TRIMS);
+    const cur = _getStoredTrim();
+    let i = ids.indexOf(cur.id); if (i < 0) i = 0;
+    const next = ids[((i + ((dir | 0) || 1)) % ids.length + ids.length) % ids.length];
+    const ss = document.getElementById('ship-select');
+    if (ss && ss.classList.contains('active')) {
+      _setStoredTrim({ id: next, hue: cur.hue });
+      try { _renderTrimPicker(); } catch (_) {}
+      try { setShipPreviewSkin((_lssBuyFocus && SHIP_SKINS[_lssBuyFocus]) ? _lssBuyFocus : _getStoredSkinId()); } catch (_) {}
+      try { const d = document.getElementById('skin-desc'), T = SHIP_TRIMS[next]; if (d && T) d.textContent = T.name + ' — ' + T.desc; } catch (_) {}
+      return next;
+    }
+    if (game.state !== 'playing' || typeof player === 'undefined' || !player || !player.mesh || player.shipState === 'dead') return null;
+    const _now = (typeof game.time === 'number') ? game.time : 0;
+    if (_now - (player._lastTrimSwap || -9) < 0.12) return null;   // a held key auto-repeats; one step per press
+    player._lastTrimSwap = _now;
+    const t = _setStoredTrim({ id: next, hue: cur.hue });
+    try { _applyShipSkin(player.mesh, player.skinId, t); } catch (_) {}
+    try { _lssAnnounceLoadout(); } catch (_) {}
+    return next;
+  } catch (_) { return null; }
+}
+if (typeof window !== 'undefined') window.__nextTrim = _lssNextTrim;
 function _lssDispatchBound(k, down) {
   const kb = input.kbBindings;
   if (!kb || !k) return;
@@ -130813,6 +131381,7 @@ function _lssDispatchBound(k, down) {
     if (k === (kb.shipNext || ']')) { try { cycleHubShip(1); } catch (_) {} }
     if (k === ((kb.hideHud != null) ? kb.hideHud : 'h')) { try { _lssToggleNoHud(); } catch (_) {} }   // (v49.09)
     if (k === ((kb.skinNext != null) ? kb.skinNext : 'k')) { try { _lssNextSkin(1); } catch (_) {} }   // (v49.52)
+    if (k === ((kb.trimNext != null) ? kb.trimNext : 'j')) { try { _lssNextTrim(1); } catch (_) {} }   // (v50.82)
   } else {
     if (k === kb.ability0) abilityInputRelease(0);
     if (k === kb.ability1) abilityInputRelease(1);
@@ -131241,6 +131810,7 @@ function _howtoRender(ov) {
     rows.push(['HIDE HUD', tag('hideHud')]);   // (v49.09)
     rows.push(['CYCLE SHIP', tag('shipPrev') + ' / ' + tag('shipNext')]);
     rows.push(['NEXT SKIN', tag('skinNext')]);   // (v49.52)
+    rows.push(['NEXT SECONDARY', tag('trimNext')]);   // (v50.82)
     rows.push(['SCOREBOARD', tag('scoreboard') + ' (HOLD)']);
     rows.push(['SETTINGS', tag('menu')]);
   }
@@ -132723,6 +133293,7 @@ const KB_ACTION_LABELS = {
   menu:       'Menu / Settings',
   hideHud:    'Hide HUD / Crosshair / Text (toggle)',   // (v49.09)
   skinNext:   'Next Skin (livery)',                       // (v49.52)
+  trimNext:   'Next Secondary Skin (trim)',               // (v50.82)
 };
 const KB_DEFAULTS = {
   fire: 'mouse0',
@@ -132734,6 +133305,7 @@ const KB_DEFAULTS = {
   scoreboard: 'tab', menu: 'escape',
   hideHud: 'h',   // (v49.09)
   skinNext: 'k',  // (v49.52) see _lssNextSkin - K is otherwise only the replay studio's play/pause, and the studio swallows keys
+  trimNext: 'j',  // (v50.82) see _lssNextTrim - J was unbound (L is the campaign quick-equip hold)
 };
 
 let settingsOpen = false;
