@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "50.92";
+const LSS_BUILD = "50.93";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -46254,6 +46254,107 @@ const _ENGINE_ORB_K = { PUNCTURE: 0.35, SLAYER: 0.35, TRACKER: 0.5, BLASTER: 0.5
 if (typeof window !== 'undefined') window.__engineOrbK = _ENGINE_ORB_K;
 const _ENGINE_ORB_X = {};
 if (typeof window !== 'undefined') window.__engineOrbX = _ENGINE_ORB_X;
+const _ENGINE_FLAME = { on: true, palette: 'class', len: 9, width: 1.15, idle: 0.28, orb: 0.55, bright: 2.0, speedRef: 0.6 };
+if (typeof window !== 'undefined') window.__engineFlame = _ENGINE_FLAME;
+const _engineFlameKnobs = () => { const K = (typeof window !== 'undefined' && window.__engineFlame) || _ENGINE_FLAME; return (K && typeof K === 'object') ? K : { on: !!K }; };
+let _engineFlameGeo = null;
+function _engineFlameGeometry() {
+  if (_engineFlameGeo) return _engineFlameGeo;
+  const pts = [];
+  for (let i = 0; i <= 16; i++) { const y = i / 16, r = Math.pow(Math.max(0, 1 - y), 0.75) * (1 + 0.45 * y * (1 - y)); pts.push(new THREE.Vector2(Math.max(r, 0.0001), y)); }
+  _engineFlameGeo = new THREE.LatheGeometry(pts, 20);
+  return _engineFlameGeo;
+}
+const _ENGINE_FLAME_VS = `
+varying vec2 vUv; varying float vFacing; varying float vSeed;
+void main() {
+  vUv = uv;
+  vec4 mv = modelViewMatrix * vec4(position, 1.0);
+  vec3 n = normalize(normalMatrix * normal);
+  vFacing = abs(dot(n, normalize(-mv.xyz)));
+  vSeed = fract(dot(modelMatrix[3].xyz, vec3(0.0137, 0.0711, 0.0373)));
+  gl_Position = projectionMatrix * mv;
+}`;
+const _ENGINE_FLAME_FS = `
+uniform float uTime, uPower, uBright; uniform vec3 uColor, uHot;
+varying vec2 vUv; varying float vFacing; varying float vSeed;
+float h2(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float vn(vec2 p) { vec2 i = floor(p), f = fract(p), u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(h2(i), h2(i + vec2(1.0, 0.0)), u.x), mix(h2(i + vec2(0.0, 1.0)), h2(i + vec2(1.0, 1.0)), u.x), u.y); }
+void main() {
+  float a = vUv.y;
+  vec2 q = vec2(vUv.x * 8.0 + vSeed * 13.0, a * 4.0 - uTime * (4.0 + 7.0 * uPower));
+  float n = vn(q) * 0.6 + vn(q * 2.3 + 7.1) * 0.4;
+  float soft = smoothstep(0.0, 0.65, vFacing);
+  float tip = 1.0 - smoothstep(0.2, 1.0, a + (n - 0.5) * 0.55);
+  float core = pow(vFacing, 3.0) * (1.0 - a) * (1.0 - a);
+  vec3 col = mix(uColor, uHot, clamp(core * 1.8 + (1.0 - a) * 0.2, 0.0, 1.0));
+  float al = soft * tip * (0.55 + 0.45 * n) * (0.45 + 0.55 * uPower);
+  gl_FragColor = vec4(col * uBright, al);
+}`;
+function _lssAddEngineFlames(group, loadoutKey) {
+  const glows = (group.userData.engineGlows || []).filter((g) => g && g.userData && g.userData.orbKey);
+  if (!glows.length) return;
+  const cls = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS[loadoutKey] != null) ? LSS.CLASS_COLORS[loadoutKey] : 0x66eeff;
+  const mat = new THREE.ShaderMaterial({
+    uniforms: { uTime: { value: 0 }, uPower: { value: 0 }, uBright: { value: _ENGINE_FLAME.bright }, uColor: { value: new THREE.Color(cls) }, uHot: { value: new THREE.Color(cls).lerp(new THREE.Color(0xffffff), 0.75) } },
+    vertexShader: _ENGINE_FLAME_VS, fragmentShader: _ENGINE_FLAME_FS,
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+  });
+  mat.userData._flameClass = cls; mat.userData._flamePal = null;
+  const geo = _engineFlameGeometry(), flames = [];
+  for (const g of glows) {
+    const f = new THREE.Mesh(geo, mat);
+    const aft = g.position.z < 0 ? -1 : 1;
+    f.rotation.x = aft * Math.PI / 2;   // the lathe's +Y onto +-Z
+    f.position.copy(g.position);
+    f.renderOrder = g.renderOrder || 0; f.castShadow = false; f.receiveShadow = false; f.frustumCulled = false;
+    f.userData.isPlume = true; f.userData.isEngineFlame = true;
+    f.userData.flameR0 = (g.geometry && g.geometry.parameters && g.geometry.parameters.radius) || 2;
+    f.userData.flameAft = aft; f.userData.flameGlow = g;
+    const K = _engineFlameKnobs(); f.visible = K.on !== false;
+    f.scale.set(f.userData.flameR0 * (K.width || 1), (K.len || 9) * f.userData.flameR0 * (K.idle != null ? K.idle : 0.28), f.userData.flameR0 * (K.width || 1));
+    group.add(f); flames.push(f);
+  }
+  group.userData.engineFlames = flames; group.userData.engineFlameMat = mat;   // ticked by _lssEngineFlameTick, not LayeredFX
+}
+const _flV = new THREE.Vector3(), _flN = new THREE.Vector3();
+function _lssEngineFlameTick(mesh, maxSpeed, dt, time) {
+  const ud = mesh.userData, fl = ud.engineFlames, mat = ud.engineFlameMat;
+  if (!fl || !fl.length || !mat) return;
+  const K = _engineFlameKnobs();
+  const on = K.on !== false && !(typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato());
+  for (let i = 0; i < fl.length; i++) fl[i].visible = on;
+  if (!on) { ud._flPrev = null; return; }
+  dt = (dt > 0 && dt < 0.5) ? dt : 1 / 60;
+  let fwd = 0;
+  if (ud._flPrev) {
+    _flV.subVectors(mesh.position, ud._flPrev).multiplyScalar(1 / dt);
+    _flN.set(0, 0, -fl[0].userData.flameAft).applyQuaternion(mesh.quaternion);
+    fwd = _flV.dot(_flN);
+    if (!isFinite(fwd) || Math.abs(fwd) > (maxSpeed || 1) * 4) fwd = 0;   // a respawn / teleport, not thrust
+  } else ud._flPrev = new THREE.Vector3();
+  ud._flPrev.copy(mesh.position);
+  const ref = Math.max(1e-3, (maxSpeed || 1) * (K.speedRef || 0.6));
+  const want = Math.max(0, Math.min(1, fwd / ref));
+  const pw = (ud._flPow || 0) + (want - (ud._flPow || 0)) * (1 - Math.exp(-dt * 6));
+  ud._flPow = pw;
+  const u = mat.uniforms;
+  u.uTime.value = time; u.uPower.value = pw; u.uBright.value = (K.bright != null) ? +K.bright : 2.0;
+  if (mat.userData._flamePal !== K.palette) {   // the palette, once per change
+    mat.userData._flamePal = K.palette;
+    if (K.palette === 'fire') { u.uColor.value.set(0xff5a14); u.uHot.value.set(0xffe9a8); }
+    else { u.uColor.value.set(mat.userData._flameClass); u.uHot.value.set(mat.userData._flameClass).lerp(_shipAnimWhiteColor, 0.75); }
+  }
+  const idle = (K.idle != null) ? +K.idle : 0.28, len = (K.len != null) ? +K.len : 9, wd = (K.width != null) ? +K.width : 1.15;
+  for (let i = 0; i < fl.length; i++) {
+    const f = fl[i], g = f.userData.flameGlow, R = f.userData.flameR0 * ((g && g.userData && g.userData.orbKey && g.userData.orbK0) ? (((_ENGINE_ORB_K[g.userData.orbKey] != null) ? +_ENGINE_ORB_K[g.userData.orbKey] : 1) / g.userData.orbK0) : 1);
+    const flick = 1 + Math.sin(time * 31 + i * 1.7) * 0.06 + Math.sin(time * 47 + i * 0.9) * 0.04;
+    const L = len * R * (idle + (1 - idle) * pw) * flick, W = R * wd * (0.85 + 0.25 * pw);
+    f.scale.set(W, L, W);
+    if (g) f.position.copy(g.position);   // the __engineOrbX knob moves the orb; the flame follows it
+  }
+}
 function _engineOrbPos(node, ox, group, out) {
   out.copy(node.position);
   if (typeof ox === 'number' && isFinite(ox)) out.x = ox;
@@ -46498,6 +46599,7 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId, trim) {
   const barrelMeshes = []; 
   const prevUD = group.userData || {};
   group.userData = Object.assign(prevUD, { engineMesh, shieldMesh: shield, engineGlows, enginePlumes, barrelMeshes, panelGlowMat, engineGlowMat, isModelShip: true });
+  try { _lssAddEngineFlames(group, loadoutKey); } catch (_) {}   // (v50.93) after the lists above, so no plume loop drives them
   _addShipRunningLight(group, chassisData.hullWidth, chassisData.hullHeight, chassisData.hullLength);
   try { _applyShipSkin(group, skinId, trim); } catch (_) {}   // (v50.82) + the secondary skin
   return group;
@@ -46934,7 +47036,9 @@ function animateShipMesh(mesh, speed, maxSpeed, isFiring, dt, doomed) {
       const baseScale = 0.7 + t * 0.9;
       const flicker = 1 + Math.sin(time * 18) * 0.05 * t;
       const _ok = (glow.userData && glow.userData.orbKey) ? (((_ENGINE_ORB_K[glow.userData.orbKey] != null) ? +_ENGINE_ORB_K[glow.userData.orbKey] : 1) / (glow.userData.orbK0 || 1)) : 1;
-      glow.scale.setScalar(baseScale * flicker * _ok);
+      const _fk = (mesh.userData.engineFlames && glow.userData && glow.userData.orbKey) ? _engineFlameKnobs() : null;
+      const _fo = (_fk && _fk.on !== false) ? ((_fk.orb != null) ? +_fk.orb : 0.55) : 1;
+      glow.scale.setScalar(baseScale * flicker * _ok * _fo);
       const _on = glow.userData && glow.userData.orbNode;
       if (_on && _on.parent && glow.parent) {
         const _k = glow.userData.orbKey, _ox = (_ENGINE_ORB_X[_k] != null) ? +_ENGINE_ORB_X[_k] : null;
@@ -46945,6 +47049,7 @@ function animateShipMesh(mesh, speed, maxSpeed, isFiring, dt, doomed) {
       }
     }
   }
+  if (mesh.userData.engineFlames) { try { _lssEngineFlameTick(mesh, maxSpeed, dt, time); } catch (_) {} }   // (v50.93)
   if (mesh.userData.enginePlumes) {
     for (const plume of mesh.userData.enginePlumes) {
       const flicker = 1 + Math.sin(time * 22 + plume.position.x * 0.5) * 0.12;
