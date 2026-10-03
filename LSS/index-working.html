@@ -1711,6 +1711,10 @@ body:has(#ship-select.active) #lss-version-badge { display: none !important; }
 .trim-blend-btn:hover { border-color: rgba(255,210,110,0.7); }
 .trim-blend-btn.selected { border-color: rgba(255,210,110,0.9); color: #ffd27a; background: rgba(60,40,0,0.55); }
 #trim-blend.idle .trim-blend-btn:not(.selected) { opacity: 0.55; }
+/* (v51.07) ENGINES - the same buttons as BLEND, one row under it; the ship's default carries a dot */
+#eng-row { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 4px; padding: 3px 2px 2px; line-height: 1.3; }
+#eng-row .tb-lbl { font-family: 'Orbitron', sans-serif; font-size: 9px; letter-spacing: 2px; color: #88ccff; opacity: 0.85; margin-right: 3px; }
+#eng-row .trim-blend-btn.ship-default::after { content: ' \2022'; color: #88ccff; }
 #trim-hue::-webkit-slider-runnable-track {
   height: 8px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.25);
   background: linear-gradient(90deg, hsl(0,75%,45%), hsl(60,75%,45%), hsl(120,75%,45%), hsl(180,75%,45%),
@@ -6702,6 +6706,8 @@ body.lss-land-lobby #lss-version-badge {
       <input type="range" id="trim-hue" min="0" max="359" step="1" value="200" aria-label="Secondary colour hue">
       <!-- (v50.87) BLEND - what the livery does over the black (_LIV_BLEND): off / metal / multiply / screen -->
       <div id="trim-blend"></div>
+      <!-- (v51.07) ENGINES - this ship's engine style, saved with its look (_renderEnginePicker) -->
+      <div id="eng-row"></div>
     </div>
     <!-- (v35.20) LEFT COLUMN: the fleets run vertically down the left edge —
          your fleet over enemy fleet, chips wrapping into a grid. The left side
@@ -7282,7 +7288,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "50.93";
+const LSS_BUILD = "51.07";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -11707,6 +11713,7 @@ async function joinRoom() {
         // straight to _shipSkinDef, which resolves anything unknown to FACTORY.
         peer.skinId = data.skinId;
         peer.trim = data.trim;   // (v50.82) the secondary skin - same contract (updateNetworkPlayer normalizes it)
+        peer.eng = data.eng;     // (v51.07) the engine style - same contract (_engineStyleNorm vets it)
         // (v43.13) and adopt the room's speed rule from whoever committed
         try {
           // (v44.18) The loadout commit carries the dial too - same precedence as speed_mode.
@@ -19848,6 +19855,7 @@ function _lssSendLoadoutTo(peerId) {
       // who joins AFTER we committed still builds our ship skinned.
       skinId: player.skinId || SHIP_SKIN_DEFAULT,
       trim: _trimWire(player.trim),   // (v50.82) the secondary skin ('chrome', 'color:200'); an old client ignores it
+      eng: _getStoredEngine(player.loadoutKey),   // (v51.07) the engine style of the ship we fly (an old client ignores it)
       // (v43.13) MATCH SPEED RIDES THE LOADOUT. The standalone speed_mode event works once a
       // match is live, but in the LOBBY it did not cross - measured with two clients both
       // showing PEER: the clicker flipped, the other sat at OFF. Rather than chase that
@@ -19948,6 +19956,7 @@ function updateNetworkPlayer(peerId, data) {
       try {
         const _tr = _trimNorm(data.trim);
         if (_trimWire(np0.trim) !== _trimWire(_tr)) { np0.trim = _tr; if (np0.mesh) _applyShipSkin(np0.mesh, np0.skinId, _tr); }
+        np0.engineStyle = _engineStyleNorm(data.eng);   // (v51.07) a new engine style: the tick reads it next frame
       } catch (_) {}
       return;
     }
@@ -19965,6 +19974,7 @@ function updateNetworkPlayer(peerId, data) {
   // Create new NetworkPlayer
   const np = new NetworkPlayer(peerId, data.loadoutKey, data.team || LSS.TEAM_FLEET_B, data.skinId, data.trim);
   peer.networkPlayer = np;
+  np.engineStyle = _engineStyleNorm(data.eng);   // (v51.07) their engines as they set them (null = this screen's pick)
   net.networkPlayers.push(np);
   // (v44.15) A peer's ship exists, so this match is networked no matter who is still here at the
   // end. See the reset in the match-start block for why this is a latch and not a live query.
@@ -74284,32 +74294,381 @@ if (typeof window !== 'undefined') window.__engineOrbK = _ENGINE_ORB_K;
 // `delete` the entry to go back to the markers. Bake a chosen value with tools/glb_set_marker.py, never here.
 const _ENGINE_ORB_X = {};
 if (typeof window !== 'undefined') window.__engineOrbX = _ENGINE_ORB_X;
-// ⭐ (v50.93) ENGINE FLAMES. Owner: "was wondering what the engine orbs might look like if they were flames instead of
-// orbs". Plumes were tried before and dropped (2026-06-12, the marker-ship note in buildModelShipMesh): "a stretched
-// cone reads as forward thrust even when the ship strafes or flies backwards" - because every engine visual is driven
-// by t = speed / maxSpeed, which has no direction. So these flames read the hull's FORWARD speed instead (its motion
-// along its own nose, from the position change each frame - the same for the player, bots, peers and replays):
-// flying forward they stretch and brighten, strafing leaves a small pilot flame, reversing leaves only that.
-// One tapered flame per thruster marker (a lathe, axis aft), additive, soft-edged, turbulence scrolling down it, a
-// ragged flickering tip and a hot core near the nozzle; the class colour like the orbs (or palette 'fire'). The orb
-// stays as the nozzle glow, smaller. isPlume, so everything that skips engine FX skips these (the cinematic hides them,
-// the frame solve's clearance soup, the ghost seat shell, skins). Potato: off.
-// Live: window.__engineFlame = { on, palette: 'class' | 'fire', len (x the orb radius), width, idle (pilot flame,
-// share of full length), orb (nozzle-glow scale while on), bright, speedRef (share of max speed that is full burn) }.
-// on: false = the v50.92 orbs exactly.
-const _ENGINE_FLAME = { on: true, palette: 'class', len: 9, width: 1.15, idle: 0.28, orb: 0.55, bright: 2.0, speedRef: 0.6 };
+// ⭐ (v50.93) ENGINE FIRE - THE MUZZLE-FIRE LOOK, ON THE ENGINES. Owner: "was wondering what the engine orbs might look
+// like if they were flames instead of orbs", then, seeing a first cut (a lathe cone with a shader - "less of the
+// blowtorch look"): "more of the look that comes from the muzzle fire look". So each thruster wears the v50.65
+// seat-view muzzle fire itself (_sjGeometry / _sjTextures: two crossed quads with the tapered flame texture along the
+// axis + the six-spiked star at the mouth), made continuous: the jet takes a fresh length every 1/flick s - successive
+// "shots", which is what makes muzzle fire flicker - and the star faces the camera. (v50.95) No re-roll: the muzzle
+// fire turns each shot to a random angle, and on a steady engine that read as spinning ("i don't like the spinning").
+// ⭐ (v50.96) ...OR SPACE RIPPLES. The owner sent a concept: "SPACE RIPPLE - expanding gravitational ripples instead of
+// exhaust". Each thruster sends out RINGS: born at the nozzle, they travel aft, widen and fade, with a soap-film
+// rainbow fringe (the three colour channels a band apart) over the class colour and a faint lens inside. From the
+// chase camera they are concentric circles (the concept's inset), from the side a receding column (its main frame).
+// Rings live in the hull's own frame (they ride the ship, like the concept's column - world-space rings would smear
+// into a 350 u-per-second trail). A pool of `rings` per thruster, a new one every `every` s at full thrust and
+// `idleEvery` s idle.
+// ⭐ (v50.97) ...OR CORONA DISCHARGE - AND EVERY ONE OF THEM IS A SETTING. The owner's next concept: "CORONA DISCHARGE -
+// electrical/plasma tendrils dance around the engine", and with it: "we should keep all these styles, as a setting in
+// themes". Settings > Theme > Engines picks the look (game.engineStyle: 'orb' | 'fire' | 'ripple' | 'corona'; saved
+// only once a player picks, so a profile that never chose follows _ENGINE_STYLE_DEFAULT). _engineFlameKnobs copies the
+// pick into the knobs when it CHANGES, so a live __engineFlame edit still holds until the next pick.
+// The corona: a CONE of bolts out of each engine, its tip INSIDE the ship and its circle out the back. The first cut
+// flared them radially off a ring at the nozzle; owner: "it'd be cooler if the bolts protruded out toward the back in
+// a cone instead of radial outward", then "the cone tip will be inside the ship, and the circle part will be out the
+// back". So up to `carcs` bolts run from the tip (`capex` R forward of the orb, where the hull hides it - they seem to
+// pour out of the nozzle) to a crackling ring at the cone's base, which reaches further aft and wider with thrust (the
+// cone keeps its angle). Each strikes for a fraction of a second, its end sweeping round the ring while it lives, then
+// strikes again somewhere else. (v50.99) The ring is never drawn whole: owner, on v50.98's always-on circle: "don't draw
+// the full circle of the cone always... let the arcs draw it sometimes partially". Up to `crarcs` sparks race round it
+// instead, each DRAWING part of the circle (a quarter to a half, now and then nearly all of it) and erasing it behind
+// itself; `cbridge` adds bolts that jump along it (0 = none). (v51.02) ...and no longer one circle: owner, "the lightning
+// one needs the circular part of the cone to be more random, not circular always, and varying distances away from the
+// ship (not too far)". Each spark draws its OWN arc - its own depth (`cnear` .. 1 of the cone's length: never further
+// out than the v50.99 ring, mostly nearer), its own size, lopsided (`cringR`: 0 = true circles) and tilted - and every
+// bolt ends at its own depth on the cone too. A spark is its own ribbon strip laid along just its arc (the strip's t
+// runs start -> start + span), so nothing outside the drawn part is ever rasterised.
+// ONE draw call and NO buffer upload per thruster: the geometry is a static set of camera-facing ribbons shared by
+// every thruster (each vertex = side, t along its bolt, slot), and the vertex shader builds each bolt from its slot's
+// uniforms - a quadratic curve (tip, bow point, ring point) plus fractal jag pinned at both ends, whose coarse octaves
+// drift with time (the dance) and whose fine octaves re-roll `crackle` times a second (the crackle). The CPU only
+// moves points.
+// Not spawnLightningBolt: that is world-space (a bolt would smear into a trail at 350 u/s), lights every bolt, and
+// shares its 96-slot pool with gameplay (Syphon's conduit must win that pool).
+// ⭐ (v51.00) ...OR INWARD FLOW. Owner, on the corona: "that looks amazing... let's add another", with the concept
+// "INWARD FLOW - particles spiral inward rather than out, showing space being pulled". Streaks of light fall INTO each
+// engine out of a wide funnel behind it, winding round the axis faster as they close in - a whirlpool: from the chase
+// camera they are the concept's spiral inset (`farms` arms), from the side its converging filaments - and vanish into a
+// glowing ring in the nozzle. The same machinery as the corona: one draw call per thruster, a static geometry shared by
+// every thruster (side, t along a streak, particle index), every position made in the vertex shader from the particle's
+// index and ONE flow clock the CPU integrates (uFlow - so more thrust speeds the fall without the particles jumping).
+// The two engines of a pair swirl in mirror image.
+// ⭐ (v51.04) ...OR THE BLOWTORCH, BACK. Owner, on Slayer's muzzle fire: "it's hard to see it on slayer, the muzzle fire
+// engine style, it's too skinny and blends in... i think maybe the first way we did it, the jet fire, or what i called
+// the blow torch". That first cut (v50.93 - set aside then for "less of the blowtorch look, and more of the look that
+// comes from the muzzle fire look") returns as the sixth style, 'torch', and as Slayer's own: a SOLID tapered flame per
+// thruster (a lathe, axis aft), additive, soft-edged, turbulence scrolling down it, a ragged flickering tip and a hot
+// core near the nozzle - it has body from every side, where the muzzle fire's two crossed quads read thin. The v50.93
+// code as it was (from the session transcript - no backup had kept it), plus the afterburner stretch (`ablen`) and the
+// cloak (x material opacity). One material per hull, shared by its thrusters.
+// ⭐ (v51.05) ...OR INWARD SPIRAL - a variant of the inward flow. Owner, with a render of a ship whose outer engines each
+// hold a small galaxy: "let's also create a variant of the inward flow...". Where the inward flow pours down a long
+// funnel from far behind, the spiral lives IN the nozzle mouth: sparks swirl round a shallow dish (rim aft, core deep
+// in the nozzle) into a white-hot core star (`parms` arms, winding faster as they close), ringed by three segmented,
+// HUD-like halos stepping back out of the nozzle like a portal (dashed, counter-rotating), while `pesc` of the sparks
+// are shards spun off the rim that fall away down the hull's -y. Same machinery: one draw call per thruster, a shared
+// static geometry (_spGeometry), everything placed in the vertex shader from the index and one flow clock.
+// ⚠ CLOAK: _setShipMeshOpacity writes `material.opacity`, which a ShaderMaterial ignores - so the corona, the inward flow,
+// the spiral, the torch and the ripples multiply their own material's opacity into their brightness, or a cloaked ship
+// stays drawn in light.
+// Plumes were tried before and dropped (2026-06-12, the marker-ship note in buildModelShipMesh): "a stretched cone
+// reads as forward thrust even when the ship strafes or flies backwards" - every engine visual is driven by
+// t = speed / maxSpeed, which has no direction. So these styles read the hull's FORWARD speed (its motion along its own
+// nose, from the position change each frame - the same for the player, bots, peers and replays): flying forward they
+// grow and brighten, strafing leaves a small pilot fire / a slow ripple / a few crawling sparks, reversing only that.
+// The orb stays as a bay glow. isPlume, so everything that skips engine FX skips these (the cinematic hides them, the
+// frame solve's clearance soup, the ghost seat shell, skins). depthTest ON. Potato: off.
+// Live: window.__engineFlame = { on, style: 'ship' (each hull its own: __engineShipStyle) | 'fire' | 'torch' | 'ripple' |
+//           'corona' | 'inward' | 'spiral',
+//   spiral: pcount / pcountIdle (sparks, max 200), pspeed / pspeedIdle (falls per second), prad / pdepth / pz (x R: the
+//           dish's radius, how far its rim sits aft of its core, the core's plane aft of the orb), pswirl (turns on the
+//           way in), parms (arms), pstreak, pwid (x R), pesc (share flung off the rim), pfall (how far they drop),
+//           pring / pringW / pringZ / pringB (portal rings: radius / half-width / aft step x R, brightness), pspin
+//           (ring turns a second at full burn), pcore / pcoreW / pcoreB (core star size / half-width x R, brightness),
+//           ppunch, porb, ppal: 'class' | 'blue',
+//   fire:   palette: 'class' | 'fire', len / wid / star (x the orb radius), idle (pilot fire share), orb, punch, flick,
+//           ablen (how much longer again on the afterburner: 0.9 = +90%; the torch's too),
+//   torch:  tlen / twid (x R), tidle (pilot flame share), tbright, torb, tpal: 'class' | 'fire',
+//   ripple: rings, life (s), every / idleEvery (s between rings), travel / r0 / r1 (x the orb radius: how far a ring goes
+//           aft, its radius born and dying), rw (band width), iri (0 = class colour .. 1 = full rainbow), rpunch, rorb,
+//   corona: carcs / carcsIdle (bolts at full burn / idle, max 12), clife (s, a strike's mean life), crackle (Hz),
+//           clen (x R: orb to the ring at full burn; cidle = the share it keeps idle), cwide (the ring's radius as a
+//           share of the cone's length: the cone's angle), capex (x R: how far inside the ship the tip sits), cbulge
+//           (how far a bolt bows out of the cone), cswirl (rad a bolt twists round the axis), crough (jag), cwid
+//           (ribbon half-width x R), cringW / cringB / cringJ (ring half-width x R, brightness, jag), crarcs /
+//           crarcsIdle / crlife (sparks drawing the ring at full burn / idle, max 4, and their mean life in s), cnear (the
+//           nearest a spark or a bolt's end sits, share of the cone's length), cringR (how lopsided a spark's arc is), cspin
+//           (rad/s a bolt's end sweeps round the ring), cbridge (share of bolts that jump along the ring instead),
+//           cpunch, corb, cpal: 'class' | 'electric',
+//   inward: fcount / fcountIdle (streaks at full burn / idle, max 160), fspeed / fspeedIdle (falls per second), fdist (x R:
+//           how far behind the nozzle they start at full burn; fidle = the share kept idle), frad (x R: the funnel's
+//           radius out there), fend (x R: the radius they vanish at), fz (x R: the nozzle plane, aft of the orb), fswirl
+//           (turns on the way in), farms (spiral arms, 0 = none), fstreak (streak length, share of the fall), fwid
+//           (half-width x R), fring / fringW / fringB (nozzle ring radius / half-width x R, brightness), fpunch, forb,
+//           fpal: 'class' | 'blue',
+//   all:    speedRef (share of max speed that is full burn) }.   on: false = the v50.92 orbs exactly.
+const _ENGINE_FLAME = { on: true, style: 'ship', palette: 'class', len: 12.5, wid: 3.3, star: 1.7, idle: 0.3, orb: 0.3, punch: 1.6, flick: 22, ablen: 0.9,
+  tlen: 10, twid: 1.3, tidle: 0.28, tbright: 2.2, torb: 0.55, tpal: 'class',
+  rings: 7, life: 0.9, every: 0.11, idleEvery: 0.4, travel: 14, r0: 1.1, r1: 3.4, rw: 0.05, iri: 0.65, rpunch: 1.4, rorb: 0.8,
+  carcs: 10, carcsIdle: 4, clife: 0.35, crackle: 18, clen: 8, cidle: 0.35, cwide: 0.33, capex: 1, cbulge: 0.15, cswirl: 0.5,
+  crough: 0.1, cwid: 0.16, cringW: 0.1, cringB: 1, cringJ: 0.08, crarcs: 3, crarcsIdle: 1, crlife: 0.4, cnear: 0.4, cringR: 1, cspin: 1.2, cbridge: 0,
+  cpunch: 1.5, corb: 0.6, cpal: 'class',
+  fcount: 90, fcountIdle: 30, fspeed: 0.9, fspeedIdle: 0.25, fdist: 12, fidle: 0.5, frad: 4.5, fend: 0.25, fz: 0.9, fswirl: 1.25,
+  farms: 4, fstreak: 0.3, fwid: 0.12, fring: 1.9, fringW: 0.12, fringB: 1, fpunch: 1.3, forb: 0.8, fpal: 'class',
+  pcount: 160, pcountIdle: 60, pspeed: 0.6, pspeedIdle: 0.2, prad: 1.7, pdepth: 0.6, pz: 0.9, pswirl: 1.6, parms: 3, pstreak: 0.18,
+  pwid: 0.07, pesc: 0.12, pfall: 1.6, pring: 1.6, pringW: 0.08, pringZ: 0.3, pringB: 1.6, pspin: 0.35, pcore: 0.5, pcoreW: 0.12,
+  pcoreB: 1.6, ppunch: 1.4, porb: 0.25, ppal: 'class', speedRef: 0.6 };
+// (v51.06) porb 0.7 -> 0.25, pringB 1.1 -> 1.6, pringW 0.05 -> 0.08: judged looking straight into Syphon's nozzles - its
+// own paint lights the nozzle face cyan, so a big orb only washed the swirl out, and the dashed rings read too faint.
+// (v51.01) fcount 140 -> 90, fstreak 0.12 -> 0.3, fwid 0.09 -> 0.12: the first cut's many short streaks read as scattered
+// white hair; fewer, longer, wider ones read as the concept's filaments pouring into the nozzle (judged live on Syphon).
+// (v51.03) the fire: len 10 -> 12.5, wid 2.6 -> 3.3, star 1.5 -> 1.7 - owner: "make the muzzle fire a bit longer, and
+// fatter" - and `ablen` 0.9: up to 90% longer again (and a little fatter and brighter) on the AFTERBURNER ("and go even
+// longer when puncture has afterburner on"). Afterburning is read from the motion like the rest - flying past cruise
+// speed (Puncture's Afterburner takes it from 450 to 600) - so bots, peers and replays show it too; for the local
+// player `player.afterburnerActive` lights it at once instead of waiting for the speed to build. A dash past cruise
+// stretches it as well (it is the same thing to look at: more thrust than cruise).
 if (typeof window !== 'undefined') window.__engineFlame = _ENGINE_FLAME;
-const _engineFlameKnobs = () => { const K = (typeof window !== 'undefined' && window.__engineFlame) || _ENGINE_FLAME; return (K && typeof K === 'object') ? K : { on: !!K }; };
-let _engineFlameGeo = null;
-function _engineFlameGeometry() {
-  if (_engineFlameGeo) return _engineFlameGeo;
+// (v51.03) EACH SHIP ITS OWN LOOK. Owner: "pyro and blaster can be default corona discharge / puncture and slayer can be
+// muzzle fire as default ... / syphon, vortex, and tracker will have inward flow as default". (v51.07) These are the
+// DEFAULTS: what a ship wears until its own pick is set in the SKIN panel (see THE ENGINE STYLE IS PART OF EACH SHIP'S
+// LOOK below). A hull not listed gets 'inward'. Live: window.__engineShipStyle.PYRO = 'ripple' (applies at once to a
+// ship with no stored pick - the tick resolves it every frame).
+// (v51.04) SLAYER fire -> torch (the muzzle fire read too skinny on it - see the BLOWTORCH note).
+const _ENGINE_SHIP_STYLE = { PYRO: 'corona', BLASTER: 'corona', PUNCTURE: 'fire', SLAYER: 'torch', SYPHON: 'inward', VORTEX: 'inward', TRACKER: 'inward' };
+if (typeof window !== 'undefined') window.__engineShipStyle = _ENGINE_SHIP_STYLE;
+// ⭐⭐ (v51.07) THE ENGINE STYLE IS PART OF EACH SHIP'S LOOK. Owner: "we should put an option for this in the skin selection
+// screen, so it remembers what ship has what engine style". So it is chosen in ship select's SKIN panel (an ENGINES row
+// under BLEND, _renderEnginePicker) and stored WITH the livery and the secondary in `lss_ship_looks` - { SHIP: { skin,
+// trim, eng } } - so it saves per ship, travels with the account (that key already does) and rides every loadout
+// announce as `eng`, so peers see your engines as they see your livery (an old client ignores the field). A ship you
+// never set wears its default from _ENGINE_SHIP_STYLE.
+// On YOUR screen: a peer's hull wears the peer's announced pick; every other hull of a type (yours, the bots') wears
+// your pick for that type. Settings > Theme > Engines shrank to the one global choice left: each ship's own, or the
+// classic orbs on every ship. (v50.97-51.06 offered every style there; a saved one of those now loads as 'ship'.)
+// (v50.97 / v51.00) The lists are hoisted functions holding only literals: Settings, its handler, loadSettings and the
+// SKIN panel read them however early they run (a top-level const read before its line throws through `typeof`: v39.02).
+function _engineStyleLabels() {   // the per-ship styles: [id, button label, what it is]
+  return [['orb', 'ORBS', 'the classic engine glow'], ['fire', 'FIRE', 'muzzle-flash jets that flicker and stretch with thrust'],
+    ['torch', 'TORCH', 'a solid blowtorch flame'], ['ripple', 'RIPPLE', 'rings rolling off the engines'],
+    ['corona', 'CORONA', 'lightning out the back in a cone'], ['inward', 'INWARD', 'streaks of light pouring into the engines'],
+    ['spiral', 'SPIRAL', 'a portal swirl in each nozzle']];
+}
+function _engineStyleList() { return _engineStyleLabels().map((x) => x[0]); }
+function _engineGlobalLabels() {   // Settings > Theme > Engines
+  return [['ship', 'Each ship its own (set per ship in the SKIN panel)'], ['orb', 'Classic orbs on every ship']];
+}
+const _ENGINE_STYLES = _engineStyleList();
+const _ENGINE_STYLE_OK = { orb: 1, fire: 1, torch: 1, ripple: 1, corona: 1, inward: 1, spiral: 1 };   // the per-frame check
+// ⚠ what a profile that never picked gets. (v51.02) 'inward' - owner, on the inward flow: "that looks amazing, too, it
+// should be the default" (v50.97-51.01 had 'corona' as a placeholder while the styles were being tried). (v51.03) 'ship':
+// each hull's own style from _ENGINE_SHIP_STYLE - three of them are 'inward'.
+const _ENGINE_STYLE_DEFAULT = 'ship';
+let _engineStyleSeen = null;   // the last pick copied into the knobs
+// hoisted, and safe before this block has run (the Settings page and saveSettings call it): the global pick ('ship' /
+// 'orb'), or the default. (v51.07) Any other saved value - a single style from v50.97-51.06 - reads as 'ship'.
+function _engineStyleNow() {
+  let s = null; try { s = game.engineStyle; } catch (_) {}
+  if (s === 'ship' || s === 'orb') return s;
+  return 'ship';
+}
+// (v51.07) the pick for a TYPE of hull: stored with its look, else its default. Called per hull per frame, so the looks
+// are read from storage at most every 2 s (and at once after a pick here - _setStoredEngine drops the cache).
+let _engPickCache = null, _engPickT = -1e9;
+function _engineShipPick(key) {
+  const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+  if (!_engPickCache || now - _engPickT > 2000) {
+    _engPickT = now; _engPickCache = {};
+    try { const L = _looksGet(); for (const k in L) if (L[k] && typeof L[k].eng === 'string') _engPickCache[k] = L[k].eng; } catch (_) {}
+  }
+  const p = key && _engPickCache[key];
+  if (p && _ENGINE_STYLE_OK[p]) return p;
+  const T = (typeof window !== 'undefined' && window.__engineShipStyle) || _ENGINE_SHIP_STYLE;
+  return (key && T && T[key]) || 'inward';
+}
+// A wire / stored value -> a style id, or null (unknown, another build's, a hostile peer's: the viewer's pick stands).
+function _engineStyleNorm(v) { return (typeof v === 'string' && _ENGINE_STYLE_OK[v]) ? v : null; }
+function _getStoredEngine(ship) {
+  const k = (ship !== undefined) ? ship : _lookShip();
+  return _engineShipPick(k);
+}
+function _setStoredEngine(id, ship) {
+  if (!_engineStyleNorm(id)) return;
+  const k = (ship !== undefined) ? ship : _lookShip();
+  if (!k) return;
+  const L = _looksGet(); (L[k] || (L[k] = {})).eng = id; _looksPut(L);
+  _engPickCache = null;   // the next frame reads it
+  // the ship you fly: tell the room, as a new livery does (peers re-dress your engines with no rebuild)
+  try { if (typeof player !== 'undefined' && player && player.loadoutKey === k && typeof _lssAnnounceLoadout === 'function') _lssAnnounceLoadout(); } catch (_) {}
+}
+const _engineFlameKnobs = () => {
+  const K0 = (typeof window !== 'undefined' && window.__engineFlame) || _ENGINE_FLAME;
+  const K = (K0 && typeof K0 === 'object') ? K0 : { on: !!K0 };
+  const s = _engineStyleNow();
+  if (s !== _engineStyleSeen) { _engineStyleSeen = s; K.on = s !== 'orb'; if (s !== 'orb') K.style = s; }
+  return K;
+};
+// the style a hull wears: the knob's, or with 'ship' (v51.03) the hull's own - (v51.07) a peer's announced pick (`own`),
+// else this screen's pick for its type (_engineShipPick). '' = the orbs.
+const _engineStyle = (K, key, own) => {
+  let st = K.style;
+  if (st === 'ship' || !st) st = own || _engineShipPick(key);
+  if (st === 'orb') return '';
+  return (st === 'fire' || st === 'torch' || st === 'corona' || st === 'inward' || st === 'spiral') ? st : 'ripple';
+};
+// the orb's scale while the engine FX are on (animateShipMesh): the fire wants a faint bay glow, the ripples a core,
+// the corona the glow its rim sits on, the inward flow the core everything falls into
+function _engineFlameOrbK(K, key, own) {
+  if (!K || K.on === false) return 1;
+  const st = _engineStyle(K, key, own);
+  if (!st) return 1;
+  if (st === 'torch') return (K.torb != null) ? +K.torb : 0.55;
+  if (st === 'spiral') return (K.porb != null) ? +K.porb : 0.25;
+  if (st === 'inward') return (K.forb != null) ? +K.forb : 0.8;
+  if (st === 'corona') return (K.corb != null) ? +K.corb : 0.6;
+  if (st === 'ripple') return (K.rorb != null) ? +K.rorb : 0.8;
+  return (K.orb != null) ? +K.orb : 0.3;
+}
+const _flZ = new THREE.Vector3(0, 0, 1), _flAftQ = [new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI), new THREE.Quaternion()];
+let _ripGeo = null;
+const _RIP_VS = `varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`;
+const _RIP_FS = `
+uniform float uAge, uPow, uPunch, uIri, uW; uniform vec3 uColor;
+varying vec2 vUv;
+float band(float r, float c, float w) { float x = (r - c) / w; return exp(-x * x); }
+void main() {
+  vec2 p = vUv * 2.0 - 1.0; float r = length(p);
+  float c = 0.8, w = uW, d = w * 0.9;
+  vec3 rainbow = vec3(band(r, c + d, w), band(r, c, w), band(r, c - d, w));
+  vec3 col = mix(uColor * band(r, c, w), rainbow * (0.55 + 0.45 * uColor), uIri) + vec3(band(r, c, w * 0.5)) * 0.3;
+  float lens = (1.0 - smoothstep(0.0, c, r)) * 0.05;
+  float fade = pow(max(0.0, 1.0 - uAge), 1.6) * smoothstep(0.0, 0.1, uAge);
+  float k = fade * (0.35 + 0.65 * uPow) * uPunch;
+  gl_FragColor = vec4(col * k + uColor * lens * k, 1.0);
+}`;
+// (v51.05) the inward spiral. Slots 0..NP-1 are sparks (streaks of _SP_NS points), NP..NP+2 the three portal rings
+// (_SP_NR points), NP+3..NP+5 the core star's three strokes (_SP_NC points); two vertices a point, as ever.
+const _SP_NP = 200, _SP_NS = 4, _SP_NR = 96, _SP_NC = 9;
+let _spGeo = null;
+function _spGeometry() {
+  if (_spGeo) return _spGeo;
+  const strips = [];
+  for (let k = 0; k < _SP_NP; k++) strips.push([k, _SP_NS]);
+  for (let k = 0; k < 3; k++) strips.push([_SP_NP + k, _SP_NR]);
+  for (let k = 0; k < 3; k++) strips.push([_SP_NP + 3 + k, _SP_NC]);
+  let nv = 0, ni = 0;
+  for (const s of strips) { nv += s[1] * 2; ni += (s[1] - 1) * 6; }
+  const pos = new Float32Array(nv * 3), idx = new Uint16Array(ni);
+  let v = 0, ii = 0;
+  for (const s of strips) {
+    const base = v, n = s[1];
+    for (let j = 0; j < n; j++) {
+      const t = j / (n - 1);
+      pos[v * 3] = -1; pos[v * 3 + 1] = t; pos[v * 3 + 2] = s[0]; v++;
+      pos[v * 3] = 1;  pos[v * 3 + 1] = t; pos[v * 3 + 2] = s[0]; v++;
+    }
+    for (let j = 0; j < n - 1; j++) {
+      const a = base + j * 2;
+      idx[ii++] = a; idx[ii++] = a + 1; idx[ii++] = a + 2;
+      idx[ii++] = a + 1; idx[ii++] = a + 3; idx[ii++] = a + 2;
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setIndex(new THREE.BufferAttribute(idx, 1));
+  g.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e4);   // the real positions are made in the shader
+  _spGeo = g;
+  return g;
+}
+const _SP_VS = [
+  '#define NP ' + _SP_NP,
+  'uniform float uFlow, uTime, uCount, uBright, uRad, uDepth, uZ, uSwirl, uArms, uStreak, uWid, uAft, uEsc, uFall, uRingZ;',
+  'uniform vec4 uRingP;',   // x base radius, y brightness, z half-width, w rotation (turns)
+  'uniform vec4 uCore;',    // x size, y brightness, z half-width, w rotation (rad)
+  'varying float vX, vA, vKind;',
+  'float h1(float n) { return fract(sin(n) * 43758.5453123); }',
+  // a spark, u = 0 at the rim .. 1 in the core: round a shallow dish (rim aft, core deep in the nozzle), winding faster
+  // as it closes; or (esc = 1, `uEsc` of them) a shard flung off the rim, out, down the hull's -y and aft
+  'vec3 swirlPt(float id, float u, out float esc) {',
+  '  float ha = h1(id * 1.731 + 0.37), hb = h1(id * 7.31 + 1.1), hc = h1(id * 3.17 + 2.9), hd = h1(id * 4.97 + 6.1);',
+  '  float th0 = (uArms > 0.5) ? (floor(ha * uArms) + hb * 0.35) * 6.2831853 / uArms : ha * 6.2831853;',
+  '  float r0 = uRad * (0.75 + 0.45 * hc);',
+  '  esc = step(hd, uEsc);',
+  '  if (esc > 0.5) {',
+  '    float th = th0 + uSwirl * 1.5 * u, r = r0 * (1.0 + 0.6 * u);',
+  '    return vec3(cos(th) * r, sin(th) * r - uFall * r0 * u * u, uZ + uAft * (uDepth + 0.6 * r0 * u));',
+  '  }',
+  '  float s = pow(u, 1.3);',
+  '  float r = r0 * pow(1.0 - s, 0.85);',
+  '  float th = th0 + uSwirl * 6.2831853 * s * (0.6 + 1.4 * s);',
+  '  return vec3(cos(th) * r, sin(th) * r, uZ + uAft * uDepth * (r / max(uRad, 1e-3)));',
+  '}',
+  // the portal rings: each a little wider and a step further aft than the last, dashed, turning opposite ways
+  'vec3 ringPt(float k, float t) {',
+  '  float a = t * 6.2831853, r = uRingP.x * (0.75 + 0.25 * k);',
+  '  return vec3(cos(a) * r, sin(a) * r, uZ + uAft * uRingZ * (k + 0.5));',
+  '}',
+  'float dashLum(float k, float t) {',
+  '  float n = (k < 0.5) ? 6.0 : ((k < 1.5) ? 4.0 : 9.0);',
+  '  float duty = (k < 0.5) ? 0.7 : ((k < 1.5) ? 0.82 : 0.45);',
+  '  float dir = (mod(k, 2.0) < 0.5) ? 1.0 : -1.0;',
+  '  float d = fract((t + uRingP.w * dir * (1.0 + 0.35 * k)) * n);',
+  '  return smoothstep(0.0, 0.04, d) * (1.0 - smoothstep(duty - 0.04, duty, d)) * (0.8 + 0.2 * sin(t * 18.849556 + uTime * 2.0 * dir));',
+  '}',
+  // the core star: three strokes through the centre, slowly turning
+  'vec3 corePt(float k, float t) {',
+  '  float ang = k * 1.0471976 + uCore.w;',
+  '  return vec3(cos(ang) * (t * 2.0 - 1.0) * uCore.x, sin(ang) * (t * 2.0 - 1.0) * uCore.x, uZ);',
+  '}',
+  'void main() {',
+  '  float side = position.x, t = position.y, id = position.z;',
+  '  float kind = (id < float(NP) - 0.5) ? 0.0 : ((id < float(NP) + 2.5) ? 1.0 : 2.0);',
+  '  vX = side; vKind = kind; vA = 0.0;',
+  '  vec3 p0, pa, pb; float w, a;',
+  '  if (kind < 0.5) {',
+  '    if (id >= uCount || uBright <= 0.001) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }',   // not drawn: off screen
+  '    float uh = fract(uFlow * (0.7 + 0.6 * h1(id * 5.13 + 4.7)) + h1(id * 9.71 + 0.3));',
+  '    float u = max(uh - uStreak * t, 0.0), esc;',
+  '    p0 = swirlPt(id, u, esc); pa = swirlPt(id, max(u - 0.01, 0.0), esc); pb = swirlPt(id, min(u + 0.01, 1.0), esc);',
+  '    float tw = 0.6 + 0.4 * sin(uTime * (7.0 + 9.0 * h1(id * 2.21)) + id);',   // each spark twinkles
+  '    a = (esc > 0.5) ? smoothstep(0.0, 0.1, uh) * pow(1.0 - uh, 1.2) * 1.2',
+  '                    : smoothstep(0.0, 0.15, uh) * (1.0 - smoothstep(0.85, 1.0, uh)) * mix(0.4, 1.2, uh);',
+  '    a *= uBright * tw * pow(1.0 - t, 1.5);',
+  '    w = uWid * ((esc > 0.5) ? 1.4 : 1.0) * mix(1.0, 0.4, t);',
+  '  } else if (kind < 1.5) {',
+  '    if (uRingP.y <= 0.001) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }',
+  '    float k = id - float(NP);',
+  '    p0 = ringPt(k, t); pa = ringPt(k, t - 0.005); pb = ringPt(k, t + 0.005);',
+  '    a = uRingP.y * dashLum(k, t); w = uRingP.z;',
+  '  } else {',
+  '    if (uCore.y <= 0.001) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }',
+  '    float k = id - float(NP) - 3.0, c = 1.0 - abs(2.0 * t - 1.0);',
+  '    p0 = corePt(k, t); pa = corePt(k, t - 0.02); pb = corePt(k, t + 0.02);',
+  '    a = uCore.y * c * c; w = uCore.z * (0.3 + 0.7 * c);',
+  '  }',
+  '  vec4 mv = modelViewMatrix * vec4(p0, 1.0);',
+  '  vec3 tg = (modelViewMatrix * vec4(pb - pa, 0.0)).xyz;',
+  '  vec3 sd = cross(tg, mv.xyz); float sl = length(sd);',
+  '  sd = (sl > 1e-8) ? sd / sl : vec3(1.0, 0.0, 0.0);',
+  '  w *= length(modelViewMatrix[0].xyz);',
+  '  float wmin = -mv.z * 0.0016;',   // ~1.3 px: thinner shimmers, so widen it and dim it
+  '  if (w < wmin) { a *= w / wmin; w = wmin; }',
+  '  vA = a;',
+  '  mv.xyz += sd * side * w;',
+  '  gl_Position = projectionMatrix * mv;',
+  '}'
+].join('\n');
+const _SP_FS = [
+  'uniform vec3 uColor;',
+  'varying float vX, vA, vKind;',
+  'void main() {',
+  '  float core = exp(-vX * vX * 22.0), halo = exp(-vX * vX * 3.0);',
+  '  float wh = (vKind > 1.5) ? 0.9 : ((vKind > 0.5) ? 0.55 : 0.5);',   // the core star whitest
+  '  vec3 col = uColor * halo * 0.6 + mix(uColor, vec3(1.0), wh) * core;',
+  '  gl_FragColor = vec4(col * vA, 1.0);',
+  '}'
+].join('\n');
+// (v51.04) the blowtorch - the v50.93 flame, as it was
+let _torchGeo = null;
+function _torchGeometry() {
+  if (_torchGeo) return _torchGeo;
   // the profile along +Y (0 = the nozzle, 1 = the tip): full width at the nozzle, a slight belly, a long taper
   const pts = [];
   for (let i = 0; i <= 16; i++) { const y = i / 16, r = Math.pow(Math.max(0, 1 - y), 0.75) * (1 + 0.45 * y * (1 - y)); pts.push(new THREE.Vector2(Math.max(r, 0.0001), y)); }
-  _engineFlameGeo = new THREE.LatheGeometry(pts, 20);
-  return _engineFlameGeo;
+  _torchGeo = new THREE.LatheGeometry(pts, 20);
+  return _torchGeo;
 }
-const _ENGINE_FLAME_VS = `
+const _TORCH_VS = `
 varying vec2 vUv; varying float vFacing; varying float vSeed;
 void main() {
   vUv = uv;
@@ -74319,7 +74678,7 @@ void main() {
   vSeed = fract(dot(modelMatrix[3].xyz, vec3(0.0137, 0.0711, 0.0373)));
   gl_Position = projectionMatrix * mv;
 }`;
-const _ENGINE_FLAME_FS = `
+const _TORCH_FS = `
 uniform float uTime, uPower, uBright; uniform vec3 uColor, uHot;
 varying vec2 vUv; varying float vFacing; varying float vSeed;
 float h2(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
@@ -74336,48 +74695,533 @@ void main() {
   float al = soft * tip * (0.55 + 0.45 * n) * (0.45 + 0.55 * uPower);
   gl_FragColor = vec4(col * uBright, al);
 }`;
-// built once per hull, after the orbs: one flame per marker orb, at the orb, pointing aft
+// (v50.97) the corona. Slots 0..MAXA-1 are bolts of _CO_NA points; (v51.02) slots MAXA..MAXA+MAXR-1 are the ring's
+// sparks, _CO_NRS points each, each laid along just its own arc. Every point is two vertices (side -1 / +1) that the
+// vertex shader spreads across the view into a glowing ribbon.
+const _CO_MAXA = 12, _CO_NA = 28, _CO_NRS = 40, _CO_MAXR = 4;   // MAXR: ring-drawing sparks (v50.99)
+let _coGeo = null;
+function _coGeometry() {
+  if (_coGeo) return _coGeo;
+  const strips = [];
+  for (let k = 0; k < _CO_MAXA; k++) strips.push([k, _CO_NA]);
+  for (let j = 0; j < _CO_MAXR; j++) strips.push([_CO_MAXA + j, _CO_NRS]);
+  let nv = 0, ni = 0;
+  for (const s of strips) { nv += s[1] * 2; ni += (s[1] - 1) * 6; }
+  const pos = new Float32Array(nv * 3), idx = new Uint16Array(ni);
+  let v = 0, ii = 0;
+  for (const s of strips) {
+    const base = v, n = s[1];
+    for (let j = 0; j < n; j++) {
+      const t = j / (n - 1);
+      pos[v * 3] = -1; pos[v * 3 + 1] = t; pos[v * 3 + 2] = s[0]; v++;
+      pos[v * 3] = 1;  pos[v * 3 + 1] = t; pos[v * 3 + 2] = s[0]; v++;
+    }
+    for (let j = 0; j < n - 1; j++) {
+      const a = base + j * 2;
+      idx[ii++] = a; idx[ii++] = a + 1; idx[ii++] = a + 2;
+      idx[ii++] = a + 1; idx[ii++] = a + 3; idx[ii++] = a + 2;
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setIndex(new THREE.BufferAttribute(idx, 1));
+  g.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e4);   // the real positions are made in the shader
+  _coGeo = g;
+  return g;
+}
+const _CO_VS = [
+  '#define MAXA ' + _CO_MAXA,
+  '#define MAXR ' + _CO_MAXR,
+  'uniform vec4 uSeg[MAXR];',   // a spark's drawn part: x start angle, y span (rad, increasing), z brightness, w 1 = head at the end
+  'uniform vec4 uSegG[MAXR];',  // (v51.02) and its arc: x radius, y depth (signed z), z lopsidedness, w seed (tilt + shape)
+  'uniform vec3 uA[MAXA];',
+  'uniform vec3 uB[MAXA];',
+  'uniform vec3 uC[MAXA];',
+  'uniform vec4 uP[MAXA];',   // x brightness (0 = not striking), y seed (negative = crawls along the ring), z jag, w half-width
+  'uniform vec4 uRing;',      // x (unused), y the sparks' brightness, z half-width, w jag
+  'uniform float uTime, uCrk;',
+  'varying float vT, vX, vE, vSeed, vRing, vFade, vKind;',
+  'float h1(float n) { return fract(sin(n) * 43758.5453123); }',
+  'float vn(float x) { float i = floor(x); float f = fract(x); f = f * f * (3.0 - 2.0 * f); return mix(h1(i), h1(i + 1.0), f) * 2.0 - 1.0; }',
+  'vec3 arcPt(int k, float t) {',
+  '  vec3 A = uA[k], B = uB[k], C = uC[k]; vec4 P = uP[k];',
+  '  float s = 1.0 - t;',
+  '  vec3 p = s * s * A + 2.0 * s * t * C + t * t * B;',
+  '  vec3 D = B - A; float L = length(D); D /= max(L, 1e-4);',
+  '  vec3 U = normalize(cross(D, abs(D.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));',
+  '  vec3 W = cross(D, U);',
+  '  float jx = 0.0, jy = 0.0, amp = 0.55, fr = 2.5;',
+  '  for (int o = 0; o < 4; o++) {',
+  '    float sp = (o < 2) ? uTime * (1.3 + 1.2 * float(o)) : uCrk * 1.731 + float(o) * 5.17;',
+  '    jx += amp * vn(t * fr + abs(P.y) * 7.13 + sp);',
+  '    jy += amp * vn(t * fr + abs(P.y) * 3.71 + 41.0 - sp);',
+  '    amp *= 0.5; fr *= 2.3;',
+  '  }',
+  // pinned at both ends: a bolt runs from the cone's tip into the ring (or ring to ring), so neither end may wander off
+  '  return p + (U * jx + W * jy) * L * P.z * smoothstep(0.0, 0.3, t) * (1.0 - smoothstep(0.8, 1.0, t));',
+  '}',
+  // (v51.02) a spark's arc, t = 0 .. 1 from its start to start + span: its own radius and depth, lopsided (two slow
+  // lobes, phased by its seed), tilted out of the nozzle's plane (direction and amount from its seed), and jagged like
+  // the bolts (the fine terms step with the crackle)
+  'vec3 sparkPt(int j, float t) {',
+  '  vec4 S = uSeg[j], G = uSegG[j];',
+  '  float a = S.x + t * S.y, sd = G.w;',
+  '  float lop = G.z * (0.6 * sin(2.0 * a + sd * 3.1) + 0.4 * sin(3.0 * a + sd * 5.7));',
+  '  float jg = uRing.w * (0.45 * sin(7.0 * a + uTime * 3.4 + sd) + 0.35 * sin(13.0 * a + uCrk * 2.7) + 0.2 * sin(29.0 * a - uCrk * 1.9));',
+  '  float r = G.x * (1.0 + lop + jg);',
+  '  float td = fract(sd * 0.37) * 6.2831853, tl = (fract(sd * 0.71) - 0.5) * 0.5;',
+  '  float z = G.y + r * (tl * cos(a - td) + uRing.w * (0.6 * sin(5.0 * a + uTime * 1.7) + 0.4 * sin(17.0 * a + uCrk * 2.3)));',
+  '  return vec3(cos(a) * r, sin(a) * r, z);',
+  '}',
+  'void main() {',
+  '  float side = position.x, t = position.y;',
+  '  bool ring = position.z > float(MAXA) - 0.5;',
+  '  int k = ring ? 0 : int(position.z + 0.5);',
+  '  int j = ring ? int(position.z - float(MAXA) + 0.5) : 0;',
+  '  float e = ring ? uSeg[j].z * uRing.y : uP[k].x;',
+  '  float kind = (!ring && uP[k].y < 0.0) ? 1.0 : 0.0;',
+  '  vT = t; vX = side; vE = e; vSeed = ring ? uSegG[j].w : abs(uP[k].y); vRing = ring ? 1.0 : 0.0; vFade = 1.0; vKind = kind;',
+  '  if (e <= 0.001) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }',   // not striking: off screen, no fragments
+  // a spark fades in at both ends of its drawn part and is brightest at its head (the end still drawing)
+  '  if (ring) { float hd = (uSeg[j].w > 0.5) ? t : 1.0 - t; vE = e * smoothstep(0.0, 0.12, t) * smoothstep(0.0, 0.12, 1.0 - t) * mix(0.35, 1.0, hd * hd); }',
+  '  vec3 p0, pa, pb;',
+  '  if (ring) { p0 = sparkPt(j, t); pa = sparkPt(j, max(t - 0.02, 0.0)); pb = sparkPt(j, min(t + 0.02, 1.0)); }',
+  '  else { p0 = arcPt(k, t); pa = arcPt(k, max(t - 0.02, 0.0)); pb = arcPt(k, min(t + 0.02, 1.0)); }',
+  '  vec4 mv = modelViewMatrix * vec4(p0, 1.0);',
+  '  vec3 tg = (modelViewMatrix * vec4(pb - pa, 0.0)).xyz;',
+  '  vec3 sd = cross(tg, mv.xyz); float sl = length(sd);',
+  '  sd = (sl > 1e-8) ? sd / sl : vec3(1.0, 0.0, 0.0);',
+  // a bolt is thin where it leaves the tip and full where it meets the ring
+  '  float w = (ring ? uRing.z : uP[k].w * (kind > 0.5 ? 1.0 : mix(0.45, 1.0, t))) * length(modelViewMatrix[0].xyz);',
+  '  float wmin = -mv.z * 0.0016;',   // ~1.3 px at a 75 deg fov: anything thinner shimmers, so widen it and dim it
+  '  if (w < wmin) { vFade = w / wmin; w = wmin; }',
+  '  mv.xyz += sd * side * w;',
+  '  gl_Position = projectionMatrix * mv;',
+  '}'
+].join('\n');
+const _CO_FS = [
+  'uniform vec3 uColor; uniform float uOpacity, uTime;',
+  'varying float vT, vX, vE, vSeed, vRing, vFade, vKind;',
+  'float h1(float n) { return fract(sin(n) * 43758.5453123); }',
+  'float vn(float x) { float i = floor(x); float f = fract(x); f = f * f * (3.0 - 2.0 * f); return mix(h1(i), h1(i + 1.0), f); }',
+  'void main() {',
+  '  float x = vX, core = exp(-x * x * 28.0), halo = exp(-x * x * 3.2);',
+  '  float along, fl;',
+  '  if (vRing > 0.5) {',   // (v51.02) a spark: its fades are already in vE; energy runs along it like a bolt's
+  '    along = 1.0;',
+  '    fl = 0.55 + 0.45 * vn(vT * 11.0 - uTime * 16.0 + vSeed * 7.0);',
+  '  } else {',
+  // a cone bolt brightens as it leaves the tip (inside the hull) and stays full into the ring; a ring crawler is even
+  '    along = (vKind > 0.5) ? 1.0 : smoothstep(0.0, 0.35, vT);',
+  '    fl = 0.6 + 0.4 * vn(vT * 9.0 - uTime * 14.0 + vSeed * 13.0);',   // pulses running out toward the ring
+  '  }',
+  '  vec3 col = uColor * halo * 0.55 + mix(uColor, vec3(1.0), 0.7) * core;',
+  '  gl_FragColor = vec4(col * (uOpacity * vE * along * fl * vFade), 1.0);',
+  '}'
+].join('\n');
+// (v51.00) the inward flow. Slots 0..NP-1 are streaks of _FW_NS points, slot NP the nozzle ring of _FW_NR points; every
+// point is two vertices (side -1 / +1) spread across the view in the shader, like the corona's ribbons.
+const _FW_NP = 160, _FW_NS = 10, _FW_NR = 96;   // (v51.01) NS 6 -> 10: a 0.3-long streak bends through the spiral
+let _fwGeo = null;
+function _fwGeometry() {
+  if (_fwGeo) return _fwGeo;
+  const strips = [];
+  for (let k = 0; k < _FW_NP; k++) strips.push([k, _FW_NS]);
+  strips.push([_FW_NP, _FW_NR]);
+  let nv = 0, ni = 0;
+  for (const s of strips) { nv += s[1] * 2; ni += (s[1] - 1) * 6; }
+  const pos = new Float32Array(nv * 3), idx = new Uint16Array(ni);
+  let v = 0, ii = 0;
+  for (const s of strips) {
+    const base = v, n = s[1];
+    for (let j = 0; j < n; j++) {
+      const t = j / (n - 1);
+      pos[v * 3] = -1; pos[v * 3 + 1] = t; pos[v * 3 + 2] = s[0]; v++;
+      pos[v * 3] = 1;  pos[v * 3 + 1] = t; pos[v * 3 + 2] = s[0]; v++;
+    }
+    for (let j = 0; j < n - 1; j++) {
+      const a = base + j * 2;
+      idx[ii++] = a; idx[ii++] = a + 1; idx[ii++] = a + 2;
+      idx[ii++] = a + 1; idx[ii++] = a + 3; idx[ii++] = a + 2;
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setIndex(new THREE.BufferAttribute(idx, 1));
+  g.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e4);   // the real positions are made in the shader
+  _fwGeo = g;
+  return g;
+}
+const _FW_VS = [
+  '#define NP ' + _FW_NP,
+  'uniform float uFlow, uCount, uBright, uDist, uRad, uEnd, uZ, uSwirl, uArms, uStreak, uWid, uAft;',
+  'uniform vec4 uRing;',   // x radius, y brightness, z half-width
+  'varying float vX, vA, vRing, vH;',
+  'float h1(float n) { return fract(sin(n) * 43758.5453123); }',
+  // a streak's place, u = 0 far behind the engine .. 1 in the nozzle: down a trumpet-shaped funnel, slow far out and
+  // quick at the end (pulled in), winding round the axis faster as it closes
+  'vec3 flowPt(float id, float u) {',
+  '  float ha = h1(id * 1.731 + 0.37), hb = h1(id * 7.31 + 1.1), hc = h1(id * 3.17 + 2.9);',
+  '  float th0 = (uArms > 0.5) ? (floor(ha * uArms) + hb * 0.3) * 6.2831853 / uArms : ha * 6.2831853;',
+  '  float s = pow(u, 1.5), d = 1.0 - s;',
+  '  float r = mix(uEnd, uRad * (0.55 + 0.6 * hc), pow(d, 1.5));',
+  '  float th = th0 + uSwirl * 6.2831853 * s * s;',
+  '  return vec3(cos(th) * r, sin(th) * r, uZ + uAft * uDist * (0.75 + 0.5 * hb) * d);',
+  '}',
+  'void main() {',
+  '  float side = position.x, t = position.y, id = position.z;',
+  '  bool ring = id > float(NP) - 0.5;',
+  '  vX = side; vRing = ring ? 1.0 : 0.0; vH = t; vA = 0.0;',
+  '  vec3 p0, pa, pb; float w;',
+  '  if (ring) {',
+  '    if (uRing.y <= 0.001) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }',
+  '    float a = t * 6.2831853;',
+  '    p0 = vec3(cos(a) * uRing.x, sin(a) * uRing.x, uZ);',
+  '    pa = vec3(cos(a - 0.05), sin(a - 0.05), 0.0) * uRing.x; pb = vec3(cos(a + 0.05), sin(a + 0.05), 0.0) * uRing.x;',
+  '    w = uRing.z; vA = uRing.y;',
+  '  } else {',
+  '    if (id >= uCount || uBright <= 0.001) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }',   // not drawn: off screen
+  '    float uh = fract(uFlow * (0.75 + 0.5 * h1(id * 5.13 + 4.7)) + h1(id * 9.71 + 0.3));',   // the head: each its own pace
+  '    float u = max(uh - uStreak * t, 0.0);',   // the tail trails back up the funnel
+  '    p0 = flowPt(id, u); pa = flowPt(id, max(u - 0.01, 0.0)); pb = flowPt(id, min(u + 0.01, 1.0));',
+  '    w = uWid * mix(1.0, 0.4, t);',
+  '    vA = uBright * smoothstep(0.0, 0.2, uh) * (1.0 - smoothstep(0.9, 1.0, uh)) * mix(0.35, 1.0, uh) * pow(1.0 - t, 1.5);',
+  '  }',
+  '  vec4 mv = modelViewMatrix * vec4(p0, 1.0);',
+  '  vec3 tg = (modelViewMatrix * vec4(pb - pa, 0.0)).xyz;',
+  '  vec3 sd = cross(tg, mv.xyz); float sl = length(sd);',
+  '  sd = (sl > 1e-8) ? sd / sl : vec3(1.0, 0.0, 0.0);',
+  '  w *= length(modelViewMatrix[0].xyz);',
+  '  float wmin = -mv.z * 0.0016;',   // ~1.3 px: thinner shimmers, so widen it and dim it
+  '  if (w < wmin) { vA *= w / wmin; w = wmin; }',
+  '  mv.xyz += sd * side * w;',
+  '  gl_Position = projectionMatrix * mv;',
+  '}'
+].join('\n');
+const _FW_FS = [
+  'uniform vec3 uColor; uniform float uTime, uSpin;',
+  'varying float vX, vA, vRing, vH;',
+  'void main() {',
+  '  float core = exp(-vX * vX * 22.0), halo = exp(-vX * vX * 3.0);',
+  '  float k = vA;',
+  '  if (vRing > 0.5) k *= 0.7 + 0.3 * sin(vH * 6.2831853 * 3.0 - uTime * 4.0 * uSpin);',   // light running round with the swirl
+  '  vec3 col = uColor * halo * 0.6 + mix(uColor, vec3(1.0), 0.65) * core;',
+  '  gl_FragColor = vec4(col * k, 1.0);',
+  '}'
+].join('\n');
+// built once per hull, after the orbs: per marker orb, one jet + one star (fire), a pool of rings (ripple), one corona
+// mesh and one inward-flow mesh. Every set exists on every hull, so a Settings change is instant.
 function _lssAddEngineFlames(group, loadoutKey) {
   const glows = (group.userData.engineGlows || []).filter((g) => g && g.userData && g.userData.orbKey);
   if (!glows.length) return;
-  const cls = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS[loadoutKey] != null) ? LSS.CLASS_COLORS[loadoutKey] : 0x66eeff;
-  const mat = new THREE.ShaderMaterial({
-    uniforms: { uTime: { value: 0 }, uPower: { value: 0 }, uBright: { value: _ENGINE_FLAME.bright }, uColor: { value: new THREE.Color(cls) }, uHot: { value: new THREE.Color(cls).lerp(new THREE.Color(0xffffff), 0.75) } },
-    vertexShader: _ENGINE_FLAME_VS, fragmentShader: _ENGINE_FLAME_FS,
-    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
-  });
-  mat.userData._flameClass = cls; mat.userData._flamePal = null;
-  const geo = _engineFlameGeometry(), flames = [];
-  for (const g of glows) {
-    const f = new THREE.Mesh(geo, mat);
+  _sjTextures(); _sjGeometry();
+  if (!_ripGeo) _ripGeo = new THREE.PlaneGeometry(2, 2);
+  const cls = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS[loadoutKey] != null) ? LSS.CLASS_COLORS[loadoutKey] : 0xffcc66;
+  const mk = (tex) => new THREE.MeshBasicMaterial({ map: tex, color: 0xffffff, transparent: true, blending: THREE.AdditiveBlending,
+    depthTest: true, depthWrite: false, fog: false, side: THREE.DoubleSide });
+  const K = _engineFlameKnobs(), nRing = Math.max(1, Math.min(16, (K.rings | 0) || 7));
+  const st0 = (K.on !== false) ? _engineStyle(K, loadoutKey) : '';   // (v51.03) per hull
+  const flames = [];
+  // (v51.04) the torch: one material per hull, shared by its thrusters (its uniforms are the hull's burn)
+  const tMat = new THREE.ShaderMaterial({
+    uniforms: { uTime: { value: 0 }, uPower: { value: 0 }, uBright: { value: 2.2 }, uColor: { value: new THREE.Color(cls) },
+      uHot: { value: new THREE.Color(cls).lerp(_shipAnimWhiteColor, 0.75) } },
+    vertexShader: _TORCH_VS, fragmentShader: _TORCH_FS, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide });
+  tMat.userData._tCls = cls; tMat.userData._tPal = null;
+  glows.forEach((g, i) => {
+    const jet = new THREE.Mesh(_sjGeoJet, mk(_sjTexJet)), star = new THREE.Mesh(_sjGeoStar, mk(_sjTexStar));
     // aft = away from the nose: the thrusters sit at the hull's tail, so the sign of their z picks the axis
     const aft = g.position.z < 0 ? -1 : 1;
-    f.rotation.x = aft * Math.PI / 2;   // the lathe's +Y onto +-Z
-    f.position.copy(g.position);
-    f.renderOrder = g.renderOrder || 0; f.castShadow = false; f.receiveShadow = false; f.frustumCulled = false;
-    f.userData.isPlume = true; f.userData.isEngineFlame = true;
-    f.userData.flameR0 = (g.geometry && g.geometry.parameters && g.geometry.parameters.radius) || 2;
-    f.userData.flameAft = aft; f.userData.flameGlow = g;
-    const K = _engineFlameKnobs(); f.visible = K.on !== false;
-    f.scale.set(f.userData.flameR0 * (K.width || 1), (K.len || 9) * f.userData.flameR0 * (K.idle != null ? K.idle : 0.28), f.userData.flameR0 * (K.width || 1));
-    group.add(f); flames.push(f);
-  }
-  group.userData.engineFlames = flames; group.userData.engineFlameMat = mat;   // ticked by _lssEngineFlameTick, not LayeredFX
+    // (v50.97) _sharedGLBGeo: these geometries are shared by every hull, so _disposeShipGroup must not free them
+    const tag = (m) => { m.position.copy(g.position); m.castShadow = false; m.receiveShadow = false; m.frustumCulled = false;
+      m.userData.isPlume = true; m.userData.isEngineFlame = true; m.userData._sharedGLBGeo = true; group.add(m); };
+    tag(jet); tag(star);
+    const rings = [];
+    for (let k = 0; k < nRing; k++) {
+      const mat = new THREE.ShaderMaterial({ uniforms: { uAge: { value: 1 }, uPow: { value: 0 }, uPunch: { value: 1.4 }, uIri: { value: 0.65 }, uW: { value: 0.05 }, uColor: { value: new THREE.Color(cls).lerp(_shipAnimWhiteColor, 0.2) } },
+        vertexShader: _RIP_VS, fragmentShader: _RIP_FS, transparent: true, depthWrite: false, depthTest: true, blending: THREE.AdditiveBlending, side: THREE.DoubleSide });
+      const m = new THREE.Mesh(_ripGeo, mat); tag(m);   // the quad's normal is +Z: perpendicular to the axis as built
+      m.visible = (k === 0 && st0 === 'ripple');   // (v50.97) one shown (at age 1 it adds nothing) so a prebake links the program
+      rings.push({ m, mat, age: 0, live: false });
+    }
+    // (v50.97) the corona: everything in its uniforms; it starts dark (every slot at brightness 0) but VISIBLE when it
+    // is the style, so a prebake render links its program instead of the first sight of an engine in play
+    const coMat = new THREE.ShaderMaterial({
+      uniforms: { uA: { value: new Float32Array(_CO_MAXA * 3) }, uB: { value: new Float32Array(_CO_MAXA * 3) }, uC: { value: new Float32Array(_CO_MAXA * 3) },
+        uP: { value: new Float32Array(_CO_MAXA * 4) }, uRing: { value: new THREE.Vector4(1, 0, 0.1, 0.06) }, uTime: { value: 0 }, uCrk: { value: 0 },
+        uSeg: { value: new Float32Array(_CO_MAXR * 4) }, uSegG: { value: new Float32Array(_CO_MAXR * 4) },
+        uColor: { value: new THREE.Color(cls).lerp(_shipAnimWhiteColor, 0.2) }, uOpacity: { value: 1.5 } },
+      vertexShader: _CO_VS, fragmentShader: _CO_FS, transparent: true, depthWrite: false, depthTest: true, blending: THREE.AdditiveBlending, side: THREE.DoubleSide });
+    const coM = new THREE.Mesh(_coGeometry(), coMat); tag(coM); coM.visible = (st0 === 'corona');
+    const arcs = [];
+    for (let k = 0; k < _CO_MAXA; k++) arcs.push({ live: false, age: 0, life: 1, gap: Math.random() * 0.3, phi: 0, om: 0, tw: 0, br: false, bk: 0, ax: 0, ay: 0, zf: 1, rf: 1, seed: 1 });
+    const rarcs = [];   // (v50.99) the sparks that draw the ring; (v51.02) each with its own depth / size / shape
+    for (let j = 0; j < _CO_MAXR; j++) rarcs.push({ live: false, age: 0, life: 1, gap: Math.random() * 0.4, a0: 0, dir: 1, sweep: 1, zf: 1, rf: 1, lop: 0, seed: 1 });
+    // (v51.00) the inward flow: dark (brightness 0) but VISIBLE when it is the style, so the prebake links its program
+    const fwMat = new THREE.ShaderMaterial({
+      uniforms: { uFlow: { value: 0 }, uCount: { value: 0 }, uBright: { value: 0 }, uDist: { value: 1 }, uRad: { value: 1 }, uEnd: { value: 0.1 },
+        uZ: { value: 0 }, uSwirl: { value: 1 }, uArms: { value: 4 }, uStreak: { value: 0.1 }, uWid: { value: 0.1 }, uAft: { value: aft },
+        uRing: { value: new THREE.Vector4(1, 0, 0.1, 0) }, uColor: { value: new THREE.Color(cls).lerp(_shipAnimWhiteColor, 0.2) },
+        uTime: { value: 0 }, uSpin: { value: 1 } },
+      vertexShader: _FW_VS, fragmentShader: _FW_FS, transparent: true, depthWrite: false, depthTest: true, blending: THREE.AdditiveBlending, side: THREE.DoubleSide });
+    const fwM = new THREE.Mesh(_fwGeometry(), fwMat); tag(fwM); fwM.visible = (st0 === 'inward');
+    // (v51.04) the torch: the lathe's +Y onto the aft axis; the idle pilot flame until the first tick sizes it
+    const torch = new THREE.Mesh(_torchGeometry(), tMat); tag(torch);
+    torch.rotation.x = aft * Math.PI / 2; torch.visible = (st0 === 'torch');
+    { const r0 = (g.geometry && g.geometry.parameters && g.geometry.parameters.radius) || 2; torch.scale.set(r0 * 1.1, r0 * 2.8, r0 * 1.1); }
+    // (v51.05) the inward spiral: dark until its first tick, but VISIBLE when it is the style (the prebake's link)
+    const spMat = new THREE.ShaderMaterial({
+      uniforms: { uFlow: { value: 0 }, uTime: { value: 0 }, uCount: { value: 0 }, uBright: { value: 0 }, uRad: { value: 1 }, uDepth: { value: 0.5 },
+        uZ: { value: 0 }, uSwirl: { value: 1 }, uArms: { value: 3 }, uStreak: { value: 0.1 }, uWid: { value: 0.1 }, uAft: { value: aft },
+        uEsc: { value: 0.1 }, uFall: { value: 1 }, uRingZ: { value: 0.3 }, uRingP: { value: new THREE.Vector4(1, 0, 0.05, 0) },
+        uCore: { value: new THREE.Vector4(0.5, 0, 0.1, 0) }, uColor: { value: new THREE.Color(cls).lerp(_shipAnimWhiteColor, 0.2) } },
+      vertexShader: _SP_VS, fragmentShader: _SP_FS, transparent: true, depthWrite: false, depthTest: true, blending: THREE.AdditiveBlending, side: THREE.DoubleSide });
+    const spM = new THREE.Mesh(_spGeometry(), spMat); tag(spM); spM.visible = (st0 === 'spiral');
+    const f = { jet, star, torch, rings, co: { m: coM, mat: coMat, arcs, rarcs, pal: null },
+      sp: { m: spM, mat: spMat, flow: Math.random() * 10, rot: Math.random(), spin: (g.position.x >= 0) ? 1 : -1, pal: null },
+      fw: { m: fwM, mat: fwMat, flow: Math.random() * 10, spin: (g.position.x >= 0) ? 1 : -1, pal: null }, glow: g, aft, R0: (g.geometry && g.geometry.parameters && g.geometry.parameters.radius) || 2,
+      col: new THREE.Color(cls).lerp(_shipAnimWhiteColor, 0.25), cls, pal: null, rollT: -1, roll: 0, jit: 1, sroll: 0, ripT: Math.random() * 0.3, i };
+    jet.visible = star.visible = (st0 === 'fire');
+    _lssEngineFlamePose(f, K, 0, null, 0);
+    flames.push(f);
+  });
+  group.userData.engineFlames = flames;
+  group.userData.engineFlameKey = loadoutKey;   // (v51.03) which hull's style 'ship' resolves to
+  group.userData.engineTorchMat = tMat;         // (v51.04)
 }
-const _flV = new THREE.Vector3(), _flN = new THREE.Vector3();
+const _engineRadius = (f) => { const g = f.glow; return f.R0 * ((g && g.userData && g.userData.orbKey && g.userData.orbK0) ? (((_ENGINE_ORB_K[g.userData.orbKey] != null) ? +_ENGINE_ORB_K[g.userData.orbKey] : 1) / g.userData.orbK0) : 1); };
+// ab (v51.03) = the afterburner, 0..1: up to `ablen` longer, and a little fatter
+function _lssEngineFlamePose(f, K, pw, camQ, ab) {
+  const g = f.glow, R = _engineRadius(f); ab = ab || 0;
+  const idle = (K.idle != null) ? +K.idle : 0.3, len = (K.len != null) ? +K.len : 12.5, wid = (K.wid != null) ? +K.wid : 3.3, st = (K.star != null) ? +K.star : 1.7;
+  const abl = (K.ablen != null) ? +K.ablen : 0.9;
+  const L = len * R * (idle + (1 - idle) * pw) * f.jit * (1 + abl * ab), W = wid * R * (0.8 + 0.25 * pw) * (0.9 + 0.2 * (f.jit - 0.85) / 0.3) * (1 + 0.15 * ab);
+  f.jet.scale.set(W, W, Math.max(1e-3, L));
+  f.jet.quaternion.copy(_flAftQ[f.aft < 0 ? 0 : 1]).multiply(_sjRoll.setFromAxisAngle(_flZ, f.roll));
+  if (g) { f.jet.position.copy(g.position); f.star.position.copy(g.position); }   // the __engineOrbX knob moves the orb; the fire follows it
+  const sr = st * R * (0.75 + 0.45 * pw) * (0.9 + 0.2 * (f.jit - 0.85) / 0.3);
+  f.star.scale.set(sr, sr, sr);
+  if (camQ) { f.star.quaternion.copy(camQ); f.star.rotateZ(f.sroll); }
+  if (f.pal !== K.palette) { f.pal = K.palette; if (K.palette === 'fire') f.col.set(0xff7a2a); else f.col.set(f.cls).lerp(_shipAnimWhiteColor, 0.25); }
+  const a = ((K.punch != null) ? +K.punch : 1.6) * (0.45 + 0.55 * pw) * (1 + 0.35 * ab);
+  f.jet.material.color.copy(f.col).multiplyScalar(a);
+  f.star.material.color.copy(f.col).multiplyScalar(a * 1.2);
+}
+// the rings: born at the nozzle every `every` s (full thrust) .. `idleEvery` s (idle), out aft, widening, fading
+function _lssEngineRippleStep(f, K, pw, dt) {
+  const R = _engineRadius(f), g = f.glow;
+  const life = Math.max(0.1, (K.life != null) ? +K.life : 0.9);
+  const ev = (K.every != null) ? +K.every : 0.11, ei = (K.idleEvery != null) ? +K.idleEvery : 0.4;
+  const every = Math.max(0.02, ei + (ev - ei) * pw);
+  f.ripT += dt;
+  if (f.ripT >= every) {
+    f.ripT = 0;
+    let s = f.rings.find((x) => !x.live); if (!s) { s = f.rings[0]; for (const x of f.rings) if (x.age > s.age) s = x; }
+    s.live = true; s.age = 0; s.pw = pw;   // a ring keeps the burn it was born with
+  }
+  const travel = (K.travel != null) ? +K.travel : 14, r0 = (K.r0 != null) ? +K.r0 : 1.1, r1 = (K.r1 != null) ? +K.r1 : 3.4;
+  for (const s of f.rings) {
+    if (!s.live) { s.m.visible = false; continue; }
+    s.age += dt;
+    const t = s.age / life;
+    if (t >= 1) { s.live = false; s.m.visible = false; continue; }
+    const go = 1 - Math.pow(1 - t, 1.8), grow = 1 - Math.pow(1 - t, 2.4);   // fast off the nozzle, then easing
+    const pk = 0.55 + 0.45 * (s.pw != null ? s.pw : pw);   // a ring born under burn reaches further
+    if (g) s.m.position.copy(g.position);
+    s.m.position.z += f.aft * travel * R * go * pk;
+    const rad = R * (r0 + (r1 - r0) * grow * pk) / 0.8;   // the band sits at 0.8 of the quad's half-width
+    s.m.scale.set(rad, rad, 1);
+    const u = s.mat.uniforms;
+    u.uAge.value = t; u.uPow.value = (s.pw != null ? s.pw : pw);
+    // (v50.97) x the material's opacity: that is where a cloak lands (see the CLOAK note above)
+    u.uPunch.value = ((K.rpunch != null) ? +K.rpunch : 1.4) * ((s.mat.opacity != null) ? s.mat.opacity : 1);
+    u.uIri.value = (K.iri != null) ? +K.iri : 0.65; u.uW.value = (K.rw != null) ? +K.rw : 0.05;
+    s.m.visible = true;
+  }
+}
+// (v50.97) the corona: strike, sweep and fade each bolt, then hand the shader its points (all in the thruster's frame -
+// the mesh sits on the orb, unrotated, so the hull's own axes: the ring is parallel to the XY plane, aft is z * f.aft)
+function _lssEngineCoronaStep(f, K, pw, dt, time) {
+  const c = f.co; if (!c) return;
+  const R = _engineRadius(f), g = f.glow, aft = f.aft, u = c.mat.uniforms;
+  if (g) c.m.position.copy(g.position);
+  const num = (k, d) => (K[k] != null && isFinite(+K[k])) ? +K[k] : d;
+  const idleN = num('carcsIdle', 4);
+  const nArc = Math.max(0, Math.min(_CO_MAXA, Math.round(idleN + (num('carcs', 10) - idleN) * pw)));
+  const life0 = Math.max(0.05, num('clife', 0.35)), spin = num('cspin', 1.2), bridge = num('cbridge', 0), cidle = num('cidle', 0.35);
+  // the cone: its tip `capex` R INSIDE the ship (forward of the orb), reaching `len` aft of the orb; it keeps its angle
+  // as thrust stretches it. (v51.02) Nothing sits at exactly `len` any more: each bolt end and each spark takes its own
+  // depth, `near` .. 1 of it (biased near: "varying distances away from the ship (not too far)"), and its own size
+  // round the cone there (coneR(zf) is the cone's radius at that depth)
+  const apex = R * num('capex', 1), len = R * num('clen', 8) * (cidle + (1 - cidle) * pw), cw = num('cwide', 0.33);
+  const tipZ = -aft * apex, near = Math.max(0, Math.min(1, num('cnear', 0.4)));
+  const coneR = (zf) => cw * (len * zf + apex);
+  const pickZ = () => near + (1 - near) * Math.pow(Math.random(), 1.3);
+  const bulge = num('cbulge', 0.15), swirl = num('cswirl', 0.5), rough = num('crough', 0.1), wid = R * num('cwid', 0.16);
+  const A = u.uA.value, B = u.uB.value, C = u.uC.value, P = u.uP.value;
+  for (let k = 0; k < _CO_MAXA; k++) {
+    const a = c.arcs[k];
+    if (a.live) {
+      a.age += dt; a.phi += a.om * dt;
+      if (a.age >= a.life) { a.live = false; a.gap = Math.random() * 0.12; }
+    } else if (k < nArc) {
+      a.gap -= dt;
+      if (a.gap <= 0) {   // a new strike, somewhere else round the cone
+        a.live = true; a.age = 0; a.life = life0 * (0.5 + Math.random() * 0.9) / (0.85 + 0.3 * pw);
+        a.phi = Math.random() * Math.PI * 2; a.om = (Math.random() < 0.5 ? -1 : 1) * spin * (0.5 + Math.random());
+        a.br = Math.random() < bridge;
+        a.tw = (Math.random() < 0.5 ? -1 : 1) * (a.br ? 0.3 + 0.6 * Math.random() : swirl * (0.5 + 0.5 * Math.random()));
+        a.bk = Math.random(); a.ax = (Math.random() - 0.5) * 0.3; a.ay = (Math.random() - 0.5) * 0.3;
+        a.zf = pickZ(); a.rf = 0.8 + 0.4 * Math.random();   // (v51.02) its own depth, and a little off the cone
+        a.seed = 1 + Math.random() * 96;
+      }
+    }
+    const i3 = k * 3, i4 = k * 4;
+    if (!a.live) { P[i4] = 0; continue; }
+    const s = a.age / a.life;
+    const env = Math.min(1, s / 0.08) * Math.pow(1 - s, 0.7);   // brightest as it strikes, then fading
+    const pb = a.phi, zE = aft * len * a.zf, rE = coneR(a.zf) * a.rf;
+    if (a.br) {   // crawling along the ring: ring point to ring point, bowing outward
+      const pe = pb + a.tw, pm = pb + a.tw * 0.5, rm = rE * (1.15 + 0.2 * a.bk);
+      A[i3] = rE * Math.cos(pb); A[i3 + 1] = rE * Math.sin(pb); A[i3 + 2] = zE;
+      B[i3] = rE * Math.cos(pe); B[i3 + 1] = rE * Math.sin(pe); B[i3 + 2] = zE;
+      C[i3] = rm * Math.cos(pm); C[i3 + 1] = rm * Math.sin(pm); C[i3 + 2] = zE - aft * R * 0.3 * a.bk;
+    } else {      // tip to ring, bowing out of the cone and twisting round it (the tips scatter a little: no single spark)
+      const pm = pb - a.tw, rm = rE * 0.5 * (1 + 2 * bulge * (0.5 + a.bk));
+      A[i3] = R * a.ax; A[i3 + 1] = R * a.ay; A[i3 + 2] = tipZ;
+      B[i3] = rE * Math.cos(pb); B[i3 + 1] = rE * Math.sin(pb); B[i3 + 2] = zE;
+      C[i3] = rm * Math.cos(pm); C[i3 + 1] = rm * Math.sin(pm); C[i3 + 2] = (tipZ + zE) * 0.5;
+    }
+    P[i4] = env * (0.55 + 0.45 * pw); P[i4 + 1] = a.br ? -a.seed : a.seed; P[i4 + 2] = rough; P[i4 + 3] = wid * (a.br ? 0.8 : 1);
+  }
+  // (v50.99) the ring, lit only where a spark is drawing it: each draws its part round from a0, then erases it behind
+  // itself. Mostly a quarter to a half of the circle, now and then nearly all of it; none live = the ring is out.
+  const rIdle = num('crarcsIdle', 1), rN = Math.max(0, Math.min(_CO_MAXR, Math.round(rIdle + (num('crarcs', 3) - rIdle) * pw)));
+  const rLife = Math.max(0.05, num('crlife', 0.4)), S = u.uSeg.value, G = u.uSegG.value, TAU = Math.PI * 2, lopK = num('cringR', 1);
+  let lit = 0;
+  for (let j = 0; j < _CO_MAXR; j++) {
+    const r = c.rarcs[j], j4 = j * 4;
+    if (r.live) {
+      r.age += dt;
+      if (r.age >= r.life) { r.live = false; r.gap = 0.05 + Math.random() * 0.3; }
+    } else if (j < rN) {
+      r.gap -= dt;
+      if (r.gap <= 0) {
+        r.live = true; r.age = 0; r.life = rLife * (0.5 + Math.random());
+        r.a0 = Math.random() * TAU; r.dir = (Math.random() < 0.5) ? -1 : 1;
+        r.sweep = TAU * ((Math.random() < 0.15) ? 0.8 + 0.15 * Math.random() : 0.25 + 0.25 * Math.random());
+        // (v51.02) its own arc: depth, size round the cone there, lopsidedness, and a seed for its tilt and shape
+        r.zf = pickZ(); r.rf = 0.75 + 0.45 * Math.random(); r.lop = 0.1 + 0.25 * Math.random(); r.seed = 1 + Math.random() * 96;
+      }
+    }
+    if (!r.live) { S[j4 + 2] = 0; continue; }
+    G[j4] = coneR(r.zf) * r.rf; G[j4 + 1] = aft * len * r.zf; G[j4 + 2] = r.lop * lopK; G[j4 + 3] = r.seed;
+    const s = r.age / r.life;
+    const head = r.sweep * Math.min(1, s / 0.6), tail = r.sweep * Math.max(0, (s - 0.45) / 0.55);
+    const start = (r.dir > 0) ? r.a0 + tail : r.a0 - head;   // the shader wants [start, start + span], angles increasing
+    S[j4] = ((start % TAU) + TAU) % TAU; S[j4 + 1] = Math.max(0, head - tail);
+    S[j4 + 2] = Math.min(1, s / 0.05) * Math.pow(1 - s, 0.4); S[j4 + 3] = (r.dir > 0) ? 1 : 0;   // w: which end is the head
+    lit++;
+  }
+  u.uRing.value.set(coneR(1), lit ? num('cringB', 1) * (0.45 + 0.55 * pw) : 0, R * num('cringW', 0.1), num('cringJ', 0.08));
+  u.uTime.value = time % 600; u.uCrk.value = Math.floor(time * num('crackle', 18)) % 1000;
+  if (c.pal !== K.cpal) { c.pal = K.cpal; if (K.cpal === 'electric') u.uColor.value.set(0x9fd8ff); else u.uColor.value.set(f.cls).lerp(_shipAnimWhiteColor, 0.2); }
+  u.uOpacity.value = num('cpunch', 1.5) * ((c.mat.opacity != null) ? c.mat.opacity : 1);   // x opacity: the cloak
+  c.m.visible = true;
+}
+// (v51.00) the inward flow: integrate the flow clock at the thrust's pace and hand the shader its funnel (in the
+// thruster's frame, like the corona: the mesh sits on the orb, unrotated; aft is z * f.aft)
+function _lssEngineInwardStep(f, K, pw, dt, time) {
+  const w = f.fw; if (!w) return;
+  const R = _engineRadius(f), g = f.glow, aft = f.aft, u = w.mat.uniforms;
+  if (g) w.m.position.copy(g.position);
+  const num = (k, d) => (K[k] != null && isFinite(+K[k])) ? +K[k] : d;
+  const sIdle = num('fspeedIdle', 0.25), cIdle = num('fcountIdle', 30), fidle = num('fidle', 0.5);
+  w.flow = (w.flow + dt * (sIdle + (num('fspeed', 0.9) - sIdle) * pw)) % 4096;   // wraps once an hour or so: one jump
+  const op = (w.mat.opacity != null) ? w.mat.opacity : 1;   // x opacity: the cloak
+  u.uFlow.value = w.flow; u.uTime.value = time % 600; u.uSpin.value = w.spin; u.uAft.value = aft;
+  u.uCount.value = Math.max(0, Math.min(_FW_NP, Math.round(cIdle + (num('fcount', 90) - cIdle) * pw)));
+  u.uBright.value = num('fpunch', 1.3) * (0.4 + 0.6 * pw) * op;
+  u.uDist.value = R * num('fdist', 12) * (fidle + (1 - fidle) * pw);
+  u.uRad.value = R * num('frad', 4.5); u.uEnd.value = R * num('fend', 0.25); u.uZ.value = aft * R * num('fz', 0.9);
+  u.uSwirl.value = num('fswirl', 1.25) * w.spin; u.uArms.value = Math.max(0, Math.round(num('farms', 4)));
+  u.uStreak.value = num('fstreak', 0.3); u.uWid.value = R * num('fwid', 0.12);
+  u.uRing.value.set(R * num('fring', 1.9), num('fringB', 1) * (0.5 + 0.5 * pw) * op, R * num('fringW', 0.12), 0);
+  if (w.pal !== K.fpal) { w.pal = K.fpal; if (K.fpal === 'blue') u.uColor.value.set(0x7fc8ff); else u.uColor.value.set(f.cls).lerp(_shipAnimWhiteColor, 0.2); }
+  w.m.visible = true;
+}
+// (v51.05) the inward spiral: the flow clock and the rings' turn at the thrust's pace, then the shader's dish, rings and
+// core (in the thruster's frame, like the inward flow)
+function _lssEngineSpiralStep(f, K, pw, dt, time) {
+  const s = f.sp; if (!s) return;
+  const R = _engineRadius(f), g = f.glow, aft = f.aft, u = s.mat.uniforms;
+  if (g) s.m.position.copy(g.position);
+  const num = (k, d) => (K[k] != null && isFinite(+K[k])) ? +K[k] : d;
+  const sIdle = num('pspeedIdle', 0.2), cIdle = num('pcountIdle', 60);
+  s.flow = (s.flow + dt * (sIdle + (num('pspeed', 0.6) - sIdle) * pw)) % 4096;
+  s.rot = (s.rot + dt * num('pspin', 0.35) * (0.3 + 0.7 * pw)) % 1024;   // ring turns
+  const op = (s.mat.opacity != null) ? s.mat.opacity : 1;   // x opacity: the cloak
+  u.uFlow.value = s.flow; u.uTime.value = time % 600; u.uAft.value = aft;
+  u.uCount.value = Math.max(0, Math.min(_SP_NP, Math.round(cIdle + (num('pcount', 160) - cIdle) * pw)));
+  u.uBright.value = num('ppunch', 1.4) * (0.45 + 0.55 * pw) * op;
+  u.uRad.value = R * num('prad', 1.7); u.uDepth.value = R * num('pdepth', 0.6); u.uZ.value = aft * R * num('pz', 0.9);
+  u.uSwirl.value = num('pswirl', 1.6) * s.spin; u.uArms.value = Math.max(0, Math.round(num('parms', 3)));
+  u.uStreak.value = num('pstreak', 0.18); u.uWid.value = R * num('pwid', 0.07);
+  u.uEsc.value = num('pesc', 0.12); u.uFall.value = num('pfall', 1.6); u.uRingZ.value = R * num('pringZ', 0.3);
+  u.uRingP.value.set(R * num('pring', 1.6), num('pringB', 1.6) * (0.5 + 0.5 * pw) * op, R * num('pringW', 0.08), s.rot * s.spin);
+  u.uCore.value.set(R * num('pcore', 0.5) * (0.8 + 0.4 * pw), num('pcoreB', 1.6) * (0.6 + 0.4 * pw) * op, R * num('pcoreW', 0.12), s.rot * 1.9 * s.spin);
+  if (s.pal !== K.ppal) { s.pal = K.ppal; if (K.ppal === 'blue') u.uColor.value.set(0x7fc8ff); else u.uColor.value.set(f.cls).lerp(_shipAnimWhiteColor, 0.2); }
+  s.m.visible = true;
+}
+// (v51.04) the torch: the hull's burn into its one material, then each flame's length and width (the v50.93 tick, plus
+// the afterburner: `ablen` longer, a little fatter, brighter and faster-scrolling)
+function _lssEngineTorchStep(ud, fl, K, pw, ab, time) {
+  const mat = ud.engineTorchMat; if (!mat) return;
+  const num = (k, d) => (K[k] != null && isFinite(+K[k])) ? +K[k] : d;
+  const u = mat.uniforms;
+  u.uTime.value = time % 600; u.uPower.value = Math.min(1, pw + 0.5 * ab);
+  u.uBright.value = num('tbright', 2.2) * (1 + 0.3 * ab) * ((mat.opacity != null) ? mat.opacity : 1);   // x opacity: the cloak
+  if (mat.userData._tPal !== K.tpal) {   // the palette, once per change
+    mat.userData._tPal = K.tpal;
+    if (K.tpal === 'fire') { u.uColor.value.set(0xff5a14); u.uHot.value.set(0xffe9a8); }
+    else { u.uColor.value.set(mat.userData._tCls); u.uHot.value.set(mat.userData._tCls).lerp(_shipAnimWhiteColor, 0.75); }
+  }
+  const idle = num('tidle', 0.28), len = num('tlen', 10), wd = num('twid', 1.3), abl = num('ablen', 0.9);
+  for (let i = 0; i < fl.length; i++) {
+    const f = fl[i], t = f.torch; if (!t) continue;
+    const R = _engineRadius(f), flick = 1 + Math.sin(time * 31 + i * 1.7) * 0.06 + Math.sin(time * 47 + i * 0.9) * 0.04;
+    const L = len * R * (idle + (1 - idle) * pw) * flick * (1 + abl * ab), W = R * wd * (0.85 + 0.25 * pw) * (1 + 0.15 * ab);
+    t.scale.set(W, L, W);
+    if (f.glow) t.position.copy(f.glow.position);   // the __engineOrbX knob moves the orb; the flame follows it
+    t.visible = true;
+  }
+}
+const _flV = new THREE.Vector3(), _flN = new THREE.Vector3(), _flQ = new THREE.Quaternion();
 function _lssEngineFlameTick(mesh, maxSpeed, dt, time) {
-  const ud = mesh.userData, fl = ud.engineFlames, mat = ud.engineFlameMat;
-  if (!fl || !fl.length || !mat) return;
+  const ud = mesh.userData, fl = ud.engineFlames;
+  if (!fl || !fl.length) return;
   const K = _engineFlameKnobs();
-  const on = K.on !== false && !(typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato());
-  for (let i = 0; i < fl.length; i++) fl[i].visible = on;
+  // (v51.03) the style is per hull now ('ship' -> _ENGINE_SHIP_STYLE), and a hull whose style is 'orb' is off like K.on
+  // (v51.07) a peer's hull wears the peer's own pick (its NetworkPlayer's `engineStyle`, from the loadout announce)
+  const own = (ud.bot && ud.bot.engineStyle) || null;
+  const st = (K.on !== false && !(typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato())) ? _engineStyle(K, ud.engineFlameKey, own) : '';
+  const on = st !== '';
+  for (let i = 0; i < fl.length; i++) {
+    const f = fl[i];
+    f.jet.visible = f.star.visible = (st === 'fire');
+    if (f.torch && st !== 'torch') f.torch.visible = false;
+    if (st !== 'ripple') for (const s of f.rings) { s.live = false; s.m.visible = false; }
+    if (f.co && st !== 'corona') { f.co.m.visible = false; for (const a of f.co.arcs) a.live = false; }
+    if (f.fw && st !== 'inward') f.fw.m.visible = false;
+    if (f.sp && st !== 'spiral') f.sp.m.visible = false;
+  }
   if (!on) { ud._flPrev = null; return; }
   dt = (dt > 0 && dt < 0.5) ? dt : 1 / 60;
-  // forward speed: the hull's own motion along its nose (the flames point aft, so the nose is minus that)
+  // forward speed: the hull's own motion along its nose (the FX point aft, so the nose is minus that)
   let fwd = 0;
   if (ud._flPrev) {
     _flV.subVectors(mesh.position, ud._flPrev).multiplyScalar(1 / dt);
-    _flN.set(0, 0, -fl[0].userData.flameAft).applyQuaternion(mesh.quaternion);
+    _flN.set(0, 0, -fl[0].aft).applyQuaternion(mesh.quaternion);
     fwd = _flV.dot(_flN);
     if (!isFinite(fwd) || Math.abs(fwd) > (maxSpeed || 1) * 4) fwd = 0;   // a respawn / teleport, not thrust
   } else ud._flPrev = new THREE.Vector3();
@@ -74386,20 +75230,27 @@ function _lssEngineFlameTick(mesh, maxSpeed, dt, time) {
   const want = Math.max(0, Math.min(1, fwd / ref));
   const pw = (ud._flPow || 0) + (want - (ud._flPow || 0)) * (1 - Math.exp(-dt * 6));
   ud._flPow = pw;
-  const u = mat.uniforms;
-  u.uTime.value = time; u.uPower.value = pw; u.uBright.value = (K.bright != null) ? +K.bright : 2.0;
-  if (mat.userData._flamePal !== K.palette) {   // the palette, once per change
-    mat.userData._flamePal = K.palette;
-    if (K.palette === 'fire') { u.uColor.value.set(0xff5a14); u.uHot.value.set(0xffe9a8); }
-    else { u.uColor.value.set(mat.userData._flameClass); u.uHot.value.set(mat.userData._flameClass).lerp(_shipAnimWhiteColor, 0.75); }
-  }
-  const idle = (K.idle != null) ? +K.idle : 0.28, len = (K.len != null) ? +K.len : 9, wd = (K.width != null) ? +K.width : 1.15;
+  if (st === 'ripple') { for (let i = 0; i < fl.length; i++) _lssEngineRippleStep(fl[i], K, pw, dt); return; }
+  if (st === 'corona') { for (let i = 0; i < fl.length; i++) _lssEngineCoronaStep(fl[i], K, pw, dt, time); return; }
+  if (st === 'inward') { for (let i = 0; i < fl.length; i++) _lssEngineInwardStep(fl[i], K, pw, dt, time); return; }
+  if (st === 'spiral') { for (let i = 0; i < fl.length; i++) _lssEngineSpiralStep(fl[i], K, pw, dt, time); return; }
+  // (v51.03) the AFTERBURNER: flying past cruise speed (maxSpeed here is the chassis' flightSpeed; Puncture's
+  // Afterburner takes 450 to 600, so it is fully lit by ~1.28x), or - our own ship - the ability's flag the moment it fires
+  let abT = Math.max(0, Math.min(1, (fwd / Math.max(1, maxSpeed || 1) - 1.03) / 0.25));
+  try { if (typeof player !== 'undefined' && player && mesh === player.mesh && player.afterburnerActive) abT = 1; } catch (_) {}
+  const ab = (ud._flAB || 0) + (abT - (ud._flAB || 0)) * (1 - Math.exp(-dt * 5));
+  ud._flAB = ab;
+  if (st === 'torch') { _lssEngineTorchStep(ud, fl, K, pw, ab, time); return; }   // (v51.04)
+  // the star faces the camera: its world orientation = the camera's, written in the hull's frame
+  let camQ = null;
+  if (typeof camera !== 'undefined' && camera) { mesh.getWorldQuaternion(_flQ).invert(); camQ = _flQ.multiply(camera.quaternion); }
+  const per = 1 / Math.max(1, (K.flick != null) ? +K.flick : 22);
   for (let i = 0; i < fl.length; i++) {
-    const f = fl[i], g = f.userData.flameGlow, R = f.userData.flameR0 * ((g && g.userData && g.userData.orbKey && g.userData.orbK0) ? (((_ENGINE_ORB_K[g.userData.orbKey] != null) ? +_ENGINE_ORB_K[g.userData.orbKey] : 1) / g.userData.orbK0) : 1);
-    const flick = 1 + Math.sin(time * 31 + i * 1.7) * 0.06 + Math.sin(time * 47 + i * 0.9) * 0.04;
-    const L = len * R * (idle + (1 - idle) * pw) * flick, W = R * wd * (0.85 + 0.25 * pw);
-    f.scale.set(W, L, W);
-    if (g) f.position.copy(g.position);   // the __engineOrbX knob moves the orb; the flame follows it
+    const f = fl[i];
+    // a fresh "shot" every 1/flick s: a new LENGTH only. (The muzzle fire also re-rolls each shot; on a steady engine
+    // that read as spinning - owner: "i don't like the spinning thing" - so the jet and the star keep one orientation.)
+    if (time - f.rollT >= per || time < f.rollT) { f.rollT = time; f.jit = 0.85 + Math.random() * 0.3; }
+    _lssEngineFlamePose(f, K, pw, camQ, ab);
   }
 }
 // A thruster orb's position in the hull group: the marker, with x replaced when `ox` is a number. The markers are
@@ -75413,7 +76264,7 @@ function animateShipMesh(mesh, speed, maxSpeed, isFiring, dt, doomed) {
       const _ok = (glow.userData && glow.userData.orbKey) ? (((_ENGINE_ORB_K[glow.userData.orbKey] != null) ? +_ENGINE_ORB_K[glow.userData.orbKey] : 1) / (glow.userData.orbK0 || 1)) : 1;
       // (v50.93) with the engine flames on, the orb is the nozzle glow at the flame's root: smaller
       const _fk = (mesh.userData.engineFlames && glow.userData && glow.userData.orbKey) ? _engineFlameKnobs() : null;
-      const _fo = (_fk && _fk.on !== false) ? ((_fk.orb != null) ? +_fk.orb : 0.55) : 1;
+      const _fo = _fk ? _engineFlameOrbK(_fk, glow.userData.orbKey, (mesh.userData.bot && mesh.userData.bot.engineStyle) || null) : 1;   // (v50.96) per style: the fire's faint bay glow, the ripples' core; (v51.03) per hull; (v51.07) a peer's own pick
       glow.scale.setScalar(baseScale * flicker * _ok * _fo);
       // (v50.35) a live __engineOrbX change moves the orb (once per change, not per frame)
       const _on = glow.userData && glow.userData.orbNode;
@@ -104576,6 +105427,7 @@ function _lssAnnounceLoadout() {
       peerId: net.myPeerId,
       skinId: player.skinId || SHIP_SKIN_DEFAULT,
       trim: _trimWire(player.trim),   // (v50.82) the secondary skin ('chrome', 'color:200'); an old client ignores it
+      eng: _getStoredEngine(player.loadoutKey),   // (v51.07) the engine style of the ship we fly (an old client ignores it)
       // (v43.13) MATCH SPEED RIDES THE LOADOUT. The standalone speed_mode event works once a
       // match is live, but in the LOBBY it did not cross - measured with two clients both
       // showing PEER: the clicker flipped, the other sat at OFF. Rather than chase that
@@ -105128,6 +105980,7 @@ function commitLoadout(key) {
       // popping from factory to skinned. An old build simply ignores the field.
       skinId: player.skinId || SHIP_SKIN_DEFAULT,
       trim: _trimWire(player.trim),   // (v50.82) the secondary skin ('chrome', 'color:200'); an old client ignores it
+      eng: _getStoredEngine(player.loadoutKey),   // (v51.07) the engine style of the ship we fly (an old client ignores it)
       // (v43.13) MATCH SPEED RIDES THE LOADOUT. The standalone speed_mode event works once a
       // match is live, but in the LOBBY it did not cross - measured with two clients both
       // showing PEER: the clicker flipped, the other sat at OFF. Rather than chase that
@@ -127841,6 +128694,7 @@ function _renderTrimPicker() {
       bRow.appendChild(btn);
     }
   }
+  try { _renderEnginePicker(); } catch (_) {}   // (v51.07) the ENGINES row under BLEND
   if (!hueEl) return;
   hueEl.classList.toggle('on', cur.id === 'color');
   if (+hueEl.value !== cur.hue) hueEl.value = String(cur.hue);
@@ -127854,6 +128708,38 @@ function _renderTrimPicker() {
     if (sw) sw.style.background = _trimSwatch('color', t.hue);
     hero();
   });
+}
+
+// ⭐ (v51.07) THE ENGINES ROW - see THE ENGINE STYLE IS PART OF EACH SHIP'S LOOK. One button per style, the ship on the
+// stage's pick selected and its default marked with a dot; a click stores it with that ship's look (and, for the ship
+// you fly, tells the room). The hero on the stage is a bare GLB clone with no engines, so the pick shows in flight -
+// the hull you fly wears it at once, every hull of that type on your screen with it.
+function _renderEnginePicker() {
+  const row = document.getElementById('eng-row');
+  if (!row) return;
+  const desc = document.getElementById('skin-desc');
+  const ship = _lookShip();
+  const cur = _getStoredEngine(ship);
+  const T = (typeof window !== 'undefined' && window.__engineShipStyle) || _ENGINE_SHIP_STYLE;
+  const def = (ship && T && T[ship]) || 'inward';
+  const back = () => { const c = SHIP_SKINS[_getStoredSkinId()]; if (desc && c) desc.textContent = c.name + ' — ' + c.desc; };
+  row.innerHTML = '<span class="tb-lbl">ENGINES</span>';
+  for (const [id, label, tip] of _engineStyleLabels()) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'trim-blend-btn' + (cur === id ? ' selected' : '') + (def === id ? ' ship-default' : '');
+    btn.textContent = label;
+    btn.title = label + ' — ' + tip + (def === id ? ' (this ship\'s default)' : '');
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();   // ⚠ load-bearing: the re-render detaches the clicked button (see the livery cards)
+      _setStoredEngine(id, ship);
+      _renderEnginePicker();
+      if (desc) desc.textContent = 'ENGINES ' + label + ' — ' + tip;
+    });
+    btn.addEventListener('mouseenter', () => { if (desc) desc.textContent = 'ENGINES ' + label + ' — ' + tip + (def === id ? ' (this ship\'s default)' : ''); });
+    btn.addEventListener('mouseleave', back);
+    row.appendChild(btn);
+  }
 }
 
 // Legacy entry point: anywhere still calling selectLoadout(key) jumps straight to
@@ -134154,6 +135040,23 @@ function buildSettingsPage() {
       </div>
     </div>
     <div class="settings-section">
+      <h3>Engines</h3>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">Each ship's engine style is part of its look: set it per ship in ship select's SKIN panel (ENGINES), where it is saved with the livery - other pilots see the one you set. Or show the classic orbs on every ship.</label>
+      </div>
+      <div class="setting-row" style="margin-top:6px;">
+        <label>Engine style</label>
+        <select id="set-engine-style" style="flex:1;">
+          ${(function() {
+            // (v50.97) the list lives in _engineStyleLabels, beside the engine FX
+            let cur = 'ship', opts = [['ship', 'Each ship its own'], ['orb', 'Classic orbs on every ship']];
+            try { cur = _engineStyleNow(); opts = _engineGlobalLabels(); } catch (_) {}   // (v51.07) the per-ship pick is in the SKIN panel
+            return opts.map(([k, lbl]) => '<option value="' + k + '"' + (k === cur ? ' selected' : '') + '>' + lbl + '</option>').join('');
+          })()}
+        </select>
+      </div>
+    </div>
+    <div class="settings-section">
       <h3>Cloud Colors</h3>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
         <label style="flex:1;">Color theme for the gas clouds drifting around cluster rocks. "Auto" inherits each cloud's color from its parent rock (current default). Other themes pick from a fixed palette. Pyro gameplay clouds keep their identity colors regardless. Changes apply live to existing clouds (no respawn needed).</label>
@@ -134937,6 +135840,17 @@ function buildSettingsPage() {
       // place so the layout stays compact when not in use.
       const _customRow = overlay.querySelector('#cloud-custom-row');
       if (_customRow) _customRow.style.display = (game.cloudTheme === 'custom') ? 'flex' : 'none';
+    });
+  }
+  // (v50.97) Engines: the engine FX style for every hull on this screen. _engineFlameKnobs picks the change up on the
+  // next frame (every hull already carries all of the styles), so it shows on the ships behind the menu at once.
+  const engSel = overlay.querySelector('#set-engine-style');
+  if (engSel) {
+    engSel.addEventListener('change', e => {
+      const v = String(e.target.value || '');
+      if (v !== 'ship' && v !== 'orb') return;   // (v51.07) the two global choices left
+      game.engineStyle = v;
+      try { saveSettings(); } catch (_) {}
     });
   }
 
@@ -136389,6 +137303,9 @@ function saveSettings() {
       // upgrades from an older settings blob feel unchanged.
       cloudBlend:      (typeof game.cloudBlend === 'string') ? game.cloudBlend : 'additive',
       cloudBrightness: (typeof game.cloudBrightness === 'number') ? game.cloudBrightness : 1.0,
+      // (v50.97) the engine FX style - written only once the player has picked one (undefined drops out of the JSON), so
+      // a profile that never chose keeps following _ENGINE_STYLE_DEFAULT if that changes
+      engineStyle: (typeof game.engineStyle === 'string') ? game.engineStyle : undefined,
       // Voxel cave settings.
       voxelRoomsEnabled: (typeof game.voxelRoomsEnabled === 'boolean') ? game.voxelRoomsEnabled : true,
       voxelRoomTheme:    (typeof game.voxelRoomTheme === 'string') ? game.voxelRoomTheme : 'stone',
@@ -138474,6 +139391,10 @@ function loadSettings() {
       if (typeof game !== 'undefined' && game) {
         game.cloudTheme = (typeof CLOUD_THEMES !== 'undefined' && (_ct in CLOUD_THEMES)) ? _ct : 'auto';
       }
+      // (v50.97) engine FX style (Settings > Theme > Engines); absent = never picked = the shipped default
+      // (v51.07) only 'ship' / 'orb' remain global; a single style saved by v50.97-51.06 is dropped - each ship's own
+      // pick (SKIN panel) took its place
+      if (data.engineStyle === 'ship' || data.engineStyle === 'orb') game.engineStyle = data.engineStyle;
       // Custom cloud palette restore. Validate length=8
       // and every slot is a finite number ; otherwise fall back to the
       // shipped defaults so a corrupted blob can't produce NaN colors.

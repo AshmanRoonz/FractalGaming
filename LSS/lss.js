@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "50.93";
+const LSS_BUILD = "51.07";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -3107,6 +3107,7 @@ async function joinRoom() {
         peer.team = data.team;
         peer.skinId = data.skinId;
         peer.trim = data.trim;   // (v50.82) the secondary skin - same contract (updateNetworkPlayer normalizes it)
+        peer.eng = data.eng;     // (v51.07) the engine style - same contract (_engineStyleNorm vets it)
         try {
           if (typeof data.speedMix === 'number' && isFinite(data.speedMix) && typeof _lssSetSpeedMix === 'function') {
             _lssSetSpeedMix(data.speedMix, true);
@@ -8649,6 +8650,7 @@ function _lssSendLoadoutTo(peerId) {
       peerId: net.myPeerId,
       skinId: player.skinId || SHIP_SKIN_DEFAULT,
       trim: _trimWire(player.trim),   // (v50.82) the secondary skin ('chrome', 'color:200'); an old client ignores it
+      eng: _getStoredEngine(player.loadoutKey),   // (v51.07) the engine style of the ship we fly (an old client ignores it)
       insaneSpeed: !!LSS.INSANE_SPEED,
       speedMix: (typeof LSS.SPEED_MIX === 'number') ? LSS.SPEED_MIX : 0,   // (v44.18) the dial
       discord_id:     _du ? _du.id : undefined,
@@ -8718,6 +8720,7 @@ function updateNetworkPlayer(peerId, data) {
       try {
         const _tr = _trimNorm(data.trim);
         if (_trimWire(np0.trim) !== _trimWire(_tr)) { np0.trim = _tr; if (np0.mesh) _applyShipSkin(np0.mesh, np0.skinId, _tr); }
+        np0.engineStyle = _engineStyleNorm(data.eng);   // (v51.07) a new engine style: the tick reads it next frame
       } catch (_) {}
       return;
     }
@@ -8733,6 +8736,7 @@ function updateNetworkPlayer(peerId, data) {
 
   const np = new NetworkPlayer(peerId, data.loadoutKey, data.team || LSS.TEAM_FLEET_B, data.skinId, data.trim);
   peer.networkPlayer = np;
+  np.engineStyle = _engineStyleNorm(data.eng);   // (v51.07) their engines as they set them (null = this screen's pick)
   net.networkPlayers.push(np);
   try { game._sawHumanPeer = true; } catch (_) {}
   game.entities.push(np);
@@ -12876,6 +12880,17 @@ function _sjSlot() {
     let o = _sjPool[0]; for (const s of _sjPool) if (s.age > o.age) o = s; return o;
   }
   _sjTextures();
+  _sjGeometry();
+  const mk = (tex) => new THREE.MeshBasicMaterial({ map: tex, color: 0xffffff, transparent: true,
+    blending: THREE.AdditiveBlending, depthTest: false, depthWrite: false, fog: false, side: THREE.DoubleSide });
+  const jet = new THREE.Mesh(_sjGeoJet, mk(_sjTexJet));
+  const star = new THREE.Mesh(_sjGeoStar, mk(_sjTexStar));
+  for (const m of [jet, star]) { m.renderOrder = 9999; m.frustumCulled = false; m.visible = false; scene.add(m); }
+  const s = { jet, star, live: false, age: 0, life: 0.075, len: 1, wid: 1, sr: 1, punch: 1, col: new THREE.Color() };
+  _sjPool.push(s);
+  return s;
+}
+function _sjGeometry() {
   if (!_sjGeoJet) {
     const a = new THREE.PlaneGeometry(1, 1); a.rotateX(-Math.PI / 2); a.translate(0, 0, 0.5);
     const b = a.clone(); b.rotateZ(Math.PI / 2);
@@ -12891,14 +12906,6 @@ function _sjSlot() {
     _sjGeoJet.setIndex(idx);
     _sjGeoStar = new THREE.PlaneGeometry(2, 2);
   }
-  const mk = (tex) => new THREE.MeshBasicMaterial({ map: tex, color: 0xffffff, transparent: true,
-    blending: THREE.AdditiveBlending, depthTest: false, depthWrite: false, fog: false, side: THREE.DoubleSide });
-  const jet = new THREE.Mesh(_sjGeoJet, mk(_sjTexJet));
-  const star = new THREE.Mesh(_sjGeoStar, mk(_sjTexStar));
-  for (const m of [jet, star]) { m.renderOrder = 9999; m.frustumCulled = false; m.visible = false; scene.add(m); }
-  const s = { jet, star, live: false, age: 0, life: 0.075, len: 1, wid: 1, sr: 1, punch: 1, col: new THREE.Color() };
-  _sjPool.push(s);
-  return s;
 }
 function _seatJetSpawn(pos, dir, colorHex, hull) {
   const J = (typeof window !== 'undefined' && window.__muzzle) ? window.__muzzle.jet : undefined;
@@ -46254,18 +46261,230 @@ const _ENGINE_ORB_K = { PUNCTURE: 0.35, SLAYER: 0.35, TRACKER: 0.5, BLASTER: 0.5
 if (typeof window !== 'undefined') window.__engineOrbK = _ENGINE_ORB_K;
 const _ENGINE_ORB_X = {};
 if (typeof window !== 'undefined') window.__engineOrbX = _ENGINE_ORB_X;
-const _ENGINE_FLAME = { on: true, palette: 'class', len: 9, width: 1.15, idle: 0.28, orb: 0.55, bright: 2.0, speedRef: 0.6 };
+const _ENGINE_FLAME = { on: true, style: 'ship', palette: 'class', len: 12.5, wid: 3.3, star: 1.7, idle: 0.3, orb: 0.3, punch: 1.6, flick: 22, ablen: 0.9,
+  tlen: 10, twid: 1.3, tidle: 0.28, tbright: 2.2, torb: 0.55, tpal: 'class',
+  rings: 7, life: 0.9, every: 0.11, idleEvery: 0.4, travel: 14, r0: 1.1, r1: 3.4, rw: 0.05, iri: 0.65, rpunch: 1.4, rorb: 0.8,
+  carcs: 10, carcsIdle: 4, clife: 0.35, crackle: 18, clen: 8, cidle: 0.35, cwide: 0.33, capex: 1, cbulge: 0.15, cswirl: 0.5,
+  crough: 0.1, cwid: 0.16, cringW: 0.1, cringB: 1, cringJ: 0.08, crarcs: 3, crarcsIdle: 1, crlife: 0.4, cnear: 0.4, cringR: 1, cspin: 1.2, cbridge: 0,
+  cpunch: 1.5, corb: 0.6, cpal: 'class',
+  fcount: 90, fcountIdle: 30, fspeed: 0.9, fspeedIdle: 0.25, fdist: 12, fidle: 0.5, frad: 4.5, fend: 0.25, fz: 0.9, fswirl: 1.25,
+  farms: 4, fstreak: 0.3, fwid: 0.12, fring: 1.9, fringW: 0.12, fringB: 1, fpunch: 1.3, forb: 0.8, fpal: 'class',
+  pcount: 160, pcountIdle: 60, pspeed: 0.6, pspeedIdle: 0.2, prad: 1.7, pdepth: 0.6, pz: 0.9, pswirl: 1.6, parms: 3, pstreak: 0.18,
+  pwid: 0.07, pesc: 0.12, pfall: 1.6, pring: 1.6, pringW: 0.08, pringZ: 0.3, pringB: 1.6, pspin: 0.35, pcore: 0.5, pcoreW: 0.12,
+  pcoreB: 1.6, ppunch: 1.4, porb: 0.25, ppal: 'class', speedRef: 0.6 };
 if (typeof window !== 'undefined') window.__engineFlame = _ENGINE_FLAME;
-const _engineFlameKnobs = () => { const K = (typeof window !== 'undefined' && window.__engineFlame) || _ENGINE_FLAME; return (K && typeof K === 'object') ? K : { on: !!K }; };
-let _engineFlameGeo = null;
-function _engineFlameGeometry() {
-  if (_engineFlameGeo) return _engineFlameGeo;
+const _ENGINE_SHIP_STYLE = { PYRO: 'corona', BLASTER: 'corona', PUNCTURE: 'fire', SLAYER: 'torch', SYPHON: 'inward', VORTEX: 'inward', TRACKER: 'inward' };
+if (typeof window !== 'undefined') window.__engineShipStyle = _ENGINE_SHIP_STYLE;
+function _engineStyleLabels() {   // the per-ship styles: [id, button label, what it is]
+  return [['orb', 'ORBS', 'the classic engine glow'], ['fire', 'FIRE', 'muzzle-flash jets that flicker and stretch with thrust'],
+    ['torch', 'TORCH', 'a solid blowtorch flame'], ['ripple', 'RIPPLE', 'rings rolling off the engines'],
+    ['corona', 'CORONA', 'lightning out the back in a cone'], ['inward', 'INWARD', 'streaks of light pouring into the engines'],
+    ['spiral', 'SPIRAL', 'a portal swirl in each nozzle']];
+}
+function _engineStyleList() { return _engineStyleLabels().map((x) => x[0]); }
+function _engineGlobalLabels() {   // Settings > Theme > Engines
+  return [['ship', 'Each ship its own (set per ship in the SKIN panel)'], ['orb', 'Classic orbs on every ship']];
+}
+const _ENGINE_STYLES = _engineStyleList();
+const _ENGINE_STYLE_OK = { orb: 1, fire: 1, torch: 1, ripple: 1, corona: 1, inward: 1, spiral: 1 };   // the per-frame check
+const _ENGINE_STYLE_DEFAULT = 'ship';
+let _engineStyleSeen = null;   // the last pick copied into the knobs
+function _engineStyleNow() {
+  let s = null; try { s = game.engineStyle; } catch (_) {}
+  if (s === 'ship' || s === 'orb') return s;
+  return 'ship';
+}
+let _engPickCache = null, _engPickT = -1e9;
+function _engineShipPick(key) {
+  const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+  if (!_engPickCache || now - _engPickT > 2000) {
+    _engPickT = now; _engPickCache = {};
+    try { const L = _looksGet(); for (const k in L) if (L[k] && typeof L[k].eng === 'string') _engPickCache[k] = L[k].eng; } catch (_) {}
+  }
+  const p = key && _engPickCache[key];
+  if (p && _ENGINE_STYLE_OK[p]) return p;
+  const T = (typeof window !== 'undefined' && window.__engineShipStyle) || _ENGINE_SHIP_STYLE;
+  return (key && T && T[key]) || 'inward';
+}
+function _engineStyleNorm(v) { return (typeof v === 'string' && _ENGINE_STYLE_OK[v]) ? v : null; }
+function _getStoredEngine(ship) {
+  const k = (ship !== undefined) ? ship : _lookShip();
+  return _engineShipPick(k);
+}
+function _setStoredEngine(id, ship) {
+  if (!_engineStyleNorm(id)) return;
+  const k = (ship !== undefined) ? ship : _lookShip();
+  if (!k) return;
+  const L = _looksGet(); (L[k] || (L[k] = {})).eng = id; _looksPut(L);
+  _engPickCache = null;   // the next frame reads it
+  try { if (typeof player !== 'undefined' && player && player.loadoutKey === k && typeof _lssAnnounceLoadout === 'function') _lssAnnounceLoadout(); } catch (_) {}
+}
+const _engineFlameKnobs = () => {
+  const K0 = (typeof window !== 'undefined' && window.__engineFlame) || _ENGINE_FLAME;
+  const K = (K0 && typeof K0 === 'object') ? K0 : { on: !!K0 };
+  const s = _engineStyleNow();
+  if (s !== _engineStyleSeen) { _engineStyleSeen = s; K.on = s !== 'orb'; if (s !== 'orb') K.style = s; }
+  return K;
+};
+const _engineStyle = (K, key, own) => {
+  let st = K.style;
+  if (st === 'ship' || !st) st = own || _engineShipPick(key);
+  if (st === 'orb') return '';
+  return (st === 'fire' || st === 'torch' || st === 'corona' || st === 'inward' || st === 'spiral') ? st : 'ripple';
+};
+function _engineFlameOrbK(K, key, own) {
+  if (!K || K.on === false) return 1;
+  const st = _engineStyle(K, key, own);
+  if (!st) return 1;
+  if (st === 'torch') return (K.torb != null) ? +K.torb : 0.55;
+  if (st === 'spiral') return (K.porb != null) ? +K.porb : 0.25;
+  if (st === 'inward') return (K.forb != null) ? +K.forb : 0.8;
+  if (st === 'corona') return (K.corb != null) ? +K.corb : 0.6;
+  if (st === 'ripple') return (K.rorb != null) ? +K.rorb : 0.8;
+  return (K.orb != null) ? +K.orb : 0.3;
+}
+const _flZ = new THREE.Vector3(0, 0, 1), _flAftQ = [new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI), new THREE.Quaternion()];
+let _ripGeo = null;
+const _RIP_VS = `varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`;
+const _RIP_FS = `
+uniform float uAge, uPow, uPunch, uIri, uW; uniform vec3 uColor;
+varying vec2 vUv;
+float band(float r, float c, float w) { float x = (r - c) / w; return exp(-x * x); }
+void main() {
+  vec2 p = vUv * 2.0 - 1.0; float r = length(p);
+  float c = 0.8, w = uW, d = w * 0.9;
+  vec3 rainbow = vec3(band(r, c + d, w), band(r, c, w), band(r, c - d, w));
+  vec3 col = mix(uColor * band(r, c, w), rainbow * (0.55 + 0.45 * uColor), uIri) + vec3(band(r, c, w * 0.5)) * 0.3;
+  float lens = (1.0 - smoothstep(0.0, c, r)) * 0.05;
+  float fade = pow(max(0.0, 1.0 - uAge), 1.6) * smoothstep(0.0, 0.1, uAge);
+  float k = fade * (0.35 + 0.65 * uPow) * uPunch;
+  gl_FragColor = vec4(col * k + uColor * lens * k, 1.0);
+}`;
+const _SP_NP = 200, _SP_NS = 4, _SP_NR = 96, _SP_NC = 9;
+let _spGeo = null;
+function _spGeometry() {
+  if (_spGeo) return _spGeo;
+  const strips = [];
+  for (let k = 0; k < _SP_NP; k++) strips.push([k, _SP_NS]);
+  for (let k = 0; k < 3; k++) strips.push([_SP_NP + k, _SP_NR]);
+  for (let k = 0; k < 3; k++) strips.push([_SP_NP + 3 + k, _SP_NC]);
+  let nv = 0, ni = 0;
+  for (const s of strips) { nv += s[1] * 2; ni += (s[1] - 1) * 6; }
+  const pos = new Float32Array(nv * 3), idx = new Uint16Array(ni);
+  let v = 0, ii = 0;
+  for (const s of strips) {
+    const base = v, n = s[1];
+    for (let j = 0; j < n; j++) {
+      const t = j / (n - 1);
+      pos[v * 3] = -1; pos[v * 3 + 1] = t; pos[v * 3 + 2] = s[0]; v++;
+      pos[v * 3] = 1;  pos[v * 3 + 1] = t; pos[v * 3 + 2] = s[0]; v++;
+    }
+    for (let j = 0; j < n - 1; j++) {
+      const a = base + j * 2;
+      idx[ii++] = a; idx[ii++] = a + 1; idx[ii++] = a + 2;
+      idx[ii++] = a + 1; idx[ii++] = a + 3; idx[ii++] = a + 2;
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setIndex(new THREE.BufferAttribute(idx, 1));
+  g.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e4);   // the real positions are made in the shader
+  _spGeo = g;
+  return g;
+}
+const _SP_VS = [
+  '#define NP ' + _SP_NP,
+  'uniform float uFlow, uTime, uCount, uBright, uRad, uDepth, uZ, uSwirl, uArms, uStreak, uWid, uAft, uEsc, uFall, uRingZ;',
+  'uniform vec4 uRingP;',   // x base radius, y brightness, z half-width, w rotation (turns)
+  'uniform vec4 uCore;',    // x size, y brightness, z half-width, w rotation (rad)
+  'varying float vX, vA, vKind;',
+  'float h1(float n) { return fract(sin(n) * 43758.5453123); }',
+  'vec3 swirlPt(float id, float u, out float esc) {',
+  '  float ha = h1(id * 1.731 + 0.37), hb = h1(id * 7.31 + 1.1), hc = h1(id * 3.17 + 2.9), hd = h1(id * 4.97 + 6.1);',
+  '  float th0 = (uArms > 0.5) ? (floor(ha * uArms) + hb * 0.35) * 6.2831853 / uArms : ha * 6.2831853;',
+  '  float r0 = uRad * (0.75 + 0.45 * hc);',
+  '  esc = step(hd, uEsc);',
+  '  if (esc > 0.5) {',
+  '    float th = th0 + uSwirl * 1.5 * u, r = r0 * (1.0 + 0.6 * u);',
+  '    return vec3(cos(th) * r, sin(th) * r - uFall * r0 * u * u, uZ + uAft * (uDepth + 0.6 * r0 * u));',
+  '  }',
+  '  float s = pow(u, 1.3);',
+  '  float r = r0 * pow(1.0 - s, 0.85);',
+  '  float th = th0 + uSwirl * 6.2831853 * s * (0.6 + 1.4 * s);',
+  '  return vec3(cos(th) * r, sin(th) * r, uZ + uAft * uDepth * (r / max(uRad, 1e-3)));',
+  '}',
+  'vec3 ringPt(float k, float t) {',
+  '  float a = t * 6.2831853, r = uRingP.x * (0.75 + 0.25 * k);',
+  '  return vec3(cos(a) * r, sin(a) * r, uZ + uAft * uRingZ * (k + 0.5));',
+  '}',
+  'float dashLum(float k, float t) {',
+  '  float n = (k < 0.5) ? 6.0 : ((k < 1.5) ? 4.0 : 9.0);',
+  '  float duty = (k < 0.5) ? 0.7 : ((k < 1.5) ? 0.82 : 0.45);',
+  '  float dir = (mod(k, 2.0) < 0.5) ? 1.0 : -1.0;',
+  '  float d = fract((t + uRingP.w * dir * (1.0 + 0.35 * k)) * n);',
+  '  return smoothstep(0.0, 0.04, d) * (1.0 - smoothstep(duty - 0.04, duty, d)) * (0.8 + 0.2 * sin(t * 18.849556 + uTime * 2.0 * dir));',
+  '}',
+  'vec3 corePt(float k, float t) {',
+  '  float ang = k * 1.0471976 + uCore.w;',
+  '  return vec3(cos(ang) * (t * 2.0 - 1.0) * uCore.x, sin(ang) * (t * 2.0 - 1.0) * uCore.x, uZ);',
+  '}',
+  'void main() {',
+  '  float side = position.x, t = position.y, id = position.z;',
+  '  float kind = (id < float(NP) - 0.5) ? 0.0 : ((id < float(NP) + 2.5) ? 1.0 : 2.0);',
+  '  vX = side; vKind = kind; vA = 0.0;',
+  '  vec3 p0, pa, pb; float w, a;',
+  '  if (kind < 0.5) {',
+  '    if (id >= uCount || uBright <= 0.001) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }',   // not drawn: off screen
+  '    float uh = fract(uFlow * (0.7 + 0.6 * h1(id * 5.13 + 4.7)) + h1(id * 9.71 + 0.3));',
+  '    float u = max(uh - uStreak * t, 0.0), esc;',
+  '    p0 = swirlPt(id, u, esc); pa = swirlPt(id, max(u - 0.01, 0.0), esc); pb = swirlPt(id, min(u + 0.01, 1.0), esc);',
+  '    float tw = 0.6 + 0.4 * sin(uTime * (7.0 + 9.0 * h1(id * 2.21)) + id);',   // each spark twinkles
+  '    a = (esc > 0.5) ? smoothstep(0.0, 0.1, uh) * pow(1.0 - uh, 1.2) * 1.2',
+  '                    : smoothstep(0.0, 0.15, uh) * (1.0 - smoothstep(0.85, 1.0, uh)) * mix(0.4, 1.2, uh);',
+  '    a *= uBright * tw * pow(1.0 - t, 1.5);',
+  '    w = uWid * ((esc > 0.5) ? 1.4 : 1.0) * mix(1.0, 0.4, t);',
+  '  } else if (kind < 1.5) {',
+  '    if (uRingP.y <= 0.001) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }',
+  '    float k = id - float(NP);',
+  '    p0 = ringPt(k, t); pa = ringPt(k, t - 0.005); pb = ringPt(k, t + 0.005);',
+  '    a = uRingP.y * dashLum(k, t); w = uRingP.z;',
+  '  } else {',
+  '    if (uCore.y <= 0.001) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }',
+  '    float k = id - float(NP) - 3.0, c = 1.0 - abs(2.0 * t - 1.0);',
+  '    p0 = corePt(k, t); pa = corePt(k, t - 0.02); pb = corePt(k, t + 0.02);',
+  '    a = uCore.y * c * c; w = uCore.z * (0.3 + 0.7 * c);',
+  '  }',
+  '  vec4 mv = modelViewMatrix * vec4(p0, 1.0);',
+  '  vec3 tg = (modelViewMatrix * vec4(pb - pa, 0.0)).xyz;',
+  '  vec3 sd = cross(tg, mv.xyz); float sl = length(sd);',
+  '  sd = (sl > 1e-8) ? sd / sl : vec3(1.0, 0.0, 0.0);',
+  '  w *= length(modelViewMatrix[0].xyz);',
+  '  float wmin = -mv.z * 0.0016;',   // ~1.3 px: thinner shimmers, so widen it and dim it
+  '  if (w < wmin) { a *= w / wmin; w = wmin; }',
+  '  vA = a;',
+  '  mv.xyz += sd * side * w;',
+  '  gl_Position = projectionMatrix * mv;',
+  '}'
+].join('\n');
+const _SP_FS = [
+  'uniform vec3 uColor;',
+  'varying float vX, vA, vKind;',
+  'void main() {',
+  '  float core = exp(-vX * vX * 22.0), halo = exp(-vX * vX * 3.0);',
+  '  float wh = (vKind > 1.5) ? 0.9 : ((vKind > 0.5) ? 0.55 : 0.5);',   // the core star whitest
+  '  vec3 col = uColor * halo * 0.6 + mix(uColor, vec3(1.0), wh) * core;',
+  '  gl_FragColor = vec4(col * vA, 1.0);',
+  '}'
+].join('\n');
+let _torchGeo = null;
+function _torchGeometry() {
+  if (_torchGeo) return _torchGeo;
   const pts = [];
   for (let i = 0; i <= 16; i++) { const y = i / 16, r = Math.pow(Math.max(0, 1 - y), 0.75) * (1 + 0.45 * y * (1 - y)); pts.push(new THREE.Vector2(Math.max(r, 0.0001), y)); }
-  _engineFlameGeo = new THREE.LatheGeometry(pts, 20);
-  return _engineFlameGeo;
+  _torchGeo = new THREE.LatheGeometry(pts, 20);
+  return _torchGeo;
 }
-const _ENGINE_FLAME_VS = `
+const _TORCH_VS = `
 varying vec2 vUv; varying float vFacing; varying float vSeed;
 void main() {
   vUv = uv;
@@ -46275,7 +46494,7 @@ void main() {
   vSeed = fract(dot(modelMatrix[3].xyz, vec3(0.0137, 0.0711, 0.0373)));
   gl_Position = projectionMatrix * mv;
 }`;
-const _ENGINE_FLAME_FS = `
+const _TORCH_FS = `
 uniform float uTime, uPower, uBright; uniform vec3 uColor, uHot;
 varying vec2 vUv; varying float vFacing; varying float vSeed;
 float h2(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
@@ -46292,45 +46511,488 @@ void main() {
   float al = soft * tip * (0.55 + 0.45 * n) * (0.45 + 0.55 * uPower);
   gl_FragColor = vec4(col * uBright, al);
 }`;
+const _CO_MAXA = 12, _CO_NA = 28, _CO_NRS = 40, _CO_MAXR = 4;   // MAXR: ring-drawing sparks (v50.99)
+let _coGeo = null;
+function _coGeometry() {
+  if (_coGeo) return _coGeo;
+  const strips = [];
+  for (let k = 0; k < _CO_MAXA; k++) strips.push([k, _CO_NA]);
+  for (let j = 0; j < _CO_MAXR; j++) strips.push([_CO_MAXA + j, _CO_NRS]);
+  let nv = 0, ni = 0;
+  for (const s of strips) { nv += s[1] * 2; ni += (s[1] - 1) * 6; }
+  const pos = new Float32Array(nv * 3), idx = new Uint16Array(ni);
+  let v = 0, ii = 0;
+  for (const s of strips) {
+    const base = v, n = s[1];
+    for (let j = 0; j < n; j++) {
+      const t = j / (n - 1);
+      pos[v * 3] = -1; pos[v * 3 + 1] = t; pos[v * 3 + 2] = s[0]; v++;
+      pos[v * 3] = 1;  pos[v * 3 + 1] = t; pos[v * 3 + 2] = s[0]; v++;
+    }
+    for (let j = 0; j < n - 1; j++) {
+      const a = base + j * 2;
+      idx[ii++] = a; idx[ii++] = a + 1; idx[ii++] = a + 2;
+      idx[ii++] = a + 1; idx[ii++] = a + 3; idx[ii++] = a + 2;
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setIndex(new THREE.BufferAttribute(idx, 1));
+  g.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e4);   // the real positions are made in the shader
+  _coGeo = g;
+  return g;
+}
+const _CO_VS = [
+  '#define MAXA ' + _CO_MAXA,
+  '#define MAXR ' + _CO_MAXR,
+  'uniform vec4 uSeg[MAXR];',   // a spark's drawn part: x start angle, y span (rad, increasing), z brightness, w 1 = head at the end
+  'uniform vec4 uSegG[MAXR];',  // (v51.02) and its arc: x radius, y depth (signed z), z lopsidedness, w seed (tilt + shape)
+  'uniform vec3 uA[MAXA];',
+  'uniform vec3 uB[MAXA];',
+  'uniform vec3 uC[MAXA];',
+  'uniform vec4 uP[MAXA];',   // x brightness (0 = not striking), y seed (negative = crawls along the ring), z jag, w half-width
+  'uniform vec4 uRing;',      // x (unused), y the sparks' brightness, z half-width, w jag
+  'uniform float uTime, uCrk;',
+  'varying float vT, vX, vE, vSeed, vRing, vFade, vKind;',
+  'float h1(float n) { return fract(sin(n) * 43758.5453123); }',
+  'float vn(float x) { float i = floor(x); float f = fract(x); f = f * f * (3.0 - 2.0 * f); return mix(h1(i), h1(i + 1.0), f) * 2.0 - 1.0; }',
+  'vec3 arcPt(int k, float t) {',
+  '  vec3 A = uA[k], B = uB[k], C = uC[k]; vec4 P = uP[k];',
+  '  float s = 1.0 - t;',
+  '  vec3 p = s * s * A + 2.0 * s * t * C + t * t * B;',
+  '  vec3 D = B - A; float L = length(D); D /= max(L, 1e-4);',
+  '  vec3 U = normalize(cross(D, abs(D.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));',
+  '  vec3 W = cross(D, U);',
+  '  float jx = 0.0, jy = 0.0, amp = 0.55, fr = 2.5;',
+  '  for (int o = 0; o < 4; o++) {',
+  '    float sp = (o < 2) ? uTime * (1.3 + 1.2 * float(o)) : uCrk * 1.731 + float(o) * 5.17;',
+  '    jx += amp * vn(t * fr + abs(P.y) * 7.13 + sp);',
+  '    jy += amp * vn(t * fr + abs(P.y) * 3.71 + 41.0 - sp);',
+  '    amp *= 0.5; fr *= 2.3;',
+  '  }',
+  '  return p + (U * jx + W * jy) * L * P.z * smoothstep(0.0, 0.3, t) * (1.0 - smoothstep(0.8, 1.0, t));',
+  '}',
+  'vec3 sparkPt(int j, float t) {',
+  '  vec4 S = uSeg[j], G = uSegG[j];',
+  '  float a = S.x + t * S.y, sd = G.w;',
+  '  float lop = G.z * (0.6 * sin(2.0 * a + sd * 3.1) + 0.4 * sin(3.0 * a + sd * 5.7));',
+  '  float jg = uRing.w * (0.45 * sin(7.0 * a + uTime * 3.4 + sd) + 0.35 * sin(13.0 * a + uCrk * 2.7) + 0.2 * sin(29.0 * a - uCrk * 1.9));',
+  '  float r = G.x * (1.0 + lop + jg);',
+  '  float td = fract(sd * 0.37) * 6.2831853, tl = (fract(sd * 0.71) - 0.5) * 0.5;',
+  '  float z = G.y + r * (tl * cos(a - td) + uRing.w * (0.6 * sin(5.0 * a + uTime * 1.7) + 0.4 * sin(17.0 * a + uCrk * 2.3)));',
+  '  return vec3(cos(a) * r, sin(a) * r, z);',
+  '}',
+  'void main() {',
+  '  float side = position.x, t = position.y;',
+  '  bool ring = position.z > float(MAXA) - 0.5;',
+  '  int k = ring ? 0 : int(position.z + 0.5);',
+  '  int j = ring ? int(position.z - float(MAXA) + 0.5) : 0;',
+  '  float e = ring ? uSeg[j].z * uRing.y : uP[k].x;',
+  '  float kind = (!ring && uP[k].y < 0.0) ? 1.0 : 0.0;',
+  '  vT = t; vX = side; vE = e; vSeed = ring ? uSegG[j].w : abs(uP[k].y); vRing = ring ? 1.0 : 0.0; vFade = 1.0; vKind = kind;',
+  '  if (e <= 0.001) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }',   // not striking: off screen, no fragments
+  '  if (ring) { float hd = (uSeg[j].w > 0.5) ? t : 1.0 - t; vE = e * smoothstep(0.0, 0.12, t) * smoothstep(0.0, 0.12, 1.0 - t) * mix(0.35, 1.0, hd * hd); }',
+  '  vec3 p0, pa, pb;',
+  '  if (ring) { p0 = sparkPt(j, t); pa = sparkPt(j, max(t - 0.02, 0.0)); pb = sparkPt(j, min(t + 0.02, 1.0)); }',
+  '  else { p0 = arcPt(k, t); pa = arcPt(k, max(t - 0.02, 0.0)); pb = arcPt(k, min(t + 0.02, 1.0)); }',
+  '  vec4 mv = modelViewMatrix * vec4(p0, 1.0);',
+  '  vec3 tg = (modelViewMatrix * vec4(pb - pa, 0.0)).xyz;',
+  '  vec3 sd = cross(tg, mv.xyz); float sl = length(sd);',
+  '  sd = (sl > 1e-8) ? sd / sl : vec3(1.0, 0.0, 0.0);',
+  '  float w = (ring ? uRing.z : uP[k].w * (kind > 0.5 ? 1.0 : mix(0.45, 1.0, t))) * length(modelViewMatrix[0].xyz);',
+  '  float wmin = -mv.z * 0.0016;',   // ~1.3 px at a 75 deg fov: anything thinner shimmers, so widen it and dim it
+  '  if (w < wmin) { vFade = w / wmin; w = wmin; }',
+  '  mv.xyz += sd * side * w;',
+  '  gl_Position = projectionMatrix * mv;',
+  '}'
+].join('\n');
+const _CO_FS = [
+  'uniform vec3 uColor; uniform float uOpacity, uTime;',
+  'varying float vT, vX, vE, vSeed, vRing, vFade, vKind;',
+  'float h1(float n) { return fract(sin(n) * 43758.5453123); }',
+  'float vn(float x) { float i = floor(x); float f = fract(x); f = f * f * (3.0 - 2.0 * f); return mix(h1(i), h1(i + 1.0), f); }',
+  'void main() {',
+  '  float x = vX, core = exp(-x * x * 28.0), halo = exp(-x * x * 3.2);',
+  '  float along, fl;',
+  '  if (vRing > 0.5) {',   // (v51.02) a spark: its fades are already in vE; energy runs along it like a bolt's
+  '    along = 1.0;',
+  '    fl = 0.55 + 0.45 * vn(vT * 11.0 - uTime * 16.0 + vSeed * 7.0);',
+  '  } else {',
+  '    along = (vKind > 0.5) ? 1.0 : smoothstep(0.0, 0.35, vT);',
+  '    fl = 0.6 + 0.4 * vn(vT * 9.0 - uTime * 14.0 + vSeed * 13.0);',   // pulses running out toward the ring
+  '  }',
+  '  vec3 col = uColor * halo * 0.55 + mix(uColor, vec3(1.0), 0.7) * core;',
+  '  gl_FragColor = vec4(col * (uOpacity * vE * along * fl * vFade), 1.0);',
+  '}'
+].join('\n');
+const _FW_NP = 160, _FW_NS = 10, _FW_NR = 96;   // (v51.01) NS 6 -> 10: a 0.3-long streak bends through the spiral
+let _fwGeo = null;
+function _fwGeometry() {
+  if (_fwGeo) return _fwGeo;
+  const strips = [];
+  for (let k = 0; k < _FW_NP; k++) strips.push([k, _FW_NS]);
+  strips.push([_FW_NP, _FW_NR]);
+  let nv = 0, ni = 0;
+  for (const s of strips) { nv += s[1] * 2; ni += (s[1] - 1) * 6; }
+  const pos = new Float32Array(nv * 3), idx = new Uint16Array(ni);
+  let v = 0, ii = 0;
+  for (const s of strips) {
+    const base = v, n = s[1];
+    for (let j = 0; j < n; j++) {
+      const t = j / (n - 1);
+      pos[v * 3] = -1; pos[v * 3 + 1] = t; pos[v * 3 + 2] = s[0]; v++;
+      pos[v * 3] = 1;  pos[v * 3 + 1] = t; pos[v * 3 + 2] = s[0]; v++;
+    }
+    for (let j = 0; j < n - 1; j++) {
+      const a = base + j * 2;
+      idx[ii++] = a; idx[ii++] = a + 1; idx[ii++] = a + 2;
+      idx[ii++] = a + 1; idx[ii++] = a + 3; idx[ii++] = a + 2;
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setIndex(new THREE.BufferAttribute(idx, 1));
+  g.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e4);   // the real positions are made in the shader
+  _fwGeo = g;
+  return g;
+}
+const _FW_VS = [
+  '#define NP ' + _FW_NP,
+  'uniform float uFlow, uCount, uBright, uDist, uRad, uEnd, uZ, uSwirl, uArms, uStreak, uWid, uAft;',
+  'uniform vec4 uRing;',   // x radius, y brightness, z half-width
+  'varying float vX, vA, vRing, vH;',
+  'float h1(float n) { return fract(sin(n) * 43758.5453123); }',
+  'vec3 flowPt(float id, float u) {',
+  '  float ha = h1(id * 1.731 + 0.37), hb = h1(id * 7.31 + 1.1), hc = h1(id * 3.17 + 2.9);',
+  '  float th0 = (uArms > 0.5) ? (floor(ha * uArms) + hb * 0.3) * 6.2831853 / uArms : ha * 6.2831853;',
+  '  float s = pow(u, 1.5), d = 1.0 - s;',
+  '  float r = mix(uEnd, uRad * (0.55 + 0.6 * hc), pow(d, 1.5));',
+  '  float th = th0 + uSwirl * 6.2831853 * s * s;',
+  '  return vec3(cos(th) * r, sin(th) * r, uZ + uAft * uDist * (0.75 + 0.5 * hb) * d);',
+  '}',
+  'void main() {',
+  '  float side = position.x, t = position.y, id = position.z;',
+  '  bool ring = id > float(NP) - 0.5;',
+  '  vX = side; vRing = ring ? 1.0 : 0.0; vH = t; vA = 0.0;',
+  '  vec3 p0, pa, pb; float w;',
+  '  if (ring) {',
+  '    if (uRing.y <= 0.001) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }',
+  '    float a = t * 6.2831853;',
+  '    p0 = vec3(cos(a) * uRing.x, sin(a) * uRing.x, uZ);',
+  '    pa = vec3(cos(a - 0.05), sin(a - 0.05), 0.0) * uRing.x; pb = vec3(cos(a + 0.05), sin(a + 0.05), 0.0) * uRing.x;',
+  '    w = uRing.z; vA = uRing.y;',
+  '  } else {',
+  '    if (id >= uCount || uBright <= 0.001) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }',   // not drawn: off screen
+  '    float uh = fract(uFlow * (0.75 + 0.5 * h1(id * 5.13 + 4.7)) + h1(id * 9.71 + 0.3));',   // the head: each its own pace
+  '    float u = max(uh - uStreak * t, 0.0);',   // the tail trails back up the funnel
+  '    p0 = flowPt(id, u); pa = flowPt(id, max(u - 0.01, 0.0)); pb = flowPt(id, min(u + 0.01, 1.0));',
+  '    w = uWid * mix(1.0, 0.4, t);',
+  '    vA = uBright * smoothstep(0.0, 0.2, uh) * (1.0 - smoothstep(0.9, 1.0, uh)) * mix(0.35, 1.0, uh) * pow(1.0 - t, 1.5);',
+  '  }',
+  '  vec4 mv = modelViewMatrix * vec4(p0, 1.0);',
+  '  vec3 tg = (modelViewMatrix * vec4(pb - pa, 0.0)).xyz;',
+  '  vec3 sd = cross(tg, mv.xyz); float sl = length(sd);',
+  '  sd = (sl > 1e-8) ? sd / sl : vec3(1.0, 0.0, 0.0);',
+  '  w *= length(modelViewMatrix[0].xyz);',
+  '  float wmin = -mv.z * 0.0016;',   // ~1.3 px: thinner shimmers, so widen it and dim it
+  '  if (w < wmin) { vA *= w / wmin; w = wmin; }',
+  '  mv.xyz += sd * side * w;',
+  '  gl_Position = projectionMatrix * mv;',
+  '}'
+].join('\n');
+const _FW_FS = [
+  'uniform vec3 uColor; uniform float uTime, uSpin;',
+  'varying float vX, vA, vRing, vH;',
+  'void main() {',
+  '  float core = exp(-vX * vX * 22.0), halo = exp(-vX * vX * 3.0);',
+  '  float k = vA;',
+  '  if (vRing > 0.5) k *= 0.7 + 0.3 * sin(vH * 6.2831853 * 3.0 - uTime * 4.0 * uSpin);',   // light running round with the swirl
+  '  vec3 col = uColor * halo * 0.6 + mix(uColor, vec3(1.0), 0.65) * core;',
+  '  gl_FragColor = vec4(col * k, 1.0);',
+  '}'
+].join('\n');
 function _lssAddEngineFlames(group, loadoutKey) {
   const glows = (group.userData.engineGlows || []).filter((g) => g && g.userData && g.userData.orbKey);
   if (!glows.length) return;
-  const cls = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS[loadoutKey] != null) ? LSS.CLASS_COLORS[loadoutKey] : 0x66eeff;
-  const mat = new THREE.ShaderMaterial({
-    uniforms: { uTime: { value: 0 }, uPower: { value: 0 }, uBright: { value: _ENGINE_FLAME.bright }, uColor: { value: new THREE.Color(cls) }, uHot: { value: new THREE.Color(cls).lerp(new THREE.Color(0xffffff), 0.75) } },
-    vertexShader: _ENGINE_FLAME_VS, fragmentShader: _ENGINE_FLAME_FS,
-    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
-  });
-  mat.userData._flameClass = cls; mat.userData._flamePal = null;
-  const geo = _engineFlameGeometry(), flames = [];
-  for (const g of glows) {
-    const f = new THREE.Mesh(geo, mat);
+  _sjTextures(); _sjGeometry();
+  if (!_ripGeo) _ripGeo = new THREE.PlaneGeometry(2, 2);
+  const cls = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS[loadoutKey] != null) ? LSS.CLASS_COLORS[loadoutKey] : 0xffcc66;
+  const mk = (tex) => new THREE.MeshBasicMaterial({ map: tex, color: 0xffffff, transparent: true, blending: THREE.AdditiveBlending,
+    depthTest: true, depthWrite: false, fog: false, side: THREE.DoubleSide });
+  const K = _engineFlameKnobs(), nRing = Math.max(1, Math.min(16, (K.rings | 0) || 7));
+  const st0 = (K.on !== false) ? _engineStyle(K, loadoutKey) : '';   // (v51.03) per hull
+  const flames = [];
+  const tMat = new THREE.ShaderMaterial({
+    uniforms: { uTime: { value: 0 }, uPower: { value: 0 }, uBright: { value: 2.2 }, uColor: { value: new THREE.Color(cls) },
+      uHot: { value: new THREE.Color(cls).lerp(_shipAnimWhiteColor, 0.75) } },
+    vertexShader: _TORCH_VS, fragmentShader: _TORCH_FS, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide });
+  tMat.userData._tCls = cls; tMat.userData._tPal = null;
+  glows.forEach((g, i) => {
+    const jet = new THREE.Mesh(_sjGeoJet, mk(_sjTexJet)), star = new THREE.Mesh(_sjGeoStar, mk(_sjTexStar));
     const aft = g.position.z < 0 ? -1 : 1;
-    f.rotation.x = aft * Math.PI / 2;   // the lathe's +Y onto +-Z
-    f.position.copy(g.position);
-    f.renderOrder = g.renderOrder || 0; f.castShadow = false; f.receiveShadow = false; f.frustumCulled = false;
-    f.userData.isPlume = true; f.userData.isEngineFlame = true;
-    f.userData.flameR0 = (g.geometry && g.geometry.parameters && g.geometry.parameters.radius) || 2;
-    f.userData.flameAft = aft; f.userData.flameGlow = g;
-    const K = _engineFlameKnobs(); f.visible = K.on !== false;
-    f.scale.set(f.userData.flameR0 * (K.width || 1), (K.len || 9) * f.userData.flameR0 * (K.idle != null ? K.idle : 0.28), f.userData.flameR0 * (K.width || 1));
-    group.add(f); flames.push(f);
-  }
-  group.userData.engineFlames = flames; group.userData.engineFlameMat = mat;   // ticked by _lssEngineFlameTick, not LayeredFX
+    const tag = (m) => { m.position.copy(g.position); m.castShadow = false; m.receiveShadow = false; m.frustumCulled = false;
+      m.userData.isPlume = true; m.userData.isEngineFlame = true; m.userData._sharedGLBGeo = true; group.add(m); };
+    tag(jet); tag(star);
+    const rings = [];
+    for (let k = 0; k < nRing; k++) {
+      const mat = new THREE.ShaderMaterial({ uniforms: { uAge: { value: 1 }, uPow: { value: 0 }, uPunch: { value: 1.4 }, uIri: { value: 0.65 }, uW: { value: 0.05 }, uColor: { value: new THREE.Color(cls).lerp(_shipAnimWhiteColor, 0.2) } },
+        vertexShader: _RIP_VS, fragmentShader: _RIP_FS, transparent: true, depthWrite: false, depthTest: true, blending: THREE.AdditiveBlending, side: THREE.DoubleSide });
+      const m = new THREE.Mesh(_ripGeo, mat); tag(m);   // the quad's normal is +Z: perpendicular to the axis as built
+      m.visible = (k === 0 && st0 === 'ripple');   // (v50.97) one shown (at age 1 it adds nothing) so a prebake links the program
+      rings.push({ m, mat, age: 0, live: false });
+    }
+    const coMat = new THREE.ShaderMaterial({
+      uniforms: { uA: { value: new Float32Array(_CO_MAXA * 3) }, uB: { value: new Float32Array(_CO_MAXA * 3) }, uC: { value: new Float32Array(_CO_MAXA * 3) },
+        uP: { value: new Float32Array(_CO_MAXA * 4) }, uRing: { value: new THREE.Vector4(1, 0, 0.1, 0.06) }, uTime: { value: 0 }, uCrk: { value: 0 },
+        uSeg: { value: new Float32Array(_CO_MAXR * 4) }, uSegG: { value: new Float32Array(_CO_MAXR * 4) },
+        uColor: { value: new THREE.Color(cls).lerp(_shipAnimWhiteColor, 0.2) }, uOpacity: { value: 1.5 } },
+      vertexShader: _CO_VS, fragmentShader: _CO_FS, transparent: true, depthWrite: false, depthTest: true, blending: THREE.AdditiveBlending, side: THREE.DoubleSide });
+    const coM = new THREE.Mesh(_coGeometry(), coMat); tag(coM); coM.visible = (st0 === 'corona');
+    const arcs = [];
+    for (let k = 0; k < _CO_MAXA; k++) arcs.push({ live: false, age: 0, life: 1, gap: Math.random() * 0.3, phi: 0, om: 0, tw: 0, br: false, bk: 0, ax: 0, ay: 0, zf: 1, rf: 1, seed: 1 });
+    const rarcs = [];   // (v50.99) the sparks that draw the ring; (v51.02) each with its own depth / size / shape
+    for (let j = 0; j < _CO_MAXR; j++) rarcs.push({ live: false, age: 0, life: 1, gap: Math.random() * 0.4, a0: 0, dir: 1, sweep: 1, zf: 1, rf: 1, lop: 0, seed: 1 });
+    const fwMat = new THREE.ShaderMaterial({
+      uniforms: { uFlow: { value: 0 }, uCount: { value: 0 }, uBright: { value: 0 }, uDist: { value: 1 }, uRad: { value: 1 }, uEnd: { value: 0.1 },
+        uZ: { value: 0 }, uSwirl: { value: 1 }, uArms: { value: 4 }, uStreak: { value: 0.1 }, uWid: { value: 0.1 }, uAft: { value: aft },
+        uRing: { value: new THREE.Vector4(1, 0, 0.1, 0) }, uColor: { value: new THREE.Color(cls).lerp(_shipAnimWhiteColor, 0.2) },
+        uTime: { value: 0 }, uSpin: { value: 1 } },
+      vertexShader: _FW_VS, fragmentShader: _FW_FS, transparent: true, depthWrite: false, depthTest: true, blending: THREE.AdditiveBlending, side: THREE.DoubleSide });
+    const fwM = new THREE.Mesh(_fwGeometry(), fwMat); tag(fwM); fwM.visible = (st0 === 'inward');
+    const torch = new THREE.Mesh(_torchGeometry(), tMat); tag(torch);
+    torch.rotation.x = aft * Math.PI / 2; torch.visible = (st0 === 'torch');
+    { const r0 = (g.geometry && g.geometry.parameters && g.geometry.parameters.radius) || 2; torch.scale.set(r0 * 1.1, r0 * 2.8, r0 * 1.1); }
+    const spMat = new THREE.ShaderMaterial({
+      uniforms: { uFlow: { value: 0 }, uTime: { value: 0 }, uCount: { value: 0 }, uBright: { value: 0 }, uRad: { value: 1 }, uDepth: { value: 0.5 },
+        uZ: { value: 0 }, uSwirl: { value: 1 }, uArms: { value: 3 }, uStreak: { value: 0.1 }, uWid: { value: 0.1 }, uAft: { value: aft },
+        uEsc: { value: 0.1 }, uFall: { value: 1 }, uRingZ: { value: 0.3 }, uRingP: { value: new THREE.Vector4(1, 0, 0.05, 0) },
+        uCore: { value: new THREE.Vector4(0.5, 0, 0.1, 0) }, uColor: { value: new THREE.Color(cls).lerp(_shipAnimWhiteColor, 0.2) } },
+      vertexShader: _SP_VS, fragmentShader: _SP_FS, transparent: true, depthWrite: false, depthTest: true, blending: THREE.AdditiveBlending, side: THREE.DoubleSide });
+    const spM = new THREE.Mesh(_spGeometry(), spMat); tag(spM); spM.visible = (st0 === 'spiral');
+    const f = { jet, star, torch, rings, co: { m: coM, mat: coMat, arcs, rarcs, pal: null },
+      sp: { m: spM, mat: spMat, flow: Math.random() * 10, rot: Math.random(), spin: (g.position.x >= 0) ? 1 : -1, pal: null },
+      fw: { m: fwM, mat: fwMat, flow: Math.random() * 10, spin: (g.position.x >= 0) ? 1 : -1, pal: null }, glow: g, aft, R0: (g.geometry && g.geometry.parameters && g.geometry.parameters.radius) || 2,
+      col: new THREE.Color(cls).lerp(_shipAnimWhiteColor, 0.25), cls, pal: null, rollT: -1, roll: 0, jit: 1, sroll: 0, ripT: Math.random() * 0.3, i };
+    jet.visible = star.visible = (st0 === 'fire');
+    _lssEngineFlamePose(f, K, 0, null, 0);
+    flames.push(f);
+  });
+  group.userData.engineFlames = flames;
+  group.userData.engineFlameKey = loadoutKey;   // (v51.03) which hull's style 'ship' resolves to
+  group.userData.engineTorchMat = tMat;         // (v51.04)
 }
-const _flV = new THREE.Vector3(), _flN = new THREE.Vector3();
+const _engineRadius = (f) => { const g = f.glow; return f.R0 * ((g && g.userData && g.userData.orbKey && g.userData.orbK0) ? (((_ENGINE_ORB_K[g.userData.orbKey] != null) ? +_ENGINE_ORB_K[g.userData.orbKey] : 1) / g.userData.orbK0) : 1); };
+function _lssEngineFlamePose(f, K, pw, camQ, ab) {
+  const g = f.glow, R = _engineRadius(f); ab = ab || 0;
+  const idle = (K.idle != null) ? +K.idle : 0.3, len = (K.len != null) ? +K.len : 12.5, wid = (K.wid != null) ? +K.wid : 3.3, st = (K.star != null) ? +K.star : 1.7;
+  const abl = (K.ablen != null) ? +K.ablen : 0.9;
+  const L = len * R * (idle + (1 - idle) * pw) * f.jit * (1 + abl * ab), W = wid * R * (0.8 + 0.25 * pw) * (0.9 + 0.2 * (f.jit - 0.85) / 0.3) * (1 + 0.15 * ab);
+  f.jet.scale.set(W, W, Math.max(1e-3, L));
+  f.jet.quaternion.copy(_flAftQ[f.aft < 0 ? 0 : 1]).multiply(_sjRoll.setFromAxisAngle(_flZ, f.roll));
+  if (g) { f.jet.position.copy(g.position); f.star.position.copy(g.position); }   // the __engineOrbX knob moves the orb; the fire follows it
+  const sr = st * R * (0.75 + 0.45 * pw) * (0.9 + 0.2 * (f.jit - 0.85) / 0.3);
+  f.star.scale.set(sr, sr, sr);
+  if (camQ) { f.star.quaternion.copy(camQ); f.star.rotateZ(f.sroll); }
+  if (f.pal !== K.palette) { f.pal = K.palette; if (K.palette === 'fire') f.col.set(0xff7a2a); else f.col.set(f.cls).lerp(_shipAnimWhiteColor, 0.25); }
+  const a = ((K.punch != null) ? +K.punch : 1.6) * (0.45 + 0.55 * pw) * (1 + 0.35 * ab);
+  f.jet.material.color.copy(f.col).multiplyScalar(a);
+  f.star.material.color.copy(f.col).multiplyScalar(a * 1.2);
+}
+function _lssEngineRippleStep(f, K, pw, dt) {
+  const R = _engineRadius(f), g = f.glow;
+  const life = Math.max(0.1, (K.life != null) ? +K.life : 0.9);
+  const ev = (K.every != null) ? +K.every : 0.11, ei = (K.idleEvery != null) ? +K.idleEvery : 0.4;
+  const every = Math.max(0.02, ei + (ev - ei) * pw);
+  f.ripT += dt;
+  if (f.ripT >= every) {
+    f.ripT = 0;
+    let s = f.rings.find((x) => !x.live); if (!s) { s = f.rings[0]; for (const x of f.rings) if (x.age > s.age) s = x; }
+    s.live = true; s.age = 0; s.pw = pw;   // a ring keeps the burn it was born with
+  }
+  const travel = (K.travel != null) ? +K.travel : 14, r0 = (K.r0 != null) ? +K.r0 : 1.1, r1 = (K.r1 != null) ? +K.r1 : 3.4;
+  for (const s of f.rings) {
+    if (!s.live) { s.m.visible = false; continue; }
+    s.age += dt;
+    const t = s.age / life;
+    if (t >= 1) { s.live = false; s.m.visible = false; continue; }
+    const go = 1 - Math.pow(1 - t, 1.8), grow = 1 - Math.pow(1 - t, 2.4);   // fast off the nozzle, then easing
+    const pk = 0.55 + 0.45 * (s.pw != null ? s.pw : pw);   // a ring born under burn reaches further
+    if (g) s.m.position.copy(g.position);
+    s.m.position.z += f.aft * travel * R * go * pk;
+    const rad = R * (r0 + (r1 - r0) * grow * pk) / 0.8;   // the band sits at 0.8 of the quad's half-width
+    s.m.scale.set(rad, rad, 1);
+    const u = s.mat.uniforms;
+    u.uAge.value = t; u.uPow.value = (s.pw != null ? s.pw : pw);
+    u.uPunch.value = ((K.rpunch != null) ? +K.rpunch : 1.4) * ((s.mat.opacity != null) ? s.mat.opacity : 1);
+    u.uIri.value = (K.iri != null) ? +K.iri : 0.65; u.uW.value = (K.rw != null) ? +K.rw : 0.05;
+    s.m.visible = true;
+  }
+}
+function _lssEngineCoronaStep(f, K, pw, dt, time) {
+  const c = f.co; if (!c) return;
+  const R = _engineRadius(f), g = f.glow, aft = f.aft, u = c.mat.uniforms;
+  if (g) c.m.position.copy(g.position);
+  const num = (k, d) => (K[k] != null && isFinite(+K[k])) ? +K[k] : d;
+  const idleN = num('carcsIdle', 4);
+  const nArc = Math.max(0, Math.min(_CO_MAXA, Math.round(idleN + (num('carcs', 10) - idleN) * pw)));
+  const life0 = Math.max(0.05, num('clife', 0.35)), spin = num('cspin', 1.2), bridge = num('cbridge', 0), cidle = num('cidle', 0.35);
+  const apex = R * num('capex', 1), len = R * num('clen', 8) * (cidle + (1 - cidle) * pw), cw = num('cwide', 0.33);
+  const tipZ = -aft * apex, near = Math.max(0, Math.min(1, num('cnear', 0.4)));
+  const coneR = (zf) => cw * (len * zf + apex);
+  const pickZ = () => near + (1 - near) * Math.pow(Math.random(), 1.3);
+  const bulge = num('cbulge', 0.15), swirl = num('cswirl', 0.5), rough = num('crough', 0.1), wid = R * num('cwid', 0.16);
+  const A = u.uA.value, B = u.uB.value, C = u.uC.value, P = u.uP.value;
+  for (let k = 0; k < _CO_MAXA; k++) {
+    const a = c.arcs[k];
+    if (a.live) {
+      a.age += dt; a.phi += a.om * dt;
+      if (a.age >= a.life) { a.live = false; a.gap = Math.random() * 0.12; }
+    } else if (k < nArc) {
+      a.gap -= dt;
+      if (a.gap <= 0) {   // a new strike, somewhere else round the cone
+        a.live = true; a.age = 0; a.life = life0 * (0.5 + Math.random() * 0.9) / (0.85 + 0.3 * pw);
+        a.phi = Math.random() * Math.PI * 2; a.om = (Math.random() < 0.5 ? -1 : 1) * spin * (0.5 + Math.random());
+        a.br = Math.random() < bridge;
+        a.tw = (Math.random() < 0.5 ? -1 : 1) * (a.br ? 0.3 + 0.6 * Math.random() : swirl * (0.5 + 0.5 * Math.random()));
+        a.bk = Math.random(); a.ax = (Math.random() - 0.5) * 0.3; a.ay = (Math.random() - 0.5) * 0.3;
+        a.zf = pickZ(); a.rf = 0.8 + 0.4 * Math.random();   // (v51.02) its own depth, and a little off the cone
+        a.seed = 1 + Math.random() * 96;
+      }
+    }
+    const i3 = k * 3, i4 = k * 4;
+    if (!a.live) { P[i4] = 0; continue; }
+    const s = a.age / a.life;
+    const env = Math.min(1, s / 0.08) * Math.pow(1 - s, 0.7);   // brightest as it strikes, then fading
+    const pb = a.phi, zE = aft * len * a.zf, rE = coneR(a.zf) * a.rf;
+    if (a.br) {   // crawling along the ring: ring point to ring point, bowing outward
+      const pe = pb + a.tw, pm = pb + a.tw * 0.5, rm = rE * (1.15 + 0.2 * a.bk);
+      A[i3] = rE * Math.cos(pb); A[i3 + 1] = rE * Math.sin(pb); A[i3 + 2] = zE;
+      B[i3] = rE * Math.cos(pe); B[i3 + 1] = rE * Math.sin(pe); B[i3 + 2] = zE;
+      C[i3] = rm * Math.cos(pm); C[i3 + 1] = rm * Math.sin(pm); C[i3 + 2] = zE - aft * R * 0.3 * a.bk;
+    } else {      // tip to ring, bowing out of the cone and twisting round it (the tips scatter a little: no single spark)
+      const pm = pb - a.tw, rm = rE * 0.5 * (1 + 2 * bulge * (0.5 + a.bk));
+      A[i3] = R * a.ax; A[i3 + 1] = R * a.ay; A[i3 + 2] = tipZ;
+      B[i3] = rE * Math.cos(pb); B[i3 + 1] = rE * Math.sin(pb); B[i3 + 2] = zE;
+      C[i3] = rm * Math.cos(pm); C[i3 + 1] = rm * Math.sin(pm); C[i3 + 2] = (tipZ + zE) * 0.5;
+    }
+    P[i4] = env * (0.55 + 0.45 * pw); P[i4 + 1] = a.br ? -a.seed : a.seed; P[i4 + 2] = rough; P[i4 + 3] = wid * (a.br ? 0.8 : 1);
+  }
+  const rIdle = num('crarcsIdle', 1), rN = Math.max(0, Math.min(_CO_MAXR, Math.round(rIdle + (num('crarcs', 3) - rIdle) * pw)));
+  const rLife = Math.max(0.05, num('crlife', 0.4)), S = u.uSeg.value, G = u.uSegG.value, TAU = Math.PI * 2, lopK = num('cringR', 1);
+  let lit = 0;
+  for (let j = 0; j < _CO_MAXR; j++) {
+    const r = c.rarcs[j], j4 = j * 4;
+    if (r.live) {
+      r.age += dt;
+      if (r.age >= r.life) { r.live = false; r.gap = 0.05 + Math.random() * 0.3; }
+    } else if (j < rN) {
+      r.gap -= dt;
+      if (r.gap <= 0) {
+        r.live = true; r.age = 0; r.life = rLife * (0.5 + Math.random());
+        r.a0 = Math.random() * TAU; r.dir = (Math.random() < 0.5) ? -1 : 1;
+        r.sweep = TAU * ((Math.random() < 0.15) ? 0.8 + 0.15 * Math.random() : 0.25 + 0.25 * Math.random());
+        r.zf = pickZ(); r.rf = 0.75 + 0.45 * Math.random(); r.lop = 0.1 + 0.25 * Math.random(); r.seed = 1 + Math.random() * 96;
+      }
+    }
+    if (!r.live) { S[j4 + 2] = 0; continue; }
+    G[j4] = coneR(r.zf) * r.rf; G[j4 + 1] = aft * len * r.zf; G[j4 + 2] = r.lop * lopK; G[j4 + 3] = r.seed;
+    const s = r.age / r.life;
+    const head = r.sweep * Math.min(1, s / 0.6), tail = r.sweep * Math.max(0, (s - 0.45) / 0.55);
+    const start = (r.dir > 0) ? r.a0 + tail : r.a0 - head;   // the shader wants [start, start + span], angles increasing
+    S[j4] = ((start % TAU) + TAU) % TAU; S[j4 + 1] = Math.max(0, head - tail);
+    S[j4 + 2] = Math.min(1, s / 0.05) * Math.pow(1 - s, 0.4); S[j4 + 3] = (r.dir > 0) ? 1 : 0;   // w: which end is the head
+    lit++;
+  }
+  u.uRing.value.set(coneR(1), lit ? num('cringB', 1) * (0.45 + 0.55 * pw) : 0, R * num('cringW', 0.1), num('cringJ', 0.08));
+  u.uTime.value = time % 600; u.uCrk.value = Math.floor(time * num('crackle', 18)) % 1000;
+  if (c.pal !== K.cpal) { c.pal = K.cpal; if (K.cpal === 'electric') u.uColor.value.set(0x9fd8ff); else u.uColor.value.set(f.cls).lerp(_shipAnimWhiteColor, 0.2); }
+  u.uOpacity.value = num('cpunch', 1.5) * ((c.mat.opacity != null) ? c.mat.opacity : 1);   // x opacity: the cloak
+  c.m.visible = true;
+}
+function _lssEngineInwardStep(f, K, pw, dt, time) {
+  const w = f.fw; if (!w) return;
+  const R = _engineRadius(f), g = f.glow, aft = f.aft, u = w.mat.uniforms;
+  if (g) w.m.position.copy(g.position);
+  const num = (k, d) => (K[k] != null && isFinite(+K[k])) ? +K[k] : d;
+  const sIdle = num('fspeedIdle', 0.25), cIdle = num('fcountIdle', 30), fidle = num('fidle', 0.5);
+  w.flow = (w.flow + dt * (sIdle + (num('fspeed', 0.9) - sIdle) * pw)) % 4096;   // wraps once an hour or so: one jump
+  const op = (w.mat.opacity != null) ? w.mat.opacity : 1;   // x opacity: the cloak
+  u.uFlow.value = w.flow; u.uTime.value = time % 600; u.uSpin.value = w.spin; u.uAft.value = aft;
+  u.uCount.value = Math.max(0, Math.min(_FW_NP, Math.round(cIdle + (num('fcount', 90) - cIdle) * pw)));
+  u.uBright.value = num('fpunch', 1.3) * (0.4 + 0.6 * pw) * op;
+  u.uDist.value = R * num('fdist', 12) * (fidle + (1 - fidle) * pw);
+  u.uRad.value = R * num('frad', 4.5); u.uEnd.value = R * num('fend', 0.25); u.uZ.value = aft * R * num('fz', 0.9);
+  u.uSwirl.value = num('fswirl', 1.25) * w.spin; u.uArms.value = Math.max(0, Math.round(num('farms', 4)));
+  u.uStreak.value = num('fstreak', 0.3); u.uWid.value = R * num('fwid', 0.12);
+  u.uRing.value.set(R * num('fring', 1.9), num('fringB', 1) * (0.5 + 0.5 * pw) * op, R * num('fringW', 0.12), 0);
+  if (w.pal !== K.fpal) { w.pal = K.fpal; if (K.fpal === 'blue') u.uColor.value.set(0x7fc8ff); else u.uColor.value.set(f.cls).lerp(_shipAnimWhiteColor, 0.2); }
+  w.m.visible = true;
+}
+function _lssEngineSpiralStep(f, K, pw, dt, time) {
+  const s = f.sp; if (!s) return;
+  const R = _engineRadius(f), g = f.glow, aft = f.aft, u = s.mat.uniforms;
+  if (g) s.m.position.copy(g.position);
+  const num = (k, d) => (K[k] != null && isFinite(+K[k])) ? +K[k] : d;
+  const sIdle = num('pspeedIdle', 0.2), cIdle = num('pcountIdle', 60);
+  s.flow = (s.flow + dt * (sIdle + (num('pspeed', 0.6) - sIdle) * pw)) % 4096;
+  s.rot = (s.rot + dt * num('pspin', 0.35) * (0.3 + 0.7 * pw)) % 1024;   // ring turns
+  const op = (s.mat.opacity != null) ? s.mat.opacity : 1;   // x opacity: the cloak
+  u.uFlow.value = s.flow; u.uTime.value = time % 600; u.uAft.value = aft;
+  u.uCount.value = Math.max(0, Math.min(_SP_NP, Math.round(cIdle + (num('pcount', 160) - cIdle) * pw)));
+  u.uBright.value = num('ppunch', 1.4) * (0.45 + 0.55 * pw) * op;
+  u.uRad.value = R * num('prad', 1.7); u.uDepth.value = R * num('pdepth', 0.6); u.uZ.value = aft * R * num('pz', 0.9);
+  u.uSwirl.value = num('pswirl', 1.6) * s.spin; u.uArms.value = Math.max(0, Math.round(num('parms', 3)));
+  u.uStreak.value = num('pstreak', 0.18); u.uWid.value = R * num('pwid', 0.07);
+  u.uEsc.value = num('pesc', 0.12); u.uFall.value = num('pfall', 1.6); u.uRingZ.value = R * num('pringZ', 0.3);
+  u.uRingP.value.set(R * num('pring', 1.6), num('pringB', 1.6) * (0.5 + 0.5 * pw) * op, R * num('pringW', 0.08), s.rot * s.spin);
+  u.uCore.value.set(R * num('pcore', 0.5) * (0.8 + 0.4 * pw), num('pcoreB', 1.6) * (0.6 + 0.4 * pw) * op, R * num('pcoreW', 0.12), s.rot * 1.9 * s.spin);
+  if (s.pal !== K.ppal) { s.pal = K.ppal; if (K.ppal === 'blue') u.uColor.value.set(0x7fc8ff); else u.uColor.value.set(f.cls).lerp(_shipAnimWhiteColor, 0.2); }
+  s.m.visible = true;
+}
+function _lssEngineTorchStep(ud, fl, K, pw, ab, time) {
+  const mat = ud.engineTorchMat; if (!mat) return;
+  const num = (k, d) => (K[k] != null && isFinite(+K[k])) ? +K[k] : d;
+  const u = mat.uniforms;
+  u.uTime.value = time % 600; u.uPower.value = Math.min(1, pw + 0.5 * ab);
+  u.uBright.value = num('tbright', 2.2) * (1 + 0.3 * ab) * ((mat.opacity != null) ? mat.opacity : 1);   // x opacity: the cloak
+  if (mat.userData._tPal !== K.tpal) {   // the palette, once per change
+    mat.userData._tPal = K.tpal;
+    if (K.tpal === 'fire') { u.uColor.value.set(0xff5a14); u.uHot.value.set(0xffe9a8); }
+    else { u.uColor.value.set(mat.userData._tCls); u.uHot.value.set(mat.userData._tCls).lerp(_shipAnimWhiteColor, 0.75); }
+  }
+  const idle = num('tidle', 0.28), len = num('tlen', 10), wd = num('twid', 1.3), abl = num('ablen', 0.9);
+  for (let i = 0; i < fl.length; i++) {
+    const f = fl[i], t = f.torch; if (!t) continue;
+    const R = _engineRadius(f), flick = 1 + Math.sin(time * 31 + i * 1.7) * 0.06 + Math.sin(time * 47 + i * 0.9) * 0.04;
+    const L = len * R * (idle + (1 - idle) * pw) * flick * (1 + abl * ab), W = R * wd * (0.85 + 0.25 * pw) * (1 + 0.15 * ab);
+    t.scale.set(W, L, W);
+    if (f.glow) t.position.copy(f.glow.position);   // the __engineOrbX knob moves the orb; the flame follows it
+    t.visible = true;
+  }
+}
+const _flV = new THREE.Vector3(), _flN = new THREE.Vector3(), _flQ = new THREE.Quaternion();
 function _lssEngineFlameTick(mesh, maxSpeed, dt, time) {
-  const ud = mesh.userData, fl = ud.engineFlames, mat = ud.engineFlameMat;
-  if (!fl || !fl.length || !mat) return;
+  const ud = mesh.userData, fl = ud.engineFlames;
+  if (!fl || !fl.length) return;
   const K = _engineFlameKnobs();
-  const on = K.on !== false && !(typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato());
-  for (let i = 0; i < fl.length; i++) fl[i].visible = on;
+  const own = (ud.bot && ud.bot.engineStyle) || null;
+  const st = (K.on !== false && !(typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato())) ? _engineStyle(K, ud.engineFlameKey, own) : '';
+  const on = st !== '';
+  for (let i = 0; i < fl.length; i++) {
+    const f = fl[i];
+    f.jet.visible = f.star.visible = (st === 'fire');
+    if (f.torch && st !== 'torch') f.torch.visible = false;
+    if (st !== 'ripple') for (const s of f.rings) { s.live = false; s.m.visible = false; }
+    if (f.co && st !== 'corona') { f.co.m.visible = false; for (const a of f.co.arcs) a.live = false; }
+    if (f.fw && st !== 'inward') f.fw.m.visible = false;
+    if (f.sp && st !== 'spiral') f.sp.m.visible = false;
+  }
   if (!on) { ud._flPrev = null; return; }
   dt = (dt > 0 && dt < 0.5) ? dt : 1 / 60;
   let fwd = 0;
   if (ud._flPrev) {
     _flV.subVectors(mesh.position, ud._flPrev).multiplyScalar(1 / dt);
-    _flN.set(0, 0, -fl[0].userData.flameAft).applyQuaternion(mesh.quaternion);
+    _flN.set(0, 0, -fl[0].aft).applyQuaternion(mesh.quaternion);
     fwd = _flV.dot(_flN);
     if (!isFinite(fwd) || Math.abs(fwd) > (maxSpeed || 1) * 4) fwd = 0;   // a respawn / teleport, not thrust
   } else ud._flPrev = new THREE.Vector3();
@@ -46339,20 +47001,22 @@ function _lssEngineFlameTick(mesh, maxSpeed, dt, time) {
   const want = Math.max(0, Math.min(1, fwd / ref));
   const pw = (ud._flPow || 0) + (want - (ud._flPow || 0)) * (1 - Math.exp(-dt * 6));
   ud._flPow = pw;
-  const u = mat.uniforms;
-  u.uTime.value = time; u.uPower.value = pw; u.uBright.value = (K.bright != null) ? +K.bright : 2.0;
-  if (mat.userData._flamePal !== K.palette) {   // the palette, once per change
-    mat.userData._flamePal = K.palette;
-    if (K.palette === 'fire') { u.uColor.value.set(0xff5a14); u.uHot.value.set(0xffe9a8); }
-    else { u.uColor.value.set(mat.userData._flameClass); u.uHot.value.set(mat.userData._flameClass).lerp(_shipAnimWhiteColor, 0.75); }
-  }
-  const idle = (K.idle != null) ? +K.idle : 0.28, len = (K.len != null) ? +K.len : 9, wd = (K.width != null) ? +K.width : 1.15;
+  if (st === 'ripple') { for (let i = 0; i < fl.length; i++) _lssEngineRippleStep(fl[i], K, pw, dt); return; }
+  if (st === 'corona') { for (let i = 0; i < fl.length; i++) _lssEngineCoronaStep(fl[i], K, pw, dt, time); return; }
+  if (st === 'inward') { for (let i = 0; i < fl.length; i++) _lssEngineInwardStep(fl[i], K, pw, dt, time); return; }
+  if (st === 'spiral') { for (let i = 0; i < fl.length; i++) _lssEngineSpiralStep(fl[i], K, pw, dt, time); return; }
+  let abT = Math.max(0, Math.min(1, (fwd / Math.max(1, maxSpeed || 1) - 1.03) / 0.25));
+  try { if (typeof player !== 'undefined' && player && mesh === player.mesh && player.afterburnerActive) abT = 1; } catch (_) {}
+  const ab = (ud._flAB || 0) + (abT - (ud._flAB || 0)) * (1 - Math.exp(-dt * 5));
+  ud._flAB = ab;
+  if (st === 'torch') { _lssEngineTorchStep(ud, fl, K, pw, ab, time); return; }   // (v51.04)
+  let camQ = null;
+  if (typeof camera !== 'undefined' && camera) { mesh.getWorldQuaternion(_flQ).invert(); camQ = _flQ.multiply(camera.quaternion); }
+  const per = 1 / Math.max(1, (K.flick != null) ? +K.flick : 22);
   for (let i = 0; i < fl.length; i++) {
-    const f = fl[i], g = f.userData.flameGlow, R = f.userData.flameR0 * ((g && g.userData && g.userData.orbKey && g.userData.orbK0) ? (((_ENGINE_ORB_K[g.userData.orbKey] != null) ? +_ENGINE_ORB_K[g.userData.orbKey] : 1) / g.userData.orbK0) : 1);
-    const flick = 1 + Math.sin(time * 31 + i * 1.7) * 0.06 + Math.sin(time * 47 + i * 0.9) * 0.04;
-    const L = len * R * (idle + (1 - idle) * pw) * flick, W = R * wd * (0.85 + 0.25 * pw);
-    f.scale.set(W, L, W);
-    if (g) f.position.copy(g.position);   // the __engineOrbX knob moves the orb; the flame follows it
+    const f = fl[i];
+    if (time - f.rollT >= per || time < f.rollT) { f.rollT = time; f.jit = 0.85 + Math.random() * 0.3; }
+    _lssEngineFlamePose(f, K, pw, camQ, ab);
   }
 }
 function _engineOrbPos(node, ox, group, out) {
@@ -47037,7 +47701,7 @@ function animateShipMesh(mesh, speed, maxSpeed, isFiring, dt, doomed) {
       const flicker = 1 + Math.sin(time * 18) * 0.05 * t;
       const _ok = (glow.userData && glow.userData.orbKey) ? (((_ENGINE_ORB_K[glow.userData.orbKey] != null) ? +_ENGINE_ORB_K[glow.userData.orbKey] : 1) / (glow.userData.orbK0 || 1)) : 1;
       const _fk = (mesh.userData.engineFlames && glow.userData && glow.userData.orbKey) ? _engineFlameKnobs() : null;
-      const _fo = (_fk && _fk.on !== false) ? ((_fk.orb != null) ? +_fk.orb : 0.55) : 1;
+      const _fo = _fk ? _engineFlameOrbK(_fk, glow.userData.orbKey, (mesh.userData.bot && mesh.userData.bot.engineStyle) || null) : 1;   // (v50.96) per style: the fire's faint bay glow, the ripples' core; (v51.03) per hull; (v51.07) a peer's own pick
       glow.scale.setScalar(baseScale * flicker * _ok * _fo);
       const _on = glow.userData && glow.userData.orbNode;
       if (_on && _on.parent && glow.parent) {
@@ -67616,6 +68280,7 @@ function _lssAnnounceLoadout() {
       peerId: net.myPeerId,
       skinId: player.skinId || SHIP_SKIN_DEFAULT,
       trim: _trimWire(player.trim),   // (v50.82) the secondary skin ('chrome', 'color:200'); an old client ignores it
+      eng: _getStoredEngine(player.loadoutKey),   // (v51.07) the engine style of the ship we fly (an old client ignores it)
       insaneSpeed: !!LSS.INSANE_SPEED,
       speedMix: (typeof LSS.SPEED_MIX === 'number') ? LSS.SPEED_MIX : 0,   // (v44.18) the dial
       discord_id:     _du ? _du.id : undefined,
@@ -67933,6 +68598,7 @@ function commitLoadout(key) {
       peerId: net.myPeerId,
       skinId: player.skinId || SHIP_SKIN_DEFAULT,
       trim: _trimWire(player.trim),   // (v50.82) the secondary skin ('chrome', 'color:200'); an old client ignores it
+      eng: _getStoredEngine(player.loadoutKey),   // (v51.07) the engine style of the ship we fly (an old client ignores it)
       insaneSpeed: !!LSS.INSANE_SPEED,
       speedMix: (typeof LSS.SPEED_MIX === 'number') ? LSS.SPEED_MIX : 0,   // (v44.18) the dial
       discord_id:     _du ? _du.id : undefined,
@@ -82791,6 +83457,7 @@ function _renderTrimPicker() {
       bRow.appendChild(btn);
     }
   }
+  try { _renderEnginePicker(); } catch (_) {}   // (v51.07) the ENGINES row under BLEND
   if (!hueEl) return;
   hueEl.classList.toggle('on', cur.id === 'color');
   if (+hueEl.value !== cur.hue) hueEl.value = String(cur.hue);
@@ -82803,6 +83470,34 @@ function _renderTrimPicker() {
     if (sw) sw.style.background = _trimSwatch('color', t.hue);
     hero();
   });
+}
+
+function _renderEnginePicker() {
+  const row = document.getElementById('eng-row');
+  if (!row) return;
+  const desc = document.getElementById('skin-desc');
+  const ship = _lookShip();
+  const cur = _getStoredEngine(ship);
+  const T = (typeof window !== 'undefined' && window.__engineShipStyle) || _ENGINE_SHIP_STYLE;
+  const def = (ship && T && T[ship]) || 'inward';
+  const back = () => { const c = SHIP_SKINS[_getStoredSkinId()]; if (desc && c) desc.textContent = c.name + ' — ' + c.desc; };
+  row.innerHTML = '<span class="tb-lbl">ENGINES</span>';
+  for (const [id, label, tip] of _engineStyleLabels()) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'trim-blend-btn' + (cur === id ? ' selected' : '') + (def === id ? ' ship-default' : '');
+    btn.textContent = label;
+    btn.title = label + ' — ' + tip + (def === id ? ' (this ship\'s default)' : '');
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();   // ⚠ load-bearing: the re-render detaches the clicked button (see the livery cards)
+      _setStoredEngine(id, ship);
+      _renderEnginePicker();
+      if (desc) desc.textContent = 'ENGINES ' + label + ' — ' + tip;
+    });
+    btn.addEventListener('mouseenter', () => { if (desc) desc.textContent = 'ENGINES ' + label + ' — ' + tip + (def === id ? ' (this ship\'s default)' : ''); });
+    btn.addEventListener('mouseleave', back);
+    row.appendChild(btn);
+  }
 }
 
 function selectLoadout(key) { commitLoadout(key); }
@@ -86650,6 +87345,23 @@ function buildSettingsPage() {
       </div>
     </div>
     <div class="settings-section">
+      <h3>Engines</h3>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">Each ship's engine style is part of its look: set it per ship in ship select's SKIN panel (ENGINES), where it is saved with the livery - other pilots see the one you set. Or show the classic orbs on every ship.</label>
+      </div>
+      <div class="setting-row" style="margin-top:6px;">
+        <label>Engine style</label>
+        <select id="set-engine-style" style="flex:1;">
+          ${(function() {
+            // (v50.97) the list lives in _engineStyleLabels, beside the engine FX
+            let cur = 'ship', opts = [['ship', 'Each ship its own'], ['orb', 'Classic orbs on every ship']];
+            try { cur = _engineStyleNow(); opts = _engineGlobalLabels(); } catch (_) {}   // (v51.07) the per-ship pick is in the SKIN panel
+            return opts.map(([k, lbl]) => '<option value="' + k + '"' + (k === cur ? ' selected' : '') + '>' + lbl + '</option>').join('');
+          })()}
+        </select>
+      </div>
+    </div>
+    <div class="settings-section">
       <h3>Cloud Colors</h3>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
         <label style="flex:1;">Color theme for the gas clouds drifting around cluster rocks. "Auto" inherits each cloud's color from its parent rock (current default). Other themes pick from a fixed palette. Pyro gameplay clouds keep their identity colors regardless. Changes apply live to existing clouds (no respawn needed).</label>
@@ -87383,6 +88095,15 @@ function buildSettingsPage() {
       _cloudRefreshSwatches();
       const _customRow = overlay.querySelector('#cloud-custom-row');
       if (_customRow) _customRow.style.display = (game.cloudTheme === 'custom') ? 'flex' : 'none';
+    });
+  }
+  const engSel = overlay.querySelector('#set-engine-style');
+  if (engSel) {
+    engSel.addEventListener('change', e => {
+      const v = String(e.target.value || '');
+      if (v !== 'ship' && v !== 'orb') return;   // (v51.07) the two global choices left
+      game.engineStyle = v;
+      try { saveSettings(); } catch (_) {}
     });
   }
 
@@ -88618,6 +89339,7 @@ function saveSettings() {
         : ((typeof CLOUD_CUSTOM_DEFAULTS !== 'undefined') ? CLOUD_CUSTOM_DEFAULTS.slice() : undefined),
       cloudBlend:      (typeof game.cloudBlend === 'string') ? game.cloudBlend : 'additive',
       cloudBrightness: (typeof game.cloudBrightness === 'number') ? game.cloudBrightness : 1.0,
+      engineStyle: (typeof game.engineStyle === 'string') ? game.engineStyle : undefined,
       voxelRoomsEnabled: (typeof game.voxelRoomsEnabled === 'boolean') ? game.voxelRoomsEnabled : true,
       voxelRoomTheme:    (typeof game.voxelRoomTheme === 'string') ? game.voxelRoomTheme : 'stone',
       voxelRoomSize:     (typeof game.voxelRoomSize === 'number') ? game.voxelRoomSize : 30,
@@ -90577,6 +91299,7 @@ function loadSettings() {
       if (typeof game !== 'undefined' && game) {
         game.cloudTheme = (typeof CLOUD_THEMES !== 'undefined' && (_ct in CLOUD_THEMES)) ? _ct : 'auto';
       }
+      if (data.engineStyle === 'ship' || data.engineStyle === 'orb') game.engineStyle = data.engineStyle;
       if (typeof game !== 'undefined' && game) {
         let _cc = null;
         if (Array.isArray(data.cloudCustomColors) && data.cloudCustomColors.length === 8) {
