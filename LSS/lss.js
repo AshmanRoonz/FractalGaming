@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "51.24";
+const LSS_BUILD = "51.29";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -561,23 +561,37 @@ const SHIP_TRIMS = {
   color:     { name: 'COLOR',      desc: 'metallic paint - the slider picks the hue', hsl: [0.75, 0.42], metal: 0.6, rough: 0.3, env: 0.9 },
 };
 const SHIP_TRIM_DEFAULT = 'black';
+const SHIP_TERS = {
+  off:     { name: 'OFF', desc: 'no layer - the primary covers all of the paint',
+             swatch: 'linear-gradient(135deg, transparent 0 44%, rgba(255,255,255,0.55) 44% 56%, transparent 56% 100%), #16181c' },
+  factory: { name: 'SHIP COLOR', desc: 'the duller paint keeps the ship\'s own colour - the primary takes only the bright panels', factory: true },
+};
+for (const _k of ['blackchrome', 'matteblack', 'darkmetal', 'chrome', 'gold', 'color']) SHIP_TERS[_k] = SHIP_TRIMS[_k];
 const _LIV_BLEND_ID = { off: 0, metal: 1, multiply: 2, screen: 3 };
 const _LIV_BLEND = { amt: { metal: 1, multiply: 1, screen: 0.75 }, metal: 0.85, rough: 0.3, env: 1.0, tone: 0.5 };
 const _TRIM_SHADE = { keep: 0.6, floor: 0.25, cap: 1.6, roughRef: 0.42 };
 function _trimNorm(t) {
-  let id = SHIP_TRIM_DEFAULT, hue = 200, blend = 'off';
+  let id = SHIP_TRIM_DEFAULT, hue = 200, blend = 'off', ter = 'off', terHue = 30;
   if (typeof t === 'string') {
     const at = t.split('@'); if (at.length > 1) blend = at[1];   // (v50.87) 'gold@metal'
+    if (at.length > 2) { const q3 = at[2].split(':'); ter = q3[0]; if (q3.length > 1) terHue = +q3[1]; }   // (v51.25) 'gold@metal@chrome'
     const q = at[0].split(':'); id = q[0]; if (q.length > 1) hue = +q[1];
-  } else if (t && typeof t === 'object') { id = t.id; if (t.hue != null) hue = +t.hue; if (t.blend != null) blend = t.blend; }
+  } else if (t && typeof t === 'object') {
+    id = t.id; if (t.hue != null) hue = +t.hue; if (t.blend != null) blend = t.blend;
+    if (t.ter != null) ter = t.ter; if (t.terHue != null) terHue = +t.terHue;   // (v51.25)
+  }
   if (typeof id !== 'string' || !Object.prototype.hasOwnProperty.call(SHIP_TRIMS, id)) id = SHIP_TRIM_DEFAULT;
   hue = isFinite(hue) ? ((Math.round(hue) % 360) + 360) % 360 : 200;
   if (typeof blend !== 'string' || !Object.prototype.hasOwnProperty.call(_LIV_BLEND_ID, blend)) blend = 'off';
-  return { id: id, hue: hue, blend: blend };
+  if (typeof ter !== 'string' || !Object.prototype.hasOwnProperty.call(SHIP_TERS, ter)) ter = 'off';
+  terHue = isFinite(terHue) ? ((Math.round(terHue) % 360) + 360) % 360 : 30;
+  return { id: id, hue: hue, blend: blend, ter: ter, terHue: terHue };
 }
 function _trimWire(t) {
   const n = _trimNorm(t);
-  return ((n.id === 'color') ? ('color:' + n.hue) : n.id) + ((n.blend !== 'off') ? '@' + n.blend : '');
+  const base = (n.id === 'color') ? ('color:' + n.hue) : n.id;
+  if (n.ter !== 'off') return base + '@' + n.blend + '@' + ((n.ter === 'color') ? ('color:' + n.terHue) : n.ter);
+  return base + ((n.blend !== 'off') ? '@' + n.blend : '');
 }
 function _getStoredTrim(ship) {
   const k = (ship !== undefined) ? ship : _lookShip();
@@ -45570,6 +45584,32 @@ const _SKIN_HUE_PARS = [
   'vec3 lssTrim(vec3 raw){',
   '  return min(uTrimCol * lssPlateShade(raw), vec3(1.0));',
   '}',
+  'uniform vec4  uTerA;',    // x 1 = on, y 1 = a colour finish (0 = the dull paint as it was), z 1 = flat finish (x the maps' detail), w 1 = the black wears the livery (SAME AS PRIMARY)
+  'uniform vec4  uTerB;',    // xy the chroma ramp the paint splits on, z the dull paint's typical luminance (linear), w its env strength / the material's
+  'uniform vec3  uTerCol;',  // the finish colour, linear
+  'uniform vec2  uTerFin;',  // x metalness, y roughness
+  'float lssPaintHi(vec3 c){',   // lssPaintMask's hue window, the paint's own chroma cutoff (always the sRGB chroma gate)
+  '  if (uSkinMaskHue < 0.0) return 0.0;',
+  '  float mx = max(c.r, max(c.g, c.b));',
+  '  float mn = min(c.r, min(c.g, c.b));',
+  '  float d = mx - mn;',
+  '  if (mx <= 1e-5 || d <= 1e-6) return 0.0;',
+  '  float h;',
+  '  if (mx == c.r)      h = mod((c.g - c.b) / d, 6.0);',
+  '  else if (mx == c.g) h = (c.b - c.r) / d + 2.0;',
+  '  else                h = (c.r - c.g) / d + 4.0;',
+  '  h /= 6.0;',
+  '  float dh = h - uSkinMaskHue; dh -= floor(dh + 0.5);',
+  '  float hw = 1.0 - smoothstep(uSkinMaskWin * 0.6, uSkinMaskWin, abs(dh));',
+  '  vec3 g = clamp(c, 0.0, 1.0);',
+  '  g = mix(g * 12.92, 1.055 * pow(g, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), g));',
+  '  float ch = max(g.r, max(g.g, g.b)) - min(g.r, min(g.g, g.b));',
+  '  return hw * smoothstep(uTerB.x, uTerB.y, ch);',
+  '}',
+  'vec3 lssTerColor(vec3 raw){',
+  '  float l = dot(raw, vec3(0.2126, 0.7152, 0.0722));',
+  '  return min(uTerCol * clamp(pow(max(l / max(uTerB.z, 1e-4), 0.0), uTrimShade.x), uTrimShade.y, uTrimShade.z), vec3(1.0));',
+  '}',
 ].join('\n');
 
 const _SKIN_PAT_VERT = [
@@ -45681,6 +45721,8 @@ function _skinPatchHueShader(m) {
     uTrimShade: { value: new THREE.Vector3(0.6, 0.25, 1.6) }, uTrimRoughK: { value: 2.4 },
     uLivBlend: { value: 0 }, uLivBlendAmt: { value: 1 }, uSkinFlatFin: { value: 0 },   // (v50.87)
     uLivMulTone: { value: 0.5 },   // (v50.88)
+    uTerA: { value: new THREE.Vector4(0, 0, 0, 0) }, uTerB: { value: new THREE.Vector4(0.3, 0.36, 0.05, 1) },
+    uTerCol: { value: new THREE.Color(0x808080) }, uTerFin: { value: new THREE.Vector2(0.5, 0.5) },
   };
   Object.defineProperty(ud, '_skinHueU', { value: u, writable: true, configurable: true, enumerable: false });
   const prevOBC = m.onBeforeCompile;
@@ -45696,9 +45738,12 @@ function _skinPatchHueShader(m) {
       .replace('#include <map_fragment>',
         '#include <map_fragment>\n\tvec3 lssRaw = diffuseColor.rgb;'   // (v49.26) the hull's own paint, for the ratio shade
         + '\n\tfloat lssPaintM = 1.0;'   // (v50.81) the paint mask - 1 everywhere unless a masked livery is on
+        + '\n\tfloat lssTerM = 0.0;'     // (v51.25) the tertiary's share: the DULL paint, taken out of lssPaintM
         + '\n\tif (uSkinMaskOn > 0.5) {\n\t\tvec3 lssMc = lssRaw;'
         + '\n#ifdef USE_MAP\n\t\tif (uSkinMaskLod > 0.01) lssMc = diffuse * texture2D(map, vMapUv, uSkinMaskLod).rgb;\n#endif'
-        + '\n\t\tlssPaintM = clamp(lssPaintMask(lssMc * uSkinMulInv) / max(1.0 - uSkinMaskGrow, 0.05), 0.0, 1.0);\n\t}'
+        + '\n\t\tlssPaintM = clamp(lssPaintMask(lssMc * uSkinMulInv) / max(1.0 - uSkinMaskGrow, 0.05), 0.0, 1.0);'
+        + '\n\t\tif (uTerA.x > 0.5) { float lssHi = min(clamp(lssPaintHi(lssMc * uSkinMulInv) / max(1.0 - uSkinMaskGrow, 0.05), 0.0, 1.0), lssPaintM);'
+        + ' lssTerM = lssPaintM - lssHi; lssPaintM = lssHi; }\n\t}'
         + '\n\tdiffuseColor.rgb = lssSkinHue(diffuseColor.rgb, uSkinHue, uSkinMix, uSkinSat, uSkinLift);'
         + '\n\tif (uSkinPatMix > 0.001) diffuseColor.rgb = lssSkinPattern(diffuseColor.rgb, lssRaw);'
         + '\n\tvec3 lssLiv = diffuseColor.rgb;'   // (v50.87) the livery over EVERY texel, before the mask takes it off the black
@@ -45719,18 +45764,30 @@ function _skinPatchHueShader(m) {
         + '\n\t\t}'
         + '\n\t\tlssBlackA = mix(lssBlackA, lssOver, uLivBlendAmt);'
         + '\n\t}'
-        + '\n\tif (uTrimOn > 0.5 || uLivBlend > 0.5) diffuseColor.rgb = mix(lssBlackA, diffuseColor.rgb, lssPaintM);'
-        + '\n\tif (uSkinMaskDbg > 0.5) diffuseColor.rgb = vec3(lssPaintM);')
+        + '\n\tvec3 lssTerA = lssRaw * uSkinMulInv;'
+        + '\n\tif (uTerA.x > 0.5) {'
+        + '\n\t\tif (uTerA.y > 0.5) lssTerA = lssTerColor(lssRaw * uSkinMulInv);'
+        + '\n\t\tif (uTerA.w > 0.5) lssBlackA = lssLiv;'
+        + '\n\t\tvec3 lssL = lssLiv; if (uPaintLiftAmt > 0.001) lssL = lssThemeLift(lssL);'
+        + '\n\t\tdiffuseColor.rgb = lssL * lssPaintM + lssTerA * lssTerM + lssBlackA * max(0.0, 1.0 - lssPaintM - lssTerM);'
+        + '\n\t} else if (uTrimOn > 0.5 || uLivBlend > 0.5) diffuseColor.rgb = mix(lssBlackA, diffuseColor.rgb, lssPaintM);'
+        + '\n\tif (uSkinMaskDbg > 0.5) diffuseColor.rgb = vec3(lssPaintM + 0.5 * lssTerM);')   // (v51.25) the layer in grey
       .replace('#include <roughnessmap_fragment>',
         '#include <roughnessmap_fragment>\n\tif (uSkinMaskOn > 0.5) {\n\t\tfloat lssRf = uSkinBaseRough;'
         + '\n#ifdef USE_ROUGHNESSMAP\n\t\tlssRf *= (uSkinFlatFin > 0.5) ? clamp(texelRoughness.g * uTrimRoughK, 0.5, 1.6) : texelRoughness.g;\n#endif'
-        + '\n\t\troughnessFactor = mix(lssRf, roughnessFactor, lssPaintM);\n\t}')
+        + '\n\t\tif (uTerA.x > 0.5) { float lssTr = uTerFin.y;'
+        + '\n#ifdef USE_ROUGHNESSMAP\n\t\t\tlssTr *= (uTerA.z > 0.5) ? clamp(texelRoughness.g * uTrimRoughK, 0.5, 1.6) : texelRoughness.g;\n#endif'
+        + '\n\t\t\troughnessFactor = lssRf * max(0.0, 1.0 - lssPaintM - lssTerM) + lssTr * lssTerM + roughnessFactor * lssPaintM;'
+        + '\n\t\t} else roughnessFactor = mix(lssRf, roughnessFactor, lssPaintM);\n\t}')
       .replace('#include <metalnessmap_fragment>',
         '#include <metalnessmap_fragment>\n\tif (uSkinMaskOn > 0.5) {\n\t\tfloat lssMf = uSkinBaseMetal;'
         + '\n#ifdef USE_METALNESSMAP\n\t\tif (uSkinFlatFin < 0.5) lssMf *= texelMetalness.b;\n#endif'
-        + '\n\t\tmetalnessFactor = mix(lssMf, metalnessFactor, lssPaintM);\n\t}')
+        + '\n\t\tif (uTerA.x > 0.5) { float lssTm = uTerFin.x;'   // (v51.25)
+        + '\n#ifdef USE_METALNESSMAP\n\t\t\tif (uTerA.z < 0.5) lssTm *= texelMetalness.b;\n#endif'
+        + '\n\t\t\tmetalnessFactor = lssMf * max(0.0, 1.0 - lssPaintM - lssTerM) + lssTm * lssTerM + metalnessFactor * lssPaintM;'
+        + '\n\t\t} else metalnessFactor = mix(lssMf, metalnessFactor, lssPaintM);\n\t}')
       .replace('#include <lights_fragment_maps>',
-        '#include <lights_fragment_maps>\n\tif (uSkinMaskOn > 0.5) {\n\t\tfloat lssEK = mix(uSkinEnvK, 1.0, lssPaintM);'
+        '#include <lights_fragment_maps>\n\tif (uSkinMaskOn > 0.5) {\n\t\tfloat lssEK = (uTerA.x > 0.5) ? (uSkinEnvK * max(0.0, 1.0 - lssPaintM - lssTerM) + uTerB.w * lssTerM + lssPaintM) : mix(uSkinEnvK, 1.0, lssPaintM);'
         + '\n#if defined( RE_IndirectDiffuse )\n\t\tiblIrradiance *= lssEK;\n#endif'
         + '\n#if defined( RE_IndirectSpecular )\n\t\tradiance *= lssEK;\n#endif'
         + '\n\t}')
@@ -45741,8 +45798,9 @@ function _skinPatchHueShader(m) {
         + '\n\tif (uSkinPatMix > 0.001) totalEmissiveRadiance = lssSkinPattern(totalEmissiveRadiance, totalEmissiveRadiance);'
         + '\n\tif (uSkinMaskOn > 0.5) totalEmissiveRadiance = mix(lssEm0, totalEmissiveRadiance, lssPaintM);'   // (v50.81)
         + '\n\tif (uPaintLiftAmt > 0.001) totalEmissiveRadiance = lssThemeLift(totalEmissiveRadiance);'   // (v50.77) the mirror copy too
-        + '\n\tif (uTrimOn > 0.5 || uLivBlend > 0.5) { float lssLk = clamp(dot(lssEm0, vec3(0.2126, 0.7152, 0.0722)) / max(dot(lssRaw * uSkinMulInv, vec3(0.2126, 0.7152, 0.0722)), 1e-4), 0.0, 4.0);'
-        + ' totalEmissiveRadiance = mix(lssBlackA * lssLk, totalEmissiveRadiance, lssPaintM); }'   // (v50.87) the trim or the blend
+        + '\n\tif (uTrimOn > 0.5 || uLivBlend > 0.5 || uTerA.x > 0.5) { float lssLk = clamp(dot(lssEm0, vec3(0.2126, 0.7152, 0.0722)) / max(dot(lssRaw * uSkinMulInv, vec3(0.2126, 0.7152, 0.0722)), 1e-4), 0.0, 4.0);'
+        + ' if (uTerA.x > 0.5) totalEmissiveRadiance = lssBlackA * lssLk * max(0.0, 1.0 - lssPaintM - lssTerM) + lssTerA * lssLk * lssTerM + totalEmissiveRadiance * lssPaintM;'   // (v51.25)
+        + ' else totalEmissiveRadiance = mix(lssBlackA * lssLk, totalEmissiveRadiance, lssPaintM); }'   // (v50.87) the trim or the blend
         + '\n\t} else if (uSkinMaskOn > 0.5) {'   // (v50.81) the livery's emissive floor comes back off the black
         + '\n\ttotalEmissiveRadiance = max(vec3(0.0), totalEmissiveRadiance - uSkinEmFloor * (1.0 - lssPaintM));'
         + '\n\t}');
@@ -45943,8 +46001,8 @@ function _skinTexPaint(tex) {
       return 1 - ss(K.win * 0.6, K.win, Math.abs(dh));
     };
     let chromaT = null;
+    const hist = new Float64Array(32);   // (v51.25) kept for the paint's own split below
     if (hue != null) {
-      const hist = new Float64Array(32);
       for (let i = 0; i < d.length; i += 4) {
         if (Math.max(d[i], d[i + 1], d[i + 2]) < 8) continue;   // atlas padding
         if (hueW(lin(d[i]), lin(d[i + 1]), lin(d[i + 2])) < 0.5) continue;
@@ -45962,23 +46020,44 @@ function _skinTexPaint(tex) {
       if (best > 0) chromaT = Math.min(K.chromaMax, Math.max(K.chromaMin, bt * 0.02));
     }
     const cT = (K.chroma != null) ? +K.chroma : ((chromaT != null) ? chromaT : 0.1), cW = Math.max(0.005, +K.chromaSoft || 0.03);
-    let ws = 0, ls = 0, bs = 0, bl = 0;
+    let splitT = null;
+    if (hue != null) {
+      const b0 = Math.min(31, Math.max(1, Math.round(cT / 0.02)));
+      let n = 0, sum = 0; for (let i = b0; i < 32; i++) { n += hist[i]; sum += i * hist[i]; }
+      let w0 = 0, s0 = 0, best = -1, bt = 0;
+      for (let t = b0 + 1; t < 32; t++) {
+        w0 += hist[t - 1]; s0 += (t - 1) * hist[t - 1];
+        const w1 = n - w0; if (!w0 || !w1) continue;
+        const m0 = s0 / w0, m1 = (sum - s0) / w1, v = w0 * w1 * (m0 - m1) * (m0 - m1);
+        if (v > best) { best = v; bt = t; }
+      }
+      if (best > 0) splitT = Math.min(0.6, Math.max(cT + 0.04, bt * 0.02));
+    }
+    let ws = 0, ls = 0, bs = 0, bl = 0, hs = 0, hl = 0, ts = 0, tl = 0, tr = 0, tg = 0, tb = 0;
     for (let i = 0; i < d.length; i += 4) {
       const r = lin(d[i]), g = lin(d[i + 1]), b = lin(d[i + 2]);
       const mx = Math.max(r, g, b), mn = Math.min(r, g, b), dd = mx - mn;
       const L = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-      let w = 0;
+      let w = 0, wh = 0;
       if (hue != null && mx > 1e-5 && dd > 1e-6) {
         const hw = hueW(r, g, b);
         if (hw > 0) {
+          const ch = (Math.max(d[i], d[i + 1], d[i + 2]) - Math.min(d[i], d[i + 1], d[i + 2])) / 255;
           if (K.gate === 'linear') w = hw * ss(K.sat0, K.sat1, dd / mx) * ss(K.val0, K.val1, mx);
-          else w = hw * ss(cT - cW, cT + cW, (Math.max(d[i], d[i + 1], d[i + 2]) - Math.min(d[i], d[i + 1], d[i + 2])) / 255);
+          else w = hw * ss(cT - cW, cT + cW, ch);
+          if (splitT != null) wh = Math.min(w, hw * ss(splitT - cW, splitT + cW, ch));   // (v51.25) the bright tier
         }
       }
       if (w > 0.001) { ws += w; ls += w * Math.log(Math.max(1e-4, L)); }
       if (w < 0.999 && L > 0.001) { bs += 1 - w; bl += (1 - w) * Math.log(L); }   // (v50.82) the plating
+      if (wh > 0.001) { hs += wh; hl += wh * Math.log(Math.max(1e-4, L)); }   // (v51.25) the bright paint
+      const wt = w - wh;
+      if (wt > 0.001) { ts += wt; tl += wt * Math.log(Math.max(1e-4, L)); tr += wt * d[i]; tg += wt * d[i + 1]; tb += wt * d[i + 2]; }   // ...the dull
     }
-    out = { hue: hue, lum: ws > 0 ? Math.exp(ls / ws) : null, cover: ws / (S * S), blk: bs > 0 ? Math.exp(bl / bs) : null, chromaT: chromaT };
+    out = { hue: hue, lum: ws > 0 ? Math.exp(ls / ws) : null, cover: ws / (S * S), blk: bs > 0 ? Math.exp(bl / bs) : null, chromaT: chromaT,
+            splitT: splitT, hiLum: hs > 0 ? Math.exp(hl / hs) : null, terLum: ts > 0 ? Math.exp(tl / ts) : null,
+            terCover: ts / (S * S), hiCover: hs / (S * S),
+            terHex: ts > 0 ? ((Math.round(tr / ts) << 16) | (Math.round(tg / ts) << 8) | Math.round(tb / ts)) : null };
   } catch (_) { out = null; }
   _skinTexPaintC.set(key, out);
   return out;
@@ -46098,6 +46177,56 @@ function _livBlendSet(m, hu, sk, b, tr) {
     hu.uSkinFlatFin.value = 1;
   }
 }
+function _terSet(m, hu, sk, b, tr) {
+  hu.uTerA.value.set(0, 0, 0, 0);
+  const id = tr && tr.ter;
+  if (!id || id === 'off' || !SHIP_TERS[id] || !_SKIN_MASK.on) return;
+  if (!/_hull_game$/i.test((m && m.name) || '')) return;
+  const L = SHIP_TERS[id], isCol = !L.factory;
+  if (!isCol && sk.restore) return;   // the ship's own colour under FACTORY: nothing changes
+  const P = m.map ? _skinTexPaint(m.map) : null;
+  if (!P || P.hue == null || P.splitT == null) return;
+  const K = _SKIN_MASK, cW = Math.max(0.005, +K.chromaSoft || 0.03);
+  const Tt = SHIP_TRIMS[tr.id];
+  let same = 0;
+  if (!(hu.uSkinMaskOn.value > 0.5)) {
+    if (Tt && Tt.same && !sk.restore) {
+      same = 1;   // the black wears the livery, and the livery's finish
+      hu.uSkinBaseMetal.value = (sk.metalness != null) ? sk.metalness : 0.5;
+      hu.uSkinBaseRough.value = (sk.roughness != null) ? sk.roughness : 0.5;
+      hu.uSkinEnvK.value = 1; hu.uSkinFlatFin.value = 0;
+      hu.uSkinMulInv.value = 1 / ((sk.mul != null && sk.mul > 0) ? sk.mul : 1);
+      hu.uSkinEmFloor.value.setRGB(0, 0, 0);
+    } else if (sk.restore) {
+      hu.uSkinBaseMetal.value = (b.metalness != null) ? b.metalness : 1;
+      hu.uSkinBaseRough.value = (b.roughness != null) ? b.roughness : 1;
+      hu.uSkinEnvK.value = 1; hu.uSkinFlatFin.value = 0;
+      hu.uSkinMulInv.value = 1; hu.uSkinEmFloor.value.setRGB(0, 0, 0);
+    }
+    hu.uSkinMaskOn.value = 1;
+    hu.uSkinMaskHue.value = P.hue;
+    hu.uSkinMaskWin.value = K.win;
+    _skinMaskGate(hu, K, P);
+    hu.uSkinMaskDbg.value = K.debug ? 1 : 0;
+    hu.uSkinMaskLod.value = _skinMaskLod(m, K); hu.uSkinMaskGrow.value = Math.min(0.95, Math.max(0, +K.grow || 0));
+  }
+  const c = b.color || m.color;
+  const cl = c ? (0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b) : 1;
+  hu.uTerB.value.set(Math.max(0, P.splitT - cW), P.splitT + cW, Math.max(1e-3, (P.terLum || 0.05) * cl), 1);
+  if (isCol) {
+    if (id === 'color') { const hsl = L.hsl || [0.75, 0.42]; hu.uTerCol.value.setHSL(tr.terHue / 360, hsl[0], hsl[1], THREE.SRGBColorSpace); }
+    else hu.uTerCol.value.setHex(L.col);   // sRGB hex -> the linear working space, as diffuseColor is
+    hu.uTerFin.value.set(L.metal, L.rough);
+    hu.uTerB.value.w = Math.min(20, L.env / Math.max(0.01, m.envMapIntensity || 0));
+    if (!(hu.uTrimOn.value > 0.5)) hu.uTrimShade.value.set(_TRIM_SHADE.keep, _TRIM_SHADE.floor, _TRIM_SHADE.cap);   // the ratio shade's curve
+    hu.uTrimRoughK.value = 1 / Math.max(0.05, _TRIM_SHADE.roughRef || 0.42);
+  } else {
+    hu.uTerFin.value.set((b.metalness != null) ? b.metalness : 1, (b.roughness != null) ? b.roughness : 1);
+    hu.uTerB.value.w = (sk.envMapIntensity > 0 && b.envMapIntensity != null) ? Math.min(20, b.envMapIntensity / sk.envMapIntensity) : 1;
+  }
+  if (!sk.restore && hu.uSkinRatio.value > 0.5 && P.hiLum) hu.uSkinHullLum.value = P.hiLum * cl * ((sk.mul != null && sk.mul > 0) ? sk.mul : 1);
+  hu.uTerA.value.set(1, isCol ? 1 : 0, isCol ? 1 : 0, same);
+}
 if (typeof window !== 'undefined') window.__trim = function (cfg) {
   const wear = (typeof cfg === 'string');
   if (wear) _setStoredTrim(cfg);
@@ -46124,7 +46253,7 @@ if (typeof window !== 'undefined') window.__trim = function (cfg) {
     if (typeof scene !== 'undefined' && scene && scene.traverse) {
       scene.traverse((o) => {
         const ud = o && o.userData;
-        if (!ud || !ud.isModelShip || o === pm || !ud.trim || ud.trim.id === SHIP_TRIM_DEFAULT) return;
+        if (!ud || !ud.isModelShip || o === pm || !ud.trim || _trimWire(ud.trim) === SHIP_TRIM_DEFAULT) return;   // (v51.25) a layer counts
         try { _applyShipSkin(o, ud.skinId, ud.trim); } catch (_) {}
       });
     }
@@ -46225,6 +46354,7 @@ function _applyShipSkin(root, skinId, trim) {
     }
     try { _trimSet(m, hu, sk, b, tr); } catch (_) { hu.uTrimOn.value = 0; }   // (v50.82) the black plating's finish
     try { _livBlendSet(m, hu, sk, b, tr); } catch (_) { hu.uLivBlend.value = 0; }   // (v50.87) the livery over it
+    try { _terSet(m, hu, sk, b, tr); } catch (_) { hu.uTerA.value.set(0, 0, 0, 0); }   // (v51.25) the dull paint's layer
     if (ud._baseHullColor !== undefined) { delete ud._baseHullColor; delete ud._baseEmissiveI; }
   }
   if (!root.userData) root.userData = {};
@@ -46245,6 +46375,9 @@ if (typeof window !== 'undefined') window.__skinProbe = function (opt) {
       if (!mats.length) return { n: 0 };
       const m = mats[0];
       const tm = mats.find((x) => x && x.name === 'cockpit_CP_tub'), tu = tm && tm.userData && tm.userData._skinHueU;
+      const hm = mats.find((x) => x && /_hull_game$/i.test(x.name || '')), hhu = hm && hm.userData && hm.userData._skinHueU;
+      const ter = (hhu && hhu.uTerA) ? { A: hhu.uTerA.value.toArray().map((v) => +v.toFixed(3)), B: hhu.uTerB.value.toArray().map((v) => +v.toFixed(3)),
+        col: '#' + hhu.uTerCol.value.getHexString(), fin: hhu.uTerFin.value.toArray().map((v) => +v.toFixed(2)), mask: hhu.uSkinMaskOn.value } : null;
       return {
         n: mats.length,
         color: '#' + m.color.getHexString(),
@@ -46257,6 +46390,7 @@ if (typeof window !== 'undefined') window.__skinProbe = function (opt) {
         tub: tm ? { color: '#' + tm.color.getHexString(), map: !!tm.map, mask: tu ? tu.uSkinMaskOn.value : null, hueMix: tu ? +tu.uSkinMix.value.toFixed(2) : null,
           pat: tu ? tu.uSkinPat.value : null, patMix: tu ? tu.uSkinPatMix.value : null, ratio: tu ? tu.uSkinRatio.value : null,
           hullLum: tu ? +tu.uSkinHullLum.value.toFixed(4) : null, metal: +tm.metalness.toFixed(2), rough: +tm.roughness.toFixed(2) } : null,
+        ter: ter,
       };
     };
     out.stored = _getStoredSkinId();
@@ -83605,15 +83739,72 @@ function _setSkinPanelOpen(open, keepTryOn) {
   if (!keepTryOn) { try { _lssCloseBuy(); } catch (_) {} }
   if (open) { try { lssShopRefresh(); } catch (_) {} }
 }
+const _CZ_POS_KEY = 'lss_cz_pos';
+function _czPosGet() {
+  try { const p = JSON.parse(localStorage.getItem(_CZ_POS_KEY) || 'null'); if (p && isFinite(p.x) && isFinite(p.y)) return p; } catch (_) {}
+  return null;
+}
 function _skinPanelPlace() {
   const panel = document.getElementById('ship-preview-skin');
-  const hero = document.getElementById('ship-hero');
   const ss = document.getElementById('ship-select');
-  if (!panel || !hero || !ss || !panel.classList.contains('open')) return;
-  const hr = hero.getBoundingClientRect(), sr = ss.getBoundingClientRect();
-  if (!(hr.width > 0 && hr.height > 0)) return;   // hero not laid out: keep the CSS fallback
-  panel.style.top = Math.round(hr.bottom - sr.top) + 'px';
-  panel.style.left = '';
+  if (!panel || !ss || !panel.classList.contains('open')) return;
+  const sr = ss.getBoundingClientRect();
+  if (!(sr.width > 0 && sr.height > 0)) return;   // the picker is not laid out: keep the CSS fallback
+  const pr = panel.getBoundingClientRect();
+  const w = pr.width || 372;
+  let x = sr.width - w - 10, y = 60;
+  const hdr = document.getElementById('ss-header-right');
+  if (hdr && hdr.offsetParent) { const hb = hdr.getBoundingClientRect(); if (hb.height > 0) y = Math.round(hb.bottom - sr.top + 6); }
+  const saved = _czPosGet();
+  if (saved) { x = saved.x; y = saved.y; }
+  x = Math.max(0, Math.min(Math.round(x), Math.round(sr.width - w)));
+  y = Math.max(0, Math.min(Math.round(y), Math.round(sr.height - 60)));   // the header always stays on screen
+  panel.style.left = x + 'px';
+  panel.style.top = y + 'px';
+  panel.style.maxHeight = Math.max(120, Math.round(sr.height - y - 10)) + 'px';
+}
+let _czWired = false;
+function _wireCzPanel() {
+  if (_czWired) return;
+  const panel = document.getElementById('ship-preview-skin');
+  const head = document.getElementById('cz-head');
+  const close = document.getElementById('cz-close');
+  const ss = document.getElementById('ship-select');
+  if (!panel || !head || !ss) return;
+  _czWired = true;
+  if (close) close.addEventListener('click', (e) => { e.stopPropagation(); _setSkinPanelOpen(false); });
+  let drag = null;
+  head.addEventListener('pointerdown', (e) => {
+    if (e.target && e.target.closest && e.target.closest('#cz-close')) return;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    const pr = panel.getBoundingClientRect();
+    drag = { id: e.pointerId, ox: e.clientX - pr.left, oy: e.clientY - pr.top };
+    try { head.setPointerCapture(e.pointerId); } catch (_) {}
+    head.classList.add('dragging');
+    e.preventDefault(); e.stopPropagation();
+  });
+  head.addEventListener('pointermove', (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const sr = ss.getBoundingClientRect(), pr = panel.getBoundingClientRect();
+    const x = Math.max(0, Math.min(e.clientX - drag.ox - sr.left, sr.width - pr.width));
+    const y = Math.max(0, Math.min(e.clientY - drag.oy - sr.top, sr.height - 60));
+    panel.style.left = Math.round(x) + 'px';
+    panel.style.top = Math.round(y) + 'px';
+    panel.style.maxHeight = Math.max(120, Math.round(sr.height - y - 10)) + 'px';
+  });
+  const end = (e) => {
+    if (!drag || (e && e.pointerId !== drag.id)) return;
+    drag = null;
+    head.classList.remove('dragging');
+    try { localStorage.setItem(_CZ_POS_KEY, JSON.stringify({ x: parseInt(panel.style.left, 10) || 0, y: parseInt(panel.style.top, 10) || 0 })); } catch (_) {}
+  };
+  head.addEventListener('pointerup', end);
+  head.addEventListener('pointercancel', end);
+  head.addEventListener('dblclick', (e) => {
+    if (e.target && e.target.closest && e.target.closest('#cz-close')) return;
+    try { localStorage.removeItem(_CZ_POS_KEY); } catch (_) {}
+    _skinPanelPlace();
+  });
 }
 function _skinChipFit() {
   try {
@@ -83642,14 +83833,7 @@ function _wireSkinToggle() {
     const hero = document.getElementById('ship-hero');
     _setSkinPanelOpen(!(hero && hero.classList.contains('skin-open')));
   });
-  document.addEventListener('click', (e) => {
-    const hero = document.getElementById('ship-hero');
-    if (!hero || !hero.classList.contains('skin-open')) return;
-    const dock = document.getElementById('ss-skin-dock');
-    const panel = document.getElementById('ship-preview-skin');
-    if ((dock && dock.contains(e.target)) || (panel && panel.contains(e.target))) return;
-    _setSkinPanelOpen(false);
-  });
+  _wireCzPanel();
 }
 function _renderSkinPicker() {
   const panel = document.getElementById('ship-preview-skin');
@@ -83680,7 +83864,7 @@ function _renderSkinPicker() {
       e.stopPropagation();
       if (lssSkinLocked(id)) {
         _lssOpenBuy(id);
-        _setSkinPanelOpen(false, true);              // true = keep the try-on
+        _renderSkinPicker();
         try { setShipPreviewSkin(id); } catch (_) {}
         return;
       }
@@ -83730,7 +83914,7 @@ function _renderTrimPicker() {
     card.innerHTML = '<span class="skin-sw" style="background:' + _trimSwatch(id, cur.hue) + ';"></span>';
     card.addEventListener('click', (e) => {
       e.stopPropagation();   // ⚠ load-bearing, as on the livery cards: the re-render detaches the clicked card
-      const _c0 = _getStoredTrim(); _setStoredTrim({ id: id, hue: _c0.hue, blend: _c0.blend });   // (v50.87) keep the blend
+      const _c0 = _getStoredTrim(); _setStoredTrim(Object.assign({}, _c0, { id: id }));   // (v50.87) keep the blend; (v51.25) and the tertiary
       _renderTrimPicker();
       hero();
     });
@@ -83757,7 +83941,7 @@ function _renderTrimPicker() {
       btn.title = label + ' — ' + tip + (mode !== 'off' ? ' (needs a livery)' : '');
       btn.addEventListener('click', (e) => {
         e.stopPropagation();   // ⚠ load-bearing: the re-render detaches the clicked button (see the livery cards)
-        const c = _getStoredTrim(); _setStoredTrim({ id: c.id, hue: c.hue, blend: mode });
+        const c = _getStoredTrim(); _setStoredTrim(Object.assign({}, c, { blend: mode }));   // (v51.25) keeps the tertiary
         _renderTrimPicker();
         hero();
       });
@@ -83766,6 +83950,7 @@ function _renderTrimPicker() {
       bRow.appendChild(btn);
     }
   }
+  try { _renderTerPicker(); } catch (_) {}      // (v51.25) the TERTIARY under BLEND
   try { _renderEnginePicker(); } catch (_) {}   // (v51.07) the ENGINES row under BLEND
   if (!hueEl) return;
   hueEl.classList.toggle('on', cur.id === 'color');
@@ -83774,9 +83959,71 @@ function _renderTrimPicker() {
   hueEl._lssWired = true;
   hueEl.addEventListener('click', (e) => e.stopPropagation());
   hueEl.addEventListener('input', () => {
-    const t = _setStoredTrim({ id: 'color', hue: +hueEl.value, blend: _getStoredTrim().blend });
+    const t = _setStoredTrim(Object.assign({}, _getStoredTrim(), { id: 'color', hue: +hueEl.value }));   // (v51.25) keeps the tertiary
     const sw = document.querySelector('#trim-grid .trim-card[data-trim-id="color"] .skin-sw');
     if (sw) sw.style.background = _trimSwatch('color', t.hue);
+    hero();
+  });
+}
+
+function _terSwatch(id, hue) {
+  const L = SHIP_TERS[id];
+  if (!L) return '#16181c';
+  if (L.factory) {
+    try {
+      const s = (typeof _shipPreview3D !== 'undefined') ? _shipPreview3D : null;
+      let hex = null;
+      if (s && s.model) s.model.traverse((o) => {
+        if (hex != null || !o.isMesh || !o.material) return;
+        for (const mm of (Array.isArray(o.material) ? o.material : [o.material])) {
+          if (mm && mm.map && /_hull_game$/i.test(mm.name || '')) { const P = _skinTexPaint(mm.map); if (P && P.terHex != null) { hex = P.terHex; break; } }
+        }
+      });
+      if (hex != null) return '#' + hex.toString(16).padStart(6, '0');
+    } catch (_) {}
+    return 'linear-gradient(135deg, #5a6050 0%, #2c3028 100%)';
+  }
+  return _trimSwatch(id, hue);   // the secondary's finishes; COLOR at the tertiary's own hue
+}
+function _renderTerPicker() {
+  const grid = document.getElementById('ter-grid');
+  const hueEl = document.getElementById('ter-hue');
+  const desc = document.getElementById('skin-desc');
+  if (!grid) return;
+  const cur = _getStoredTrim();
+  const factory = _getStoredSkinId() === SHIP_SKIN_DEFAULT;
+  const hero = () => { try { setShipPreviewSkin((_lssBuyFocus && SHIP_SKINS[_lssBuyFocus]) ? _lssBuyFocus : _getStoredSkinId()); } catch (_) {} };
+  const back = () => { const c = SHIP_SKINS[_getStoredSkinId()]; if (desc && c) desc.textContent = c.name + ' — ' + c.desc; };
+  const say = (id, L) => 'TERTIARY ' + L.name + ' — ' + ((L.factory || id === 'off') ? L.desc : ('the duller paint in ' + L.desc));
+  grid.innerHTML = '';
+  for (const id of Object.keys(SHIP_TERS)) {
+    const L = SHIP_TERS[id];
+    const card = document.createElement('div');
+    card.className = 'perk-card skin-card trim-card ter-card' + (id === cur.ter ? ' selected' : '') + ((L.factory && factory) ? ' idle' : '');
+    card.dataset.terId = id;
+    card.title = say(id, L) + ((L.factory && factory) ? ' (needs a primary skin)' : '');
+    card.innerHTML = '<span class="skin-sw" style="background:' + _terSwatch(id, cur.terHue) + ';"></span>';
+    card.addEventListener('click', (e) => {
+      e.stopPropagation();   // ⚠ load-bearing, as on the livery cards: the re-render detaches the clicked card
+      _setStoredTrim(Object.assign({}, _getStoredTrim(), { ter: id }));
+      _renderTerPicker();
+      hero();
+      if (desc) desc.textContent = say(id, L);
+    });
+    card.addEventListener('mouseenter', () => { if (desc) desc.textContent = say(id, L); });
+    card.addEventListener('mouseleave', back);
+    grid.appendChild(card);
+  }
+  if (!hueEl) return;
+  hueEl.classList.toggle('on', cur.ter === 'color');
+  if (+hueEl.value !== cur.terHue) hueEl.value = String(cur.terHue);
+  if (hueEl._lssWired) return;
+  hueEl._lssWired = true;
+  hueEl.addEventListener('click', (e) => e.stopPropagation());
+  hueEl.addEventListener('input', () => {
+    const t = _setStoredTrim(Object.assign({}, _getStoredTrim(), { ter: 'color', terHue: +hueEl.value }));
+    const sw = document.querySelector('#ter-grid .ter-card[data-ter-id="color"] .skin-sw');
+    if (sw) sw.style.background = _terSwatch('color', t.terHue);
     hero();
   });
 }
@@ -85919,7 +86166,7 @@ function _lssNextTrim(dir) {
     const next = ids[((i + ((dir | 0) || 1)) % ids.length + ids.length) % ids.length];
     const ss = document.getElementById('ship-select');
     if (ss && ss.classList.contains('active')) {
-      _setStoredTrim({ id: next, hue: cur.hue, blend: cur.blend });
+      _setStoredTrim(Object.assign({}, cur, { id: next }));   // (v51.25) keeps the blend and the tertiary
       try { _renderTrimPicker(); } catch (_) {}
       try { setShipPreviewSkin((_lssBuyFocus && SHIP_SKINS[_lssBuyFocus]) ? _lssBuyFocus : _getStoredSkinId()); } catch (_) {}
       try { const d = document.getElementById('skin-desc'), T = SHIP_TRIMS[next]; if (d && T) d.textContent = T.name + ' — ' + T.desc; } catch (_) {}
@@ -85929,7 +86176,7 @@ function _lssNextTrim(dir) {
     const _now = (typeof game.time === 'number') ? game.time : 0;
     if (_now - (player._lastTrimSwap || -9) < 0.12) return null;   // a held key auto-repeats; one step per press
     player._lastTrimSwap = _now;
-    const t = _setStoredTrim({ id: next, hue: cur.hue, blend: cur.blend });
+    const t = _setStoredTrim(Object.assign({}, cur, { id: next }));   // (v51.25) keeps the blend and the tertiary
     try { _applyShipSkin(player.mesh, player.skinId, t); } catch (_) {}
     try { _lssAnnounceLoadout(); } catch (_) {}
     return next;
