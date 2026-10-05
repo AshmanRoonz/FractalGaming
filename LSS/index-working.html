@@ -7342,7 +7342,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "51.37";
+const LSS_BUILD = "51.38";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -25785,6 +25785,89 @@ function _gcgPalette(key) {
   const c = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS[key] != null) ? LSS.CLASS_COLORS[key] : 0x00e0ff;
   const w = (x) => Math.round(x + (255 - x) * 0.85);
   return (_GCG_PAL[key] = [c, (w((c >> 16) & 255) << 16) | (w((c >> 8) & 255) << 8) | w(c & 255)]);
+}
+// ⭐ (v51.38) THE TETHER SHOCKS WHAT IT HOLDS. Owner: "i want puncture's tether trap to cover the trapped ship in
+// yellow lightning that extends from the trap". A caught ship used to get ONE bolt, 1.4 u thick, from the trap to
+// its centre - under the v46.99 floor (5 u measured invisible on a ~420 u hull). While a trap holds a target (the
+// pilot, a bot, a peer's ship, a monster - one `rootTarget` covers them all), this runs the core lightning's own
+// machinery, in PUNCTURE's pair (_gcgPalette: 0xffee44 halo, 0xfffce3 white-hot core) and the two-bolt recipe, so
+// it can never read as hull damage (pale cyan, single bolt):
+//   STRANDS  bolts from the trap to points ON the target's hull (_gcgAnchors), so the discharge visibly leaves the
+//            trap and lands on the ship;
+//   COVER    the core glow's walk - arcs chained around and along the hull - so the whole ship is wrapped.
+// Walk state lives on the TRAP (two traps on one ship each crawl their own way). Nothing persistent is made: when
+// the trap breaks for any reason (expiry, shot down, teleport, death) it stops being fed and the pooled bolts run
+// out by themselves. Returns true when it drew, so the caller can fall back to the old single arc.
+// Knobs: window.__tetherShock = { on, tint, core, every, arcs, thick, life, jump, strandEvery, strands,
+//                                 strandThick, strandLife, light }.
+const _TSK_A = new THREE.Vector3(), _TSK_B = new THREE.Vector3();
+function _tetherShock(eff, tgt, dt) {
+  if (!eff || !tgt || !tgt.mesh || !tgt.position || typeof spawnLightningBolt !== 'function') return false;
+  if (_RPL.kc || _RPL.studio) return false;   // a replay owns the hulls (the _gunCoreGlow rule)
+  const K = (typeof window !== 'undefined' && window.__tetherShock) || {};
+  if (K.on === false) return false;
+  const A = _gcgAnchors(tgt);
+  if (!A || !A.rings || !A.rings.length) return false;
+  const small = (typeof _fxSmallDevice === 'function') && _fxSmallDevice();
+  const pal = _gcgPalette('PUNCTURE');
+  const halo = (K.tint != null) ? K.tint : pal[0], core = (K.core != null) ? K.core : pal[1];
+  const rings = A.rings;
+  A.hullMesh.updateWorldMatrix(true, false);
+  const mw = A.hullMesh.matrixWorld;
+  // COVER: the walk, a little denser than a core's (it lasts 4 s, not 10) and jumping rings more often so it
+  // reaches the whole ship rather than one band of it.
+  eff._shkT = (eff._shkT || 0) - (dt || 0.016);
+  if (eff._shkT <= 0) {
+    eff._shkT = (K.every != null) ? K.every : (small ? 0.12 : 0.05);
+    const life = (K.life != null) ? K.life : 0.26, thick = (K.thick != null) ? K.thick : 11;
+    const jump = (K.jump != null) ? K.jump : 0.4;
+    const arcs = Math.max(1, (K.arcs != null) ? K.arcs : (small ? 1 : 3));
+    for (let s = 0; s < arcs; s++) {
+      eff._shkWalk = (eff._shkWalk | 0) + 1;
+      const ring = rings[(eff._shkRing | 0) % rings.length], n = ring.length, i0 = eff._shkWalk % n;
+      const a = ring[i0];
+      let b;
+      if (rings.length > 1 && Math.random() < jump) {
+        const nr = ((eff._shkRing | 0) + 1 + ((Math.random() * (rings.length - 1)) | 0)) % rings.length;
+        const other = rings[nr]; b = other[i0 % other.length]; eff._shkRing = nr;
+      } else b = ring[(i0 + 1) % n];
+      _TSK_A.set(a.x, a.y, a.z).applyMatrix4(mw);
+      _TSK_B.set(b.x, b.y, b.z).applyMatrix4(mw);
+      if (_TSK_A.distanceTo(_TSK_B) < 6) continue;   // spawnLightningBolt ignores anything shorter
+      const fa = _TSK_A.clone(), fb = _TSK_B.clone();
+      try {
+        spawnLightningBolt(fa, fb, halo, life, 2, thick, false);
+        spawnLightningBolt(fa, fb, core, life * 0.55, 1, thick * 0.38, false);
+      } catch (_) {}
+    }
+  }
+  // STRANDS: trap -> a different hull point each time, so the strands fan over the ship instead of one line.
+  eff._shkS = (eff._shkS || 0) - (dt || 0.016);
+  if (eff._shkS <= 0) {
+    eff._shkS = (K.strandEvery != null) ? K.strandEvery : (small ? 0.16 : 0.07);
+    const strands = Math.max(1, (K.strands != null) ? K.strands : (small ? 1 : 2));
+    const sThick = (K.strandThick != null) ? K.strandThick : 9, sLife = (K.strandLife != null) ? K.strandLife : 0.14;
+    for (let s = 0; s < strands; s++) {
+      const ring = rings[(Math.random() * rings.length) | 0];
+      const a = ring[(Math.random() * ring.length) | 0];
+      const to = new THREE.Vector3(a.x, a.y, a.z).applyMatrix4(mw);
+      const from = eff.position.clone();
+      if (from.distanceTo(to) < 6) continue;
+      try {
+        spawnLightningBolt(from, to, halo, sLife, 3, sThick, false);
+        spawnLightningBolt(from.clone(), to.clone(), core, sLife * 0.6, 1, sThick * 0.38, false);
+      } catch (_) {}
+    }
+  }
+  // ...and the plating picks the yellow up (not on a phone - every dynamic light is a forward-pass cost)
+  if (!small && Math.random() < ((K.light != null) ? K.light : 0.25) && typeof spawnDynamicLight === 'function') {
+    const camP = (typeof camera !== 'undefined' && camera) ? camera.position : null;
+    if (!camP || camP.distanceToSquared(tgt.position) < 2600 * 2600) {
+      const reach = ((tgt.chassis && tgt.chassis.hullLength) || (tgt.collisionRadius ? tgt.collisionRadius * 1.4 : 60)) * 2.4;
+      try { spawnDynamicLight(tgt.position, halo, 2.4, reach, 0.12); } catch (_) {}
+    }
+  }
+  return true;
 }
 if (typeof window !== 'undefined') window.__gunCoreInfo = function () {
   return _GCG.live.map(o => ({
@@ -118643,6 +118726,13 @@ function updateWorldEffects(dt) {
       //   A trap shot down this frame only skips its dressing; timer 0 lets the sweep below take it.
       const _tethGone = !!eff._shotDown;
       if (!_tethGone) _tetherAlphaApply(eff);   // (v47.92) faint when set, readable once it has caught someone
+      // ⭐ (v51.38) ...and once it has, the yellow lightning runs out of the trap and over the whole ship - every
+      // frame it holds someone, any owner kind (see _tetherShock). Reports a throw once and never again.
+      eff._shocked = false;
+      if (eff.triggered && _rootAlive && !_tethGone && !eff._broke) {
+        try { eff._shocked = _tetherShock(eff, eff.rootTarget, dt); }
+        catch (e) { if (!_tetherShock.err) { _tetherShock.err = 1; try { console.warn('[tether] shock threw:', e); } catch (_) {} } }
+      }
       // ---- Visible effects so the trap reads as an active ensnare ----
       // The bare octahedron looks like a static debug widget ; layer in:
       //   * spinning rotation per frame so the geometry visibly tumbles,
@@ -118687,7 +118777,9 @@ function updateWorldEffects(dt) {
         // (v47.92) a SET trap crackles thinner (0.6 vs 1.0) - see the idle cadence below
         spawnLightningBolt(eff.position, arcEnd, LSS.CLASS_COLORS.PUNCTURE, 0.08, 1, eff.triggered ? 1.0 : 0.6);
         // Tether arc to the rooted target, if any (longer, brighter, branched)
-        if (eff.triggered && eff.rootTarget && eff.rootTarget.alive) {
+        // (v51.38) only as the FALLBACK now - _tetherShock's strands replace it whenever the target has a hull to
+        // land on; a target it could not anchor (no mesh yet) still gets the old single arc.
+        if (eff.triggered && eff.rootTarget && eff.rootTarget.alive && !eff._shocked) {
           spawnLightningBolt(eff.position, eff.rootTarget.position, LSS.CLASS_COLORS.PUNCTURE, 0.10, 2, 1.4);
         }
         // (v47.92) ...and about a quarter as often while it waits: a bolt every 50-100 ms was the

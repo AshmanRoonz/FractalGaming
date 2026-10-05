@@ -9613,3 +9613,13 @@ Owner: *"i find our water to look a bit jello like... i like how this water move
   - **Audit:** 99 plain `playSound` sites are the player's own ship, UI / countdown / fanfare cues, or `else` fallbacks behind `playSpatialSound`. Continuous voices (fly-bys, carrier engine, peer water hiss, other ships' phi hum) already have panners. Music, announcer, campaign VO and the ambient bed are centred by design.
   - **The gaps were 3:** the firewall and ignited-gas `fire_burn` loops and the Plasma Shield wall's `shield_hum`, ticked through `_tickSoundLoop` -> plain `playSound` from `game.worldEffects`. That list holds every player's, bot's and peer's effects, so a wall across the map hummed dead-centre at full volume.
   - **Fix:** `_tickSoundLoop` takes an optional position (or function) + spatial opts. Firewalls sound from the curtain point nearest the listener; clouds and walls sound from their own position. The player's own shield hums pass none and stay centred.
+- ⭐ **(v51.38) THE TETHER SHOCKS WHAT IT HOLDS** (owner: *"i want puncture's tether trap to cover the trapped ship in yellow lightning that extends from the trap"*). **Jump:** `function _tetherShock` · `eff._shocked` in the tether branch of the world-effects update.
+  - **Before:** a caught ship got ONE bolt, 1.4 u thick, trap -> centre. That is under the v46.99 floor (5 u measured invisible on a ~420 u hull).
+  - **Now,** while a trap holds anything (pilot, bot, peer ship, monster - one `rootTarget`), the v46.99 core-lightning machinery runs in PUNCTURE's `_gcgPalette` pair (`0xffee44` halo + `0xfffce3` core, the two-bolt recipe, so it can't read as hull damage):
+    - **STRANDS:** bolts from the trap to a different `_gcgAnchors` hull point each time, fanning over the ship. 2 every 0.07 s, 9 u.
+    - **COVER:** the walk, 3 arcs every 0.05 s, 11 u, jump 0.4.
+    - A yellow dynamic light on the hull, 25 % of ticks.
+    - Small devices thin all of it.
+  - Walk state lives on the TRAP, and nothing persistent is created, so expiry / shot-down / teleport / death just stop feeding it. The old 1.4 u arc stays as a fallback for a target `_gcgAnchors` cannot anchor.
+  - Knobs: `window.__tetherShock = { on, tint, core, every, arcs, thick, life, jump, strandEvery, strands, strandThick, strandLife, light }`. Test with `__tetherProbe.drop(160)` (an enemy trap off your nose that catches you at once).
+  - ⚠ **Cost unmeasured.** Up to ~100+ tube builds a second while a trap holds someone. One v46.99 core (~80/s) measured 144 -> 112-120 fps; the bolts share the 96-slot pool, which drops non-essential spawns when full.

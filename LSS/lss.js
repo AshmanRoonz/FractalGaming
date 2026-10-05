@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "51.37";
+const LSS_BUILD = "51.38";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -12851,6 +12851,71 @@ function _gcgPalette(key) {
   const c = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS[key] != null) ? LSS.CLASS_COLORS[key] : 0x00e0ff;
   const w = (x) => Math.round(x + (255 - x) * 0.85);
   return (_GCG_PAL[key] = [c, (w((c >> 16) & 255) << 16) | (w((c >> 8) & 255) << 8) | w(c & 255)]);
+}
+const _TSK_A = new THREE.Vector3(), _TSK_B = new THREE.Vector3();
+function _tetherShock(eff, tgt, dt) {
+  if (!eff || !tgt || !tgt.mesh || !tgt.position || typeof spawnLightningBolt !== 'function') return false;
+  if (_RPL.kc || _RPL.studio) return false;   // a replay owns the hulls (the _gunCoreGlow rule)
+  const K = (typeof window !== 'undefined' && window.__tetherShock) || {};
+  if (K.on === false) return false;
+  const A = _gcgAnchors(tgt);
+  if (!A || !A.rings || !A.rings.length) return false;
+  const small = (typeof _fxSmallDevice === 'function') && _fxSmallDevice();
+  const pal = _gcgPalette('PUNCTURE');
+  const halo = (K.tint != null) ? K.tint : pal[0], core = (K.core != null) ? K.core : pal[1];
+  const rings = A.rings;
+  A.hullMesh.updateWorldMatrix(true, false);
+  const mw = A.hullMesh.matrixWorld;
+  eff._shkT = (eff._shkT || 0) - (dt || 0.016);
+  if (eff._shkT <= 0) {
+    eff._shkT = (K.every != null) ? K.every : (small ? 0.12 : 0.05);
+    const life = (K.life != null) ? K.life : 0.26, thick = (K.thick != null) ? K.thick : 11;
+    const jump = (K.jump != null) ? K.jump : 0.4;
+    const arcs = Math.max(1, (K.arcs != null) ? K.arcs : (small ? 1 : 3));
+    for (let s = 0; s < arcs; s++) {
+      eff._shkWalk = (eff._shkWalk | 0) + 1;
+      const ring = rings[(eff._shkRing | 0) % rings.length], n = ring.length, i0 = eff._shkWalk % n;
+      const a = ring[i0];
+      let b;
+      if (rings.length > 1 && Math.random() < jump) {
+        const nr = ((eff._shkRing | 0) + 1 + ((Math.random() * (rings.length - 1)) | 0)) % rings.length;
+        const other = rings[nr]; b = other[i0 % other.length]; eff._shkRing = nr;
+      } else b = ring[(i0 + 1) % n];
+      _TSK_A.set(a.x, a.y, a.z).applyMatrix4(mw);
+      _TSK_B.set(b.x, b.y, b.z).applyMatrix4(mw);
+      if (_TSK_A.distanceTo(_TSK_B) < 6) continue;   // spawnLightningBolt ignores anything shorter
+      const fa = _TSK_A.clone(), fb = _TSK_B.clone();
+      try {
+        spawnLightningBolt(fa, fb, halo, life, 2, thick, false);
+        spawnLightningBolt(fa, fb, core, life * 0.55, 1, thick * 0.38, false);
+      } catch (_) {}
+    }
+  }
+  eff._shkS = (eff._shkS || 0) - (dt || 0.016);
+  if (eff._shkS <= 0) {
+    eff._shkS = (K.strandEvery != null) ? K.strandEvery : (small ? 0.16 : 0.07);
+    const strands = Math.max(1, (K.strands != null) ? K.strands : (small ? 1 : 2));
+    const sThick = (K.strandThick != null) ? K.strandThick : 9, sLife = (K.strandLife != null) ? K.strandLife : 0.14;
+    for (let s = 0; s < strands; s++) {
+      const ring = rings[(Math.random() * rings.length) | 0];
+      const a = ring[(Math.random() * ring.length) | 0];
+      const to = new THREE.Vector3(a.x, a.y, a.z).applyMatrix4(mw);
+      const from = eff.position.clone();
+      if (from.distanceTo(to) < 6) continue;
+      try {
+        spawnLightningBolt(from, to, halo, sLife, 3, sThick, false);
+        spawnLightningBolt(from.clone(), to.clone(), core, sLife * 0.6, 1, sThick * 0.38, false);
+      } catch (_) {}
+    }
+  }
+  if (!small && Math.random() < ((K.light != null) ? K.light : 0.25) && typeof spawnDynamicLight === 'function') {
+    const camP = (typeof camera !== 'undefined' && camera) ? camera.position : null;
+    if (!camP || camP.distanceToSquared(tgt.position) < 2600 * 2600) {
+      const reach = ((tgt.chassis && tgt.chassis.hullLength) || (tgt.collisionRadius ? tgt.collisionRadius * 1.4 : 60)) * 2.4;
+      try { spawnDynamicLight(tgt.position, halo, 2.4, reach, 0.12); } catch (_) {}
+    }
+  }
+  return true;
 }
 if (typeof window !== 'undefined') window.__gunCoreInfo = function () {
   return _GCG.live.map(o => ({
@@ -76749,6 +76814,11 @@ function updateWorldEffects(dt) {
       }
       const _tethGone = !!eff._shotDown;
       if (!_tethGone) _tetherAlphaApply(eff);   // (v47.92) faint when set, readable once it has caught someone
+      eff._shocked = false;
+      if (eff.triggered && _rootAlive && !_tethGone && !eff._broke) {
+        try { eff._shocked = _tetherShock(eff, eff.rootTarget, dt); }
+        catch (e) { if (!_tetherShock.err) { _tetherShock.err = 1; try { console.warn('[tether] shock threw:', e); } catch (_) {} } }
+      }
       if (eff.mesh && !_tethGone) {
         eff.mesh.rotation.x += dt * 1.4;
         eff.mesh.rotation.y += dt * 2.1;
@@ -76777,7 +76847,7 @@ function updateWorldEffects(dt) {
         const reach = 80 + Math.random() * 100;
         const arcEnd = eff.position.clone().add(dir.multiplyScalar(reach));
         spawnLightningBolt(eff.position, arcEnd, LSS.CLASS_COLORS.PUNCTURE, 0.08, 1, eff.triggered ? 1.0 : 0.6);
-        if (eff.triggered && eff.rootTarget && eff.rootTarget.alive) {
+        if (eff.triggered && eff.rootTarget && eff.rootTarget.alive && !eff._shocked) {
           spawnLightningBolt(eff.position, eff.rootTarget.position, LSS.CLASS_COLORS.PUNCTURE, 0.10, 2, 1.4);
         }
         eff.arcTimer = eff.triggered ? (0.05 + Math.random() * 0.05) : (0.22 + Math.random() * 0.2);
