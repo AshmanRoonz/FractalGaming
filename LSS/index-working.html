@@ -7342,7 +7342,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "51.36";
+const LSS_BUILD = "51.37";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -117997,7 +117997,8 @@ function updateWorldEffects(dt) {
       // Continuous burning loop. Re-triggers every 0.95 s while
       // the firewall is alive, so the player hears a sustained fire roar
       // wherever the curtain is in the room.
-      _tickSoundLoop(eff, '_burnTimer', dt, 0.95, 'fire_burn');
+      // (v51.37) ...FROM where the curtain is: its nearest point to you, in 3D (see _effSoundAt).
+      _tickSoundLoop(eff, '_burnTimer', dt, 0.95, 'fire_burn', () => _effSoundAt(eff), { refDistance: 350, maxDistance: 7000 });
       // Mesh sync gate: only the owner runs damage logic. Visual fire
       // particles below run on every peer so the flame curtain shows up.
       const isMyEff = !net.active || !eff.ownerPeerId || eff.ownerPeerId === net.myPeerId;
@@ -118392,7 +118393,7 @@ function updateWorldEffects(dt) {
       if (eff.ignited) {
         // Ignited gas cloud burns: same fire_burn loop as the
         // firewall, so all sustained fire shares one sound identity.
-        _tickSoundLoop(eff, '_burnTimer', dt, 0.95, 'fire_burn');
+        _tickSoundLoop(eff, '_burnTimer', dt, 0.95, 'fire_burn', () => _effSoundAt(eff), { refDistance: 300, maxDistance: 6000 });   // (v51.37) in 3D
         eff.igniteTimer -= dt;
         // Damage and slow ALL enemies in the burning area (bots + player)
         for (const bot of game.entities) {
@@ -118768,7 +118769,7 @@ function updateWorldEffects(dt) {
       // Shield. Held to a single hum identity for "energy shield" so the
       // player can audibly distinguish energy shields from fire effects.
       if (eff.hp > 0) {
-        _tickSoundLoop(eff, '_humTimer', dt, 0.95, 'shield_hum');
+        _tickSoundLoop(eff, '_humTimer', dt, 0.95, 'shield_hum', () => _effSoundAt(eff), { refDistance: 220, maxDistance: 4000 });   // (v51.37) in 3D
       }
       if (eff.mesh && eff.hp > 0) {
         const hpPct = eff.hp / eff.maxHp;
@@ -158091,14 +158092,39 @@ if (typeof window !== 'undefined') {
   } catch (_) {}
 }
 
-function _tickSoundLoop(host, stateKey, dt, interval, soundType) {
+// (v51.37) `at` (optional): a Vector3, or a function returning one, for a loop hosted by something IN THE
+// WORLD - it then plays through playSpatialSound(soundType, at, opts) instead of the centred playSound.
+// Owner: "are there any sounds in the game that aren't linked to 3d/surround sound?" - the audit found exactly
+// these: the firewall and ignited-gas burn loops and the Plasma Shield wall's hum, ticked from
+// game.worldEffects (which holds every player's, bot's and peer's effects), so a wall across the map hummed
+// dead-centre at full volume. Loops on the player's OWN ship (shield hums) pass no `at` and stay centred.
+function _tickSoundLoop(host, stateKey, dt, interval, soundType, at, opts) {
   if (!host) return;
   if (host[stateKey] == null) host[stateKey] = 0;
   host[stateKey] -= dt;
   if (host[stateKey] <= 0) {
-    try { playSound(soundType); } catch (e) {}
+    let p = null;
+    if (at) { try { p = (typeof at === 'function') ? at() : at; } catch (_) { p = null; } }
+    if (p && typeof playSpatialSound === 'function') { try { playSpatialSound(soundType, p, opts); } catch (e) {} }
+    else { try { playSound(soundType); } catch (e) {} }
     host[stateKey] = interval;
   }
+}
+// (v51.37) Where a world effect's loop should sound from. A firewall is a curtain up to 800 u long, so it sounds
+// from the point on it NEAREST the listener (the camera - the listener is synced to it) rather than from its
+// start; everything else from its own position. A FRESH vector per call (~1 a second per effect): the spatial
+// player may hold on to the one it is handed.
+function _effSoundAt(eff) {
+  if (!eff || !eff.position) return null;
+  const v = new THREE.Vector3();
+  const p = eff.position, d = eff.direction, L = +eff.length || 0;
+  if (eff.type === 'firewall' && d && L > 0 && typeof camera !== 'undefined' && camera) {
+    const dl = Math.hypot(d.x, d.y, d.z) || 1, ux = d.x / dl, uy = d.y / dl, uz = d.z / dl;
+    const c = camera.position;
+    const t = Math.max(0, Math.min(L, (c.x - p.x) * ux + (c.y - p.y) * uy + (c.z - p.z) * uz));
+    return v.set(p.x + ux * t, p.y + uy * t, p.z + uz * t);
+  }
+  return v.copy(p);
 }
 
 // Boot-time restore: pull the persisted library from localStorage. Called

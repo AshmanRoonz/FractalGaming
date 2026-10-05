@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "51.36";
+const LSS_BUILD = "51.37";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -76268,7 +76268,7 @@ function updateWorldEffects(dt) {
     eff.timer -= dt;
 
     if (eff.type === 'firewall') {
-      _tickSoundLoop(eff, '_burnTimer', dt, 0.95, 'fire_burn');
+      _tickSoundLoop(eff, '_burnTimer', dt, 0.95, 'fire_burn', () => _effSoundAt(eff), { refDistance: 350, maxDistance: 7000 });
       const isMyEff = !net.active || !eff.ownerPeerId || eff.ownerPeerId === net.myPeerId;
       if (isMyEff) for (const bot of game.entities) {
         if (!bot.alive || bot.team === eff.team) continue;
@@ -76567,7 +76567,7 @@ function updateWorldEffects(dt) {
       }
 
       if (eff.ignited) {
-        _tickSoundLoop(eff, '_burnTimer', dt, 0.95, 'fire_burn');
+        _tickSoundLoop(eff, '_burnTimer', dt, 0.95, 'fire_burn', () => _effSoundAt(eff), { refDistance: 300, maxDistance: 6000 });   // (v51.37) in 3D
         eff.igniteTimer -= dt;
         for (const bot of game.entities) {
           if (!bot.alive || bot.team === eff.team) continue;
@@ -76833,7 +76833,7 @@ function updateWorldEffects(dt) {
 
     else if (eff.type === 'particle_wall') {
       if (eff.hp > 0) {
-        _tickSoundLoop(eff, '_humTimer', dt, 0.95, 'shield_hum');
+        _tickSoundLoop(eff, '_humTimer', dt, 0.95, 'shield_hum', () => _effSoundAt(eff), { refDistance: 220, maxDistance: 4000 });   // (v51.37) in 3D
       }
       if (eff.mesh && eff.hp > 0) {
         const hpPct = eff.hp / eff.maxHp;
@@ -106098,14 +106098,29 @@ if (typeof window !== 'undefined') {
   } catch (_) {}
 }
 
-function _tickSoundLoop(host, stateKey, dt, interval, soundType) {
+function _tickSoundLoop(host, stateKey, dt, interval, soundType, at, opts) {
   if (!host) return;
   if (host[stateKey] == null) host[stateKey] = 0;
   host[stateKey] -= dt;
   if (host[stateKey] <= 0) {
-    try { playSound(soundType); } catch (e) {}
+    let p = null;
+    if (at) { try { p = (typeof at === 'function') ? at() : at; } catch (_) { p = null; } }
+    if (p && typeof playSpatialSound === 'function') { try { playSpatialSound(soundType, p, opts); } catch (e) {} }
+    else { try { playSound(soundType); } catch (e) {} }
     host[stateKey] = interval;
   }
+}
+function _effSoundAt(eff) {
+  if (!eff || !eff.position) return null;
+  const v = new THREE.Vector3();
+  const p = eff.position, d = eff.direction, L = +eff.length || 0;
+  if (eff.type === 'firewall' && d && L > 0 && typeof camera !== 'undefined' && camera) {
+    const dl = Math.hypot(d.x, d.y, d.z) || 1, ux = d.x / dl, uy = d.y / dl, uz = d.z / dl;
+    const c = camera.position;
+    const t = Math.max(0, Math.min(L, (c.x - p.x) * ux + (c.y - p.y) * uy + (c.z - p.z) * uz));
+    return v.set(p.x + ux * t, p.y + uy * t, p.z + uz * t);
+  }
+  return v.copy(p);
 }
 
 function _loadPersistedSoundRecipes() {
