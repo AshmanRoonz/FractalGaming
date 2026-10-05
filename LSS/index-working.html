@@ -7342,7 +7342,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "51.38";
+const LSS_BUILD = "51.39";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -110958,6 +110958,32 @@ function _ghostZoomSolidity() {
   const s1 = (typeof Z.ghostSolidity === 'number') ? Z.ghostSolidity : 0.22;
   return s0 - Math.min(1, z) * (s0 - s1);
 }
+// ⭐ (v51.39) THE CHASE CAMERA'S WALL X-RAY WORKS ON A SOLID COCKPIT TOO. v38.74 ghosts the hull while the chase boom is
+// pulled into it by a wall behind (game._tpGhost: owner then, "when i back into a wall, i can see inside the ship"),
+// but it was gated on `_ghostHullKnobs(...).on` - i.e. on the solidity setting being below Solid - so since v42.09's
+// slider / v50.43's steps a pilot on SOLID backed into a wall and saw the hull's inside again. This is the solidity
+// the shell should use when something OTHER than the setting asks for one: the zoom ramp first (v44.27), else a
+// chase-camera wall -> the X-ray step (XRAY_END 0.45), unless the pilot's own setting is already more see-through.
+// ⚠ THIRD PERSON ONLY, BY THE OWNER'S CALL: "we only needed xray for backing into walls for third person". A first
+//   v51.39 cut also x-rayed the SEAT when its tail met a wall - wrong diagnosis: the seat's real fault is the view
+//   being pushed forward into the nose (owner: "it shouldn't change anything at all, it's not like the back of the
+//   ship is going into the wall"), which x-ray would only have hidden.
+function _ghostSeatSolidity() {
+  const z = _ghostZoomSolidity();
+  if (typeof z === 'number') return z;
+  if (typeof game === 'undefined' || !game) return undefined;
+  const _vr = (typeof isXRPresenting === 'function') && isXRPresenting();
+  const wall = !!(game.thirdPerson && !_vr && game._tpGhost);
+  if (!wall) return undefined;
+  const G = (window.__cockpit && window.__cockpit.ghost) || {};
+  const user = (typeof G.solidity === 'number') ? G.solidity
+             : ((typeof input !== 'undefined' && input && typeof input.cockpitSolidity === 'number') ? input.cockpitSolidity : 0);
+  return (user > 0.45) ? 0.45 : undefined;
+}
+if (typeof window !== 'undefined') window.__wallGhostInfo = () => ({
+  chaseWall: !!(game && game._tpGhost), boom: (game && game._tpBoom != null) ? Math.round(game._tpBoom) : null,
+  solidityNow: _ghostSeatSolidity(), shellOn: !!(player && player.mesh && player.mesh.userData && player.mesh.userData._ghostOn),
+});
 function _ghostSeatWanted() {
   if (typeof game === 'undefined' || !game || typeof player === 'undefined' || !player) return false;
   // (v37.69) MIRROR THE RIG'S OWN BRANCH. _lssApplyShipRig takes the chase view on
@@ -110974,7 +111000,7 @@ function _ghostSeatWanted() {
   // centre when a wall is behind it, i.e. into the tail; game._tpGhost is the rig's hysteresis
   // flag for exactly that, and the seat shell (abs(N.V), so the inner skin reads like the outer)
   // is the right look for it.
-  if (game.thirdPerson && !_vr) return (!!game._tpGhost || (game._adsGhostZ || 0) > 0.002) && _ghostHullKnobs(_ghostZoomSolidity()).on;   // (v44.27)
+  if (game.thirdPerson && !_vr) return (!!game._tpGhost || (game._adsGhostZ || 0) > 0.002) && _ghostHullKnobs(_ghostSeatSolidity()).on;   // (v44.27) (v51.39 a wall overrides Solid)
   if (!game._cockpit3dLive) return false;
   return _ghostHullKnobs().on;
 }
@@ -111004,7 +111030,7 @@ function _ghostHullSync() {
     _ghostHullSync._t = now;
     _ghostHullTimeU.value += Math.min(0.1, (now - prev) / 1000);
     _ghostHullApply(mesh);
-    _ghostHullTune(mesh, _ghostHullKnobs(_ghostZoomSolidity()));   // (v44.27)
+    _ghostHullTune(mesh, _ghostHullKnobs(_ghostSeatSolidity()));   // (v44.27) (v51.39 + the wall override)
   } else if (mesh.userData && mesh.userData._ghostOn) {
     _ghostHullRestore(mesh);
   }
