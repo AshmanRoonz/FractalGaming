@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "51.39";
+const LSS_BUILD = "51.40";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -4696,7 +4696,6 @@ if (typeof window !== 'undefined') window._campTick = function (dt) { try { Camp
 
 const _tpOff = new THREE.Vector3();
 const _tpDir = new THREE.Vector3();
-const _fpWallDir = new THREE.Vector3();   // (v51.39) the seat's wall-behind probe, see _ghostSeatSolidity
 const _tpRight = new THREE.Vector3();
 const _stQ = new THREE.Quaternion(), _stE = new THREE.Euler(), _stV = new THREE.Vector3(), _stV2 = new THREE.Vector3();   // (v50.45) steer
 function _toggleThirdPerson() {
@@ -71444,16 +71443,16 @@ function _ghostSeatSolidity() {
   if (typeof z === 'number') return z;
   if (typeof game === 'undefined' || !game) return undefined;
   const _vr = (typeof isXRPresenting === 'function') && isXRPresenting();
-  const wall = (game.thirdPerson && !_vr) ? !!game._tpGhost : !!game._fpWallGhost;
+  const wall = !!(game.thirdPerson && !_vr && game._tpGhost);
   if (!wall) return undefined;
   const G = (window.__cockpit && window.__cockpit.ghost) || {};
   const user = (typeof G.solidity === 'number') ? G.solidity
              : ((typeof input !== 'undefined' && input && typeof input.cockpitSolidity === 'number') ? input.cockpitSolidity : 0);
   return (user > 0.45) ? 0.45 : undefined;
 }
-if (typeof window !== 'undefined') window.__fpGhostInfo = () => ({
-  seatWall: !!(game && game._fpWallGhost), seatNear: (game && game._fpWallNear != null) ? Math.round(game._fpWallNear) : null,
-  chaseWall: !!(game && game._tpGhost), solidityNow: _ghostSeatSolidity(), shellOn: !!(player && player.mesh && player.mesh.userData && player.mesh.userData._ghostOn),
+if (typeof window !== 'undefined') window.__wallGhostInfo = () => ({
+  chaseWall: !!(game && game._tpGhost), boom: (game && game._tpBoom != null) ? Math.round(game._tpBoom) : null,
+  solidityNow: _ghostSeatSolidity(), shellOn: !!(player && player.mesh && player.mesh.userData && player.mesh.userData._ghostOn),
 });
 function _ghostSeatWanted() {
   if (typeof game === 'undefined' || !game || typeof player === 'undefined' || !player) return false;
@@ -71462,7 +71461,7 @@ function _ghostSeatWanted() {
   if (_RPL.kc || _RPL.studio) return false;   // (v47.97) the kill cam shows your hull from outside - solid, not the seat's ghost shell
   if (game.thirdPerson && !_vr) return (!!game._tpGhost || (game._adsGhostZ || 0) > 0.002) && _ghostHullKnobs(_ghostSeatSolidity()).on;   // (v44.27) (v51.39 a wall overrides Solid)
   if (!game._cockpit3dLive) return false;
-  return _ghostHullKnobs(_ghostSeatSolidity()).on;   // (v51.39) a wall behind the seat overrides Solid
+  return _ghostHullKnobs().on;
 }
 function _seatViewLive() {
   if (typeof game === 'undefined' || !game || typeof player === 'undefined' || !player) return false;
@@ -72493,7 +72492,6 @@ function _lssApplyShipRig(dt) {
     const _vrNow = (typeof isXRPresenting === 'function') && isXRPresenting();
     if (game.thirdPerson && !_vrNow) {
       _lssCockpitOff(dt);   // (v37.39) the chase view is never a live cockpit: strips off, lights down
-      game._fpWallGhost = false; game._fpWallRays = null;   // (v51.39) the seat's wall probe re-arms when you go back in
       const _pP = window.__par || {};
       const _pAct = (_pP.on !== false) ? 1 : 0;
       const _pS = (_pP.ship != null) ? _pP.ship : 0;   // (v50.46) 26 -> 0, the slide is off (STEER INTO THE TURN)
@@ -72557,25 +72555,6 @@ function _lssApplyShipRig(dt) {
           game._cockpit3dLive = true;
           try { document.body.classList.add('lss-cockpit3d'); } catch (_) {}
         }
-        if (!_vrNow) {
-          const _FG = window.__fpGhost || {};
-          if (_FG.enabled === false) game._fpWallGhost = false;
-          else {
-            const _hl = (player.chassis && player.chassis.hullLength) || 100;
-            const _gOn = (typeof _FG.on === 'number') ? _FG.on : (_hl * 0.55 + 16);
-            const _gOff = (typeof _FG.off === 'number') ? _FG.off : (_gOn + 14);
-            const _R = game._fpWallRays || (game._fpWallRays = [1e9, 1e9, 1e9]);
-            const _k = game._fpWallK = ((game._fpWallK | 0) + 1) % 3;
-            _fpWallDir.set(_k === 0 ? 0 : (_k === 1 ? -0.57 : 0.57), 0, _k === 0 ? 1 : 0.82).applyQuaternion(camera.quaternion);
-            let _d = _gOff + 20;
-            try { if (typeof raycastLevel === 'function') _d = raycastLevel(player.position, _fpWallDir, _gOff + 20, false, true); } catch (_) {}
-            _R[_k] = _d;
-            const _near = Math.min(_R[0], _R[1], _R[2]);
-            if (!game._fpWallGhost && _near < _gOn) game._fpWallGhost = true;
-            else if (game._fpWallGhost && _near > _gOff) game._fpWallGhost = false;
-            game._fpWallNear = _near;
-          }
-        } else game._fpWallGhost = false;   // the headset's seat is not part of this (v51.39 scope: the owner's flat seat)
         const _W = window.__cockpit || {};
         const _kick = (typeof _W.kick === 'number') ? _W.kick : 0.35 * _recoilK('kick');
         const _rc = Math.max(player.gunRecoilL || 0, player.gunRecoilR || 0);

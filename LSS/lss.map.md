@@ -9630,3 +9630,14 @@ Owner: *"i find our water to look a bit jello like... i like how this water move
   - `_ghostHullApply` builds from the setting and `_ghostHullTune` re-tunes to the override every frame - the path the zoom ghost has always used for Solid pilots.
   - ⚠ **It also revives v38.74 for SOLID cockpits.** The chase-camera wall ghost was gated on `_ghostHullKnobs().on`, i.e. on the setting being below Solid. So since v42.09 / v50.43 a Solid pilot backing the chase camera into a wall saw the hull's inside again.
   - **Knobs and scope:** `window.__fpGhost = { on, off }` (distances) / `{ enabled: false }`. Not in VR: the headset seat is out of scope.
+  - ⛔ **(v51.40) CORRECTION - THE SEAT HALF WAS A WRONG DIAGNOSIS AND IS GONE.** Owner: *"i don't get why it was pushing forward into the nose... it's not like the back of the ship is going into the wall"*, then *"we only needed xray for backing into walls for third person"*.
+    - The first-person probe (`_fpWallGhost`, `__fpGhost`) is removed. What stays is the third-person half: the chase camera's v38.74 wall x-ray now also works on a Solid cockpit (`_ghostSeatSolidity`; console `window.__wallGhostInfo()`).
+    - **The original first-person report ("the view pushes forward into the nose") is UNRESOLVED.** With a frame logger running (camera vs the `cockpit1` world position in the camera frame, hull mesh vs `player.position`, velocity, scale, near, fov), the owner reversed for ~9 s at up to 346 u/s and saw nothing: *"apparently it's fixed"*. But the log held NO sudden stop, so a hard reverse impact was never exercised.
+    - **Ruled out in code:**
+      - the seat camera has no wall clamp; the rig writes it only from the eye, recoil (0 by default) and the chase boom;
+      - steer-into-the-turn is third person only;
+      - the bank is a roll about the forward axis and cannot push forward;
+      - the ADS zoom dolly runs only in `__zoom.mode` 'hybrid' since v44.65 (the owner was on 'through');
+      - screen shake moves only x / y.
+    - Normal first-person camera-to-eye offset, measured: (0, -4.4, -7.5) in the camera frame, drifting to about (0.5, -1.3, -2.1) in flight.
+    - **If it comes back:** reinstall the frame logger (rAF registered from a task runs after the game's frame), have the owner reverse HARD into a wall, and compare the offsets at the impact frame.
