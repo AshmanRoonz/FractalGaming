@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "51.40";
+const LSS_BUILD = "51.56";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -706,7 +706,7 @@ const game = {
   roundTimer: LSS.ROUND_TIME,
   warmupTimer: LSS.WARMUP_TIME,
   testMode: false,
-  sandwichGrass: false,
+  sandwichGrass: true,   // (v51.41) the blade tufts (_swBuildGrass) - window.__grass for knobs, ?grass=0 to turn off
   scoreA: 0, scoreB: 0,
   currentRound: 1,
   wallOpacity: 0.30,
@@ -23117,6 +23117,7 @@ const _swU = { uTime:{value:0}, uYMid:{value:0}, uAMP:{value:1}, uSnow:{value:0.
                uTexK4:{value:new THREE.Vector4(0,0,0,0)}, uTexT4:{value:new THREE.Vector4(240,0,0,0)}, uTexBio2:{value:new THREE.Vector4(0,0,0,0)},
                uSunDir:{value:new THREE.Vector3(0.29,0.86,0.43)},   // (v44.45) world sun, kept in step with _WX.sunDir
                uSunTop:{value:null}, uSunTopBox:{value:new THREE.Vector4(0,0,0,0)}, uSunTopK:{value:new THREE.Vector4(0,2,36,0)},
+               uGrassField:{value:new THREE.Vector4(1,1,1,0)},   // (v51.49) the ground under the grass tufts takes their colour - see _swGrassK `field`
                uBendFlat:{value:0},
                uWaterY:{value:-1e9}, uWaterOn:{value:0},
                uArch:{value:new THREE.Vector3(0,0,0)}, uArchRamp:{value:2600}, uArchSand:{value:new THREE.Color(0xdccb99)},
@@ -23462,6 +23463,7 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
     sh.uniforms.uGrassD=_swU.uGrassD;
     sh.uniforms.uSunDir=_swU.uSunDir;
     sh.uniforms.uSunTop=_swU.uSunTop; sh.uniforms.uSunTopBox=_swU.uSunTopBox; sh.uniforms.uSunTopK=_swU.uSunTopK;   // (v49.40)
+    sh.uniforms.uGrassField=_swU.uGrassField;   // (v51.49)
     sh.uniforms.uTexGrass=_swU.uTexGrass; sh.uniforms.uTexMud=_swU.uTexMud; sh.uniforms.uTexSand=_swU.uTexSand;   // (v49.27)
     sh.uniforms.uTexMeanG=_swU.uTexMeanG; sh.uniforms.uTexMeanM=_swU.uTexMeanM; sh.uniforms.uTexMeanS=_swU.uTexMeanS;
     sh.uniforms.uTexK=_swU.uTexK; sh.uniforms.uTexFade=_swU.uTexFade; sh.uniforms.uTexChroma=_swU.uTexChroma; sh.uniforms.uTexTaps=_swU.uTexTaps; sh.uniforms.uBeachAll=_swU.uBeachAll;
@@ -23513,7 +23515,7 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
     } else {
       sh.vertexShader='attribute float aFlatY;\nuniform float uBendFlat;\nvarying float vWY; varying vec3 vWPos; varying vec3 vSN;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vWY=mix(position.y, aFlatY, uBendFlat); vWPos=position;\n vSN=vec3(0.0,1.0,0.0);');
     }
-    sh.fragmentShader=_SUNTOP_GLSL+'float _lssSunVis=1.0;\nvarying float vWY; varying vec3 vWPos; varying vec3 vSN;\nuniform float uTime,uYMid,uAMP,uSnow,uSnowVary,uSnowSlope,uLava,uSnowRough,uLavaGlow,uSlopeGrass,uSlopeRock,uCeil,uRocky,uGlitch,uGold,uCrystal,uMossy,uSmooth,uDetail,uAerial,uAerialStart,uAerialFar,uAO,uSat,uStrata,uRim,uPatchScale,uWaterY,uWaterOn,uRelief,uGrassD;\nuniform vec3 uColGrass,uColRock,uColSnow,uColMoss,uCam,uAerialColor,uPatchMix,uColDirt,uSunDir;\nuniform vec4 uVolc[4];\nuniform float uVolcH[4];\nuniform float uVolcN;\nuniform vec3 uArch,uArchSand; uniform float uArchRamp;\n'
+    sh.fragmentShader=_SUNTOP_GLSL+'float _lssSunVis=1.0;\nuniform vec4 uGrassField;\nvarying float vWY; varying vec3 vWPos; varying vec3 vSN;\nuniform float uTime,uYMid,uAMP,uSnow,uSnowVary,uSnowSlope,uLava,uSnowRough,uLavaGlow,uSlopeGrass,uSlopeRock,uCeil,uRocky,uGlitch,uGold,uCrystal,uMossy,uSmooth,uDetail,uAerial,uAerialStart,uAerialFar,uAO,uSat,uStrata,uRim,uPatchScale,uWaterY,uWaterOn,uRelief,uGrassD;\nuniform vec3 uColGrass,uColRock,uColSnow,uColMoss,uCam,uAerialColor,uPatchMix,uColDirt,uSunDir;\nuniform vec4 uVolc[4];\nuniform float uVolcH[4];\nuniform float uVolcN;\nuniform vec3 uArch,uArchSand; uniform float uArchRamp;\n'
       +'uniform sampler2D uTexGrass,uTexMud,uTexSand; uniform vec3 uTexMeanG,uTexMeanM,uTexMeanS; uniform vec4 uTexK; uniform vec2 uTexFade; uniform float uTexChroma,uTexTaps,uBeachAll;\n'
       +'uniform sampler2D uTexRock,uTexGRock; uniform vec3 uTexMeanR,uTexMeanGR; uniform vec4 uTexK2,uTexK3,uTexBio;\n'
       +'uniform sampler2D uTexSnow,uTexMoss,uTexBed; uniform vec3 uTexMeanSn,uTexMeanMo,uTexMeanBd; uniform vec4 uTexK4,uTexT4,uTexBio2;\n'
@@ -23528,7 +23530,7 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
     sh.fragmentShader=sh.fragmentShader.replace('#include <lights_pars_begin>', _sunTopPars());
     sh.fragmentShader=sh.fragmentShader.replace('#include <color_fragment>',
       '#include <color_fragment>\n if(uCeil<0.5){\n vec3 fn = uSmooth>0.5 ? normalize(vSN) : normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n float fl=clamp((abs(fn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0);\n float pc=_tpatch(vWPos.xz);\n float _mD=length(uCam.xz-vWPos.xz);\n vec3 _tgx3=dFdx(vWPos),_tgy3=dFdy(vWPos); vec2 _tgx=_tgx3.xz,_tgy=_tgy3.xz;\n float _tF2=1.0-smoothstep(uTexK3.y,uTexK3.z,_mD);\n float _tF0=1.0-smoothstep(uTexFade.x,uTexFade.y,_mD);\n float _tF=_tF0*step(0.5,uMossy);\n float _tMix=smoothstep(0.30,0.70,0.5+0.5*_tvn(vWPos.xz*0.0021+vec2(3.3,7.7)));\n float _tkG=clamp(uTexK.x*_tF0*uTexBio.x,0.0,1.0);\n float _mW=(1.0-smoothstep(240.0,950.0,_mD))*uGrassD*(1.0-0.6*_tkG);\n float _mN=0.0;\n if(_mW>0.001){ float _ma=_tvn(vWPos.xz*0.009)*3.1416; vec2 _md=vec2(cos(_ma),sin(_ma)); vec2 _mp=vec2(dot(vWPos.xz,_md),dot(vWPos.xz,vec2(-_md.y,_md.x))); _mN=_tvn(vec2(_mp.x*0.055,_mp.y*0.165))*0.46+_tvn(vec2(_mp.x*0.145,_mp.y*0.430)+vec2(11.0,4.0))*0.34+_tvn(vec2(_mp.x*0.360,_mp.y*1.050)+vec2(3.0,19.0))*0.20; _mN*=0.45+0.95*clamp(0.5+0.5*_tvn(vWPos.xz*0.018+vec2(27.0,6.0)),0.0,1.0); }\n vec3 grass=mix(uColMoss,uColGrass,smoothstep(0.32,0.72,pc));\n float moss1=_tvn(vWPos.xz*0.07);\n float moss2=_tvn(vWPos.xz*0.19+vec2(7.0,3.0));\n float mott=clamp(0.5+0.5*(moss1*0.62+moss2*0.38),0.0,1.0);\n grass*=(0.78+0.34*mott);\n grass*=_tDet(uTexGrass,uTexMeanG,vWPos.xz,_tgx,_tgy,_tMix,_tkG);\n float _tkMo=clamp(uTexK4.y*_tF0*uTexBio2.y,0.0,1.0);\n vec3 _mossC=uColMoss*(0.7+0.4*mott);\n if(_tkMo>0.001) _mossC*=_tDet(uTexMoss,uTexMeanMo,vWPos.xz,_tgx,_tgy,_tMix,_tkMo);\n grass=mix(grass,_mossC,(1.0-smoothstep(0.28,0.62,pc))*0.6);\n float rkA=_tvn(vWPos.xz*0.045+vec2(vWPos.y*0.03));\n float rkB=_tvn(vWPos.xz*0.12+vec2(13.0,7.0));\n float rkC=_tvn(vWPos.xz*0.30+vec2(vWPos.y*0.05,0.0));\n float rockMott=clamp(0.5+0.5*(rkA*0.55+rkB*0.3+rkC*0.15),0.0,1.0);\n float strata=0.5+0.5*sin(vWPos.y*0.05+_tvn(vWPos.xz*0.025)*3.0);\n float _tkR=clamp(uTexK2.x*_tF2*uTexBio.y,0.0,1.0)*step(0.001,1.0-fl);\n vec3 rock=uColRock*(0.70+0.55*mix(rockMott,0.5,_tkR*0.85))*(1.0-uStrata*0.57+uStrata*strata);\n rock*=_tTri(uTexRock,uTexMeanR,vWPos,fn,_tgx3,_tgy3,uTexK2.w,_tkR);\n float _tkGR=clamp(uTexK2.y*_tF2*uTexBio.z,0.0,1.0)*step(0.001,1.0-fl);\n vec3 _grCol=mix(uColMoss,uColRock,0.40)*1.30*_tTri(uTexGRock,uTexMeanGR,vWPos,fn,_tgx3,_tgy3,uTexK3.x,step(0.001,_tkGR));\n if(uMossy>0.5){ vec2 _mq=mix(vWPos.xz,vec2(vWPos.x+vWPos.z,vWPos.y*1.6),(1.0-abs(fn.y))*step(0.001,_tkGR)); float mc=_tvn(_mq*0.022+vec2(vWPos.y*0.015,0.0))*0.55+_tvn(_mq*0.06+vec2(9.0,4.0))*0.45; float mossSide=smoothstep(0.5,0.82,0.5+0.5*mc)*(1.0-fl); rock=mix(rock,mix(uColMoss*(0.62+0.5*mott),_grCol,_tkGR),mossSide*0.72); }\n rock=mix(rock,_grCol,clamp(fl*(1.0-fl)*4.0*uTexK2.z,0.0,1.0)*_tkGR);\n vec3 terr=mix(rock,grass,fl);\n if(uMossy>0.5 && uSat>0.001){ float _gl=dot(grass,vec3(0.299,0.587,0.114)); vec3 _gd=mix(grass,vec3(_gl),uSat*0.85); float _dry=_tpatch(vWPos.xz*1.7+vec2(31.0,12.0)); float _dirt=clamp(0.5+0.5*_tvn(vWPos.xz*0.011+vec2(4.0,8.0)),0.0,1.0); _gd=mix(_gd,_gd*mix(vec3(1.0),vec3(0.46,0.42,0.20)*2.2,smoothstep(0.62,0.86,_dry)),uSat*0.55); _gd=mix(_gd,_gd*mix(vec3(1.0),vec3(0.27,0.20,0.12)*2.6,1.0-smoothstep(0.18,0.42,_dirt)),uSat*0.45); grass=mix(grass,_gd,clamp(uSat*1.4,0.0,1.0)); terr=mix(rock,grass,fl); }\n'
-      +' if(uMossy>0.5){\n float _sA=_tvn(vWPos.xz*0.0030*uPatchScale+vec2(21.0,9.0));\n float _sB=_tvn(vWPos.xz*0.0105*uPatchScale+vec2(3.0,17.0));\n float _sC=_tvn(vWPos.xz*0.0330*uPatchScale+vec2(9.0,2.0));\n float _sN=_sA*0.55+_sB*0.32+_sC*0.13;\n float _rN=_tvn(vWPos.xz*0.0062*uPatchScale+vec2(41.0,-13.0))*0.62+_tvn(vWPos.xz*0.0210*uPatchScale+vec2(7.0,29.0))*0.38;\n float _spk=clamp(0.5+0.5*_tvn(vWPos.xz*1.15),0.0,1.0);\n float _grit=clamp(0.5+0.5*_tvn(vWPos.xz*0.42+vec2(5.0,23.0)),0.0,1.0);\n float _mE=_mN*0.085*_mW;\n float _tkM=clamp(uTexK.y*_tF,0.0,1.0);\n float _dirtM=smoothstep(0.16-0.10*_tkM,0.46,_sN+_mE)*uPatchMix.x;\n float _ovgM=smoothstep(0.14,0.44,-_sN+_mE)*uPatchMix.z;\n float _rubM=smoothstep(0.20,0.52,_rN+_mE)*uPatchMix.y*(0.45+0.55*(1.0-fl));\n vec3 _dirtC=uColDirt*(1.55+1.45*_grit);\n if(_tkM>0.001) _dirtC=mix(_dirtC,uColDirt*2.275*_tDet(uTexMud,uTexMeanM,vWPos.xz,_tgx,_tgy,_tMix,1.0),_tkM);\n vec3 _rubC=uColRock*(0.70+1.05*_spk);\n vec3 _ovgC=mix(uColMoss,uColGrass,0.30)*(0.46+0.32*mott);\n grass=mix(grass,_ovgC,clamp(_ovgM,0.0,0.80));\n grass=mix(grass,_dirtC,clamp(_dirtM,0.0,0.90));\n grass=mix(grass,_rubC,clamp(_rubM,0.0,0.78));\n terr=mix(rock,grass,fl);\n }\n'
+      +' if(uMossy>0.5){\n float _sA=_tvn(vWPos.xz*0.0030*uPatchScale+vec2(21.0,9.0));\n float _sB=_tvn(vWPos.xz*0.0105*uPatchScale+vec2(3.0,17.0));\n float _sC=_tvn(vWPos.xz*0.0330*uPatchScale+vec2(9.0,2.0));\n float _sN=_sA*0.55+_sB*0.32+_sC*0.13;\n float _rN=_tvn(vWPos.xz*0.0062*uPatchScale+vec2(41.0,-13.0))*0.62+_tvn(vWPos.xz*0.0210*uPatchScale+vec2(7.0,29.0))*0.38;\n float _spk=clamp(0.5+0.5*_tvn(vWPos.xz*1.15),0.0,1.0);\n float _grit=clamp(0.5+0.5*_tvn(vWPos.xz*0.42+vec2(5.0,23.0)),0.0,1.0);\n float _mE=_mN*0.085*_mW;\n float _tkM=clamp(uTexK.y*_tF,0.0,1.0);\n float _dirtM=smoothstep(0.16-0.10*_tkM,0.46,_sN+_mE)*uPatchMix.x;\n float _ovgM=smoothstep(0.14,0.44,-_sN+_mE)*uPatchMix.z;\n float _rubM=smoothstep(0.20,0.52,_rN+_mE)*uPatchMix.y*(0.45+0.55*(1.0-fl));\n vec3 _dirtC=uColDirt*(1.55+1.45*_grit);\n if(_tkM>0.001) _dirtC=mix(_dirtC,uColDirt*2.275*_tDet(uTexMud,uTexMeanM,vWPos.xz,_tgx,_tgy,_tMix,1.0),_tkM);\n vec3 _rubC=uColRock*(0.70+1.05*_spk);\n vec3 _ovgC=mix(uColMoss,uColGrass,0.30)*(0.46+0.32*mott);\n grass*=mix(vec3(1.0),uGrassField.rgb,uGrassField.a*smoothstep(0.36,0.46,pc)*smoothstep(0.45,0.65,fl)*step(uWaterY+3.0,vWPos.y));\n grass=mix(grass,_ovgC,clamp(_ovgM,0.0,0.80));\n grass=mix(grass,_dirtC,clamp(_dirtM,0.0,0.90));\n grass=mix(grass,_rubC,clamp(_rubM,0.0,0.78));\n terr=mix(rock,grass,fl);\n }\n'
       +' if(_mW>0.001){\n  terr*=1.0+_mN*0.33*_mW;\n  terr*=1.0-clamp(-_mN,0.0,1.0)*0.26*_mW;\n  vec3 _mh=mix(vec3(0.84,0.95,0.88),vec3(1.16,1.05,0.66),clamp(0.5+0.5*_mN,0.0,1.0));\n  terr=mix(terr,terr*_mh,fl*_mW*0.75);\n }\n float th=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _sl=uSnow+_swSW*uSnowVary+(1.0-fl)*uSnowSlope;\n float snow=smoothstep(_sl,_sl+0.10+0.07*(1.0-fl),th);\n vec3 _snC=uColSnow; float _tkSn=clamp(uTexK4.x*_tF2*uTexBio2.x,0.0,1.0);\n if(_tkSn>0.001 && snow>0.001) _snC*=_tTri(uTexSnow,uTexMeanSn,vWPos,fn,_tgx3,_tgy3,uTexT4.x,_tkSn);\n terr=mix(terr,_snC,snow*max(fl,0.30));\n if(uTexBio2.z>0.001 && vWPos.y<uWaterY+2.0){ float _bdW=smoothstep(-2.0,14.0,uWaterY-vWPos.y)*max(fl,0.5)*clamp(uTexK4.z*_tF0*uTexBio2.z,0.0,1.0); if(_bdW>0.001){ vec3 _bed=uTexMeanBd*_tDet(uTexBed,uTexMeanBd,vWPos.xz,_tgx,_tgy,_tMix,1.0); terr=mix(terr,_bed,_bdW); } }\n if(uAO>0.001 && _mD<2200.0){ float _aoCav=mix(0.62,1.0,smoothstep(uSlopeRock,1.0,clamp(fn.y,0.0,1.0))); float _aoDet=mix(0.74,1.06,clamp(0.5+0.5*_detN(vWPos.xz),0.0,1.0)); _aoDet=mix(_aoDet,1.0,(1.0-fl)*_tkR); float _aoVal=mix(0.80,1.0,th); float _aoBlob=mix(0.86,1.04,_tpatch(vWPos.xz*0.6+vec2(17.0,5.0))); float _aoRaw=clamp(_aoCav*_aoDet*_aoVal*_aoBlob,0.45,1.08); float _aoFade=1.0-smoothstep(900.0,2200.0,length(uCam.xz-vWPos.xz)); float _ao=mix(1.0,_aoRaw,uAO*_aoFade*(1.0-snow*0.6)); terr*=_ao; }\n if(uRelief>0.001 && uCeil<0.5){ float _rD=length(uCam.xz-vWPos.xz); float _rW=(1.0-smoothstep(700.0,2400.0,_rD))*uRelief; if(_rW>0.001){ float _e2=9.0; float _c0=_detN(vWPos.xz); float _cx=_detN(vWPos.xz+vec2(_e2,0.0))+_detN(vWPos.xz-vec2(_e2,0.0)); float _cz=_detN(vWPos.xz+vec2(0.0,_e2))+_detN(vWPos.xz-vec2(0.0,_e2)); float _curv=(_cx+_cz)*0.25-_c0; float _cav=clamp(-_curv*9.0,0.0,1.0); float _ridge=clamp(_curv*7.0,0.0,1.0); vec2 _sg=vec2(_detN(vWPos.xz+vec2(_e2,0.0))-_c0,_detN(vWPos.xz+vec2(0.0,_e2))-_c0); float _sunFace=clamp(0.5-dot(normalize(_sg+vec2(1e-5)),normalize(uSunDir.xz+vec2(1e-5)))*0.5,0.0,1.0); float _shade=1.0-(_cav*(0.30+0.22*_sunFace))*_rW+_ridge*0.10*_rW; terr*=clamp(_shade,0.45,1.15); } }\n if(uMossy>0.5 && (uArch.z>1.0 || uBeachAll>0.001) && uWaterY>-1e8){ float _aD=length(vWPos.xz-uArch.xy); float _aw=max(uArch.z>1.0 ? 1.0-smoothstep(uArch.z-uArchRamp,uArch.z+600.0,_aD) : 0.0, uBeachAll); if(_aw>0.001){ float _bh=vWPos.y-uWaterY; float _bn=_tvn(vWPos.xz*0.031)*7.0; float _beach=(1.0-smoothstep(12.0+_bn,38.0+_bn,_bh))*smoothstep(-60.0,-4.0,_bh); vec3 _sand=uArchSand*(0.84+0.28*clamp(0.5+0.5*_tvn(vWPos.xz*0.085),0.0,1.0)); float _tkS=clamp(uTexK.z*_tF,0.0,1.0); if(_tkS>0.001) _sand=mix(_sand,uArchSand*_tDet(uTexSand,uTexMeanS,vWPos.xz,_tgx,_tgy,_tMix,1.0),_tkS); terr=mix(terr,_sand,_beach*_aw*max(fl,0.35)); } }\n if(uAerial>0.001){ float _camD=length(uCam.xz-vWPos.xz); float _ap=smoothstep(uAerialStart,uAerialFar,_camD)*uAerial; _ap*=(1.0-clamp((vWY-(uYMid-uAMP*0.2))/(uAMP*1.4),0.0,1.0)*0.55); terr=mix(terr,uAerialColor,clamp(_ap,0.0,0.85)); }\n  if(uWaterOn>0.001 && vWPos.y<uWaterY){ float _cdp=uWaterY-vWPos.y; float _cf=(1.0-smoothstep(80.0,1100.0,_cdp))*smoothstep(0.0,30.0,_cdp)*uWaterOn; vec2 _cq=vWPos.xz*0.021; float _c1=sin(_cq.x*2.3+_cq.y*1.1+uTime*1.35)*sin(_cq.y*1.9-_cq.x*1.3-uTime*1.05); float _c2=sin((_cq.x+_cq.y)*1.45+uTime*0.85)*sin((_cq.x-_cq.y*0.7)*1.7-uTime*0.65); float _cc=pow(clamp(0.5+0.5*(_c1*0.6+_c2*0.4),0.0,1.0),3.5); terr*=1.0+_cf*_cc*1.15*clamp(fn.y,0.0,1.0); }\n diffuseColor.rgb=terr;\n }\n if(uCeil>0.5){ float _cm1=_tvn(vWPos.xz*0.045+vec2(vWPos.y*0.03));\n float _cm2=_tvn(vWPos.xz*0.12+vec2(13.0,7.0));\n float _cmott=clamp(0.5+0.5*(_cm1*0.6+_cm2*0.4),0.0,1.0);\n float _cstr=0.5+0.5*sin(vWPos.y*0.05+_tvn(vWPos.xz*0.025)*3.0);\n vec3 _cgx3=dFdx(vWPos),_cgy3=dFdy(vWPos);\n float _tkRC=clamp(uTexK2.x*uTexBio.w*(1.0-smoothstep(uTexK3.y,uTexK3.z,length(uCam.xz-vWPos.xz))),0.0,1.0);\n diffuseColor.rgb*=(0.80+0.36*mix(_cmott,0.5,_tkRC*0.85))*(1.0-uStrata*0.57+uStrata*_cstr);\n if(_tkRC>0.001) diffuseColor.rgb*=_tTri(uTexRock,uTexMeanR,vWPos,normalize(cross(_cgx3,_cgy3)),_cgx3,_cgy3,uTexK2.w,_tkRC);\n if(uAO>0.001){ vec3 _cn2=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n float _cao=mix(0.68,1.0,smoothstep(0.0,0.85,abs(_cn2.y)));\n float _caoD=mix(0.80,1.05,clamp(0.5+0.5*_detN(vWPos.xz),0.0,1.0));\n diffuseColor.rgb*=mix(1.0,clamp(_cao*_caoD,0.5,1.05),uAO); }\n if(uAerial>0.001){ float _cad=length(uCam.xz-vWPos.xz);\n float _cap=smoothstep(uAerialStart,uAerialFar,_cad)*uAerial;\n diffuseColor.rgb=mix(diffuseColor.rgb,uAerialColor,clamp(_cap,0.0,0.85)); }\n }\n if(uRim>0.001){ vec3 _rn=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n vec3 _rv=normalize(uCam-vWPos);\n float _rf=pow(1.0-abs(dot(_rn,_rv)),3.0);\n diffuseColor.rgb=mix(diffuseColor.rgb,uAerialColor*1.25,_rf*uRim); }\n if(uGlitch>0.5 && uCeil>0.5){ float zone=_tpatch(vWPos.xz+vec2(uTime*2.5,0.0)); vec2 gid=floor(vWPos.xz/240.0); float r=_thsh(gid+floor(uTime*0.8)); float r2=_thsh(gid*1.93+floor(uTime*1.5)); if(zone>0.62 && r>0.45) discard; if(zone>0.5){ if(r2>0.55) diffuseColor.rgb=diffuseColor.rgb.gbr; diffuseColor.rgb*=mix(0.75,1.25,r2); } }');
     sh.fragmentShader=sh.fragmentShader.replace('#include <roughnessmap_fragment>',
       '#include <roughnessmap_fragment>\n float _tr=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _rsl=uSnow+_swSW*uSnowVary;\n float _snow=smoothstep(_rsl,_rsl+0.12,_tr);\n roughnessFactor=mix(roughnessFactor,uSnowRough,_snow);');
@@ -23611,8 +23613,529 @@ function _swGrassMatGet(){ if(_swGrassMat)return _swGrassMat;
     sh.vertexShader='uniform float uTime,uFadeA,uFadeB;\nuniform vec3 uCam;\n'+sh.vertexShader.replace('#include <begin_vertex>',
       '#include <begin_vertex>\n vec3 ip=vec3(instanceMatrix[3][0],instanceMatrix[3][1],instanceMatrix[3][2]);\n float wOff=sin(ip.x*0.0032+1.7)*2.0+sin(ip.z*0.0036-0.6)*2.0;\n float sway=0.16*sin(uTime*1.7+wOff)*cos(uTime*2.38+wOff);\n transformed.x+=sway*transformed.y;\n transformed.z+=sway*0.45*transformed.y;\n float gfade=1.0-smoothstep(uFadeA,uFadeB,distance(ip.xz,uCam.xz));\n transformed.y*=gfade;\n transformed.x*=mix(0.35,1.0,gfade);'); };
   _swGrassMat=m; return m; }
-function _swBuildGrass(x0,z0,T){
-  if(game.sandwichGrass===false || ((T.biome||'grassy')!=='grassy' && T.biome!=='mossy')) return null;   
+function _swGrassK() {
+  const K = (typeof window !== 'undefined' && window.__grass) || {};
+  const o = _swGrassK.o || (_swGrassK.o = {});
+  if (_swGrassK.url === undefined) {
+    _swGrassK.url = null;
+    try { const q = new URLSearchParams(location.search).get('grass'); if (q != null) _swGrassK.url = q; } catch (_) {}
+  }
+  const n = (k, d) => (K[k] != null && isFinite(+K[k])) ? +K[k] : d;
+  o.on = K.on != null ? K.on !== false : !(_swGrassK.url === '0' || _swGrassK.url === 'off');
+  o.style = K.style || ((_swGrassK.url === 'blades') ? 'blades' : 'tufts');
+  o.density = n('density', 1);     // tufts per area (spacing / sqrt(density))
+  o.spacing = n('spacing', 12);    // world units between tufts on the jittered grid
+  o.height = n('height', 1);       // instance scale (uniform - use cardH for height alone)
+  o.tall = n('tall', 0.5);         // share of TALL tufts (the rest short)
+  o.plantMargin = n('plantMargin', 1300);   // (v51.54) chunks are planted within fadeB + this (nearest point), dropped past it + 450
+  o.view = Math.max(1, Math.min(5, Math.round(n('view', 4))));   // (v51.54: SUPERSEDED by plantMargin - kept for old knob strings) (v51.50: 4; v51.48: 3; v51.47: back to 2 -
+  o.mode = (K.mode === 'rank') ? 'rank' : 'tree';
+  o.fadeA = n('fadeA', o.mode === 'tree' ? 1800 : 900);   // full size (tree) / every tuft present (rank) inside this...
+  o.fadeB = n('fadeB', o.mode === 'tree' ? 3400 : 3900);  // ...shrunk to nothing (tree) / the last tuft gone (rank) here
+  o.detailW = n('detailW', 0.22);  // detail-level span over which an arrived tuft's own shading fades in
+  o.flatR = n('flatR', 1.19);      // the flat (just-arrived) colour x this, per channel - match it to the DETAILED tuft
+  o.flatG = n('flatG', 1.17);
+  o.flatB = n('flatB', 0.95);
+  o.shadowR = n('shadowR', 2200);  // grass chunks further than this (3D) skip the shadow map (receiveShadow is a uniform: free to flip)
+  o.match = n('match', 1.0);       // tuft brightness over the ground's (1 = the atlas mean exactly; v51.48 0.9 -> 1.0)
+  o.fieldR = n('fieldR', 1.13);    // the ground's grass colour x this where tufts grow (v51.53: re-measured, mid band:
+  o.fieldG = n('fieldG', 1.37);    //   detailed / ground = 0.956, 0.886, 0.905 at 1.18 / 1.55 / 1.02)
+  o.fieldB = n('fieldB', 0.83);   // (v51.55) the ground read ~10 % bluer than the tufts on it (164 u up, near + mid bands)
+  o.fieldAmt = n('fieldAmt', 1.0); // 0 = the ground as it was
+  o.cover = n('cover', 0.35);      // the cut-out's coverage hold per mip level (higher = more solid far away)
+  o.sway = n('sway', 0.03);        // flutter per unit of height
+  o.lean = n('lean', 0.18);        // the gust wave's lean at the tip, per unit of tuft height (v51.43: 0.32 -> 0.18 for 3x taller tufts)
+  o.waveLen = n('waveLen', 300);   // world units between gust fronts
+  o.waveSpeed = n('waveSpeed', 1.5); // rad/s (fronts travel waveLen * waveSpeed / 2pi u/s)
+  o.windDir = n('windDir', 0.7);   // radians, world XZ
+  o.tint = n('tint', 1.0);
+  o.bladesShort = n('bladesShort', 90);
+  o.bladesTall = n('bladesTall', 70);
+  o.bladeW = n('bladeW', 0.78);    // (v51.43) relative to the (now 1.8x wider) card: ~1.4x the v51.42 blade in world units
+  o.bladeLen = n('bladeLen', 1);
+  o.cross = n('cross', 0.5);       // radians of lean either way - the criss-cross
+  o.droop = n('droop', 1);
+  o.tipWarm = n('tipWarm', 0.5);   // straw-yellow at the tips
+  o.wisps = n('wisps', 16);
+  o.seeds = n('seeds', 0.35);
+  o.cards = n('cards', 3);
+  o.leanCards = n('leanCards', 2);
+  o.cardW = n('cardW', 1);
+  o.cardH = n('cardH', 1);
+  return o;
+}
+function _swGrassAtlasGet() {
+  const S = _swGrassAtlasGet;
+  if (S.a) return S.a;
+  const small = (typeof _fxSmallDevice === 'function' && _fxSmallDevice());
+  const C = small ? 128 : 256, W = C * 2, H = C * 2;
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const tex = new THREE.DataTexture(new Uint8Array(W * H * 4), W, H, THREE.RGBAFormat, THREE.UnsignedByteType);
+  tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = small ? 2 : 4;
+  tex.generateMipmaps = true; tex.minFilter = THREE.LinearMipmapLinearFilter; tex.magFilter = THREE.LinearFilter;
+  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping; tex.flipY = false;
+  const cells = { short: [0, 0], tall: [1, 0] };
+  const m = 0.01;
+  const uv = (name) => { const c = cells[name]; return { u0: (c[0] + m) / 2, u1: (c[0] + 1 - m) / 2, vT: m, vB: 1 - m }; };
+  S.a = { tex: tex, canvas: cv, rank: null, rankCanvas: null, C: C, W: W, H: H, cells: cells, uv: uv };
+  _swGrassAtlasPaint(S.a);
+  return S.a;
+}
+function _swGrassAtlasPaint(A) {
+  const K = _swGrassK(), g = A.canvas.getContext('2d'), C = A.C;
+  g.clearRect(0, 0, A.W, A.H);
+  let s = 51 >>> 0;
+  const R = () => { s = s + 0x6D2B79F5 | 0; let t = Math.imul(s ^ s >>> 15, 1 | s); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+  const rg = A.rankCanvas ? A.rankCanvas.getContext('2d') : null;
+  let s2 = 97 >>> 0;
+  const R2 = () => { s2 = s2 + 0x6D2B79F5 | 0; let t = Math.imul(s2 ^ s2 >>> 15, 1 | s2); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+  if (rg) {
+    const id = rg.createImageData(A.W, A.H), dd = id.data;
+    for (let i = 0; i < A.W * A.H; i++) { const q = Math.round(255 * (0.02 + 0.95 * R2())); dd[i * 4] = dd[i * 4 + 1] = dd[i * 4 + 2] = q; dd[i * 4 + 3] = 255; }
+    rg.putImageData(id, 0, 0);
+  }
+  const rk = (v) => { const q = Math.round(255 * Math.max(0.02, Math.min(0.97, v))); return 'rgb(' + q + ',' + q + ',' + q + ')'; };
+  const cl = (v) => Math.max(0, Math.min(255, Math.round(v)));
+  const rgb = (r, gg, b) => 'rgb(' + cl(r) + ',' + cl(gg) + ',' + cl(b) + ')';
+  for (const name of ['short', 'tall']) {
+    const Hc = A.H, x0 = A.cells[name][0] * C, xL = x0 + C * 0.015, xR = x0 + C * 0.985, base = Hc * 0.995, tall = name === 'tall';
+    const n = Math.max(4, Math.round((tall ? K.bladesTall : K.bladesShort)));
+    for (let i = 0; i < n; i++) {
+      const depth = i / (n - 1);   // painted back to front
+      const x = x0 + C * (0.05 + R() * 0.90);
+      const len = Hc * (tall ? 0.70 + R() * 0.29 : 0.42 + R() * 0.50) * K.bladeLen;
+      let w = C * (0.0045 + R() * 0.0065) * K.bladeW;
+      if (R() < 0.12) w *= 2.0;   // the odd broad leaf among the fine blades
+      let ang = (R() - 0.5) * 2 * K.cross - ((x - (x0 + C * 0.5)) / C) * 0.5;
+      let tx = x + Math.sin(ang) * len;
+      if (tx < xL || tx > xR) { ang = -ang * 0.6; tx = x + Math.sin(ang) * len; }
+      tx = Math.max(xL, Math.min(xR, tx));
+      const ty = Math.max(Hc * 0.003, base - Math.cos(ang) * len);
+      const bow = (Math.sign(ang) * (0.10 + R() * 0.12) * K.droop + (R() - 0.5) * 0.08) * len;
+      const mx = (x + tx) * 0.5 + bow, my = (base + ty) * 0.5 + Math.abs(bow) * 0.25;
+      const lo = 74 + 48 * depth, hi = 176 + 79 * depth;   // (v51.48: 42 / 168 - the dark bases made the field read darker than the ground)
+      const dry = R() < 0.14;
+      const wm = Math.min(1, K.tipWarm * (dry ? 1.6 : Math.pow(R(), 0.7)));
+      const grd = g.createLinearGradient(x, base, tx, ty);
+      grd.addColorStop(0, rgb(lo, lo * 1.02, lo * 0.9));
+      grd.addColorStop(0.45, rgb((lo + hi) * 0.5, (lo + hi) * 0.5, (lo + hi) * 0.5 * (1 - 0.25 * wm)));
+      grd.addColorStop(1, rgb(hi * (dry ? 1.05 : 1), hi * (1 - 0.04 * wm), hi * (1 - 0.62 * wm)));
+      const bladePath = (c2) => { c2.beginPath(); c2.moveTo(x - w, base); c2.quadraticCurveTo(mx - w * 0.6, my, tx, ty); c2.quadraticCurveTo(mx + w * 0.6, my, x + w, base); };
+      g.fillStyle = grd; bladePath(g); g.fill();
+      if (rg) { rg.fillStyle = rk(0.55 * R2() + 0.42 * (1 - depth)); bladePath(rg); rg.fill(); }   // front blades rank low = stay longest
+      if (w > C * 0.004) {
+        g.strokeStyle = 'rgba(255,255,240,' + (0.08 + 0.14 * depth).toFixed(2) + ')'; g.lineWidth = Math.max(0.5, w * 0.4);
+        g.beginPath(); g.moveTo(x, base - len * 0.04); g.quadraticCurveTo(mx, my, x + (tx - x) * 0.94, base + (ty - base) * 0.94); g.stroke();
+      }
+    }
+    const nw = Math.max(0, Math.round(tall ? K.wisps : K.wisps * 0.5));
+    for (let i = 0; i < nw; i++) {
+      const x = x0 + C * (0.08 + R() * 0.84), len = Hc * (0.55 + R() * 0.43) * K.bladeLen;
+      const ang = (R() - 0.5) * 2 * (K.cross + 0.25);
+      const tx = Math.max(xL, Math.min(xR, x + Math.sin(ang) * len)), ty = Math.max(Hc * 0.003, base - Math.cos(ang) * len);
+      const L = 150 + R() * 90;
+      const qx = (x + tx) * 0.5 + (R() - 0.5) * C * 0.08, wr = 0.30 + 0.67 * R2();   // wisps are fine detail: they go early
+      g.strokeStyle = rgb(L, L * 0.98, L * (1 - 0.45 * K.tipWarm)); g.lineWidth = Math.max(0.6, C * 0.0035);
+      g.beginPath(); g.moveTo(x, base); g.quadraticCurveTo(qx, (base + ty) * 0.5, tx, ty); g.stroke();
+      if (rg) { rg.strokeStyle = rk(wr); rg.lineWidth = g.lineWidth; rg.beginPath(); rg.moveTo(x, base); rg.quadraticCurveTo(qx, (base + ty) * 0.5, tx, ty); rg.stroke(); }
+      if (tall && R() < K.seeds) {   // a seed head: a short run of grains at the tip
+        g.fillStyle = rgb(L + 30, L + 22, L * 0.8);
+        if (rg) rg.fillStyle = rk(wr);
+        const ux = (tx - x) / len, uy = (ty - base) / len;
+        for (let k = 0; k < 6; k++) {
+          const f = 1 - k * 0.035, ex = x + (tx - x) * f, ey = base + (ty - base) * f, ea = Math.atan2(uy, ux) + Math.PI / 2;
+          g.beginPath(); g.ellipse(ex, ey, C * 0.006, C * 0.014, ea, 0, Math.PI * 2); g.fill();
+          if (rg) { rg.beginPath(); rg.ellipse(ex, ey, C * 0.006, C * 0.014, ea, 0, Math.PI * 2); rg.fill(); }
+        }
+      }
+    }
+  }
+  _swGrassAtlasUpload(A);   // (v51.52) canvas -> DataTexture with the colour bleed
+  if (A.rankCanvas) _swGrassRankBuild(A);
+  try {
+    const d = g.getImageData(0, 0, A.W, A.H).data, lin = (v) => { v /= 255; return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+    let sum = 0, wsum = 0;
+    for (let py = 0; py < A.H; py += 2) {
+      const tu = 1 - py / A.H, rowF = tu < 0.5 ? 0.70 + 0.18 * (tu * 2) : 0.88 + 0.12 * ((tu - 0.5) * 2);   // the cards' vertex rows (v51.48)
+      for (let px = 0; px < A.W; px += 2) {
+        const o = (py * A.W + px) * 4, al = d[o + 3] / 255;
+        if (al < 0.5) continue;
+        sum += (0.2126 * lin(d[o]) + 0.7152 * lin(d[o + 1]) + 0.0722 * lin(d[o + 2])) * rowF; wsum++;
+      }
+    }
+    A.mean = wsum ? sum / wsum : 0.4;
+  } catch (_) { A.mean = 0.4; }
+}
+const _GRASS_GROUND_GLSL = `
+uniform vec3 uColGrass, uColMoss, uPatchMix;
+uniform float uSat, uAO, uPatchScale, uYMid, uAMP, uSlopeRock;
+float _thsh(vec2 p){return fract(sin(p.x*127.1+p.y*311.7)*43758.5453);}
+float _tvn(vec2 p){vec2 i=floor(p),f=fract(p);vec2 u=f*f*(3.0-2.0*f);float a=_thsh(i),b=_thsh(i+vec2(1.0,0.0)),c=_thsh(i+vec2(0.0,1.0)),d=_thsh(i+vec2(1.0,1.0));return mix(mix(a,b,u.x),mix(c,d,u.x),u.y)*2.0-1.0;}
+float _tpatch(vec2 p){float n=_tvn(p*0.0016+vec2(5.1,-2.3))*0.62+_tvn(p*0.0041+vec2(11.0,7.0))*0.38;return clamp((n+1.0)*0.5,0.0,1.0);}
+float _detN(vec2 p){return _tvn(p*0.035)*0.55+_tvn(p*0.09+vec2(11.0,5.0))*0.30+_tvn(p*0.22+vec2(3.0,9.0))*0.15;}
+vec3 _grassGround(vec3 wp, float ny, vec3 cam, out float bare) {
+  vec2 p = wp.xz;
+  float pc = _tpatch(p);
+  vec3 grass = mix(uColMoss, uColGrass, smoothstep(0.32, 0.72, pc));
+  float mott = clamp(0.5 + 0.5 * (_tvn(p * 0.07) * 0.62 + _tvn(p * 0.19 + vec2(7.0, 3.0)) * 0.38), 0.0, 1.0);
+  grass *= 0.78 + 0.34 * mott;
+  grass = mix(grass, uColMoss * (0.7 + 0.4 * mott), (1.0 - smoothstep(0.28, 0.62, pc)) * 0.6);
+  if (uSat > 0.001) {
+    float gl = dot(grass, vec3(0.299, 0.587, 0.114));
+    vec3 gd = mix(grass, vec3(gl), uSat * 0.85);
+    float dry = _tpatch(p * 1.7 + vec2(31.0, 12.0));
+    float dirt = clamp(0.5 + 0.5 * _tvn(p * 0.011 + vec2(4.0, 8.0)), 0.0, 1.0);
+    gd = mix(gd, gd * mix(vec3(1.0), vec3(0.46, 0.42, 0.20) * 2.2, smoothstep(0.62, 0.86, dry)), uSat * 0.55);
+    gd = mix(gd, gd * mix(vec3(1.0), vec3(0.27, 0.20, 0.12) * 2.6, 1.0 - smoothstep(0.18, 0.42, dirt)), uSat * 0.45);
+    grass = mix(grass, gd, clamp(uSat * 1.4, 0.0, 1.0));
+  }
+  float sN = _tvn(p * 0.0030 * uPatchScale + vec2(21.0, 9.0)) * 0.55 + _tvn(p * 0.0105 * uPatchScale + vec2(3.0, 17.0)) * 0.32 + _tvn(p * 0.0330 * uPatchScale + vec2(9.0, 2.0)) * 0.13;
+  float rN = _tvn(p * 0.0062 * uPatchScale + vec2(41.0, -13.0)) * 0.62 + _tvn(p * 0.0210 * uPatchScale + vec2(7.0, 29.0)) * 0.38;
+  float ovgM = smoothstep(0.14, 0.44, -sN) * uPatchMix.z;
+  grass = mix(grass, mix(uColMoss, uColGrass, 0.30) * (0.46 + 0.32 * mott), clamp(ovgM, 0.0, 0.80));
+  bare = max(clamp(smoothstep(0.16, 0.46, sN) * uPatchMix.x, 0.0, 0.90), clamp(smoothstep(0.20, 0.52, rN) * uPatchMix.y * 0.45, 0.0, 0.78));
+  float aoCav = mix(0.62, 1.0, smoothstep(uSlopeRock, 1.0, clamp(ny, 0.0, 1.0)));
+  float aoDet = mix(0.74, 1.06, clamp(0.5 + 0.5 * _detN(p), 0.0, 1.0));
+  float th = clamp((wp.y - (uYMid - uAMP * 0.5)) / (uAMP * 1.15), 0.0, 1.0);
+  float aoRaw = clamp(aoCav * aoDet * mix(0.80, 1.0, th) * mix(0.86, 1.04, _tpatch(p * 0.6 + vec2(17.0, 5.0))), 0.45, 1.08);
+  float aoFade = 1.0 - smoothstep(900.0, 2200.0, length(cam.xz - p));
+  grass *= mix(1.0, aoRaw, uAO * aoFade);
+  return grass;
+}
+`;
+const _GRM = { rt: null, scene: null, cam: null, mat: null, box: new THREE.Vector4(0, 0, 1, 1), R: 4096, N: 512, n: 0, f: 0, cx: NaN, cz: NaN };
+function _swGrassMapInit() {
+  if (_GRM.rt) return _GRM;
+  const small = (typeof _fxSmallDevice === 'function' && _fxSmallDevice());
+  const N = small ? 256 : 512;
+  _GRM.N = N;
+  _GRM.rt = new THREE.WebGLRenderTarget(N, N, { type: THREE.HalfFloatType, depthBuffer: false, stencilBuffer: false });
+  const t = _GRM.rt.texture;
+  t.minFilter = THREE.LinearFilter; t.magFilter = THREE.LinearFilter; t.generateMipmaps = false; t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
+  _GRM.mat = new THREE.ShaderMaterial({
+    uniforms: {
+      uColGrass: _swU.uColGrass, uColMoss: _swU.uColMoss, uPatchMix: _swU.uPatchMix, uPatchScale: _swU.uPatchScale,
+      uYMid: _swU.uYMid, uAMP: _swU.uAMP, uSlopeRock: _swU.uSlopeRock, uCam: _swU.uCam,
+      uAO: { get value() { return window.__terrainAOU ? window.__terrainAOU.value : 0.55; } },
+      uSat: { get value() { return window.__terrainSatU ? window.__terrainSatU.value : 0.40; } },
+      uBox: { value: _GRM.box },
+    },
+    vertexShader: 'uniform vec4 uBox;\nvarying vec2 vW;\nvoid main() { vW = uBox.xy + uv * uBox.zw; gl_Position = vec4(position.xy, 0.0, 1.0); }',
+    fragmentShader: _GRASS_GROUND_GLSL + 'uniform vec3 uCam;\nvarying vec2 vW;\nvoid main() { float bare; vec3 c = _grassGround(vec3(vW.x, 1.0e6, vW.y), 1.0, vec3(1.0e9), bare); gl_FragColor = vec4(c, bare); }',
+    depthTest: false, depthWrite: false,
+  });
+  const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), _GRM.mat); quad.frustumCulled = false;
+  _GRM.scene = new THREE.Scene(); _GRM.scene.add(quad);
+  _GRM.cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  return _GRM;
+}
+function _swGrassMapTick(force) {
+  const G = _swGrassMapInit();
+  if (typeof renderer === 'undefined' || !renderer) return;
+  try { if (renderer.xr && renderer.xr.isPresenting && G.n > 0) return; } catch (_) {}
+  const ts = (2 * G.R) / G.N, c = _swU.uCam.value;
+  const cx = Math.floor(c.x / ts) * ts, cz = Math.floor(c.z / ts) * ts;
+  G.f++;
+  if (!force && cx === G.cx && cz === G.cz && (G.f % 8) !== 0) return;
+  G.cx = cx; G.cz = cz;
+  G.box.set(cx - G.R, cz - G.R, 2 * G.R, 2 * G.R);
+  const prev = renderer.getRenderTarget();
+  try { renderer.setRenderTarget(G.rt); renderer.render(G.scene, G.cam); } finally { renderer.setRenderTarget(prev); }
+  G.n++;
+}
+function _swGrassAtlasUpload(A) {
+  const W = A.W, H = A.H, C = A.C, d = A.canvas.getContext('2d').getImageData(0, 0, W, H).data;
+  const out = new Uint8Array(W * H * 4);
+  for (const name of Object.keys(A.cells)) {
+    const x0 = A.cells[name][0] * C, x1 = x0 + C;
+    let r = 0, g = 0, b = 0, n = 0;
+    for (let y = 0; y < H; y++) for (let x = x0; x < x1; x++) {
+      const o = (y * W + x) * 4; if (d[o + 3] < 200) continue;
+      r += d[o]; g += d[o + 1]; b += d[o + 2]; n++;
+    }
+    const mr = n ? r / n : 128, mg = n ? g / n : 160, mb = n ? b / n : 96;
+    for (let y = 0; y < H; y++) for (let x = x0; x < x1; x++) {
+      const o = (y * W + x) * 4, a = d[o + 3] / 255;
+      out[o] = Math.round(d[o] * a + mr * (1 - a)); out[o + 1] = Math.round(d[o + 1] * a + mg * (1 - a)); out[o + 2] = Math.round(d[o + 2] * a + mb * (1 - a));
+      out[o + 3] = d[o + 3];
+    }
+  }
+  A.tex.image = { data: out, width: W, height: H };
+  A.tex.needsUpdate = true;
+}
+function _swGrassRankBuild(A) {
+  const W = A.W, H = A.H, d = A.rankCanvas.getContext('2d').getImageData(0, 0, W, H).data;
+  let w = W, h = H, cur = new Uint8Array(w * h * 4);
+  for (let i = 0; i < w * h; i++) { const v = d[i * 4]; cur[i * 4] = cur[i * 4 + 1] = cur[i * 4 + 2] = v; cur[i * 4 + 3] = 255; }
+  const levels = [{ data: cur, width: w, height: h }];
+  while (w > 1 || h > 1) {
+    const nw = Math.max(1, w >> 1), nh = Math.max(1, h >> 1), nx = new Uint8Array(nw * nh * 4);
+    for (let y = 0; y < nh; y++) for (let x = 0; x < nw; x++) {
+      const sx = Math.min(w - 1, x * 2 + ((x + y) & 1)), sy = Math.min(h - 1, y * 2 + ((x * 3 + y) & 1));
+      const si = (sy * w + sx) * 4, di = (y * nw + x) * 4;
+      nx[di] = nx[di + 1] = nx[di + 2] = cur[si]; nx[di + 3] = 255;
+    }
+    levels.push({ data: nx, width: nw, height: nh }); cur = nx; w = nw; h = nh;
+  }
+  let tex = A.rank;
+  if (!tex) { tex = new THREE.DataTexture(levels[0].data, W, H, THREE.RGBAFormat, THREE.UnsignedByteType); A.rank = tex; }
+  tex.image = { data: levels[0].data, width: W, height: H };
+  tex.mipmaps = levels;
+  tex.generateMipmaps = false; tex.minFilter = THREE.NearestMipmapNearestFilter; tex.magFilter = THREE.NearestFilter;
+  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping; tex.flipY = false; tex.needsUpdate = true;
+  return tex;
+}
+function _swGenGrassTuft(seed, kind) {
+  const A = _swGrassAtlasGet(), K = _swGrassK();
+  let s = Math.imul(seed | 0, 2654435761) | 0;
+  const R = () => { s = s + 0x6D2B79F5 | 0; let t = Math.imul(s ^ s >>> 15, 1 | s); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+  const POS = [], NRM = [], COL = [], UV = [], IDX = [];
+  const card = (bx, bz, ang, tilt, bend, w, h, cell) => {
+    const U = A.uv(cell);
+    const dx = Math.cos(ang), dz = Math.sin(ang), sx = -dz, sz = dx;
+    const a1x = Math.sin(tilt) * dx, a1y = Math.cos(tilt), a1z = Math.sin(tilt) * dz;
+    const t2 = tilt + bend, a2x = Math.sin(t2) * dx, a2y = Math.cos(t2), a2z = Math.sin(t2) * dz;
+    const hh = h * 0.5;
+    const p1x = bx + a1x * hh, p1y = a1y * hh, p1z = bz + a1z * hh;
+    const rows = [[bx, 0, bz, U.vB, 0.70], [p1x, p1y, p1z, (U.vB + U.vT) * 0.5, 0.88], [p1x + a2x * hh, p1y + a2y * hh, p1z + a2z * hh, U.vT, 1.0]];   // (v51.48: base 0.55 / mid 0.85)
+    let nx = dx * 0.25, ny = 0.95, nz = dz * 0.25; const nl = Math.sqrt(nx * nx + ny * ny + nz * nz); nx /= nl; ny /= nl; nz /= nl;
+    const base = POS.length / 3;
+    for (const r of rows) for (const sg of [-1, 1]) {
+      POS.push(r[0] + sx * sg * w * 0.5, r[1], r[2] + sz * sg * w * 0.5);
+      NRM.push(nx, ny, nz); COL.push(r[4], r[4], r[4]); UV.push(sg < 0 ? U.u0 : U.u1, r[3]);
+    }
+    IDX.push(base, base + 2, base + 1, base + 1, base + 2, base + 3, base + 2, base + 4, base + 3, base + 3, base + 4, base + 5);
+  };
+  const tall = kind === 'tall', H0 = (tall ? 63 : 36) * K.cardH, W0 = (tall ? 36 : 26) * K.cardW, cell = tall ? 'tall' : 'short';
+  const nC = Math.max(1, Math.round(K.cards)), a0 = R() * Math.PI;
+  for (let i = 0; i < nC; i++) {   // the crossing cards: the tuft's body from the side
+    const a = a0 + i * Math.PI / nC + (R() - 0.5) * 0.35;
+    card((R() - 0.5) * 4, (R() - 0.5) * 4, a, (R() - 0.5) * 0.24, (R() - 0.5) * 0.4, W0 * (0.85 + R() * 0.3), H0 * (0.85 + R() * 0.3), cell);
+  }
+  const nL = Math.max(0, Math.round(K.leanCards));
+  for (let i = 0; i < nL; i++) {   // the leaning cards: what a tuft looks like from ABOVE (a ship's usual view)
+    const a = (i / Math.max(1, nL)) * 6.283 + R() * 1.2;
+    card(Math.cos(a) * 3, Math.sin(a) * 3, a, 0.45 + R() * 0.3, 0.25, W0 * 0.8, H0 * 0.55, cell);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(POS, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(NRM, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(COL, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(UV, 2));
+  geo.setIndex(IDX);
+  geo.computeBoundingSphere(); geo.computeBoundingBox();
+  geo._lssTuftH = H0;
+  return geo;
+}
+function _swGrassTuftGeos() {
+  const S = _swGrassTuftGeos;
+  if (!S.g) S.g = { short: _swGenGrassTuft(7, 'short'), tall: _swGenGrassTuft(19, 'tall') };
+  return S.g;
+}
+function _swGrassTuftMatGet() {
+  const S = _swGrassTuftMatGet;
+  if (S.m) return S.m;
+  const A = _swGrassAtlasGet(), K = _swGrassK();
+  const m = _swFoliageMat(0, true);
+  m.map = A.tex; m.alphaTest = 0.42; m.roughness = 0.9;
+  m.envMapIntensity = 0.12;
+  const U = {
+    uA: { value: K.fadeA }, uB: { value: K.fadeB },
+    uW: { value: new THREE.Vector4() }, uD: { value: new THREE.Vector4() },
+    uL: { value: new THREE.Vector4() },
+    uTint: { value: K.tint }, uCov: { value: K.cover }, uPx: { value: new THREE.Vector2(A.W, A.H) },
+    uRank: { value: A.rank }, uNorm: { value: 1 / Math.max(0.05, A.mean || 0.4) },
+    uDW: { value: K.detailW }, uMap: { value: _swGrassMapInit().rt.texture }, uMapBox: { value: _GRM.box },   // (v51.50)
+    uFlat: { value: new THREE.Vector3(1, 1, 1) },   // (v51.51) the flat colour's calibration (flatR/G/B)
+  };
+  const ob = m.onBeforeCompile;
+  m.onBeforeCompile = function (sh, r) {
+    if (ob) ob.call(this, sh, r);
+    sh.uniforms.uTreeFadeA = U.uA; sh.uniforms.uTreeFadeB = U.uB;
+    sh.uniforms.uGrassW = U.uW; sh.uniforms.uGrassD = U.uD; sh.uniforms.uGrassL = U.uL;
+    sh.uniforms.uGrassTint = U.uTint; sh.uniforms.uColGrass = _swU.uColGrass; sh.uniforms.uColMoss = _swU.uColMoss;
+    sh.uniforms.uAtlasPx = U.uPx; sh.uniforms.uCoverK = U.uCov; sh.uniforms.uGrassRank = U.uRank; sh.uniforms.uGrassNorm = U.uNorm;
+    sh.uniforms.uGrassDW = U.uDW; sh.uniforms.uGrassMap = U.uMap; sh.uniforms.uGrassMapBox = U.uMapBox;   // (v51.50)
+    sh.uniforms.uGrassFlat = U.uFlat;   // (v51.51)
+    sh.uniforms.uPatchMix = _swU.uPatchMix; sh.uniforms.uPatchScale = _swU.uPatchScale;
+    sh.uniforms.uYMid = _swU.uYMid; sh.uniforms.uAMP = _swU.uAMP; sh.uniforms.uSlopeRock = _swU.uSlopeRock;
+    sh.uniforms.uAO = { get value() { return window.__terrainAOU ? window.__terrainAOU.value : 0.55; } };
+    sh.uniforms.uSat = { get value() { return window.__terrainSatU ? window.__terrainSatU.value : 0.40; } };
+    sh.uniforms.uSunTop = _swU.uSunTop; sh.uniforms.uSunTopBox = _swU.uSunTopBox; sh.uniforms.uSunTopK = _swU.uSunTopK;
+    sh.uniforms.uAerial = _swU.uAerial; sh.uniforms.uAerialStart = _swU.uAerialStart; sh.uniforms.uAerialFar = _swU.uAerialFar; sh.uniforms.uAerialColor = _swU.uAerialColor;   // (v51.49)
+    sh.vertexShader = _SUNTOP_GLSL + 'uniform float uAerial, uAerialStart, uAerialFar, uAO, uYMid, uAMP, uSlopeRock;\nuniform sampler2D uGrassMap;\nuniform vec4 uGrassMapBox;\nvarying vec2 vGT;\nvarying vec3 vGC;\nvarying float vSV, vAP;\n' + sh.vertexShader.replace('#include <color_vertex>',
+      '#include <color_vertex>\n vec3 _gip = vec3(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2]);\n' +
+      ' vec4 _gm = texture2D(uGrassMap, (_gip.xz - uGrassMapBox.xy) / uGrassMapBox.zw);\n float _gBare = _gm.a;\n' +
+      '#ifdef USE_INSTANCING_COLOR\n vGT = instanceColor.xy;\n vColor.rgb = color.rgb;\n float _gny = instanceColor.z;\n#else\n vGT = vec2(1.0);\n float _gny = 1.0;\n#endif\n' +
+      ' float _gth = clamp((_gip.y - (uYMid - uAMP * 0.5)) / (uAMP * 1.15), 0.0, 1.0);\n' +
+      ' float _gaf = 1.0;\n' +   // (v51.53) was the terrain's 900..2200 u distance fade - a colour that changed as you flew
+      ' vGC = _gm.rgb * mix(1.0, clamp(mix(0.62, 1.0, smoothstep(uSlopeRock, 1.0, clamp(_gny, 0.0, 1.0))) * mix(0.80, 1.0, _gth), 0.45, 1.08), uAO * _gaf);\n' +
+      ' vSV = (uSunTopK.x > 0.5) ? _lssSunVisT(_gip) : 1.0;\n' +
+      ' vAP = (uAerial > 0.001) ? clamp(smoothstep(uAerialStart, uAerialFar, length(uCam.xz - _gip.xz)) * uAerial * (1.0 - clamp((_gip.y - (uYMid - uAMP * 0.2)) / (uAMP * 1.4), 0.0, 1.0) * 0.55), 0.0, 0.85) : 0.0;\n' +
+      ' float _gGrow = 1.0 - smoothstep(0.35, 0.60, _gBare);')
+      .replace('#include <project_vertex>', ' transformed *= _gGrow;\n#include <project_vertex>');
+    sh.fragmentShader = 'uniform vec2 uAtlasPx;\nuniform float uCoverK, uGrassTint, uGrassNorm;\nuniform vec3 uAerialColor, uGrassFlat;\nvarying vec2 vGT;\nvarying float vGF, vGD;\nvarying vec3 vGC;\nvarying float vSV, vAP;\nfloat _lssSunVis = 1.0;\n' + sh.fragmentShader
+      .replace('void main() {', 'void main() {\n _lssSunVis = vSV;')
+      .replace('#include <lights_pars_begin>', _sunTopPars())
+      .replace('#include <color_fragment>', '#include <color_fragment>\n' +
+        ' diffuseColor.rgb = mix(vGC * uGrassTint * uGrassFlat, diffuseColor.rgb * vGC * (vGT.y * uGrassTint * uGrassNorm), vGD);\n' +
+        ' diffuseColor.rgb = mix(diffuseColor.rgb, uAerialColor, vAP);')
+      .replace('#include <alphatest_fragment>',
+        '{ vec2 _rdx = dFdx(vMapUv * uAtlasPx), _rdy = dFdy(vMapUv * uAtlasPx);\n' +
+        '  float _rmip = max(0.0, 0.5 * log2(max(dot(_rdx, _rdx), dot(_rdy, _rdy))));\n' +
+        '  diffuseColor.a *= 1.0 + _rmip * uCoverK; }\n' +
+        'if ( diffuseColor.a < alphaTest ) discard;')
+      .replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\n#ifdef DOUBLE_SIDED\n  normal *= faceDirection;\n#endif');
+  };
+  m.customProgramCacheKey = () => 'lss-grass-tuft-6';
+  try { Object.defineProperty(m, '_lssGrass', { value: U, enumerable: false, configurable: true }); } catch (_) {}
+  m.needsUpdate = true;
+  S.m = m;
+  _swGrassUniTick();
+  return m;
+}
+function _swGrassUniTick() {
+  { const K0 = _swGrassK(); _swU.uGrassField.value.set(K0.fieldR, K0.fieldG, K0.fieldB, K0.on ? K0.fieldAmt : 0); }   // (v51.49)
+  const m = _swGrassTuftMatGet.m; if (!m || !m._lssGrass) return;
+  const K = _swGrassK(), U = m._lssGrass, g = _swGrassTuftGeos.g;
+  const H = (g && g.short && g.short._lssTuftH) || 11;
+  U.uA.value = K.fadeA; U.uB.value = Math.max(K.fadeA + 1, K.fadeB);
+  U.uW.value.set(K.sway, K.lean, 6.2832 / Math.max(10, K.waveLen), K.waveSpeed);
+  U.uD.value.set(Math.cos(K.windDir), Math.sin(K.windDir), 0, H);
+  U.uL.value.set(0, Math.max(0.01, K.detailW), 0, K.mode === 'tree' ? 1 : 0);   // (v51.51) y = the per-tuft detail span; (v51.56) w = TREE mode
+  U.uFlat.value.set(K.flatR, K.flatG, K.flatB);
+  U.uTint.value = K.tint * K.match; U.uCov.value = K.cover; U.uDW.value = Math.max(0.01, K.detailW);
+  const A = _swGrassAtlasGet.a; if (A && A.mean) U.uNorm.value = 1 / Math.max(0.05, A.mean);
+  try { _swGrassMapTick(); } catch (e) { if (!_GRM.err) { _GRM.err = 1; try { console.warn('[grass] map tick threw:', e); } catch (_) {} } }   // (v51.50)
+}
+function _swBuildGrass(x0, z0, T) {
+  const t0 = performance.now();
+  const r = _swBuildGrassTufts(x0, z0, T);
+  const ms = performance.now() - t0, S = _swBuildGrass;
+  if (r) { S.n = (S.n || 0) + 1; S.ms = (S.ms || 0) + ms; S.max = Math.max(S.max || 0, ms); S.last = ms; }
+  if (ms > 12) {
+    const L = S.slow || (S.slow = []);
+    let tuf = 0; if (r) for (const im of r) tuf += im.count;
+    L.push({ ms: +ms.toFixed(1), cx: Math.round(x0 / _SW_CHUNK), cz: Math.round(z0 / _SW_CHUNK), tufts: tuf, hb: !!(_HB && _HB.ready), t: Math.round(performance.now()) });
+    L.sort((a, b) => b.ms - a.ms); if (L.length > 8) L.length = 8;
+  }
+  return r;
+}
+function _swBuildGrassTufts(x0, z0, T) {
+  if (game.sandwichGrass === false || ((T.biome || 'grassy') !== 'grassy' && T.biome !== 'mossy')) return null;
+  const K = _swGrassK();
+  if (!K.on) return null;
+  if (K.style === 'blades') return _swBuildGrassBlades(x0, z0, T);
+  const small = (typeof _fxSmallDevice === 'function' && _fxSmallDevice());
+  const sp = Math.max(4, K.spacing / Math.sqrt(Math.max(0.05, K.density))) * (small ? 1.45 : 1);
+  const SUB = 3, NB = Math.max(1, Math.round(_SW_CHUNK / (sp * SUB))), bs = _SW_CHUNK / NB, ss = bs / SUB;
+  const SR = _swU.uSlopeRock.value, SG = _swU.uSlopeGrass.value;
+  const gy = (x, z) => T.HUB ? _swDrapeY(x, z, T) : _stGroundYGrid(x, z, T);
+  let s = (Math.imul(Math.round(x0 / 16) + 9191, 2654435761) ^ Math.imul(Math.round(z0 / 16) + 313, 40503)) | 0;
+  const rnd = () => { s = s + 0x6D2B79F5 | 0; let t = Math.imul(s ^ s >>> 15, 1 | s); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+  const buckets = [[], []];   // short / tall: x, y, z, mix, rotY, scale, bright
+  const snowT = T.snowLine || 0.7;
+  for (let j = 0; j < NB; j++) for (let i = 0; i < NB; i++) {
+    const bx = x0 + i * bs, bz = z0 + j * bs, cx = bx + bs * 0.5, cz = bz + bs * 0.5;
+    if (T.HUB && typeof _owExcludes === 'function' && _owExcludes(cx, cz)) continue;
+    if (T.HUB && _hubCityExcludes(cx, cz) && (typeof _hubCityGroundBlocked !== 'function' || _hubCityGroundBlocked(cx, cz))) continue;
+    if (T.HUB && _hzZoneForFoliage(cx, cz)) continue;   // (v35.13) heartland flora - deep zones grow their own cover
+    const cy = gy(cx, cz);
+    if (T.WL != null && cy < T.WL + 2) continue;
+    if ((cy - (T.YMID - T.AMP * 0.5)) / (T.AMP * 1.15) > snowT) continue;
+    const yx = gy(cx + 8, cz) - cy, yz = gy(cx, cz + 8) - cy;
+    const nyB = 8 / Math.hypot(yx, yz, 8);   // (v51.47) the ground normal's y - the tuft's AO cavity term
+    const fl = Math.max(0, Math.min(1, (nyB - SR) / Math.max(0.001, SG - SR)));
+    if (fl < 0.5) continue;
+    if (typeof _volcHotAt === 'function' && _volcHotAt(cx, cz, 1.2) > 0.004) continue;
+    for (let b = 0; b < SUB * SUB; b++) {
+      const r1 = rnd(), r2 = rnd(), r3 = rnd(), r4 = rnd(), r5 = rnd(), r6 = rnd(), r7 = rnd(), r8 = rnd();   // drawn up front: a rejection never shifts the stream
+      const x = bx + ((b % SUB) + 0.5 + (r1 - 0.5) * 0.9) * ss, z = bz + (((b / SUB) | 0) + 0.5 + (r2 - 0.5) * 0.9) * ss;
+      const pc = _stPatch(x, z);
+      if (r3 > (pc - 0.36) / 0.10) continue;
+      const y = gy(x, z);
+      if (T.WL != null && y < T.WL + 3) continue;
+      const lush = Math.max(0, Math.min(1, (pc - 0.40) / 0.40));
+      const mixG = Math.max(0, Math.min(1, (pc - 0.32) / 0.40));
+      buckets[r4 < K.tall ? 1 : 0].push(x, y, z, nyB, r5 * 6.283, (0.85 + r6 * 0.3) * K.height * (0.9 + 0.2 * lush), 0.88 + r7 * 0.2, r8);   // (v51.51) + the tuft's rank
+    }
+  }
+  const G = _swGrassTuftGeos(), mat = _swGrassTuftMatGet(), geos = [G.short, G.tall];
+  const M = new THREE.Matrix4(), Q = new THREE.Quaternion(), E = new THREE.Euler(), Pv = new THREE.Vector3(), Sv = new THREE.Vector3(), Cc = new THREE.Color();
+  const out = [];
+  for (let b = 0; b < 2; b++) {
+    const P = buckets[b], n = P.length / 8;
+    if (n < 1) continue;
+    const ord = new Uint32Array(n); for (let k = 0; k < n; k++) ord[k] = k;
+    ord.sort((a, c) => P[a * 8 + 7] - P[c * 8 + 7]);
+    const ranks = new Float32Array(n);
+    const im = new THREE.InstancedMesh(geos[b], mat, n);
+    for (let k = 0; k < n; k++) {
+      const o = ord[k] * 8;
+      E.set(0, P[o + 4], 0); Q.setFromEuler(E);
+      Pv.set(P[o], P[o + 1] - 0.8, P[o + 2]); Sv.set(P[o + 5], P[o + 5], P[o + 5]);
+      M.compose(Pv, Q, Sv); im.setMatrixAt(k, M);
+      Cc.setRGB(P[o + 7], P[o + 6], P[o + 3]); im.setColorAt(k, Cc);   // (v51.51) x RANK, y brightness, z ground normal y
+      ranks[k] = P[o + 7];
+    }
+    im.instanceMatrix.needsUpdate = true; if (im.instanceColor) im.instanceColor.needsUpdate = true;
+    im.frustumCulled = true; im.castShadow = false; im.receiveShadow = true;
+    im.computeBoundingSphere();   // (v51.51) at the FULL count: the gate trims .count every frame, the bounds must cover them all
+    let yMin = Infinity, yMax = -Infinity;
+    for (let k = 0; k < n; k++) { const yy = P[k * 8 + 1]; if (yy < yMin) yMin = yy; if (yy > yMax) yMax = yy; }
+    im.userData = { isSandwichTerrain: true, _grassB: true, _gyMin: yMin, _gyMax: yMax + 70 };   // (v51.48) for the 3D chunk gate
+    try { Object.defineProperty(im.userData, '_ranks', { value: ranks, enumerable: false, configurable: true }); } catch (_) {}   // non-enumerable: three JSON-copies userData on clone (the v49.56 trap)
+    scene.add(_lssFreezeStatic(im)); out.push(im);
+  }
+  return out.length ? out : null;
+}
+if (typeof window !== 'undefined') {
+  window.__grassAtlas = function () {
+    const A = _swGrassAtlasGet.a; if (!A) return 'no atlas yet';
+    const w = window.open(); if (w) { w.document.body.style.background = '#333'; const img = w.document.createElement('img'); img.src = A.canvas.toDataURL(); img.style.width = '100%'; w.document.body.appendChild(img); }
+    return A.W + 'x' + A.H;
+  };
+  window.__grassRegen = function () {
+    const A = _swGrassAtlasGet.a; if (A) _swGrassAtlasPaint(A);
+    const G = _swGrassTuftGeos.g;
+    if (G) for (const [key, seed] of [['short', 7], ['tall', 19]]) {
+      const g = G[key], ng = _swGenGrassTuft(seed, key);
+      g.dispose();
+      for (const a of Object.keys(g.attributes)) g.deleteAttribute(a);
+      for (const a of Object.keys(ng.attributes)) g.setAttribute(a, ng.attributes[a]);
+      g.setIndex(ng.index); g.boundingSphere = ng.boundingSphere; g.boundingBox = ng.boundingBox; g._lssTuftH = ng._lssTuftH;
+    }
+    const chunks = game.sandwichChunks;
+    if (chunks) for (const c of chunks.values()) if (Array.isArray(c.grass)) for (const im of c.grass) { if (im) { im.boundingSphere = null; im.boundingBox = null; } }
+    return 'regenerated atlas + tufts';
+  };
+  window.__grassRebuild = function () {
+    const chunks = game.sandwichChunks; if (!chunks) return 'no chunks';
+    let n = 0;
+    for (const c of chunks.values()) if (c.grassBuilt) { try { _swRemoveGrass(c.grass); } catch (_) {} c.grass = null; c.grassBuilt = false; n++; }
+    try { _swStreamIdle.idle = false; } catch (_) {}   // the stream's idle early-out would otherwise skip the replant
+    return 'cleared ' + n + ' chunks - the streamer replants them';
+  };
+  window.__grassStats = function () {
+    const chunks = game.sandwichChunks; if (!chunks) return null;
+    let meshes = 0, tufts = 0, vis = 0, visTufts = 0, tris = 0;
+    for (const c of chunks.values()) {
+      const L = c.grass ? (Array.isArray(c.grass) ? c.grass : [c.grass]) : null;
+      if (!L) continue;
+      for (const im of L) {
+        if (!im) continue;
+        meshes++; tufts += im.count;
+        if (im.visible) { vis++; visTufts += im.count; tris += im.count * ((im.geometry.index ? im.geometry.index.count : 0) / 3); }
+      }
+    }
+    const B = _swBuildGrass;
+    return { meshes: meshes, tufts: tufts, visibleMeshes: vis, visibleTufts: visTufts, trisIfAllInView: tris,
+             build: { chunks: B.n || 0, avgMs: B.n ? +(B.ms / B.n).toFixed(2) : 0, maxMs: +(B.max || 0).toFixed(2), lastMs: +(B.last || 0).toFixed(2), slow: (B.slow || []).slice() },
+             K: Object.assign({}, _swGrassK()) };
+  };
+}
+function _swBuildGrassBlades(x0,z0,T){
+  if(game.sandwichGrass===false || ((T.biome||'grassy')!=='grassy' && T.biome!=='mossy')) return null;
   
   
   
@@ -23660,7 +24183,7 @@ function _swBuildGrass(x0,z0,T){
     _swGd.updateMatrix(); im.setMatrixAt(k,_swGd.matrix); }
   im.instanceMatrix.needsUpdate=true; im.frustumCulled=true; im.userData={isSandwichTerrain:true}; scene.add(im); return im;
 }
-function _swRemoveGrass(im){ if(im){ try{ if(im.parent)scene.remove(im); if(im.dispose)im.dispose(); }catch(_){} } }
+function _swRemoveGrass(im){ if(Array.isArray(im)){ for(const m of im) _swRemoveGrass(m); return; } if(im){ try{ if(im.parent)scene.remove(im); if(im.dispose)im.dispose(); }catch(_){} } }   // (v51.41) the tufts are a list (short / tall)
 function _swMul(seed){ let a=seed>>>0; return function(){ a=a+0x6D2B79F5|0; let t=Math.imul(a^a>>>15,1|a); t=t+Math.imul(t^t>>>7,61|t)^t; return ((t^t>>>14)>>>0)/4294967296; }; }
 function _swGenTree(opt){
   const rng=_swMul(opt.seed||12345), POS=[], COL=[], deg=Math.PI/180;
@@ -24364,7 +24887,7 @@ function _swTreeGeoGet(){
   }
   return _swTreeGeos;
 }
-function _swFoliageMat(glow){
+function _swFoliageMat(glow, grass){
   const m=new THREE.MeshStandardMaterial({vertexColors:true,color:0xffffff,roughness:1,metalness:0,side:THREE.DoubleSide});
   m.envMapIntensity = 0.18;
   if(glow){ m.emissive=new THREE.Color(glow); m.emissiveIntensity=0.5; }
@@ -24407,10 +24930,30 @@ function _swFoliageMat(glow){
     '  vec3 _rpush = vec3(_v.x, -dot(_v, _v) / (2.0 * max(_h, 1.0)), _v.y);\n' +
     '  transformed += transpose(_rm) * _rpush / max(dot(_rm[0], _rm[0]), 1e-6);\n' +
     ' }\n';
+  const GDECL = grass ? 'uniform vec4 uGrassW, uGrassD, uGrassL;\nvarying float vGF, vGD;\n' : '';
+  const CF = grass ? ' float cf=max(transformed.y,0.0)*uGrassW.x;\n'
+    : ' float canopy=max(0.0,transformed.y-18.0);\n float cf=canopy*canopy*0.0012+canopy*0.015;\n cf=min(cf,transformed.y*uSway);\n';
+  const GWIND = !grass ? '' :
+    ' { vec2 _wd=uGrassD.xy; float _ga=dot(ip.xz,_wd), _gb=dot(ip.xz,vec2(-_wd.y,_wd.x));\n' +
+    '   float _wv=sin(_ga*uGrassW.z-uTime*uGrassW.w+sin(_gb*0.0031)*2.2+sin(_ga*0.0007+_gb*0.0011)*3.0);\n' +
+    '   float _g=0.5+0.5*_wv; _g=_g*_g*(3.0-2.0*_g);\n' +
+    '   float _hh=max(transformed.y,0.0)/uGrassD.w;\n' +
+    '   float _ln=uGrassW.y*(0.18+_g*(0.75+0.25*sin(uTime*2.7+vph)))*_hh*_hh*uGrassD.w;\n' +
+    '   mat3 _gm=mat3(instanceMatrix);\n' +
+    '   vec3 _gl=transpose(_gm)*vec3(_wd.x,0.0,_wd.y)/max(length(_gm[0]),1e-4);\n' +
+    '   transformed+=_gl*_ln;\n' +
+    '   transformed.y-=_ln*_ln/(2.0*max(transformed.y,1.0));\n' +
+    ' }\n';
+  const FADE = grass ?
+    ' vGF=1.0-smoothstep(uTreeFadeA,uTreeFadeB,distance(ip,uCam));\n' +
+    '#ifdef USE_INSTANCING_COLOR\n float _gtr=instanceColor.x;\n#else\n float _gtr=0.0;\n#endif\n' +
+    ' if (uGrassL.w > 0.5) { vGD = 1.0; transformed *= vGF; if (vGF <= 0.0) transformed = vec3(0.0); }\n' +
+    ' else { vGD=smoothstep(_gtr,_gtr+uGrassL.y,vGF); if (vGF <= _gtr) transformed = vec3(0.0); }'
+    : ' float tfade=1.0-smoothstep(uTreeFadeA,uTreeFadeB,distance(ip.xz,uCam.xz));\n transformed*=tfade;';
   m.onBeforeCompile=(sh)=>{ sh.uniforms.uTime=_swU.uTime; sh.uniforms.uCam=_swU.uCam; sh.uniforms.uTreeFadeA=_swU.uTreeFadeA; sh.uniforms.uTreeFadeB=_swU.uTreeFadeB; sh.uniforms.uSway=_swU.uSway;
     if (_rus) { sh.uniforms.uRus=_swU.uRus; sh.uniforms.uRusB=_swU.uRusB; sh.uniforms.uRusN=_swU.uRusN; sh.uniforms.uRusK=_swU.uRusK; sh.uniforms.uRusC=_swU.uRusC; sh.uniforms.uRusL=_swU.uRusL; }
-    sh.vertexShader='uniform float uTime,uTreeFadeA,uTreeFadeB,uSway;\nuniform vec3 uCam;\n'+RUS_DECL+sh.vertexShader.replace('#include <begin_vertex>',
-      '#include <begin_vertex>\n vec3 ip=vec3(instanceMatrix[3][0],instanceMatrix[3][1],instanceMatrix[3][2]);\n float ph=ip.x*0.05+ip.z*0.05;\n float vph=ph+transformed.x*0.08+transformed.z*0.08+transformed.y*0.05;\n float canopy=max(0.0,transformed.y-18.0);\n float cf=canopy*canopy*0.0012+canopy*0.015;\n cf=min(cf,transformed.y*uSway);\n'+RUS_PRE+' float gust=0.6+0.4*sin(uTime*0.13+ph*0.3);\n float swayX=(sin(uTime*0.9+vph)*0.85+sin(uTime*1.9+vph*1.7)*0.4)*gust;\n float swayZ=(sin(uTime*0.8+vph*1.2+1.7)*0.7+sin(uTime*2.3+vph*1.5)*0.3)*gust;\n transformed.x+=swayX*cf;\n transformed.z+=swayZ*cf;\n transformed.y+=sin(uTime*3.1+vph*2.0)*cf*0.22;\n'+RUS_POST+' float tfade=1.0-smoothstep(uTreeFadeA,uTreeFadeB,distance(ip.xz,uCam.xz));\n transformed*=tfade;'); };
+    sh.vertexShader='uniform float uTime,uTreeFadeA,uTreeFadeB,uSway;\nuniform vec3 uCam;\n'+GDECL+RUS_DECL+sh.vertexShader.replace('#include <begin_vertex>',
+      '#include <begin_vertex>\n vec3 ip=vec3(instanceMatrix[3][0],instanceMatrix[3][1],instanceMatrix[3][2]);\n float ph=ip.x*0.05+ip.z*0.05;\n float vph=ph+transformed.x*0.08+transformed.z*0.08+transformed.y*0.05;\n'+CF+RUS_PRE+' float gust=0.6+0.4*sin(uTime*0.13+ph*0.3);\n float swayX=(sin(uTime*0.9+vph)*0.85+sin(uTime*1.9+vph*1.7)*0.4)*gust;\n float swayZ=(sin(uTime*0.8+vph*1.2+1.7)*0.7+sin(uTime*2.3+vph*1.5)*0.3)*gust;\n transformed.x+=swayX*cf;\n transformed.z+=swayZ*cf;\n transformed.y+=sin(uTime*3.1+vph*2.0)*cf*0.22;\n'+GWIND+RUS_POST+FADE); };
   return m;
 }
 function _swTreeMatGet(){ if(!_swTreeMat){ _swTreeMat=_swFoliageMat(0); if(_swTreeStyleRibbon()) _swRibbonPatchMat(_swTreeMat); } return _swTreeMat; }   // (v50.63) the ribbon trees' atlas + cut-out + canopy lighting
@@ -24798,6 +25341,38 @@ function _swTreeVisTick(cx, cz) {
   const B2 = B * B;
   const _PK = _swPlantK(), _PB2 = _PK.fadeB * _PK.fadeB;
   try { const _pmM = _swPlantMatGet.m; if (_pmM && _pmM._lssFade) { _pmM._lssFade.uA.value = _PK.fadeA; _pmM._lssFade.uB.value = _PK.fadeB; } } catch (_) {}
+  const _GK = _swGrassK(), _GE = _GK.fadeB, _GB2 = _GE * _GE, _GSR2 = _GK.shadowR * _GK.shadowR;
+  const _GFA = _GK.fadeA, _GFW = Math.max(1, _GK.fadeB - _GK.fadeA);
+  try { _swGrassUniTick(); } catch (_) {}
+  for (const c of chunks.values()) {
+    const g = c.grass;
+    if (!g || !Array.isArray(g)) continue;
+    const x0 = c.cx * _SW_CHUNK, z0 = c.cz * _SW_CHUNK;
+    const dx = Math.max(0, x0 - cx, cx - (x0 + _SW_CHUNK)), dz = Math.max(0, z0 - cz, cz - (z0 + _SW_CHUNK));
+    const v = (dx * dx + dz * dz) < _GB2;
+    const _gcy = _swU.uCam.value.y, _gd2 = dx * dx + dz * dz;
+    for (let i = 0; i < g.length; i++) {
+      const im = g[i]; if (!im) continue;
+      const u = im.userData || {}, dy = (u._gyMin != null) ? Math.max(0, u._gyMin - _gcy, _gcy - u._gyMax) : 0;
+      const _n2 = _gd2 + dy * dy;
+      let cnt = im.count;
+      const R = u._ranks;
+      if (R) {
+        const t = Math.min(1, Math.max(0, (Math.sqrt(_n2) - _GFA) / _GFW)), lvl = 1 - t * t * (3 - 2 * t);
+        if (_GK.mode === 'tree') cnt = lvl > 0 ? R.length : 0;   // (v51.56) the trees' uniform shrink: all or nothing per mesh
+        else {
+          let lo = 0, hi = R.length;
+          while (lo < hi) { const mid = (lo + hi) >> 1; if (R[mid] < lvl) lo = mid + 1; else hi = mid; }
+          cnt = lo;
+        }
+        if (im.count !== cnt) im.count = cnt;
+      }
+      const vv = v && _n2 < _GB2 && cnt > 0;
+      if (im.visible !== vv) im.visible = vv;
+      const rs = _n2 < _GSR2;   // (v51.50) a uniform in r165, so flipping it costs no program
+      if (im.receiveShadow !== rs) im.receiveShadow = rs;
+    }
+  }
   let _hid = 0, _shown = 0;
   for (const c of chunks.values()) {
     const arr = c.trees;
@@ -42122,7 +42697,7 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
   
   const _disc = (T && T.biome === 'mossy');
   const _R2 = _VIEW * _VIEW;
-  const wantGrass = (game.sandwichGrass !== false) && (((T.biome || 'grassy') === 'grassy') || T.biome === 'mossy');
+  const wantGrass = (game.sandwichGrass !== false) && _swGrassK().on && (((T.biome || 'grassy') === 'grassy') || T.biome === 'mossy');   // (v51.41) + __grass.on / ?grass=0
   const wantTrees = (game.sandwichTrees !== false) && (T.biome === 'mossy');
   const wantDrapes = (game.sandwichDrapes !== false) && !!(T && T.HUB) &&
                      !(typeof window !== 'undefined' && window.__drapes && window.__drapes.on === false);
@@ -42239,15 +42814,17 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
   const _treeView = (T && T.biome === 'mossy') ? _swHubView() : _SW_TREE_VIEW;
   const _remMax = _budgeted ? Math.max(1, (typeof window !== 'undefined' && window.__swRemoveMax != null) ? window.__swRemoveMax : 3) : Infinity;
   let gBuilt = 0, tBuilt = 0;
+  const _gK = _swGrassK(), _gPlant = _gK.fadeB + _gK.plantMargin, _gDrop = _gPlant + 450;
+  const _gCand = [];
   for (const c of chunks.values()) {
     const cx = c.cx, cz = c.cz;
     const _cheb = Math.max(Math.abs(cx - scx), Math.abs(cz - scz));
-    const near = _cheb <= _SW_GRASS_VIEW;
-    if (near && wantGrass && !c.grassBuilt && gBuilt < (gLim || 1)) {
-      const _fpT = game._foliageProf ? performance.now() : 0;
-      c.grass = _swBuildGrass(cx * _SW_CHUNK, cz * _SW_CHUNK, T); c.grassBuilt = true; gBuilt++;
-      if (game._foliageProf) _foliageProfRec('grass', performance.now() - _fpT);
-    } else if ((!near || !wantGrass) && c.grassBuilt && _swRemoved < _remMax) {
+    const _gx0 = cx * _SW_CHUNK, _gz0 = cz * _SW_CHUNK;
+    const _gdx = Math.max(0, _gx0 - px, px - (_gx0 + _SW_CHUNK)), _gdz = Math.max(0, _gz0 - pz, pz - (_gz0 + _SW_CHUNK));
+    const _gd = Math.sqrt(_gdx * _gdx + _gdz * _gdz);
+    if (_gd < _gPlant && wantGrass && !c.grassBuilt) {
+      _gCand.push(_gd, c);
+    } else if ((_gd > _gDrop || !wantGrass) && c.grassBuilt && _swRemoved < _remMax) {
       _swRemoveGrass(c.grass); c.grass = null; c.grassBuilt = false; _swRemoved++;   // (v39.94) capped, see the dispose note
     }
     const nearT = _cheb <= _treeView;
@@ -42264,6 +42841,17 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
       if (game._foliageProf) _foliageProfRec('trees', performance.now() - _fpT);
     } else if ((!nearT || !wantFoliage) && c.treesBuilt && _swRemoved < _remMax) {
       _swRemoveTrees(c.trees); c.trees = null; c.treesBuilt = false; _swRemoved++;   // (v39.94) capped
+    }
+  }
+  if (_gCand.length) {
+    const _gn = _gCand.length / 2, _gi = [];
+    for (let i = 0; i < _gn; i++) _gi.push(i);
+    _gi.sort((a, b) => _gCand[a * 2] - _gCand[b * 2]);
+    for (let k = 0; k < _gi.length && gBuilt < (gLim || 1); k++) {
+      const c = _gCand[_gi[k] * 2 + 1];
+      const _fpT = game._foliageProf ? performance.now() : 0;
+      c.grass = _swBuildGrass(c.cx * _SW_CHUNK, c.cz * _SW_CHUNK, T); c.grassBuilt = true; gBuilt++;
+      if (game._foliageProf) _foliageProfRec('grass', performance.now() - _fpT);
     }
   }
   _SC.idle = (built === 0 && stepped === 0 && gBuilt === 0 && tBuilt === 0 && _swDisposed === 0 && _swRemoved === 0 && _staleN === 0);   // (v39.49) a stepped job is not idle ; (v46.98) nor is a pending rebake

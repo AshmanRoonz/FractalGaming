@@ -7342,7 +7342,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "51.40";
+const LSS_BUILD = "51.56";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -8558,7 +8558,7 @@ const game = {
   roundTimer: LSS.ROUND_TIME,
   warmupTimer: LSS.WARMUP_TIME,
   testMode: false,
-  sandwichGrass: false,
+  sandwichGrass: true,   // (v51.41) the blade tufts (_swBuildGrass) - window.__grass for knobs, ?grass=0 to turn off
   scoreA: 0, scoreB: 0,
   currentRound: 1,
   // Wall opacity default ; can be overridden by saved settings.
@@ -39860,6 +39860,7 @@ const _swU = { uTime:{value:0}, uYMid:{value:0}, uAMP:{value:1}, uSnow:{value:0.
                // (v49.40) the baked sun shadow: RG16F (R = shadow depth above the baked ground, G = shadow-top
                // height), world xz -> uv, and K = (on, bias, soft width, -). window.__sunShadow = { on, bias, soft }.
                uSunTop:{value:null}, uSunTopBox:{value:new THREE.Vector4(0,0,0,0)}, uSunTopK:{value:new THREE.Vector4(0,2,36,0)},
+               uGrassField:{value:new THREE.Vector4(1,1,1,0)},   // (v51.49) the ground under the grass tufts takes their colour - see _swGrassK `field`
                // (v36.99) 1 = bent-sandwich mode: height bands read the
                // pre-bend height attribute (aFlatY) instead of world y.
                uBendFlat:{value:0},
@@ -40371,6 +40372,7 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
     // sun-facing term read (0,0,0) - dormant only because uRelief is not wired either (see lss.map.md).
     sh.uniforms.uSunDir=_swU.uSunDir;
     sh.uniforms.uSunTop=_swU.uSunTop; sh.uniforms.uSunTopBox=_swU.uSunTopBox; sh.uniforms.uSunTopK=_swU.uSunTopK;   // (v49.40)
+    sh.uniforms.uGrassField=_swU.uGrassField;   // (v51.49)
     sh.uniforms.uTexGrass=_swU.uTexGrass; sh.uniforms.uTexMud=_swU.uTexMud; sh.uniforms.uTexSand=_swU.uTexSand;   // (v49.27)
     sh.uniforms.uTexMeanG=_swU.uTexMeanG; sh.uniforms.uTexMeanM=_swU.uTexMeanM; sh.uniforms.uTexMeanS=_swU.uTexMeanS;
     sh.uniforms.uTexK=_swU.uTexK; sh.uniforms.uTexFade=_swU.uTexFade; sh.uniforms.uTexChroma=_swU.uTexChroma; sh.uniforms.uTexTaps=_swU.uTexTaps; sh.uniforms.uBeachAll=_swU.uBeachAll;
@@ -40527,7 +40529,7 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
       // attribute (reads 0) and uBendFlat stays 0 — byte-identical look.
       sh.vertexShader='attribute float aFlatY;\nuniform float uBendFlat;\nvarying float vWY; varying vec3 vWPos; varying vec3 vSN;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vWY=mix(position.y, aFlatY, uBendFlat); vWPos=position;\n vSN=vec3(0.0,1.0,0.0);');
     }
-    sh.fragmentShader=_SUNTOP_GLSL+'float _lssSunVis=1.0;\nvarying float vWY; varying vec3 vWPos; varying vec3 vSN;\nuniform float uTime,uYMid,uAMP,uSnow,uSnowVary,uSnowSlope,uLava,uSnowRough,uLavaGlow,uSlopeGrass,uSlopeRock,uCeil,uRocky,uGlitch,uGold,uCrystal,uMossy,uSmooth,uDetail,uAerial,uAerialStart,uAerialFar,uAO,uSat,uStrata,uRim,uPatchScale,uWaterY,uWaterOn,uRelief,uGrassD;\nuniform vec3 uColGrass,uColRock,uColSnow,uColMoss,uCam,uAerialColor,uPatchMix,uColDirt,uSunDir;\nuniform vec4 uVolc[4];\nuniform float uVolcH[4];\nuniform float uVolcN;\nuniform vec3 uArch,uArchSand; uniform float uArchRamp;\n'
+    sh.fragmentShader=_SUNTOP_GLSL+'float _lssSunVis=1.0;\nuniform vec4 uGrassField;\nvarying float vWY; varying vec3 vWPos; varying vec3 vSN;\nuniform float uTime,uYMid,uAMP,uSnow,uSnowVary,uSnowSlope,uLava,uSnowRough,uLavaGlow,uSlopeGrass,uSlopeRock,uCeil,uRocky,uGlitch,uGold,uCrystal,uMossy,uSmooth,uDetail,uAerial,uAerialStart,uAerialFar,uAO,uSat,uStrata,uRim,uPatchScale,uWaterY,uWaterOn,uRelief,uGrassD;\nuniform vec3 uColGrass,uColRock,uColSnow,uColMoss,uCam,uAerialColor,uPatchMix,uColDirt,uSunDir;\nuniform vec4 uVolc[4];\nuniform float uVolcH[4];\nuniform float uVolcN;\nuniform vec3 uArch,uArchSand; uniform float uArchRamp;\n'
       // (v49.27) the ground tiles: explicit-gradient taps (the calls sit inside per-pixel branches), a second tap
       // rotated and 3.7x larger mixed in by a slow noise so the repeat never lines up, the result a RATIO around
       // the tile's own mean - the zone palette still decides the colour; uTexChroma decides how much of the
@@ -40567,7 +40569,7 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
       // opposite ends of one field, rubble from its own so scree does not
       // always sit next to bare earth). Rubble is slope-biased: it collects on
       // the steeper grass near rock, the way scree actually does.
-      +' if(uMossy>0.5){\n float _sA=_tvn(vWPos.xz*0.0030*uPatchScale+vec2(21.0,9.0));\n float _sB=_tvn(vWPos.xz*0.0105*uPatchScale+vec2(3.0,17.0));\n float _sC=_tvn(vWPos.xz*0.0330*uPatchScale+vec2(9.0,2.0));\n float _sN=_sA*0.55+_sB*0.32+_sC*0.13;\n float _rN=_tvn(vWPos.xz*0.0062*uPatchScale+vec2(41.0,-13.0))*0.62+_tvn(vWPos.xz*0.0210*uPatchScale+vec2(7.0,29.0))*0.38;\n float _spk=clamp(0.5+0.5*_tvn(vWPos.xz*1.15),0.0,1.0);\n float _grit=clamp(0.5+0.5*_tvn(vWPos.xz*0.42+vec2(5.0,23.0)),0.0,1.0);\n float _mE=_mN*0.085*_mW;\n float _tkM=clamp(uTexK.y*_tF,0.0,1.0);\n float _dirtM=smoothstep(0.16-0.10*_tkM,0.46,_sN+_mE)*uPatchMix.x;\n float _ovgM=smoothstep(0.14,0.44,-_sN+_mE)*uPatchMix.z;\n float _rubM=smoothstep(0.20,0.52,_rN+_mE)*uPatchMix.y*(0.45+0.55*(1.0-fl));\n vec3 _dirtC=uColDirt*(1.55+1.45*_grit);\n if(_tkM>0.001) _dirtC=mix(_dirtC,uColDirt*2.275*_tDet(uTexMud,uTexMeanM,vWPos.xz,_tgx,_tgy,_tMix,1.0),_tkM);\n vec3 _rubC=uColRock*(0.70+1.05*_spk);\n vec3 _ovgC=mix(uColMoss,uColGrass,0.30)*(0.46+0.32*mott);\n grass=mix(grass,_ovgC,clamp(_ovgM,0.0,0.80));\n grass=mix(grass,_dirtC,clamp(_dirtM,0.0,0.90));\n grass=mix(grass,_rubC,clamp(_rubM,0.0,0.78));\n terr=mix(rock,grass,fl);\n }\n'
+      +' if(uMossy>0.5){\n float _sA=_tvn(vWPos.xz*0.0030*uPatchScale+vec2(21.0,9.0));\n float _sB=_tvn(vWPos.xz*0.0105*uPatchScale+vec2(3.0,17.0));\n float _sC=_tvn(vWPos.xz*0.0330*uPatchScale+vec2(9.0,2.0));\n float _sN=_sA*0.55+_sB*0.32+_sC*0.13;\n float _rN=_tvn(vWPos.xz*0.0062*uPatchScale+vec2(41.0,-13.0))*0.62+_tvn(vWPos.xz*0.0210*uPatchScale+vec2(7.0,29.0))*0.38;\n float _spk=clamp(0.5+0.5*_tvn(vWPos.xz*1.15),0.0,1.0);\n float _grit=clamp(0.5+0.5*_tvn(vWPos.xz*0.42+vec2(5.0,23.0)),0.0,1.0);\n float _mE=_mN*0.085*_mW;\n float _tkM=clamp(uTexK.y*_tF,0.0,1.0);\n float _dirtM=smoothstep(0.16-0.10*_tkM,0.46,_sN+_mE)*uPatchMix.x;\n float _ovgM=smoothstep(0.14,0.44,-_sN+_mE)*uPatchMix.z;\n float _rubM=smoothstep(0.20,0.52,_rN+_mE)*uPatchMix.y*(0.45+0.55*(1.0-fl));\n vec3 _dirtC=uColDirt*(1.55+1.45*_grit);\n if(_tkM>0.001) _dirtC=mix(_dirtC,uColDirt*2.275*_tDet(uTexMud,uTexMeanM,vWPos.xz,_tgx,_tgy,_tMix,1.0),_tkM);\n vec3 _rubC=uColRock*(0.70+1.05*_spk);\n vec3 _ovgC=mix(uColMoss,uColGrass,0.30)*(0.46+0.32*mott);\n grass*=mix(vec3(1.0),uGrassField.rgb,uGrassField.a*smoothstep(0.36,0.46,pc)*smoothstep(0.45,0.65,fl)*step(uWaterY+3.0,vWPos.y));\n grass=mix(grass,_ovgC,clamp(_ovgM,0.0,0.80));\n grass=mix(grass,_dirtC,clamp(_dirtM,0.0,0.90));\n grass=mix(grass,_rubC,clamp(_rubM,0.0,0.78));\n terr=mix(rock,grass,fl);\n }\n'
       +' if(_mW>0.001){\n  terr*=1.0+_mN*0.33*_mW;\n  terr*=1.0-clamp(-_mN,0.0,1.0)*0.26*_mW;\n  vec3 _mh=mix(vec3(0.84,0.95,0.88),vec3(1.16,1.05,0.66),clamp(0.5+0.5*_mN,0.0,1.0));\n  terr=mix(terr,terr*_mh,fl*_mW*0.75);\n }\n float th=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _sl=uSnow+_swSW*uSnowVary+(1.0-fl)*uSnowSlope;\n float snow=smoothstep(_sl,_sl+0.10+0.07*(1.0-fl),th);\n vec3 _snC=uColSnow; float _tkSn=clamp(uTexK4.x*_tF2*uTexBio2.x,0.0,1.0);\n if(_tkSn>0.001 && snow>0.001) _snC*=_tTri(uTexSnow,uTexMeanSn,vWPos,fn,_tgx3,_tgy3,uTexT4.x,_tkSn);\n terr=mix(terr,_snC,snow*max(fl,0.30));\n if(uTexBio2.z>0.001 && vWPos.y<uWaterY+2.0){ float _bdW=smoothstep(-2.0,14.0,uWaterY-vWPos.y)*max(fl,0.5)*clamp(uTexK4.z*_tF0*uTexBio2.z,0.0,1.0); if(_bdW>0.001){ vec3 _bed=uTexMeanBd*_tDet(uTexBed,uTexMeanBd,vWPos.xz,_tgx,_tgy,_tMix,1.0); terr=mix(terr,_bed,_bdW); } }\n if(uAO>0.001 && _mD<2200.0){ float _aoCav=mix(0.62,1.0,smoothstep(uSlopeRock,1.0,clamp(fn.y,0.0,1.0))); float _aoDet=mix(0.74,1.06,clamp(0.5+0.5*_detN(vWPos.xz),0.0,1.0)); _aoDet=mix(_aoDet,1.0,(1.0-fl)*_tkR); float _aoVal=mix(0.80,1.0,th); float _aoBlob=mix(0.86,1.04,_tpatch(vWPos.xz*0.6+vec2(17.0,5.0))); float _aoRaw=clamp(_aoCav*_aoDet*_aoVal*_aoBlob,0.45,1.08); float _aoFade=1.0-smoothstep(900.0,2200.0,length(uCam.xz-vWPos.xz)); float _ao=mix(1.0,_aoRaw,uAO*_aoFade*(1.0-snow*0.6)); terr*=_ao; }\n if(uRelief>0.001 && uCeil<0.5){ float _rD=length(uCam.xz-vWPos.xz); float _rW=(1.0-smoothstep(700.0,2400.0,_rD))*uRelief; if(_rW>0.001){ float _e2=9.0; float _c0=_detN(vWPos.xz); float _cx=_detN(vWPos.xz+vec2(_e2,0.0))+_detN(vWPos.xz-vec2(_e2,0.0)); float _cz=_detN(vWPos.xz+vec2(0.0,_e2))+_detN(vWPos.xz-vec2(0.0,_e2)); float _curv=(_cx+_cz)*0.25-_c0; float _cav=clamp(-_curv*9.0,0.0,1.0); float _ridge=clamp(_curv*7.0,0.0,1.0); vec2 _sg=vec2(_detN(vWPos.xz+vec2(_e2,0.0))-_c0,_detN(vWPos.xz+vec2(0.0,_e2))-_c0); float _sunFace=clamp(0.5-dot(normalize(_sg+vec2(1e-5)),normalize(uSunDir.xz+vec2(1e-5)))*0.5,0.0,1.0); float _shade=1.0-(_cav*(0.30+0.22*_sunFace))*_rW+_ridge*0.10*_rW; terr*=clamp(_shade,0.45,1.15); } }\n if(uMossy>0.5 && (uArch.z>1.0 || uBeachAll>0.001) && uWaterY>-1e8){ float _aD=length(vWPos.xz-uArch.xy); float _aw=max(uArch.z>1.0 ? 1.0-smoothstep(uArch.z-uArchRamp,uArch.z+600.0,_aD) : 0.0, uBeachAll); if(_aw>0.001){ float _bh=vWPos.y-uWaterY; float _bn=_tvn(vWPos.xz*0.031)*7.0; float _beach=(1.0-smoothstep(12.0+_bn,38.0+_bn,_bh))*smoothstep(-60.0,-4.0,_bh); vec3 _sand=uArchSand*(0.84+0.28*clamp(0.5+0.5*_tvn(vWPos.xz*0.085),0.0,1.0)); float _tkS=clamp(uTexK.z*_tF,0.0,1.0); if(_tkS>0.001) _sand=mix(_sand,uArchSand*_tDet(uTexSand,uTexMeanS,vWPos.xz,_tgx,_tgy,_tMix,1.0),_tkS); terr=mix(terr,_sand,_beach*_aw*max(fl,0.35)); } }\n if(uAerial>0.001){ float _camD=length(uCam.xz-vWPos.xz); float _ap=smoothstep(uAerialStart,uAerialFar,_camD)*uAerial; _ap*=(1.0-clamp((vWY-(uYMid-uAMP*0.2))/(uAMP*1.4),0.0,1.0)*0.55); terr=mix(terr,uAerialColor,clamp(_ap,0.0,0.85)); }\n  if(uWaterOn>0.001 && vWPos.y<uWaterY){ float _cdp=uWaterY-vWPos.y; float _cf=(1.0-smoothstep(80.0,1100.0,_cdp))*smoothstep(0.0,30.0,_cdp)*uWaterOn; vec2 _cq=vWPos.xz*0.021; float _c1=sin(_cq.x*2.3+_cq.y*1.1+uTime*1.35)*sin(_cq.y*1.9-_cq.x*1.3-uTime*1.05); float _c2=sin((_cq.x+_cq.y)*1.45+uTime*0.85)*sin((_cq.x-_cq.y*0.7)*1.7-uTime*0.65); float _cc=pow(clamp(0.5+0.5*(_c1*0.6+_c2*0.4),0.0,1.0),3.5); terr*=1.0+_cf*_cc*1.15*clamp(fn.y,0.0,1.0); }\n diffuseColor.rgb=terr;\n }\n if(uCeil>0.5){ float _cm1=_tvn(vWPos.xz*0.045+vec2(vWPos.y*0.03));\n float _cm2=_tvn(vWPos.xz*0.12+vec2(13.0,7.0));\n float _cmott=clamp(0.5+0.5*(_cm1*0.6+_cm2*0.4),0.0,1.0);\n float _cstr=0.5+0.5*sin(vWPos.y*0.05+_tvn(vWPos.xz*0.025)*3.0);\n vec3 _cgx3=dFdx(vWPos),_cgy3=dFdy(vWPos);\n float _tkRC=clamp(uTexK2.x*uTexBio.w*(1.0-smoothstep(uTexK3.y,uTexK3.z,length(uCam.xz-vWPos.xz))),0.0,1.0);\n diffuseColor.rgb*=(0.80+0.36*mix(_cmott,0.5,_tkRC*0.85))*(1.0-uStrata*0.57+uStrata*_cstr);\n if(_tkRC>0.001) diffuseColor.rgb*=_tTri(uTexRock,uTexMeanR,vWPos,normalize(cross(_cgx3,_cgy3)),_cgx3,_cgy3,uTexK2.w,_tkRC);\n if(uAO>0.001){ vec3 _cn2=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n float _cao=mix(0.68,1.0,smoothstep(0.0,0.85,abs(_cn2.y)));\n float _caoD=mix(0.80,1.05,clamp(0.5+0.5*_detN(vWPos.xz),0.0,1.0));\n diffuseColor.rgb*=mix(1.0,clamp(_cao*_caoD,0.5,1.05),uAO); }\n if(uAerial>0.001){ float _cad=length(uCam.xz-vWPos.xz);\n float _cap=smoothstep(uAerialStart,uAerialFar,_cad)*uAerial;\n diffuseColor.rgb=mix(diffuseColor.rgb,uAerialColor,clamp(_cap,0.0,0.85)); }\n }\n if(uRim>0.001){ vec3 _rn=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n vec3 _rv=normalize(uCam-vWPos);\n float _rf=pow(1.0-abs(dot(_rn,_rv)),3.0);\n diffuseColor.rgb=mix(diffuseColor.rgb,uAerialColor*1.25,_rf*uRim); }\n if(uGlitch>0.5 && uCeil>0.5){ float zone=_tpatch(vWPos.xz+vec2(uTime*2.5,0.0)); vec2 gid=floor(vWPos.xz/240.0); float r=_thsh(gid+floor(uTime*0.8)); float r2=_thsh(gid*1.93+floor(uTime*1.5)); if(zone>0.62 && r>0.45) discard; if(zone>0.5){ if(r2>0.55) diffuseColor.rgb=diffuseColor.rgb.gbr; diffuseColor.rgb*=mix(0.75,1.25,r2); } }');
     sh.fragmentShader=sh.fragmentShader.replace('#include <roughnessmap_fragment>',
       '#include <roughnessmap_fragment>\n float _tr=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _rsl=uSnow+_swSW*uSnowVary;\n float _snow=smoothstep(_rsl,_rsl+0.12,_tr);\n roughnessFactor=mix(roughnessFactor,uSnowRough,_snow);');
@@ -40675,8 +40677,720 @@ function _swGrassMatGet(){ if(_swGrassMat)return _swGrassMat;
     sh.vertexShader='uniform float uTime,uFadeA,uFadeB;\nuniform vec3 uCam;\n'+sh.vertexShader.replace('#include <begin_vertex>',
       '#include <begin_vertex>\n vec3 ip=vec3(instanceMatrix[3][0],instanceMatrix[3][1],instanceMatrix[3][2]);\n float wOff=sin(ip.x*0.0032+1.7)*2.0+sin(ip.z*0.0036-0.6)*2.0;\n float sway=0.16*sin(uTime*1.7+wOff)*cos(uTime*2.38+wOff);\n transformed.x+=sway*transformed.y;\n transformed.z+=sway*0.45*transformed.y;\n float gfade=1.0-smoothstep(uFadeA,uFadeB,distance(ip.xz,uCam.xz));\n transformed.y*=gfade;\n transformed.x*=mix(0.35,1.0,gfade);'); };
   _swGrassMat=m; return m; }
-function _swBuildGrass(x0,z0,T){
-  if(game.sandwichGrass===false || ((T.biome||'grassy')!=='grassy' && T.biome!=='mossy')) return null;   
+// ═══ (v51.41) GRASS: BLADE TUFTS BLOWING IN THE WIND ═══════════════════════════════════════════════════════════
+// Owner, after the ribbon trees: "can we get grassy areas to run like that too... same LOD system, culling, tiling,
+// wind, and tweak the overall density to get this balance between individual blade detail and performance" /
+// "right now grassy areas are just textured floor... i was thinking grass blades blowing in the wind".
+// The ribbon trees' recipe at grass scale. The old grass (v33, below as _swBuildGrassBlades, off since the v36 perf
+// pass) was ONE flat-colour blade per instance, 8 tris each - fields cost ~100k instances for little coverage. A
+// TUFT here is 5 bent cut-out cards (20 tris) from a painted BLADE ATLAS (_swGrassAtlasGet: ~40 individual tapered,
+// curved blades a card, lit from the base up), so one instance draws ~200 blades.
+//   - Tiling + culling: per chunk on its own lifecycle (c.grass, planted inside __grass.view chunks), <= 2
+//     InstancedMeshes a chunk (short / tall tuft), frustum culled per chunk, and _swTreeVisTick hides a chunk's
+//     grass whose nearest corner is past fadeB (`userData._grassB`). No shadows cast (receive yes - the mushrooms'
+//     and shore plants' rule).
+//   - "LOD" = the trees' rule: NOTHING swaps with distance. Each tuft shrinks into the ground at its own hashed
+//     distance between fadeA and fadeB (see GRASS MODE in _swFoliageMat), so the field thins smoothly instead of
+//     ending at a ring.
+//   - Wind: the foliage shader in grass mode - flutter + a rolling gust wave across the field + the rustle spring.
+//   - Colour: the atlas is painted near-white; a tuft is tinted by the terrain's OWN live grass / moss colours
+//     (uColGrass / uColMoss - the zone tick moves them) mixed by the same _stPatch the ground shader mixes by,
+//     so the grass is the ground's colour standing up, in every zone. instanceColor carries (mix, brightness).
+//   - Heights come from _swDrapeY (the clipmap's rendered L0 surface, a table lookup) so tufts neither float nor
+//     sink, and the build costs a few hundred field samples a chunk, not one per tuft.
+//   - window.__grass = { on, style ('tufts' | 'blades'), density, height, fadeA, fadeB, band, view, sway, lean,
+//     waveLen, waveSpeed, windDir (radians), tint } - on / style / density / height / view apply to chunks
+//     planted after the change (__grassRebuild() replants), the rest are live. ?grass=0 turns it off.
+function _swGrassK() {
+  const K = (typeof window !== 'undefined' && window.__grass) || {};
+  const o = _swGrassK.o || (_swGrassK.o = {});
+  if (_swGrassK.url === undefined) {
+    _swGrassK.url = null;
+    try { const q = new URLSearchParams(location.search).get('grass'); if (q != null) _swGrassK.url = q; } catch (_) {}
+  }
+  const n = (k, d) => (K[k] != null && isFinite(+K[k])) ? +K[k] : d;
+  // (v51.44-46) SHELL TEXTURING WAS TRIED AND REJECTED: 8-12 transparent, alpha-cut copies of the ground on the clipmap's
+  // L0 lattice (one instanced draw a 1024 u tile, a layer per instance), first as the far field the tufts dissolved
+  // into, then as the whole field with a per-layer sway. Owner: "it didn't feel like it did anything", then "no i don't
+  // like it... get rid of it, back to the blades... we need to figure out how to make them blend better so we don't
+  // notice the pop in". The code is gone (backups/index-working_v51.46_*); the lesson is in lss.map.md.
+  o.on = K.on != null ? K.on !== false : !(_swGrassK.url === '0' || _swGrassK.url === 'off');
+  o.style = K.style || ((_swGrassK.url === 'blades') ? 'blades' : 'tufts');
+  // planting (chunks planted after a change; __grassRebuild() replants)
+  // (v51.43) owner on v51.42: "the grass is dense in clumps... and the clumps are sparsely separated... no clumps,
+  // more evenly distributed, slightly wider blades, triple the height". Planting is now an EVEN jittered grid
+  // (`spacing` apart) wherever the ground grows grass, not anchors with a random handful each.
+  o.density = n('density', 1);     // tufts per area (spacing / sqrt(density))
+  o.spacing = n('spacing', 12);    // world units between tufts on the jittered grid
+  o.height = n('height', 1);       // instance scale (uniform - use cardH for height alone)
+  o.tall = n('tall', 0.5);         // share of TALL tufts (the rest short)
+  o.plantMargin = n('plantMargin', 1300);   // (v51.54) chunks are planted within fadeB + this (nearest point), dropped past it + 450
+  o.view = Math.max(1, Math.min(5, Math.round(n('view', 4))));   // (v51.54: SUPERSEDED by plantMargin - kept for old knob strings) (v51.50: 4; v51.48: 3; v51.47: back to 2 -
+                                   // a ring of 1 left a fast ship inside fadeB of a chunk not planted yet = tufts appearing whole)
+  // ⭐⭐ (v51.45) DETAIL FADE, NEVER A SIZE CHANGE. Owner on v51.42-44: "it still feels like the grass is warping in
+  // in front of me and disappearing behind me... it shouldn't be doing that, it should be fading in and out of detail
+  // from solid to detailed". v51.42's subtractive LOD (reverted here) did it with GEOMETRY: past fadeA tufts shrank
+  // out at hashed ranks and the survivors widened by keep^-0.6 to hold the coverage - so every tuft in a 1300 u band
+  // changed size as the ship moved, which IS the warp. A tuft now never changes size: its BLADES dissolve. Every
+  // blade in the atlas carries a random rank (a second canvas, the atlas's `rank` texture; front blades rank lower
+  // and stay longest) and a blade draws while its rank is under the tuft's detail level - 1 inside fadeA, 0 at
+  // fadeB, each tuft's band shifted by up to +-jitter/2 (hashed from its position) so there is no ring. The rank
+  // texture's background is 1, so a blade's filtered EDGE goes before its core: blades thin, then go. (v51.45 had a
+  // shell mass filling in behind them; since v51.47 they dissolve into ground of their own colour - see `match`.)
+  // ⭐⭐ (v51.48) THE CIRCLE ROUND THE SHIP. Owner on v51.47: "i see the blades loading in a circle around my ship".
+  // Seen at 640 u up: the band was measured as HORIZONTAL distance from the ship (the trees' convention,
+  // distance(ip.xz, uCam.xz)), so everything under a high ship counted as near - a full-detail disc ~900 u across with
+  // a hard edge, read from above. Now it is the 3D distance (the ship's uCam carries its height): at altitude the whole
+  // field below is equally far and thins evenly, and the detail grows in everywhere as you come down. And the band is
+  // LONG: the trees go between 5.6 and 8.2 km (33-57 % into the fog, a tree a few pixels high) and the shore plants at
+  // 1.8-2.6 km, but v51.47's grass went from full to gone in 450 u - a line the eye follows. Now blades start leaving
+  // at 300 u and the last goes at ~2600 (2400 + jitter / 2): the field thins too gradually to have an edge.
+  // (v51.50) owner: "it needs to go further out" - full detail to ~900, the last blade at ~3900 (fadeB + jitter / 2).
+  // Affordable because a tuft past its own end is now collapsed in the vertex shader (never rasterised), its ground
+  // colour is one texture read (_GRM) instead of ~16 noise evaluations a VERTEX, and far chunks skip the shadow map.
+  // ⭐⭐⭐ (v51.56) THE TREES' WAY. Owner on v51.55: "still popping" -> "why don't the trees pop in like this? they work
+  // fine". Because a tree never arrives: the trees' fade is ONE uniform shrink toward the base (transformed *= fade)
+  // over 5.6 -> 8.2 km, every tree alike, in the haze. Since v51.45 every tuft had its own moment (a rank, then an
+  // arrival) - and however well its colour matched, a 60 u silhouette arriving in one frame is a pop. TREE mode (the
+  // default): every tuft present and fully shaded out to fadeA, then the whole field shrinks toward its bases into
+  // ground of its own colour by fadeB. It draws every tuft out to fadeB (the rank trim cannot drop a tuft that is still
+  // visible), so the band sits nearer than the rank mode's did. mode: 'rank' brings back v51.51-55 for an A/B.
+  o.mode = (K.mode === 'rank') ? 'rank' : 'tree';
+  o.fadeA = n('fadeA', o.mode === 'tree' ? 1800 : 900);   // full size (tree) / every tuft present (rank) inside this...
+  o.fadeB = n('fadeB', o.mode === 'tree' ? 3400 : 3900);  // ...shrunk to nothing (tree) / the last tuft gone (rank) here
+  // ⭐⭐⭐ (v51.50) SOLID -> DETAILED, NOT ABSENT -> PRESENT. Owner: "things looks dumb when they pop into existence, and
+  // that's still what's happening... the transition is not good" (and, v51.44: "it should be fading in and out of
+  // detail from solid to detailed"). The rank dissolve (v51.45) made each BLADE binary - absent until its rank came up,
+  // then there in full light and shade: the field still popped, one blade at a time. Now a blade arrives as the
+  // GROUND's flat colour (vGC: no atlas shade, no row shade, no brightness jitter - and the ground under the grass has
+  // that colour, see `field`), invisible against it, and its own light and shade fade in over detailW of the detail
+  // level after its rank comes up. Nothing goes from absent to visible; it goes from solid to detailed.
+  o.detailW = n('detailW', 0.22);  // detail-level span over which an arrived tuft's own shading fades in
+  // ⭐⭐⭐ (v51.51) PER TUFT, NOT PER PIXEL - AND IT DECIDES THE DRAW COUNT. Owner on v51.50: "it's getting better... but i
+  // can still see it popping in, especially from higher altitudes". From high up the whole visible field is inside the
+  // band and its blades are a texel or less: v51.49's point-sampled rank mips gave every PIXEL its own draw, and as the
+  // camera moved which pixels passed flipped frame to frame - a sparkle over the field. Now each TUFT has one rank
+  // (planting RNG, deterministic per chunk, carried in instanceColor.x): it is present while the detail level at its
+  // own distance is above its rank, arriving as the flat ground colour and taking its own shading over detailW (vGD).
+  // One decision per tuft per frame cannot sparkle. And because a chunk's instances are SORTED by rank, the chunk gate
+  // sets each mesh's draw count to the prefix whose ranks are under the detail level at the chunk's NEAREST point - the
+  // most any tuft in it can have - so a far chunk submits a handful of tufts, not all of them. MEASURED on v51.50 before
+  // this: the grass was 4.5 ms of GPU (p90 6.4) with 205 k tufts in view, the governor at its floor (s-0.60, 98 fps).
+  // (v51.52) CALIBRATED, owner: "very close... just got to match the colors a little better and the popping in might
+  // not be noticeable". MEASURED in the owner's view (1,607 u up, the frame rendered off-screen with the grass hidden /
+  // forced flat / forced black for coverage): at 1.0 a just-arrived tuft read R 0.89 G 0.83 B 0.96 of the ground behind
+  // it; at (1.30, 1.40, 1.12) it read 0.93..1.01 across the near / mid / far bands; these close the far band (where
+  // tufts ARRIVE) a little further. Re-measure with the same harness after any ground-colour change.
+  // ⭐⭐ (v51.53) ...BUT TO THE DETAILED TUFT, NOT TO THE GROUND. Owner on v51.52: "patches of changing colors... it's
+  // like the grass is changing colors as i drive". MEASURED (same harness, 738 u up, every present tuft forced flat vs
+  // forced fully detailed): flat / detailed = (1.085, 1.157, 1.108) in the mid band and (1.088, 1.156, 1.098) in the far
+  // one - consistent - so every tuft brightened-then-darkened through its arrival as the ship came on: a colour change
+  // riding the ship. The arrival must be colour-NEUTRAL; the ground is matched to the tufts instead (`field`).
+  // (v51.55) re-measured at 164 u up on v51.54: flat / detailed = (1.02, 1.03, 1.10) -> these (within ~2 % on all three)
+  o.flatR = n('flatR', 1.19);      // the flat (just-arrived) colour x this, per channel - match it to the DETAILED tuft
+  o.flatG = n('flatG', 1.17);
+  o.flatB = n('flatB', 0.95);
+  o.shadowR = n('shadowR', 2200);  // grass chunks further than this (3D) skip the shadow map (receiveShadow is a uniform: free to flip)
+  // ⭐⭐⭐ (v51.47) THE TUFT IS THE GROUND'S COLOUR. Why the dissolve still read as "pop in": a tuft was
+  // mix(moss, grass) x the atlas, but the ground under it is that mix PLUS the terrain shader's mottle, moss
+  // blend, the overworld's desaturation (uSat 0.40: 34 % toward grey), dry and dirt washes, its AO and the baked
+  // mountain shadow - so every tuft was a different colour and brightness from the ground it dissolved into, and the
+  // eye caught each one leaving. Now the tuft's vertex shader runs THAT pipeline (_GRASS_GROUND_GLSL - the same noise
+  // functions and constants, evaluated once at the tuft's base) and the atlas only carries the blades' light and
+  // shade around 1 (`match` x the atlas's own measured mean, so a tuft AVERAGES to the ground under it). Dissolving
+  // a blade then reveals ground of the colour that blade already was. Bare patches (the overworld's dirt and rubble
+  // overlays) grow no grass: tufts there scale to nothing - by position, so it never changes as you fly.
+  o.match = n('match', 1.0);       // tuft brightness over the ground's (1 = the atlas mean exactly; v51.48 0.9 -> 1.0)
+  // ⭐⭐⭐ (v51.49) ...AND THEN THE OTHER WAY ROUND. Owner, as v51.48's circle was being measured: "no near grass is the
+  // right color". MEASURED (the owner's view, the frame rendered twice off-screen, grass hidden / shown, linear):
+  // grass changed its pixels by R x1.14, G x1.45, B x1.02 within ~600 u - the tufts are a much greener, brighter
+  // thing than the ground they stand on, whatever v51.47's port says the ground is - and ~0.8x past 1200 u, where the
+  // terrain hazes (uAerial) and the tufts did not. The near grass is the LOOK, so the GROUND now moves to it: where
+  // grass grows (the planting's own patch ramp 0.36..0.46 and slope, not under water; the dirt / rubble overlays still
+  // win) the terrain's grass colour is multiplied by `field` (uGrassField, in _swPatchTerrainMat's mossy block). The
+  // tufts keep their colour; past the last blade the field is the same green. The tufts also haze now, exactly as the
+  // terrain does. Re-measure with the same off-screen A/B (grass hidden vs shown): the ratio should sit near 1.
+  o.fieldR = n('fieldR', 1.13);    // the ground's grass colour x this where tufts grow (v51.53: re-measured, mid band:
+  o.fieldG = n('fieldG', 1.37);    //   detailed / ground = 0.956, 0.886, 0.905 at 1.18 / 1.55 / 1.02)
+  o.fieldB = n('fieldB', 0.83);   // (v51.55) the ground read ~10 % bluer than the tufts on it (164 u up, near + mid bands)
+  o.fieldAmt = n('fieldAmt', 1.0); // 0 = the ground as it was
+  o.cover = n('cover', 0.35);      // the cut-out's coverage hold per mip level (higher = more solid far away)
+  // wind (live)
+  o.sway = n('sway', 0.03);        // flutter per unit of height
+  o.lean = n('lean', 0.18);        // the gust wave's lean at the tip, per unit of tuft height (v51.43: 0.32 -> 0.18 for 3x taller tufts)
+  o.waveLen = n('waveLen', 300);   // world units between gust fronts
+  o.waveSpeed = n('waveSpeed', 1.5); // rad/s (fronts travel waveLen * waveSpeed / 2pi u/s)
+  o.windDir = n('windDir', 0.7);   // radians, world XZ
+  o.tint = n('tint', 1.0);
+  // the look of a tuft (__grassRegen() repaints / rebuilds in place)
+  o.bladesShort = n('bladesShort', 90);
+  o.bladesTall = n('bladesTall', 70);
+  o.bladeW = n('bladeW', 0.78);    // (v51.43) relative to the (now 1.8x wider) card: ~1.4x the v51.42 blade in world units
+  o.bladeLen = n('bladeLen', 1);
+  o.cross = n('cross', 0.5);       // radians of lean either way - the criss-cross
+  o.droop = n('droop', 1);
+  o.tipWarm = n('tipWarm', 0.5);   // straw-yellow at the tips
+  o.wisps = n('wisps', 16);
+  o.seeds = n('seeds', 0.35);
+  o.cards = n('cards', 3);
+  o.leanCards = n('leanCards', 2);
+  o.cardW = n('cardW', 1);
+  o.cardH = n('cardH', 1);
+  return o;
+}
+function _swGrassAtlasGet() {
+  const S = _swGrassAtlasGet;
+  if (S.a) return S.a;
+  const small = (typeof _fxSmallDevice === 'function' && _fxSmallDevice());
+  // (v51.43) each cell is C wide x 2C tall (the tufts are 3x taller and ~1.8x wider than v51.42's): close to the
+  // cards' own aspect, so a painted lean stays a lean on the card instead of being stretched upright
+  const C = small ? 128 : 256, W = C * 2, H = C * 2;
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  // ⭐ (v51.52) a DataTexture, not a CanvasTexture: a canvas stores premultiplied alpha, so every transparent texel
+  // between the blades is (0,0,0,0) and the mips averaged blade colour with BLACK - a far tuft (and a half-detailed one
+  // in the band) measured 12-17 % darker than a near one. _swGrassAtlasUpload bleeds each cell's mean blade colour into
+  // the transparent texels (alpha stays 0) before the GPU builds the mips. Same layout: row 0 = v 0.
+  const tex = new THREE.DataTexture(new Uint8Array(W * H * 4), W, H, THREE.RGBAFormat, THREE.UnsignedByteType);
+  tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = small ? 2 : 4;
+  tex.generateMipmaps = true; tex.minFilter = THREE.LinearMipmapLinearFilter; tex.magFilter = THREE.LinearFilter;
+  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping; tex.flipY = false;
+  const cells = { short: [0, 0], tall: [1, 0] };
+  const m = 0.01;
+  const uv = (name) => { const c = cells[name]; return { u0: (c[0] + m) / 2, u1: (c[0] + 1 - m) / 2, vT: m, vB: 1 - m }; };
+  // (v51.45) the blades' dissolve ranks, same layout (data, not colour): see the detail fade in _swGrassK. Painted on
+  // a canvas, uploaded as a DataTexture with hand-built mips by _swGrassRankBuild (v51.49).
+  // (v51.51) retired with the per-blade dissolve - rankCanvas null skips its painting and _swGrassRankBuild
+  S.a = { tex: tex, canvas: cv, rank: null, rankCanvas: null, C: C, W: W, H: H, cells: cells, uv: uv };
+  _swGrassAtlasPaint(S.a);
+  return S.a;
+}
+function _swGrassAtlasPaint(A) {
+  // (v51.41b) Owner's reference: a dense field of LONG, THIN blades leaning every which way, crossing each other,
+  // dark green at the base and light yellow-green at the tips, with fine wispy stems laced through. So: many thin
+  // blades a card, each leaning (+-cross radians, fanned so it stays inside its cell) and BOWED toward its lean;
+  // back blades darker (the tuft's own shade); tips warmed toward straw (tipWarm) - the atlas is a luminance /
+  // warmth code, the hue comes from the terrain's grass colour in the shader. Knobs in __grass, __grassRegen()
+  // repaints in place.
+  const K = _swGrassK(), g = A.canvas.getContext('2d'), C = A.C;
+  g.clearRect(0, 0, A.W, A.H);
+  let s = 51 >>> 0;
+  const R = () => { s = s + 0x6D2B79F5 | 0; let t = Math.imul(s ^ s >>> 15, 1 | s); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+  // (v51.45) the rank canvas: every shape painted again in one flat grey = its dissolve rank, on a background of 1
+  // (white) so filtered edges rank HIGH and go first. Its own RNG, so the colour atlas is exactly what it was.
+  const rg = A.rankCanvas ? A.rankCanvas.getContext('2d') : null;
+  let s2 = 97 >>> 0;
+  const R2 = () => { s2 = s2 + 0x6D2B79F5 | 0; let t = Math.imul(s2 ^ s2 >>> 15, 1 | s2); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+  // (v51.49) the background is uniform NOISE, not 1: from a distance the atlas's mips blur blades over the gaps and
+  // the cut-out keeps those pixels, so a pixel's rank must be a fair random draw wherever the cut-out can land. With a
+  // background of 1 they were all discarded at once; with box-filtered mips every far pixel averaged to ~0.8 and the
+  // whole far field left together at vGF 0.8 (~900 u) - the v51.48 edge. See _swGrassRankBuild for the mips.
+  if (rg) {
+    const id = rg.createImageData(A.W, A.H), dd = id.data;
+    for (let i = 0; i < A.W * A.H; i++) { const q = Math.round(255 * (0.02 + 0.95 * R2())); dd[i * 4] = dd[i * 4 + 1] = dd[i * 4 + 2] = q; dd[i * 4 + 3] = 255; }
+    rg.putImageData(id, 0, 0);
+  }
+  const rk = (v) => { const q = Math.round(255 * Math.max(0.02, Math.min(0.97, v))); return 'rgb(' + q + ',' + q + ',' + q + ')'; };
+  const cl = (v) => Math.max(0, Math.min(255, Math.round(v)));
+  const rgb = (r, gg, b) => 'rgb(' + cl(r) + ',' + cl(gg) + ',' + cl(b) + ')';
+  for (const name of ['short', 'tall']) {
+    const Hc = A.H, x0 = A.cells[name][0] * C, xL = x0 + C * 0.015, xR = x0 + C * 0.985, base = Hc * 0.995, tall = name === 'tall';
+    const n = Math.max(4, Math.round((tall ? K.bladesTall : K.bladesShort)));
+    for (let i = 0; i < n; i++) {
+      const depth = i / (n - 1);   // painted back to front
+      const x = x0 + C * (0.05 + R() * 0.90);
+      const len = Hc * (tall ? 0.70 + R() * 0.29 : 0.42 + R() * 0.50) * K.bladeLen;
+      let w = C * (0.0045 + R() * 0.0065) * K.bladeW;
+      if (R() < 0.12) w *= 2.0;   // the odd broad leaf among the fine blades
+      // lean: random either way, fanned away from the cell's middle; flipped back if the tip would leave the cell
+      let ang = (R() - 0.5) * 2 * K.cross - ((x - (x0 + C * 0.5)) / C) * 0.5;
+      let tx = x + Math.sin(ang) * len;
+      if (tx < xL || tx > xR) { ang = -ang * 0.6; tx = x + Math.sin(ang) * len; }
+      tx = Math.max(xL, Math.min(xR, tx));
+      const ty = Math.max(Hc * 0.003, base - Math.cos(ang) * len);
+      // bow toward the lean (a blade arcs), plus a little random wobble
+      const bow = (Math.sign(ang) * (0.10 + R() * 0.12) * K.droop + (R() - 0.5) * 0.08) * len;
+      const mx = (x + tx) * 0.5 + bow, my = (base + ty) * 0.5 + Math.abs(bow) * 0.25;
+      const lo = 74 + 48 * depth, hi = 176 + 79 * depth;   // (v51.48: 42 / 168 - the dark bases made the field read darker than the ground)
+      const dry = R() < 0.14;
+      const wm = Math.min(1, K.tipWarm * (dry ? 1.6 : Math.pow(R(), 0.7)));
+      const grd = g.createLinearGradient(x, base, tx, ty);
+      grd.addColorStop(0, rgb(lo, lo * 1.02, lo * 0.9));
+      grd.addColorStop(0.45, rgb((lo + hi) * 0.5, (lo + hi) * 0.5, (lo + hi) * 0.5 * (1 - 0.25 * wm)));
+      grd.addColorStop(1, rgb(hi * (dry ? 1.05 : 1), hi * (1 - 0.04 * wm), hi * (1 - 0.62 * wm)));
+      const bladePath = (c2) => { c2.beginPath(); c2.moveTo(x - w, base); c2.quadraticCurveTo(mx - w * 0.6, my, tx, ty); c2.quadraticCurveTo(mx + w * 0.6, my, x + w, base); };
+      g.fillStyle = grd; bladePath(g); g.fill();
+      if (rg) { rg.fillStyle = rk(0.55 * R2() + 0.42 * (1 - depth)); bladePath(rg); rg.fill(); }   // front blades rank low = stay longest
+      // midrib highlight: what makes a blade read as a blade, not a sliver
+      if (w > C * 0.004) {
+        g.strokeStyle = 'rgba(255,255,240,' + (0.08 + 0.14 * depth).toFixed(2) + ')'; g.lineWidth = Math.max(0.5, w * 0.4);
+        g.beginPath(); g.moveTo(x, base - len * 0.04); g.quadraticCurveTo(mx, my, x + (tx - x) * 0.94, base + (ty - base) * 0.94); g.stroke();
+      }
+    }
+    // the fine wispy stems laced through the reference field: hairlines at steep crossing angles, a few with grain
+    const nw = Math.max(0, Math.round(tall ? K.wisps : K.wisps * 0.5));
+    for (let i = 0; i < nw; i++) {
+      const x = x0 + C * (0.08 + R() * 0.84), len = Hc * (0.55 + R() * 0.43) * K.bladeLen;
+      const ang = (R() - 0.5) * 2 * (K.cross + 0.25);
+      const tx = Math.max(xL, Math.min(xR, x + Math.sin(ang) * len)), ty = Math.max(Hc * 0.003, base - Math.cos(ang) * len);
+      const L = 150 + R() * 90;
+      const qx = (x + tx) * 0.5 + (R() - 0.5) * C * 0.08, wr = 0.30 + 0.67 * R2();   // wisps are fine detail: they go early
+      g.strokeStyle = rgb(L, L * 0.98, L * (1 - 0.45 * K.tipWarm)); g.lineWidth = Math.max(0.6, C * 0.0035);
+      g.beginPath(); g.moveTo(x, base); g.quadraticCurveTo(qx, (base + ty) * 0.5, tx, ty); g.stroke();
+      if (rg) { rg.strokeStyle = rk(wr); rg.lineWidth = g.lineWidth; rg.beginPath(); rg.moveTo(x, base); rg.quadraticCurveTo(qx, (base + ty) * 0.5, tx, ty); rg.stroke(); }
+      if (tall && R() < K.seeds) {   // a seed head: a short run of grains at the tip
+        g.fillStyle = rgb(L + 30, L + 22, L * 0.8);
+        if (rg) rg.fillStyle = rk(wr);
+        const ux = (tx - x) / len, uy = (ty - base) / len;
+        for (let k = 0; k < 6; k++) {
+          const f = 1 - k * 0.035, ex = x + (tx - x) * f, ey = base + (ty - base) * f, ea = Math.atan2(uy, ux) + Math.PI / 2;
+          g.beginPath(); g.ellipse(ex, ey, C * 0.006, C * 0.014, ea, 0, Math.PI * 2); g.fill();
+          if (rg) { rg.beginPath(); rg.ellipse(ex, ey, C * 0.006, C * 0.014, ea, 0, Math.PI * 2); rg.fill(); }
+        }
+      }
+    }
+  }
+  _swGrassAtlasUpload(A);   // (v51.52) canvas -> DataTexture with the colour bleed
+  if (A.rankCanvas) _swGrassRankBuild(A);
+  // (v51.47) the blades' mean LINEAR luminance over covered texels, times the cards' vertex row shade (0.55 base ->
+  // 0.85 -> 1.0 tip) - what a tuft averages to before the ground colour multiplies in. `match` divides by it.
+  try {
+    const d = g.getImageData(0, 0, A.W, A.H).data, lin = (v) => { v /= 255; return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+    let sum = 0, wsum = 0;
+    for (let py = 0; py < A.H; py += 2) {
+      const tu = 1 - py / A.H, rowF = tu < 0.5 ? 0.70 + 0.18 * (tu * 2) : 0.88 + 0.12 * ((tu - 0.5) * 2);   // the cards' vertex rows (v51.48)
+      for (let px = 0; px < A.W; px += 2) {
+        const o = (py * A.W + px) * 4, al = d[o + 3] / 255;
+        if (al < 0.5) continue;
+        sum += (0.2126 * lin(d[o]) + 0.7152 * lin(d[o + 1]) + 0.0722 * lin(d[o + 2])) * rowF; wsum++;
+      }
+    }
+    A.mean = wsum ? sum / wsum : 0.4;
+  } catch (_) { A.mean = 0.4; }
+}
+// (v51.47) the terrain's GRASS COLOUR, ported for the tufts' vertex stage - see `match` in _swGrassK. Mirrors the
+// terrain fragment shader's grass branch (_swPatchTerrainMat: the mossy patch mix, mottle, moss blend, uSat
+// desaturation + dry / dirt washes, the mossy dirt / overgrowth / rubble overlays, the AO), minus what only exists
+// near the eye or on steep ground (moss strokes, relief, the ground tiles' ratio around their own mean). Keep the
+// two in step: a change to the ground's grass colour there wants the same change here. Pure ASCII (GLSL ES).
+const _GRASS_GROUND_GLSL = `
+uniform vec3 uColGrass, uColMoss, uPatchMix;
+uniform float uSat, uAO, uPatchScale, uYMid, uAMP, uSlopeRock;
+float _thsh(vec2 p){return fract(sin(p.x*127.1+p.y*311.7)*43758.5453);}
+float _tvn(vec2 p){vec2 i=floor(p),f=fract(p);vec2 u=f*f*(3.0-2.0*f);float a=_thsh(i),b=_thsh(i+vec2(1.0,0.0)),c=_thsh(i+vec2(0.0,1.0)),d=_thsh(i+vec2(1.0,1.0));return mix(mix(a,b,u.x),mix(c,d,u.x),u.y)*2.0-1.0;}
+float _tpatch(vec2 p){float n=_tvn(p*0.0016+vec2(5.1,-2.3))*0.62+_tvn(p*0.0041+vec2(11.0,7.0))*0.38;return clamp((n+1.0)*0.5,0.0,1.0);}
+float _detN(vec2 p){return _tvn(p*0.035)*0.55+_tvn(p*0.09+vec2(11.0,5.0))*0.30+_tvn(p*0.22+vec2(3.0,9.0))*0.15;}
+vec3 _grassGround(vec3 wp, float ny, vec3 cam, out float bare) {
+  vec2 p = wp.xz;
+  float pc = _tpatch(p);
+  vec3 grass = mix(uColMoss, uColGrass, smoothstep(0.32, 0.72, pc));
+  float mott = clamp(0.5 + 0.5 * (_tvn(p * 0.07) * 0.62 + _tvn(p * 0.19 + vec2(7.0, 3.0)) * 0.38), 0.0, 1.0);
+  grass *= 0.78 + 0.34 * mott;
+  grass = mix(grass, uColMoss * (0.7 + 0.4 * mott), (1.0 - smoothstep(0.28, 0.62, pc)) * 0.6);
+  if (uSat > 0.001) {
+    float gl = dot(grass, vec3(0.299, 0.587, 0.114));
+    vec3 gd = mix(grass, vec3(gl), uSat * 0.85);
+    float dry = _tpatch(p * 1.7 + vec2(31.0, 12.0));
+    float dirt = clamp(0.5 + 0.5 * _tvn(p * 0.011 + vec2(4.0, 8.0)), 0.0, 1.0);
+    gd = mix(gd, gd * mix(vec3(1.0), vec3(0.46, 0.42, 0.20) * 2.2, smoothstep(0.62, 0.86, dry)), uSat * 0.55);
+    gd = mix(gd, gd * mix(vec3(1.0), vec3(0.27, 0.20, 0.12) * 2.6, 1.0 - smoothstep(0.18, 0.42, dirt)), uSat * 0.45);
+    grass = mix(grass, gd, clamp(uSat * 1.4, 0.0, 1.0));
+  }
+  float sN = _tvn(p * 0.0030 * uPatchScale + vec2(21.0, 9.0)) * 0.55 + _tvn(p * 0.0105 * uPatchScale + vec2(3.0, 17.0)) * 0.32 + _tvn(p * 0.0330 * uPatchScale + vec2(9.0, 2.0)) * 0.13;
+  float rN = _tvn(p * 0.0062 * uPatchScale + vec2(41.0, -13.0)) * 0.62 + _tvn(p * 0.0210 * uPatchScale + vec2(7.0, 29.0)) * 0.38;
+  float ovgM = smoothstep(0.14, 0.44, -sN) * uPatchMix.z;
+  grass = mix(grass, mix(uColMoss, uColGrass, 0.30) * (0.46 + 0.32 * mott), clamp(ovgM, 0.0, 0.80));
+  bare = max(clamp(smoothstep(0.16, 0.46, sN) * uPatchMix.x, 0.0, 0.90), clamp(smoothstep(0.20, 0.52, rN) * uPatchMix.y * 0.45, 0.0, 0.78));
+  float aoCav = mix(0.62, 1.0, smoothstep(uSlopeRock, 1.0, clamp(ny, 0.0, 1.0)));
+  float aoDet = mix(0.74, 1.06, clamp(0.5 + 0.5 * _detN(p), 0.0, 1.0));
+  float th = clamp((wp.y - (uYMid - uAMP * 0.5)) / (uAMP * 1.15), 0.0, 1.0);
+  float aoRaw = clamp(aoCav * aoDet * mix(0.80, 1.0, th) * mix(0.86, 1.04, _tpatch(p * 0.6 + vec2(17.0, 5.0))), 0.45, 1.08);
+  float aoFade = 1.0 - smoothstep(900.0, 2200.0, length(cam.xz - p));
+  grass *= mix(1.0, aoRaw, uAO * aoFade);
+  return grass;
+}
+`;
+// ⭐⭐ (v51.50) THE GROUND-COLOUR MAP. v51.47 ran _grassGround in the tufts' VERTEX shader - ~16 value-noise
+// evaluations (64 sin hashes) for every one of a tuft's 30 vertices, all giving the same answer; with 88 k tufts in view
+// that was most of the grass's 2.2 ms. Now the same GLSL (so the same GPU sin hashes - a CPU port could never match
+// them: fract(sin(large) * 43758) is chaotic in the last ulp) is rendered once into a 512^2 half-float map round the
+// ship (16 u texels over +-4096 u, snapped to the texel grid so a tuft's sample never shimmers as the map follows),
+// re-rendered when the ship crosses a texel and every 8th frame otherwise (zone recolours, the AO's distance fade).
+// RGB = the ground colour with the position-only AO, A = bare (dirt / rubble). The per-tuft AO terms (slope, height)
+// stay in the vertex shader. ~0.03 ms a render; skipped in XR (the last map stands).
+const _GRM = { rt: null, scene: null, cam: null, mat: null, box: new THREE.Vector4(0, 0, 1, 1), R: 4096, N: 512, n: 0, f: 0, cx: NaN, cz: NaN };
+function _swGrassMapInit() {
+  if (_GRM.rt) return _GRM;
+  const small = (typeof _fxSmallDevice === 'function' && _fxSmallDevice());
+  const N = small ? 256 : 512;
+  _GRM.N = N;
+  _GRM.rt = new THREE.WebGLRenderTarget(N, N, { type: THREE.HalfFloatType, depthBuffer: false, stencilBuffer: false });
+  const t = _GRM.rt.texture;
+  t.minFilter = THREE.LinearFilter; t.magFilter = THREE.LinearFilter; t.generateMipmaps = false; t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
+  _GRM.mat = new THREE.ShaderMaterial({
+    uniforms: {
+      uColGrass: _swU.uColGrass, uColMoss: _swU.uColMoss, uPatchMix: _swU.uPatchMix, uPatchScale: _swU.uPatchScale,
+      uYMid: _swU.uYMid, uAMP: _swU.uAMP, uSlopeRock: _swU.uSlopeRock, uCam: _swU.uCam,
+      uAO: { get value() { return window.__terrainAOU ? window.__terrainAOU.value : 0.55; } },
+      uSat: { get value() { return window.__terrainSatU ? window.__terrainSatU.value : 0.40; } },
+      uBox: { value: _GRM.box },
+    },
+    vertexShader: 'uniform vec4 uBox;\nvarying vec2 vW;\nvoid main() { vW = uBox.xy + uv * uBox.zw; gl_Position = vec4(position.xy, 0.0, 1.0); }',
+    // flat ground (ny 1) and a height past every AO band: the per-tuft slope / height AO is the vertex shader's
+    // (v51.53) cam = far away: the terrain's position-only AO (detail noise, blobs) fades by DISTANCE FROM THE CAMERA
+    // (900..2200 u), and on the tufts that read as dark patches swelling and shrinking as the ship moved ("patches of
+    // changing colors"). The tufts carry their own light and shade; the map is the ground colour alone, and no longer
+    // depends on where the camera is.
+    fragmentShader: _GRASS_GROUND_GLSL + 'uniform vec3 uCam;\nvarying vec2 vW;\nvoid main() { float bare; vec3 c = _grassGround(vec3(vW.x, 1.0e6, vW.y), 1.0, vec3(1.0e9), bare); gl_FragColor = vec4(c, bare); }',
+    depthTest: false, depthWrite: false,
+  });
+  const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), _GRM.mat); quad.frustumCulled = false;
+  _GRM.scene = new THREE.Scene(); _GRM.scene.add(quad);
+  _GRM.cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  return _GRM;
+}
+function _swGrassMapTick(force) {
+  const G = _swGrassMapInit();
+  if (typeof renderer === 'undefined' || !renderer) return;
+  try { if (renderer.xr && renderer.xr.isPresenting && G.n > 0) return; } catch (_) {}
+  const ts = (2 * G.R) / G.N, c = _swU.uCam.value;
+  const cx = Math.floor(c.x / ts) * ts, cz = Math.floor(c.z / ts) * ts;
+  G.f++;
+  if (!force && cx === G.cx && cz === G.cz && (G.f % 8) !== 0) return;
+  G.cx = cx; G.cz = cz;
+  G.box.set(cx - G.R, cz - G.R, 2 * G.R, 2 * G.R);
+  const prev = renderer.getRenderTarget();
+  try { renderer.setRenderTarget(G.rt); renderer.render(G.scene, G.cam); } finally { renderer.setRenderTarget(prev); }
+  G.n++;
+}
+// (v51.52) the painted canvas -> the atlas DataTexture. getImageData un-premultiplies, so blade texels come out with
+// their own colour; every texel under full opacity in a CELL takes that cell's mean blade colour (alpha untouched), so
+// the GPU's mips average blade colour with blade colour - never with black.
+function _swGrassAtlasUpload(A) {
+  const W = A.W, H = A.H, C = A.C, d = A.canvas.getContext('2d').getImageData(0, 0, W, H).data;
+  const out = new Uint8Array(W * H * 4);
+  for (const name of Object.keys(A.cells)) {
+    const x0 = A.cells[name][0] * C, x1 = x0 + C;
+    let r = 0, g = 0, b = 0, n = 0;
+    for (let y = 0; y < H; y++) for (let x = x0; x < x1; x++) {
+      const o = (y * W + x) * 4; if (d[o + 3] < 200) continue;
+      r += d[o]; g += d[o + 1]; b += d[o + 2]; n++;
+    }
+    const mr = n ? r / n : 128, mg = n ? g / n : 160, mb = n ? b / n : 96;
+    for (let y = 0; y < H; y++) for (let x = x0; x < x1; x++) {
+      const o = (y * W + x) * 4, a = d[o + 3] / 255;
+      // partial edge texels keep their own colour, faded toward the mean as they thin out
+      out[o] = Math.round(d[o] * a + mr * (1 - a)); out[o + 1] = Math.round(d[o + 1] * a + mg * (1 - a)); out[o + 2] = Math.round(d[o + 2] * a + mb * (1 - a));
+      out[o + 3] = d[o + 3];
+    }
+  }
+  A.tex.image = { data: out, width: W, height: H };
+  A.tex.needsUpdate = true;
+}
+// (v51.49) the rank texture's mip chain by DECIMATION: each level's texel is ONE of its four children (which one
+// alternates, so no corner is favoured), never their average. Every level then holds the same uniform spread of ranks
+// as level 0, so the share of a far tuft's pixels that survive is the detail level itself - the dissolve keeps its
+// planned pace at any distance instead of collapsing where the box-filtered mips averaged the ranks together.
+// Point-sampled in and between levels (Nearest / NearestMipmapNearest) for the same reason.
+function _swGrassRankBuild(A) {
+  const W = A.W, H = A.H, d = A.rankCanvas.getContext('2d').getImageData(0, 0, W, H).data;
+  let w = W, h = H, cur = new Uint8Array(w * h * 4);
+  for (let i = 0; i < w * h; i++) { const v = d[i * 4]; cur[i * 4] = cur[i * 4 + 1] = cur[i * 4 + 2] = v; cur[i * 4 + 3] = 255; }
+  const levels = [{ data: cur, width: w, height: h }];
+  while (w > 1 || h > 1) {
+    const nw = Math.max(1, w >> 1), nh = Math.max(1, h >> 1), nx = new Uint8Array(nw * nh * 4);
+    for (let y = 0; y < nh; y++) for (let x = 0; x < nw; x++) {
+      const sx = Math.min(w - 1, x * 2 + ((x + y) & 1)), sy = Math.min(h - 1, y * 2 + ((x * 3 + y) & 1));
+      const si = (sy * w + sx) * 4, di = (y * nw + x) * 4;
+      nx[di] = nx[di + 1] = nx[di + 2] = cur[si]; nx[di + 3] = 255;
+    }
+    levels.push({ data: nx, width: nw, height: nh }); cur = nx; w = nw; h = nh;
+  }
+  let tex = A.rank;
+  if (!tex) { tex = new THREE.DataTexture(levels[0].data, W, H, THREE.RGBAFormat, THREE.UnsignedByteType); A.rank = tex; }
+  tex.image = { data: levels[0].data, width: W, height: H };
+  tex.mipmaps = levels;
+  tex.generateMipmaps = false; tex.minFilter = THREE.NearestMipmapNearestFilter; tex.magFilter = THREE.NearestFilter;
+  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping; tex.flipY = false; tex.needsUpdate = true;
+  return tex;
+}
+// one tuft: `cards` cards crossing the middle (spread evenly round it) + `leanCards` leaning outward, each bent in two
+// segments; normals mostly UP so the tuft lights like the ground under it (and the field does not show card planes)
+function _swGenGrassTuft(seed, kind) {
+  const A = _swGrassAtlasGet(), K = _swGrassK();
+  let s = Math.imul(seed | 0, 2654435761) | 0;
+  const R = () => { s = s + 0x6D2B79F5 | 0; let t = Math.imul(s ^ s >>> 15, 1 | s); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+  const POS = [], NRM = [], COL = [], UV = [], IDX = [];
+  const card = (bx, bz, ang, tilt, bend, w, h, cell) => {
+    const U = A.uv(cell);
+    const dx = Math.cos(ang), dz = Math.sin(ang), sx = -dz, sz = dx;
+    const a1x = Math.sin(tilt) * dx, a1y = Math.cos(tilt), a1z = Math.sin(tilt) * dz;
+    const t2 = tilt + bend, a2x = Math.sin(t2) * dx, a2y = Math.cos(t2), a2z = Math.sin(t2) * dz;
+    const hh = h * 0.5;
+    const p1x = bx + a1x * hh, p1y = a1y * hh, p1z = bz + a1z * hh;
+    const rows = [[bx, 0, bz, U.vB, 0.70], [p1x, p1y, p1z, (U.vB + U.vT) * 0.5, 0.88], [p1x + a2x * hh, p1y + a2y * hh, p1z + a2z * hh, U.vT, 1.0]];   // (v51.48: base 0.55 / mid 0.85)
+    let nx = dx * 0.25, ny = 0.95, nz = dz * 0.25; const nl = Math.sqrt(nx * nx + ny * ny + nz * nz); nx /= nl; ny /= nl; nz /= nl;
+    const base = POS.length / 3;
+    for (const r of rows) for (const sg of [-1, 1]) {
+      POS.push(r[0] + sx * sg * w * 0.5, r[1], r[2] + sz * sg * w * 0.5);
+      NRM.push(nx, ny, nz); COL.push(r[4], r[4], r[4]); UV.push(sg < 0 ? U.u0 : U.u1, r[3]);
+    }
+    IDX.push(base, base + 2, base + 1, base + 1, base + 2, base + 3, base + 2, base + 4, base + 3, base + 3, base + 4, base + 5);
+  };
+  // (v51.43) "triple the height": 21 / 12 -> 63 / 36; wider (20 / 16 -> 36 / 26) so long blades can still cross
+  const tall = kind === 'tall', H0 = (tall ? 63 : 36) * K.cardH, W0 = (tall ? 36 : 26) * K.cardW, cell = tall ? 'tall' : 'short';
+  const nC = Math.max(1, Math.round(K.cards)), a0 = R() * Math.PI;
+  for (let i = 0; i < nC; i++) {   // the crossing cards: the tuft's body from the side
+    const a = a0 + i * Math.PI / nC + (R() - 0.5) * 0.35;
+    card((R() - 0.5) * 4, (R() - 0.5) * 4, a, (R() - 0.5) * 0.24, (R() - 0.5) * 0.4, W0 * (0.85 + R() * 0.3), H0 * (0.85 + R() * 0.3), cell);
+  }
+  const nL = Math.max(0, Math.round(K.leanCards));
+  for (let i = 0; i < nL; i++) {   // the leaning cards: what a tuft looks like from ABOVE (a ship's usual view)
+    const a = (i / Math.max(1, nL)) * 6.283 + R() * 1.2;
+    card(Math.cos(a) * 3, Math.sin(a) * 3, a, 0.45 + R() * 0.3, 0.25, W0 * 0.8, H0 * 0.55, cell);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(POS, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(NRM, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(COL, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(UV, 2));
+  geo.setIndex(IDX);
+  geo.computeBoundingSphere(); geo.computeBoundingBox();
+  geo._lssTuftH = H0;
+  return geo;
+}
+function _swGrassTuftGeos() {
+  const S = _swGrassTuftGeos;
+  if (!S.g) S.g = { short: _swGenGrassTuft(7, 'short'), tall: _swGenGrassTuft(19, 'tall') };
+  return S.g;
+}
+function _swGrassTuftMatGet() {
+  const S = _swGrassTuftMatGet;
+  if (S.m) return S.m;
+  const A = _swGrassAtlasGet(), K = _swGrassK();
+  const m = _swFoliageMat(0, true);
+  m.map = A.tex; m.alphaTest = 0.42; m.roughness = 0.9;
+  m.envMapIntensity = 0.12;
+  const U = {
+    uA: { value: K.fadeA }, uB: { value: K.fadeB },
+    uW: { value: new THREE.Vector4() }, uD: { value: new THREE.Vector4() },
+    uL: { value: new THREE.Vector4() },
+    uTint: { value: K.tint }, uCov: { value: K.cover }, uPx: { value: new THREE.Vector2(A.W, A.H) },
+    uRank: { value: A.rank }, uNorm: { value: 1 / Math.max(0.05, A.mean || 0.4) },
+    uDW: { value: K.detailW }, uMap: { value: _swGrassMapInit().rt.texture }, uMapBox: { value: _GRM.box },   // (v51.50)
+    uFlat: { value: new THREE.Vector3(1, 1, 1) },   // (v51.51) the flat colour's calibration (flatR/G/B)
+  };
+  const ob = m.onBeforeCompile;
+  m.onBeforeCompile = function (sh, r) {
+    if (ob) ob.call(this, sh, r);
+    sh.uniforms.uTreeFadeA = U.uA; sh.uniforms.uTreeFadeB = U.uB;
+    sh.uniforms.uGrassW = U.uW; sh.uniforms.uGrassD = U.uD; sh.uniforms.uGrassL = U.uL;
+    sh.uniforms.uGrassTint = U.uTint; sh.uniforms.uColGrass = _swU.uColGrass; sh.uniforms.uColMoss = _swU.uColMoss;
+    sh.uniforms.uAtlasPx = U.uPx; sh.uniforms.uCoverK = U.uCov; sh.uniforms.uGrassRank = U.uRank; sh.uniforms.uGrassNorm = U.uNorm;
+    sh.uniforms.uGrassDW = U.uDW; sh.uniforms.uGrassMap = U.uMap; sh.uniforms.uGrassMapBox = U.uMapBox;   // (v51.50)
+    sh.uniforms.uGrassFlat = U.uFlat;   // (v51.51)
+    // (v51.47) the ground's colour pipeline (_GRASS_GROUND_GLSL) reads the terrain's own uniforms - the same objects,
+    // so zone recolours, __terrainSat / __terrainAO and the patch knobs move the tufts with the ground. uAO / uSat are
+    // created by the terrain's first compile with tier-aware defaults; read through, never create them here.
+    sh.uniforms.uPatchMix = _swU.uPatchMix; sh.uniforms.uPatchScale = _swU.uPatchScale;
+    sh.uniforms.uYMid = _swU.uYMid; sh.uniforms.uAMP = _swU.uAMP; sh.uniforms.uSlopeRock = _swU.uSlopeRock;
+    sh.uniforms.uAO = { get value() { return window.__terrainAOU ? window.__terrainAOU.value : 0.55; } };
+    sh.uniforms.uSat = { get value() { return window.__terrainSatU ? window.__terrainSatU.value : 0.40; } };
+    sh.uniforms.uSunTop = _swU.uSunTop; sh.uniforms.uSunTopBox = _swU.uSunTopBox; sh.uniforms.uSunTopK = _swU.uSunTopK;
+    sh.uniforms.uAerial = _swU.uAerial; sh.uniforms.uAerialStart = _swU.uAerialStart; sh.uniforms.uAerialFar = _swU.uAerialFar; sh.uniforms.uAerialColor = _swU.uAerialColor;   // (v51.49)
+    // instanceColor is DATA here (x = moss->grass mix (v51.47: unused - the ground colour has its own), y = brightness,
+    // z = the ground normal's y at the tuft): keep three from multiplying it into vColor
+    // (v51.50) the ground colour comes from the map (_GRM): one read; the slope / height AO stays per tuft
+    sh.vertexShader = _SUNTOP_GLSL + 'uniform float uAerial, uAerialStart, uAerialFar, uAO, uYMid, uAMP, uSlopeRock;\nuniform sampler2D uGrassMap;\nuniform vec4 uGrassMapBox;\nvarying vec2 vGT;\nvarying vec3 vGC;\nvarying float vSV, vAP;\n' + sh.vertexShader.replace('#include <color_vertex>',
+      '#include <color_vertex>\n vec3 _gip = vec3(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2]);\n' +
+      ' vec4 _gm = texture2D(uGrassMap, (_gip.xz - uGrassMapBox.xy) / uGrassMapBox.zw);\n float _gBare = _gm.a;\n' +
+      '#ifdef USE_INSTANCING_COLOR\n vGT = instanceColor.xy;\n vColor.rgb = color.rgb;\n float _gny = instanceColor.z;\n#else\n vGT = vec2(1.0);\n float _gny = 1.0;\n#endif\n' +
+      ' float _gth = clamp((_gip.y - (uYMid - uAMP * 0.5)) / (uAMP * 1.15), 0.0, 1.0);\n' +
+      ' float _gaf = 1.0;\n' +   // (v51.53) was the terrain's 900..2200 u distance fade - a colour that changed as you flew
+      ' vGC = _gm.rgb * mix(1.0, clamp(mix(0.62, 1.0, smoothstep(uSlopeRock, 1.0, clamp(_gny, 0.0, 1.0))) * mix(0.80, 1.0, _gth), 0.45, 1.08), uAO * _gaf);\n' +
+      ' vSV = (uSunTopK.x > 0.5) ? _lssSunVisT(_gip) : 1.0;\n' +
+      // (v51.49) the terrain's aerial haze (same formula, same uniforms) at the tuft's base: from 1200 u the ground
+      // hazes toward uAerialColor and the tufts measured ~0.8x it until they did too
+      ' vAP = (uAerial > 0.001) ? clamp(smoothstep(uAerialStart, uAerialFar, length(uCam.xz - _gip.xz)) * uAerial * (1.0 - clamp((_gip.y - (uYMid - uAMP * 0.2)) / (uAMP * 1.4), 0.0, 1.0) * 0.55), 0.0, 0.85) : 0.0;\n' +
+      ' float _gGrow = 1.0 - smoothstep(0.35, 0.60, _gBare);')
+      .replace('#include <project_vertex>', ' transformed *= _gGrow;\n#include <project_vertex>');
+    sh.fragmentShader = 'uniform vec2 uAtlasPx;\nuniform float uCoverK, uGrassTint, uGrassNorm;\nuniform vec3 uAerialColor, uGrassFlat;\nvarying vec2 vGT;\nvarying float vGF, vGD;\nvarying vec3 vGC;\nvarying float vSV, vAP;\nfloat _lssSunVis = 1.0;\n' + sh.fragmentShader
+      .replace('void main() {', 'void main() {\n _lssSunVis = vSV;')
+      .replace('#include <lights_pars_begin>', _sunTopPars())
+      // (v51.50 / 51.51) SOLID -> DETAILED (see detailW in _swGrassK): flat ground colour -> the tuft's own shading, by vGD
+      .replace('#include <color_fragment>', '#include <color_fragment>\n' +
+        ' diffuseColor.rgb = mix(vGC * uGrassTint * uGrassFlat, diffuseColor.rgb * vGC * (vGT.y * uGrassTint * uGrassNorm), vGD);\n' +
+        ' diffuseColor.rgb = mix(diffuseColor.rgb, uAerialColor, vAP);')
+      .replace('#include <alphatest_fragment>',
+        '{ vec2 _rdx = dFdx(vMapUv * uAtlasPx), _rdy = dFdy(vMapUv * uAtlasPx);\n' +
+        '  float _rmip = max(0.0, 0.5 * log2(max(dot(_rdx, _rdx), dot(_rdy, _rdy))));\n' +
+        '  diffuseColor.a *= 1.0 + _rmip * uCoverK; }\n' +
+        'if ( diffuseColor.a < alphaTest ) discard;')
+      .replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\n#ifdef DOUBLE_SIDED\n  normal *= faceDirection;\n#endif');
+  };
+  m.customProgramCacheKey = () => 'lss-grass-tuft-6';
+  try { Object.defineProperty(m, '_lssGrass', { value: U, enumerable: false, configurable: true }); } catch (_) {}
+  m.needsUpdate = true;
+  S.m = m;
+  _swGrassUniTick();
+  return m;
+}
+// the live knobs -> the grass uniforms (from _swTreeVisTick, every frame; a few float writes)
+function _swGrassUniTick() {
+  { const K0 = _swGrassK(); _swU.uGrassField.value.set(K0.fieldR, K0.fieldG, K0.fieldB, K0.on ? K0.fieldAmt : 0); }   // (v51.49)
+  const m = _swGrassTuftMatGet.m; if (!m || !m._lssGrass) return;
+  const K = _swGrassK(), U = m._lssGrass, g = _swGrassTuftGeos.g;
+  const H = (g && g.short && g.short._lssTuftH) || 11;
+  U.uA.value = K.fadeA; U.uB.value = Math.max(K.fadeA + 1, K.fadeB);
+  U.uW.value.set(K.sway, K.lean, 6.2832 / Math.max(10, K.waveLen), K.waveSpeed);
+  U.uD.value.set(Math.cos(K.windDir), Math.sin(K.windDir), 0, H);
+  U.uL.value.set(0, Math.max(0.01, K.detailW), 0, K.mode === 'tree' ? 1 : 0);   // (v51.51) y = the per-tuft detail span; (v51.56) w = TREE mode
+  U.uFlat.value.set(K.flatR, K.flatG, K.flatB);
+  U.uTint.value = K.tint * K.match; U.uCov.value = K.cover; U.uDW.value = Math.max(0.01, K.detailW);
+  const A = _swGrassAtlasGet.a; if (A && A.mean) U.uNorm.value = 1 / Math.max(0.05, A.mean);
+  try { _swGrassMapTick(); } catch (e) { if (!_GRM.err) { _GRM.err = 1; try { console.warn('[grass] map tick threw:', e); } catch (_) {} } }   // (v51.50)
+}
+function _swBuildGrass(x0, z0, T) {
+  // (v51.48) timed: the streamer plants one chunk a frame, and view 3 is 49 chunks - __grassStats() reads it
+  const t0 = performance.now();
+  const r = _swBuildGrassTufts(x0, z0, T);
+  const ms = performance.now() - t0, S = _swBuildGrass;
+  if (r) { S.n = (S.n || 0) + 1; S.ms = (S.ms || 0) + ms; S.max = Math.max(S.max || 0, ms); S.last = ms; }
+  // (v51.51) the slowest plants, with where and what - a 163 ms one was seen on v51.50 (one chunk a frame = a 163 ms frame)
+  if (ms > 12) {
+    const L = S.slow || (S.slow = []);
+    let tuf = 0; if (r) for (const im of r) tuf += im.count;
+    L.push({ ms: +ms.toFixed(1), cx: Math.round(x0 / _SW_CHUNK), cz: Math.round(z0 / _SW_CHUNK), tufts: tuf, hb: !!(_HB && _HB.ready), t: Math.round(performance.now()) });
+    L.sort((a, b) => b.ms - a.ms); if (L.length > 8) L.length = 8;
+  }
+  return r;
+}
+function _swBuildGrassTufts(x0, z0, T) {
+  if (game.sandwichGrass === false || ((T.biome || 'grassy') !== 'grassy' && T.biome !== 'mossy')) return null;
+  const K = _swGrassK();
+  if (!K.on) return null;
+  if (K.style === 'blades') return _swBuildGrassBlades(x0, z0, T);
+  const small = (typeof _fxSmallDevice === 'function' && _fxSmallDevice());
+  // (v51.43) AN EVEN FIELD. v51.42 planted 40 u anchors that each took a random 3..~20 tufts in a 26 u disc and
+  // dropped wherever an anchor failed a test - dense clumps with gaps between ("no clumps, more evenly
+  // distributed"). Now: tufts on a jittered grid `spacing` apart; the expensive tests (city / overworld pads,
+  // zones, water, snow, slope, volcanic heat) run once per 3x3 block of tufts at the block's centre, and only the
+  // patch test runs per tuft - as a soft ramp (0.36..0.46), so a field's edge thins out instead of ending on a line.
+  const sp = Math.max(4, K.spacing / Math.sqrt(Math.max(0.05, K.density))) * (small ? 1.45 : 1);
+  const SUB = 3, NB = Math.max(1, Math.round(_SW_CHUNK / (sp * SUB))), bs = _SW_CHUNK / NB, ss = bs / SUB;
+  const SR = _swU.uSlopeRock.value, SG = _swU.uSlopeGrass.value;
+  const gy = (x, z) => T.HUB ? _swDrapeY(x, z, T) : _stGroundYGrid(x, z, T);
+  // deterministic per chunk: a replanted chunk grows exactly the same field
+  let s = (Math.imul(Math.round(x0 / 16) + 9191, 2654435761) ^ Math.imul(Math.round(z0 / 16) + 313, 40503)) | 0;
+  const rnd = () => { s = s + 0x6D2B79F5 | 0; let t = Math.imul(s ^ s >>> 15, 1 | s); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+  const buckets = [[], []];   // short / tall: x, y, z, mix, rotY, scale, bright
+  const snowT = T.snowLine || 0.7;
+  for (let j = 0; j < NB; j++) for (let i = 0; i < NB; i++) {
+    const bx = x0 + i * bs, bz = z0 + j * bs, cx = bx + bs * 0.5, cz = bz + bs * 0.5;
+    if (T.HUB && typeof _owExcludes === 'function' && _owExcludes(cx, cz)) continue;
+    if (T.HUB && _hubCityExcludes(cx, cz) && (typeof _hubCityGroundBlocked !== 'function' || _hubCityGroundBlocked(cx, cz))) continue;
+    if (T.HUB && _hzZoneForFoliage(cx, cz)) continue;   // (v35.13) heartland flora - deep zones grow their own cover
+    const cy = gy(cx, cz);
+    if (T.WL != null && cy < T.WL + 2) continue;
+    if ((cy - (T.YMID - T.AMP * 0.5)) / (T.AMP * 1.15) > snowT) continue;
+    const yx = gy(cx + 8, cz) - cy, yz = gy(cx, cz + 8) - cy;
+    const nyB = 8 / Math.hypot(yx, yz, 8);   // (v51.47) the ground normal's y - the tuft's AO cavity term
+    const fl = Math.max(0, Math.min(1, (nyB - SR) / Math.max(0.001, SG - SR)));
+    if (fl < 0.5) continue;
+    if (typeof _volcHotAt === 'function' && _volcHotAt(cx, cz, 1.2) > 0.004) continue;
+    for (let b = 0; b < SUB * SUB; b++) {
+      const r1 = rnd(), r2 = rnd(), r3 = rnd(), r4 = rnd(), r5 = rnd(), r6 = rnd(), r7 = rnd(), r8 = rnd();   // drawn up front: a rejection never shifts the stream
+      const x = bx + ((b % SUB) + 0.5 + (r1 - 0.5) * 0.9) * ss, z = bz + (((b / SUB) | 0) + 0.5 + (r2 - 0.5) * 0.9) * ss;
+      const pc = _stPatch(x, z);
+      if (r3 > (pc - 0.36) / 0.10) continue;
+      const y = gy(x, z);
+      if (T.WL != null && y < T.WL + 3) continue;
+      const lush = Math.max(0, Math.min(1, (pc - 0.40) / 0.40));
+      const mixG = Math.max(0, Math.min(1, (pc - 0.32) / 0.40));
+      buckets[r4 < K.tall ? 1 : 0].push(x, y, z, nyB, r5 * 6.283, (0.85 + r6 * 0.3) * K.height * (0.9 + 0.2 * lush), 0.88 + r7 * 0.2, r8);   // (v51.51) + the tuft's rank
+    }
+  }
+  const G = _swGrassTuftGeos(), mat = _swGrassTuftMatGet(), geos = [G.short, G.tall];
+  const M = new THREE.Matrix4(), Q = new THREE.Quaternion(), E = new THREE.Euler(), Pv = new THREE.Vector3(), Sv = new THREE.Vector3(), Cc = new THREE.Color();
+  const out = [];
+  for (let b = 0; b < 2; b++) {
+    const P = buckets[b], n = P.length / 8;
+    if (n < 1) continue;
+    // (v51.51) instances in RANK order, so "every tuft that can be present here" is always a prefix (see _swGrassK)
+    const ord = new Uint32Array(n); for (let k = 0; k < n; k++) ord[k] = k;
+    ord.sort((a, c) => P[a * 8 + 7] - P[c * 8 + 7]);
+    const ranks = new Float32Array(n);
+    const im = new THREE.InstancedMesh(geos[b], mat, n);
+    for (let k = 0; k < n; k++) {
+      const o = ord[k] * 8;
+      E.set(0, P[o + 4], 0); Q.setFromEuler(E);
+      Pv.set(P[o], P[o + 1] - 0.8, P[o + 2]); Sv.set(P[o + 5], P[o + 5], P[o + 5]);
+      M.compose(Pv, Q, Sv); im.setMatrixAt(k, M);
+      Cc.setRGB(P[o + 7], P[o + 6], P[o + 3]); im.setColorAt(k, Cc);   // (v51.51) x RANK, y brightness, z ground normal y
+      ranks[k] = P[o + 7];
+    }
+    im.instanceMatrix.needsUpdate = true; if (im.instanceColor) im.instanceColor.needsUpdate = true;
+    im.frustumCulled = true; im.castShadow = false; im.receiveShadow = true;
+    im.computeBoundingSphere();   // (v51.51) at the FULL count: the gate trims .count every frame, the bounds must cover them all
+    let yMin = Infinity, yMax = -Infinity;
+    for (let k = 0; k < n; k++) { const yy = P[k * 8 + 1]; if (yy < yMin) yMin = yy; if (yy > yMax) yMax = yy; }
+    im.userData = { isSandwichTerrain: true, _grassB: true, _gyMin: yMin, _gyMax: yMax + 70 };   // (v51.48) for the 3D chunk gate
+    try { Object.defineProperty(im.userData, '_ranks', { value: ranks, enumerable: false, configurable: true }); } catch (_) {}   // non-enumerable: three JSON-copies userData on clone (the v49.56 trap)
+    scene.add(_lssFreezeStatic(im)); out.push(im);
+  }
+  return out.length ? out : null;
+}
+if (typeof window !== 'undefined') {
+  window.__grassAtlas = function () {
+    const A = _swGrassAtlasGet.a; if (!A) return 'no atlas yet';
+    const w = window.open(); if (w) { w.document.body.style.background = '#333'; const img = w.document.createElement('img'); img.src = A.canvas.toDataURL(); img.style.width = '100%'; w.document.body.appendChild(img); }
+    return A.W + 'x' + A.H;
+  };
+  // repaint the blade atlas and rebuild the two tuft shapes IN PLACE - every planted chunk follows (look knobs)
+  window.__grassRegen = function () {
+    const A = _swGrassAtlasGet.a; if (A) _swGrassAtlasPaint(A);
+    const G = _swGrassTuftGeos.g;
+    if (G) for (const [key, seed] of [['short', 7], ['tall', 19]]) {
+      const g = G[key], ng = _swGenGrassTuft(seed, key);
+      g.dispose();
+      for (const a of Object.keys(g.attributes)) g.deleteAttribute(a);
+      for (const a of Object.keys(ng.attributes)) g.setAttribute(a, ng.attributes[a]);
+      g.setIndex(ng.index); g.boundingSphere = ng.boundingSphere; g.boundingBox = ng.boundingBox; g._lssTuftH = ng._lssTuftH;
+    }
+    // the instanced bounds were computed from the old tuft size
+    const chunks = game.sandwichChunks;
+    if (chunks) for (const c of chunks.values()) if (Array.isArray(c.grass)) for (const im of c.grass) { if (im) { im.boundingSphere = null; im.boundingBox = null; } }
+    return 'regenerated atlas + tufts';
+  };
+  // replant every resident chunk's grass (after on / style / density / height / view changes)
+  window.__grassRebuild = function () {
+    const chunks = game.sandwichChunks; if (!chunks) return 'no chunks';
+    let n = 0;
+    for (const c of chunks.values()) if (c.grassBuilt) { try { _swRemoveGrass(c.grass); } catch (_) {} c.grass = null; c.grassBuilt = false; n++; }
+    try { _swStreamIdle.idle = false; } catch (_) {}   // the stream's idle early-out would otherwise skip the replant
+    return 'cleared ' + n + ' chunks - the streamer replants them';
+  };
+  // what the grass costs right now: tufts resident / drawn, chunks, triangles a pass
+  window.__grassStats = function () {
+    const chunks = game.sandwichChunks; if (!chunks) return null;
+    let meshes = 0, tufts = 0, vis = 0, visTufts = 0, tris = 0;
+    for (const c of chunks.values()) {
+      const L = c.grass ? (Array.isArray(c.grass) ? c.grass : [c.grass]) : null;
+      if (!L) continue;
+      for (const im of L) {
+        if (!im) continue;
+        meshes++; tufts += im.count;
+        if (im.visible) { vis++; visTufts += im.count; tris += im.count * ((im.geometry.index ? im.geometry.index.count : 0) / 3); }
+      }
+    }
+    const B = _swBuildGrass;
+    return { meshes: meshes, tufts: tufts, visibleMeshes: vis, visibleTufts: visTufts, trisIfAllInView: tris,
+             build: { chunks: B.n || 0, avgMs: B.n ? +(B.ms / B.n).toFixed(2) : 0, maxMs: +(B.max || 0).toFixed(2), lastMs: +(B.last || 0).toFixed(2), slow: (B.slow || []).slice() },
+             K: Object.assign({}, _swGrassK()) };
+  };
+}
+// (v33) the original one-blade-per-instance grass, kept for an A/B (window.__grass.style = 'blades' / ?grass=blades)
+function _swBuildGrassBlades(x0,z0,T){
+  if(game.sandwichGrass===false || ((T.biome||'grassy')!=='grassy' && T.biome!=='mossy')) return null;
   
   
   
@@ -40726,7 +41440,7 @@ function _swBuildGrass(x0,z0,T){
     _swGd.updateMatrix(); im.setMatrixAt(k,_swGd.matrix); }
   im.instanceMatrix.needsUpdate=true; im.frustumCulled=true; im.userData={isSandwichTerrain:true}; scene.add(im); return im;
 }
-function _swRemoveGrass(im){ if(im){ try{ if(im.parent)scene.remove(im); if(im.dispose)im.dispose(); }catch(_){} } }
+function _swRemoveGrass(im){ if(Array.isArray(im)){ for(const m of im) _swRemoveGrass(m); return; } if(im){ try{ if(im.parent)scene.remove(im); if(im.dispose)im.dispose(); }catch(_){} } }   // (v51.41) the tufts are a list (short / tall)
 // (v33.05) REAL ez-tree trees (github.com/dgreenheck/ez-tree recipes) — a faithful port
 // of its recursive-branch algorithm : a tapered TRUNK forks into branches (and
 // sub-branches) that bend with twist + gnarliness + gravitropism (force toward/away from
@@ -41612,7 +42326,7 @@ function _swTreeGeoGet(){
 // (v35.12) Shared foliage material factory — trees and mushrooms use the
 // identical sway/fade vertex patch; mushrooms add a soft blue emissive so
 // they read as bioluminescent in the dark blue zones.
-function _swFoliageMat(glow){
+function _swFoliageMat(glow, grass){
   const m=new THREE.MeshStandardMaterial({vertexColors:true,color:0xffffff,roughness:1,metalness:0,side:THREE.DoubleSide});
   m.envMapIntensity = 0.18;
   if(glow){ m.emissive=new THREE.Color(glow); m.emissiveIntensity=0.5; }
@@ -41672,10 +42386,43 @@ function _swFoliageMat(glow){
     '  vec3 _rpush = vec3(_v.x, -dot(_v, _v) / (2.0 * max(_h, 1.0)), _v.y);\n' +
     '  transformed += transpose(_rm) * _rpush / max(dot(_rm[0], _rm[0]), 1e-6);\n' +
     ' }\n';
+  // (v51.41) GRASS MODE (`grass` true - the blade tufts of _swBuildGrass). Three changes, everything else shared
+  // (the flutter, the rustle spring): (1) the flutter scales with plain height (uGrassW.x per unit) - the trees'
+  // canopy rule starts at 18 u, above the whole tuft, so grass would never move; (2) ROLLING WIND - a gust wave
+  // travels across the field along uGrassD.xy (wavelength / speed in uGrassW.zw, its fronts warped so they are
+  // not straight lines) and leans every tuft the same WORLD way, bent (offset ~ h^2, the top drops along its arc);
+  // (3) NO GEOMETRY FADE: a DETAIL LEVEL (vGF: 1 inside uTreeFadeA, 0 at uTreeFadeB - the grass material points
+  // those at its own uniforms) against the tuft's RANK (v51.51, see _swGrassK): absent below it, arriving flat and
+  // taking its shading over uGrassL.y (vGD). v51.41b-44 scaled tufts here instead (shrink + widen) - the owner's
+  // "warping in front of me"; v51.45-50 dissolved them per blade / per pixel - "still popping".
+  const GDECL = grass ? 'uniform vec4 uGrassW, uGrassD, uGrassL;\nvarying float vGF, vGD;\n' : '';
+  const CF = grass ? ' float cf=max(transformed.y,0.0)*uGrassW.x;\n'
+    : ' float canopy=max(0.0,transformed.y-18.0);\n float cf=canopy*canopy*0.0012+canopy*0.015;\n cf=min(cf,transformed.y*uSway);\n';
+  const GWIND = !grass ? '' :
+    ' { vec2 _wd=uGrassD.xy; float _ga=dot(ip.xz,_wd), _gb=dot(ip.xz,vec2(-_wd.y,_wd.x));\n' +
+    '   float _wv=sin(_ga*uGrassW.z-uTime*uGrassW.w+sin(_gb*0.0031)*2.2+sin(_ga*0.0007+_gb*0.0011)*3.0);\n' +
+    '   float _g=0.5+0.5*_wv; _g=_g*_g*(3.0-2.0*_g);\n' +
+    '   float _hh=max(transformed.y,0.0)/uGrassD.w;\n' +
+    '   float _ln=uGrassW.y*(0.18+_g*(0.75+0.25*sin(uTime*2.7+vph)))*_hh*_hh*uGrassD.w;\n' +
+    '   mat3 _gm=mat3(instanceMatrix);\n' +
+    '   vec3 _gl=transpose(_gm)*vec3(_wd.x,0.0,_wd.y)/max(length(_gm[0]),1e-4);\n' +
+    '   transformed+=_gl*_ln;\n' +
+    '   transformed.y-=_ln*_ln/(2.0*max(transformed.y,1.0));\n' +
+    ' }\n';
+  const FADE = grass ?
+    // (v51.51) the detail level at this tuft (3D distance to the ship), its RANK (instanceColor.x, set at planting),
+    // present while level > rank (else a point: never rasterised), and how far its own shading has come in (vGD).
+    // (v51.56) uGrassL.w = 1: TREE mode - every tuft present and fully shaded, the whole field shrinking toward its bases
+    // over the band exactly as the trees' fade does (transformed *= fade), no tuft ever arriving on its own.
+    ' vGF=1.0-smoothstep(uTreeFadeA,uTreeFadeB,distance(ip,uCam));\n' +
+    '#ifdef USE_INSTANCING_COLOR\n float _gtr=instanceColor.x;\n#else\n float _gtr=0.0;\n#endif\n' +
+    ' if (uGrassL.w > 0.5) { vGD = 1.0; transformed *= vGF; if (vGF <= 0.0) transformed = vec3(0.0); }\n' +
+    ' else { vGD=smoothstep(_gtr,_gtr+uGrassL.y,vGF); if (vGF <= _gtr) transformed = vec3(0.0); }'
+    : ' float tfade=1.0-smoothstep(uTreeFadeA,uTreeFadeB,distance(ip.xz,uCam.xz));\n transformed*=tfade;';
   m.onBeforeCompile=(sh)=>{ sh.uniforms.uTime=_swU.uTime; sh.uniforms.uCam=_swU.uCam; sh.uniforms.uTreeFadeA=_swU.uTreeFadeA; sh.uniforms.uTreeFadeB=_swU.uTreeFadeB; sh.uniforms.uSway=_swU.uSway;
     if (_rus) { sh.uniforms.uRus=_swU.uRus; sh.uniforms.uRusB=_swU.uRusB; sh.uniforms.uRusN=_swU.uRusN; sh.uniforms.uRusK=_swU.uRusK; sh.uniforms.uRusC=_swU.uRusC; sh.uniforms.uRusL=_swU.uRusL; }
-    sh.vertexShader='uniform float uTime,uTreeFadeA,uTreeFadeB,uSway;\nuniform vec3 uCam;\n'+RUS_DECL+sh.vertexShader.replace('#include <begin_vertex>',
-      '#include <begin_vertex>\n vec3 ip=vec3(instanceMatrix[3][0],instanceMatrix[3][1],instanceMatrix[3][2]);\n float ph=ip.x*0.05+ip.z*0.05;\n float vph=ph+transformed.x*0.08+transformed.z*0.08+transformed.y*0.05;\n float canopy=max(0.0,transformed.y-18.0);\n float cf=canopy*canopy*0.0012+canopy*0.015;\n cf=min(cf,transformed.y*uSway);\n'+RUS_PRE+' float gust=0.6+0.4*sin(uTime*0.13+ph*0.3);\n float swayX=(sin(uTime*0.9+vph)*0.85+sin(uTime*1.9+vph*1.7)*0.4)*gust;\n float swayZ=(sin(uTime*0.8+vph*1.2+1.7)*0.7+sin(uTime*2.3+vph*1.5)*0.3)*gust;\n transformed.x+=swayX*cf;\n transformed.z+=swayZ*cf;\n transformed.y+=sin(uTime*3.1+vph*2.0)*cf*0.22;\n'+RUS_POST+' float tfade=1.0-smoothstep(uTreeFadeA,uTreeFadeB,distance(ip.xz,uCam.xz));\n transformed*=tfade;'); };
+    sh.vertexShader='uniform float uTime,uTreeFadeA,uTreeFadeB,uSway;\nuniform vec3 uCam;\n'+GDECL+RUS_DECL+sh.vertexShader.replace('#include <begin_vertex>',
+      '#include <begin_vertex>\n vec3 ip=vec3(instanceMatrix[3][0],instanceMatrix[3][1],instanceMatrix[3][2]);\n float ph=ip.x*0.05+ip.z*0.05;\n float vph=ph+transformed.x*0.08+transformed.z*0.08+transformed.y*0.05;\n'+CF+RUS_PRE+' float gust=0.6+0.4*sin(uTime*0.13+ph*0.3);\n float swayX=(sin(uTime*0.9+vph)*0.85+sin(uTime*1.9+vph*1.7)*0.4)*gust;\n float swayZ=(sin(uTime*0.8+vph*1.2+1.7)*0.7+sin(uTime*2.3+vph*1.5)*0.3)*gust;\n transformed.x+=swayX*cf;\n transformed.z+=swayZ*cf;\n transformed.y+=sin(uTime*3.1+vph*2.0)*cf*0.22;\n'+GWIND+RUS_POST+FADE); };
   return m;
 }
 function _swTreeMatGet(){ if(!_swTreeMat){ _swTreeMat=_swFoliageMat(0); if(_swTreeStyleRibbon()) _swRibbonPatchMat(_swTreeMat); } return _swTreeMat; }   // (v50.63) the ribbon trees' atlas + cut-out + canopy lighting
@@ -42246,6 +42993,42 @@ function _swTreeVisTick(cx, cz) {
   // knob is live: the uniforms their shader reads are written here, the same frame the gate uses the value.
   const _PK = _swPlantK(), _PB2 = _PK.fadeB * _PK.fadeB;
   try { const _pmM = _swPlantMatGet.m; if (_pmM && _pmM._lssFade) { _pmM._lssFade.uA.value = _PK.fadeA; _pmM._lssFade.uB.value = _PK.fadeB; } } catch (_) {}
+  // (v51.41) the grass tufts: their knobs -> uniforms, and the same nearest-corner gate on THEIR fade end
+  const _GK = _swGrassK(), _GE = _GK.fadeB, _GB2 = _GE * _GE, _GSR2 = _GK.shadowR * _GK.shadowR;
+  const _GFA = _GK.fadeA, _GFW = Math.max(1, _GK.fadeB - _GK.fadeA);
+  try { _swGrassUniTick(); } catch (_) {}
+  for (const c of chunks.values()) {
+    const g = c.grass;
+    if (!g || !Array.isArray(g)) continue;
+    const x0 = c.cx * _SW_CHUNK, z0 = c.cz * _SW_CHUNK;
+    const dx = Math.max(0, x0 - cx, cx - (x0 + _SW_CHUNK)), dz = Math.max(0, z0 - cz, cz - (z0 + _SW_CHUNK));
+    const v = (dx * dx + dz * dz) < _GB2;
+    // (v51.48) the fade is 3D now: a chunk far below a high ship is past the band even when it is right under it
+    const _gcy = _swU.uCam.value.y, _gd2 = dx * dx + dz * dz;
+    for (let i = 0; i < g.length; i++) {
+      const im = g[i]; if (!im) continue;
+      const u = im.userData || {}, dy = (u._gyMin != null) ? Math.max(0, u._gyMin - _gcy, _gcy - u._gyMax) : 0;
+      const _n2 = _gd2 + dy * dy;
+      // (v51.51) the most detail any tuft in this mesh can have = the level at its NEAREST point; only ranks under it can
+      // be present, and the instances are rank-sorted, so that prefix is the whole draw
+      let cnt = im.count;
+      const R = u._ranks;
+      if (R) {
+        const t = Math.min(1, Math.max(0, (Math.sqrt(_n2) - _GFA) / _GFW)), lvl = 1 - t * t * (3 - 2 * t);
+        if (_GK.mode === 'tree') cnt = lvl > 0 ? R.length : 0;   // (v51.56) the trees' uniform shrink: all or nothing per mesh
+        else {
+          let lo = 0, hi = R.length;
+          while (lo < hi) { const mid = (lo + hi) >> 1; if (R[mid] < lvl) lo = mid + 1; else hi = mid; }
+          cnt = lo;
+        }
+        if (im.count !== cnt) im.count = cnt;
+      }
+      const vv = v && _n2 < _GB2 && cnt > 0;
+      if (im.visible !== vv) im.visible = vv;
+      const rs = _n2 < _GSR2;   // (v51.50) a uniform in r165, so flipping it costs no program
+      if (im.receiveShadow !== rs) im.receiveShadow = rs;
+    }
+  }
   let _hid = 0, _shown = 0;
   for (const c of chunks.values()) {
     const arr = c.trees;
@@ -68299,7 +69082,7 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
   
   const _disc = (T && T.biome === 'mossy');
   const _R2 = _VIEW * _VIEW;
-  const wantGrass = (game.sandwichGrass !== false) && (((T.biome || 'grassy') === 'grassy') || T.biome === 'mossy');
+  const wantGrass = (game.sandwichGrass !== false) && _swGrassK().on && (((T.biome || 'grassy') === 'grassy') || T.biome === 'mossy');   // (v51.41) + __grass.on / ?grass=0
   const wantTrees = (game.sandwichTrees !== false) && (T.biome === 'mossy');
   // (v46.56) ⚠ TREES ARE MOSSY-ONLY, AND RIDGE DRAPES MUST NOT BE. `wantTrees` gates on the HUB's
   // one biome, so hanging the drapes off it built them nowhere - measured on an endless crystalcave
@@ -68465,15 +69248,26 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
   // leaves the dispose square drops its grass and trees together. Same cap, same reasoning.
   const _remMax = _budgeted ? Math.max(1, (typeof window !== 'undefined' && window.__swRemoveMax != null) ? window.__swRemoveMax : 3) : Infinity;
   let gBuilt = 0, tBuilt = 0;
+  // ⭐⭐ (v51.54) GRASS IS PLANTED BY DISTANCE, NEAREST FIRST, AND NEVER INSIDE THE BAND. Owner on v51.53: "yeah the grass
+  // is changing as i move... we had this issue with the mountains at one time" / "it either makes it look like it's
+  // popping in, or it is actually popping in". It was: planting was a Chebyshev square of `view` chunks round the
+  // ship's chunk - as near as 4 x 900 = 3600 u - while the band reached 3900 (MEASURED: nearest unplanted chunk 3,613 u
+  // out). Every chunk border crossed planted (and dropped) a ring of 900 u squares INSIDE the visible band: whole
+  // patches of grass appearing at once - the mountains' lesson again (v36.43: a term keyed to the GRID, not the world).
+  // Now a chunk is planted once its nearest point is inside fadeB + plantMargin (the margin exceeds the 1,273 u the ship
+  // can travel inside one chunk, the stream's idle early-out re-runs on a chunk change), the nearest first, and dropped
+  // only past that + 450. A chunk is planted while every tuft in it is still past the band, so planting is invisible.
+  const _gK = _swGrassK(), _gPlant = _gK.fadeB + _gK.plantMargin, _gDrop = _gPlant + 450;
+  const _gCand = [];
   for (const c of chunks.values()) {
     const cx = c.cx, cz = c.cz;
     const _cheb = Math.max(Math.abs(cx - scx), Math.abs(cz - scz));
-    const near = _cheb <= _SW_GRASS_VIEW;
-    if (near && wantGrass && !c.grassBuilt && gBuilt < (gLim || 1)) {
-      const _fpT = game._foliageProf ? performance.now() : 0;
-      c.grass = _swBuildGrass(cx * _SW_CHUNK, cz * _SW_CHUNK, T); c.grassBuilt = true; gBuilt++;
-      if (game._foliageProf) _foliageProfRec('grass', performance.now() - _fpT);
-    } else if ((!near || !wantGrass) && c.grassBuilt && _swRemoved < _remMax) {
+    const _gx0 = cx * _SW_CHUNK, _gz0 = cz * _SW_CHUNK;
+    const _gdx = Math.max(0, _gx0 - px, px - (_gx0 + _SW_CHUNK)), _gdz = Math.max(0, _gz0 - pz, pz - (_gz0 + _SW_CHUNK));
+    const _gd = Math.sqrt(_gdx * _gdx + _gdz * _gdz);
+    if (_gd < _gPlant && wantGrass && !c.grassBuilt) {
+      _gCand.push(_gd, c);
+    } else if ((_gd > _gDrop || !wantGrass) && c.grassBuilt && _swRemoved < _remMax) {
       _swRemoveGrass(c.grass); c.grass = null; c.grassBuilt = false; _swRemoved++;   // (v39.94) capped, see the dispose note
     }
     const nearT = _cheb <= _treeView;
@@ -68498,6 +69292,18 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
       if (game._foliageProf) _foliageProfRec('trees', performance.now() - _fpT);
     } else if ((!nearT || !wantFoliage) && c.treesBuilt && _swRemoved < _remMax) {
       _swRemoveTrees(c.trees); c.trees = null; c.treesBuilt = false; _swRemoved++;   // (v39.94) capped
+    }
+  }
+  // (v51.54) the grass candidates, nearest first, up to the per-call budget (one a frame in play)
+  if (_gCand.length) {
+    const _gn = _gCand.length / 2, _gi = [];
+    for (let i = 0; i < _gn; i++) _gi.push(i);
+    _gi.sort((a, b) => _gCand[a * 2] - _gCand[b * 2]);
+    for (let k = 0; k < _gi.length && gBuilt < (gLim || 1); k++) {
+      const c = _gCand[_gi[k] * 2 + 1];
+      const _fpT = game._foliageProf ? performance.now() : 0;
+      c.grass = _swBuildGrass(c.cx * _SW_CHUNK, c.cz * _SW_CHUNK, T); c.grassBuilt = true; gBuilt++;
+      if (game._foliageProf) _foliageProfRec('grass', performance.now() - _fpT);
     }
   }
   // (v38.61) record what this pass concluded (see the idle early-out above)
