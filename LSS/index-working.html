@@ -7342,7 +7342,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "51.30";
+const LSS_BUILD = "51.36";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -39808,6 +39808,16 @@ const _swU = { uTime:{value:0}, uYMid:{value:0}, uAMP:{value:1}, uSnow:{value:0.
                // _hubZoneTick. Was a hardcoded brown in the shader, which put
                // mud on the lava plains and the ice fields.
                uColDirt:{value:new THREE.Color(0x54371f)} };
+// (v51.34) FOLIAGE RUSTLE - the disturbance ring _swFoliageMat's vertex patch reads (see _rusTick). 16 slots:
+// uRus = where + when (xyz, start time on the uTime clock), uRusB = radius, strength, travel direction (xz);
+// uRusN = live count (0 = the whole block is skipped), uRusK = spring lean / sway boost / spring rate /
+// damping (v51.35), uRusC = a sphere around every live event, so plants nowhere near one skip the loop.
+_swU.uRus  = { value: Array.from({ length: 16 }, () => new THREE.Vector4(0, -1e6, 0, -100)) };
+_swU.uRusB = { value: Array.from({ length: 16 }, () => new THREE.Vector4(0, 0, 0, 0)) };
+_swU.uRusN = { value: 0 };
+_swU.uRusK = { value: new THREE.Vector4(0.50, 3.0, 6.5, 2.2) };
+_swU.uRusC = { value: new THREE.Vector4(0, -1e6, 0, 0) };
+_swU.uRusL = { value: new THREE.Vector4(0.012, 45.0, 0, 0) };   // (v51.36) crown lag (rad per unit of height), bend reference height
 if (typeof window !== 'undefined') {
 
   // (v35.33) Tree sway ceiling: __treeSway(0.04) for a near-still forest,
@@ -41523,13 +41533,243 @@ function _swFoliageMat(glow){
   const m=new THREE.MeshStandardMaterial({vertexColors:true,color:0xffffff,roughness:1,metalness:0,side:THREE.DoubleSide});
   m.envMapIntensity = 0.18;
   if(glow){ m.emissive=new THREE.Color(glow); m.emissiveIntensity=0.5; }
+  // (v51.34 -> v51.35) FOLIAGE RUSTLE = A SPRING, PLUS THE WIND SWAY TURNED UP. Owner, on v51.34's lean-away
+  // push: "i didn't see much or any movement" -> "just like increase the sway by a lot for a second" -> "it would
+  // sway for a second after the ship goes by, like it springs back". So each live event (see _rusTick) is a
+  // DAMPED SPRING per plant: pushed away from where the mover passed (and a little along its travel), then
+  // swinging back through centre and past it, dying out over ~a second - sin(age * uRusK.z) * exp(-age *
+  // uRusK.w), as a lean of up to uRusK.x radians times the vertex's height above the plant's base (uSway's
+  // v35.33 angle rule: a reed and an oak swing alike). While it rings down the plant's own wind sway is
+  // multiplied by up to 1 + uRusK.y, so the motion stays organic rather than a pendulum.
+  // Everything is read at the plant's BASE, so the whole plant moves as a body and nothing shears; a mover
+  // from the base up to ~120 u above it counts as "at" the plant (its crown). Zero cost with no live event
+  // (uRusN), and plants outside uRusC never enter the loop.
+  // (v51.36) ...AND IT BENDS. Owner on v51.35: "they seem a bit stiff" - the spring tilted each plant as a
+  // rigid pole (offset proportional to height). Now the offset is lean x h^2 / (h + uRusL.y): trunks stay
+  // planted and crowns swing (measured world heights: trees 50-156, shore plants 14-46). The crown also LAGS
+  // the trunk (phase - h x uRusL.x, a wave running up the plant), so it whips instead of ticking like a
+  // pendulum; the sum over events is carried as a sin / cos pair so each vertex can take its own lag. The top
+  // drops along its arc (|push|^2 / 2h) so a swinging tree does not stretch.
+  const _rus = !!(_swU.uRus && _swU.uRusB && _swU.uRusN && _swU.uRusK && _swU.uRusC && _swU.uRusL);
+  const RUS_DECL = _rus ? 'uniform vec4 uRus[16];\nuniform vec4 uRusB[16];\nuniform int uRusN;\nuniform vec4 uRusK;\nuniform vec4 uRusC;\nuniform vec4 uRusL;\n' : '';
+  const RUS_PRE = !_rus ? '' :
+    ' float _rb01 = 0.0; vec2 _rvS = vec2(0.0); vec2 _rvC = vec2(0.0);\n' +
+    ' if (uRusN > 0) {\n' +
+    '  vec3 _rb = (modelMatrix * vec4(ip, 1.0)).xyz;\n' +
+    '  if (distance(_rb, uRusC.xyz) < uRusC.w) {\n' +
+    '   float _acc = 0.0;\n' +
+    '   for (int i = 0; i < 16; i++) {\n' +
+    '    if (i >= uRusN) break;\n' +
+    '    vec4 e = uRus[i]; vec4 b = uRusB[i];\n' +
+    '    vec3 d = _rb - e.xyz; float dh = length(d.xz);\n' +
+    '    float dist = length(vec2(dh, max(0.0, abs(d.y) - 120.0)));\n' +
+    '    if (dist >= b.x) continue;\n' +
+    '    float age = uTime - e.w; if (age < 0.0) continue;\n' +
+    '    float f = b.y * (1.0 - smoothstep(b.x * 0.35, b.x, dist));\n' +
+    '    float dmp = exp(-age * uRusK.w);\n' +
+    '    _acc += (1.0 - exp(-age * 25.0)) * dmp * f;\n' +
+    '    vec2 away = dh > 1.0 ? d.xz / dh : b.zw;\n' +
+    '    vec2 w = (away + b.zw * 0.5) * (f * dmp);\n' +
+    '    float _rph = age * uRusK.z;\n' +
+    '    _rvS += w * sin(_rph); _rvC += w * cos(_rph);\n' +
+    '   }\n' +
+    '   _rb01 = min(_acc, 1.0);\n' +
+    '   float _rl = length(_rvS); if (_rl > 1.6) _rvS *= 1.6 / _rl;\n' +
+    '   _rl = length(_rvC); if (_rl > 1.6) _rvC *= 1.6 / _rl;\n' +
+    '  }\n' +
+    ' }\n' +
+    ' cf *= 1.0 + uRusK.y * _rb01;\n';
+  const RUS_POST = !_rus ? '' :
+    ' if (_rb01 > 0.0) {\n' +
+    '  mat3 _rm = mat3(modelMatrix) * mat3(instanceMatrix);\n' +
+    '  vec3 _ro = _rm * transformed;\n' +
+    '  float _h = max(0.0, _ro.y);\n' +
+    '  float _lag = _h * uRusL.x;\n' +
+    '  vec2 _v = (_rvS * cos(_lag) - _rvC * sin(_lag)) * (uRusK.x * _h * _h / (_h + uRusL.y));\n' +
+    '  vec3 _rpush = vec3(_v.x, -dot(_v, _v) / (2.0 * max(_h, 1.0)), _v.y);\n' +
+    '  transformed += transpose(_rm) * _rpush / max(dot(_rm[0], _rm[0]), 1e-6);\n' +
+    ' }\n';
   m.onBeforeCompile=(sh)=>{ sh.uniforms.uTime=_swU.uTime; sh.uniforms.uCam=_swU.uCam; sh.uniforms.uTreeFadeA=_swU.uTreeFadeA; sh.uniforms.uTreeFadeB=_swU.uTreeFadeB; sh.uniforms.uSway=_swU.uSway;
-    sh.vertexShader='uniform float uTime,uTreeFadeA,uTreeFadeB,uSway;\nuniform vec3 uCam;\n'+sh.vertexShader.replace('#include <begin_vertex>',
-      '#include <begin_vertex>\n vec3 ip=vec3(instanceMatrix[3][0],instanceMatrix[3][1],instanceMatrix[3][2]);\n float ph=ip.x*0.05+ip.z*0.05;\n float vph=ph+transformed.x*0.08+transformed.z*0.08+transformed.y*0.05;\n float canopy=max(0.0,transformed.y-18.0);\n float cf=canopy*canopy*0.0012+canopy*0.015;\n cf=min(cf,transformed.y*uSway);\n float gust=0.6+0.4*sin(uTime*0.13+ph*0.3);\n float swayX=(sin(uTime*0.9+vph)*0.85+sin(uTime*1.9+vph*1.7)*0.4)*gust;\n float swayZ=(sin(uTime*0.8+vph*1.2+1.7)*0.7+sin(uTime*2.3+vph*1.5)*0.3)*gust;\n transformed.x+=swayX*cf;\n transformed.z+=swayZ*cf;\n transformed.y+=sin(uTime*3.1+vph*2.0)*cf*0.22;\n float tfade=1.0-smoothstep(uTreeFadeA,uTreeFadeB,distance(ip.xz,uCam.xz));\n transformed*=tfade;'); };
+    if (_rus) { sh.uniforms.uRus=_swU.uRus; sh.uniforms.uRusB=_swU.uRusB; sh.uniforms.uRusN=_swU.uRusN; sh.uniforms.uRusK=_swU.uRusK; sh.uniforms.uRusC=_swU.uRusC; sh.uniforms.uRusL=_swU.uRusL; }
+    sh.vertexShader='uniform float uTime,uTreeFadeA,uTreeFadeB,uSway;\nuniform vec3 uCam;\n'+RUS_DECL+sh.vertexShader.replace('#include <begin_vertex>',
+      '#include <begin_vertex>\n vec3 ip=vec3(instanceMatrix[3][0],instanceMatrix[3][1],instanceMatrix[3][2]);\n float ph=ip.x*0.05+ip.z*0.05;\n float vph=ph+transformed.x*0.08+transformed.z*0.08+transformed.y*0.05;\n float canopy=max(0.0,transformed.y-18.0);\n float cf=canopy*canopy*0.0012+canopy*0.015;\n cf=min(cf,transformed.y*uSway);\n'+RUS_PRE+' float gust=0.6+0.4*sin(uTime*0.13+ph*0.3);\n float swayX=(sin(uTime*0.9+vph)*0.85+sin(uTime*1.9+vph*1.7)*0.4)*gust;\n float swayZ=(sin(uTime*0.8+vph*1.2+1.7)*0.7+sin(uTime*2.3+vph*1.5)*0.3)*gust;\n transformed.x+=swayX*cf;\n transformed.z+=swayZ*cf;\n transformed.y+=sin(uTime*3.1+vph*2.0)*cf*0.22;\n'+RUS_POST+' float tfade=1.0-smoothstep(uTreeFadeA,uTreeFadeB,distance(ip.xz,uCam.xz));\n transformed*=tfade;'); };
   return m;
 }
 function _swTreeMatGet(){ if(!_swTreeMat){ _swTreeMat=_swFoliageMat(0); if(_swTreeStyleRibbon()) _swRibbonPatchMat(_swTreeMat); } return _swTreeMat; }   // (v50.63) the ribbon trees' atlas + cut-out + canopy lighting
 function _swShroomMatGet(){ if(!_swShroomMat) _swShroomMat=_swFoliageMat(0x2a55ff); return _swShroomMat; }
+// ═══ (v51.34) FOLIAGE RUSTLE: ships and rockets disturb the trees and plants they pass ═══════════════════════
+// Owner: "i want foliage to rustle as a ship or rocket flies by or through, sound and movement".
+// MOVEMENT is GPU-side: _swU.uRus* is a ring of 16 disturbance events (where, when, how hard, which way) that
+// _swFoliageMat's vertex patch reads, so every foliage material - chunk trees, shore plants, mushrooms, sky
+// islands, city parks - leans away from a passing mover and flutters as it settles, with no per-tree CPU work.
+// SOUND (and whether to spend an event at all) needs to know a plant is actually THERE, so each mover near the
+// camera is checked against the trees and plants of the chunk(s) under it (`c.trees`, instance positions cached
+// per InstancedMesh) and a positional rustle plays at the nearest plant.
+//   - Movers: the player, every ship in game.entities, and every ROCKET in game.projectiles (`smokeTrail` -
+//     missiles, salvos, tracker rockets; bullets and beams do not shake trees).
+//   - Knobs, live: window.__rustle = { on, shipR, rocketR, minSpeed, vRef, emitDt, spring, swayBoost,
+//     springRate, damping, lag, bendH, range, sound, soundR, hearR, soundDt } (any subset);
+//     window.__rustleStats() reads the counters. (v51.35 renamed bend/flutter/flutterHz/decay when the motion
+//     became a spring; v51.36 added lag / bendH when it learned to bend.)
+//   - City parks and sky islands MOVE (same material) but do not trigger on their own - they are not chunk
+//     foliage. A ship skimming a park still shakes it when a chunk tree nearby fired the event.
+const _RUS = { head: 0, ev: [], st: new WeakMap(), pts: new WeakMap(), near: { x: 0, y: 0, z: 0, d: 0 },
+               v3: null, err: 0, stats: { emits: 0, sounds: 0, movers: 0, nearFoliage: 0, live: 0 } };
+function _rusK() {
+  const W = (typeof window !== 'undefined' && window.__rustle) || {};
+  const o = _rusK.o || (_rusK.o = {});
+  const n = (k, d) => (W[k] != null && isFinite(+W[k])) ? +W[k] : d;
+  o.on = W.on !== false;
+  o.shipR = n('shipR', 300);       // disturbance radius around a ship (world units; v51.35 owner-tested live)
+  o.rocketR = n('rocketR', 180);   // ...and a rocket
+  o.minSpeed = n('minSpeed', 60);  // slower than this disturbs nothing (hovering, landed)
+  o.vRef = n('vRef', 900);         // the speed that counts as full strength
+  o.emitDt = n('emitDt', 0.09);    // seconds between events per mover while it is near foliage
+  o.spring = n('spring', 0.50);    // (v51.35) the spring's lean at full strength (v51.36: on the bent profile)
+  o.swayBoost = n('swayBoost', 3.0); // ...and the wind sway multiplied by up to 1 + this while it rings
+  o.springRate = n('springRate', 6.5); // spring angular rate, rad/s (v51.36 6.5 = ~1 swing a second; was 10)
+  o.damping = n('damping', 2.2);   // 1/s - rings ~1-1.5 s ("sway for a second ... springs back")
+  o.lag = n('lag', 0.012);         // (v51.36) crown lag, radians per world unit of height (whip, not pendulum)
+  o.bendH = n('bendH', 45);        // (v51.36) bend reference height: below it the offset grows ~h^2, above ~h
+  o.range = n('range', 3000);      // movers further than this from the camera are skipped
+  o.sound = W.sound !== false;
+  o.soundR = n('soundR', 140);     // a mover must pass this close to a plant to make it sound
+  o.hearR = n('hearR', 1100);      // ...and the plant must be this close to the listener
+  o.soundDt = n('soundDt', 0.22);  // seconds between rustles per mover (jittered)
+  return o;
+}
+// World-space [x, y, z, height] per instance, cached per InstancedMesh until its count changes. Height is the
+// geometry's top times the instance's Y scale - the trunk-to-crown span a mover can brush.
+function _rusPtsOf(im) {
+  let P = _RUS.pts.get(im);
+  const n = im.count | 0;
+  if (P && P.n === n) return P;
+  const a = im.instanceMatrix && im.instanceMatrix.array;
+  if (!a || !n) return null;
+  const g = im.geometry;
+  if (g && !g.boundingBox) { try { g.computeBoundingBox(); } catch (_) {} }
+  const gh = (g && g.boundingBox && isFinite(g.boundingBox.max.y)) ? Math.max(1, g.boundingBox.max.y) : 40;
+  const m = im.matrixWorld.elements, my = Math.hypot(m[4], m[5], m[6]) || 1;
+  const arr = new Float32Array(n * 4);
+  for (let i = 0; i < n; i++) {
+    const o = i * 16, x = a[o + 12], y = a[o + 13], z = a[o + 14];
+    arr[i * 4]     = m[0] * x + m[4] * y + m[8]  * z + m[12];
+    arr[i * 4 + 1] = m[1] * x + m[5] * y + m[9]  * z + m[13];
+    arr[i * 4 + 2] = m[2] * x + m[6] * y + m[10] * z + m[14];
+    arr[i * 4 + 3] = gh * Math.hypot(a[o + 4], a[o + 5], a[o + 6]) * my;
+  }
+  P = { n: n, arr: arr };
+  _RUS.pts.set(im, P);
+  return P;
+}
+// Nearest plant to (x, y, z) within R, as a distance to its trunk-to-crown segment. Fills `out` with the
+// contact point (on that segment) and the distance; false when nothing is that close.
+function _rusNearest(x, y, z, R, out) {
+  const chunks = game.sandwichChunks;
+  if (!chunks || !chunks.size) return false;
+  const C = _SW_CHUNK;
+  const cx0 = Math.floor((x - R) / C), cx1 = Math.floor((x + R) / C);
+  const cz0 = Math.floor((z - R) / C), cz1 = Math.floor((z + R) / C);
+  let best = R * R, hit = false;
+  for (let cx = cx0; cx <= cx1; cx++) for (let cz = cz0; cz <= cz1; cz++) {
+    const c = chunks.get(cx + ',' + cz);
+    const list = c && c.trees;
+    if (!list) continue;
+    for (let j = 0; j < list.length; j++) {
+      const im = list[j];
+      if (!im || !im.isInstancedMesh || !im.visible) continue;   // drapes are plain meshes; far-gated meshes are hidden
+      const P = _rusPtsOf(im);
+      if (!P) continue;
+      const A = P.arr;
+      for (let i = 0, k = 0; i < P.n; i++, k += 4) {
+        const dx = A[k] - x, dz = A[k + 2] - z;
+        const h2 = dx * dx + dz * dz;
+        if (h2 >= best) continue;
+        const by = A[k + 1], ty = by + A[k + 3];
+        const dy = y < by ? by - y : (y > ty ? y - ty : 0);
+        const d2 = h2 + dy * dy;
+        if (d2 < best) { best = d2; hit = true; out.x = A[k]; out.y = Math.min(ty, Math.max(by, y)); out.z = A[k + 2]; }
+      }
+    }
+  }
+  if (hit) out.d = Math.sqrt(best);
+  return hit;
+}
+function _rusEmit(x, y, z, R, s, dx, dz, now) {
+  const i = _RUS.head;
+  const e = _RUS.ev[i] || (_RUS.ev[i] = { x: 0, y: 0, z: 0, t: -1e9, R: 0, s: 0, dx: 0, dz: 0 });
+  e.x = x; e.y = y; e.z = z; e.t = now; e.R = R; e.s = s; e.dx = dx; e.dz = dz;
+  _RUS.head = (i + 1) % 16;
+  _RUS.stats.emits++;
+}
+// Per frame, from the hub block of gameLoop (beside the other foliage ticks). Clock = _swU.uTime, the same one
+// the shader ages events with.
+function _rusTick(dt) {
+  const U = _swU;
+  if (!U || !U.uRus) return;
+  const K = _rusK();
+  if (!K.on || game.bendWorld || !game.sandwichChunks || !camera) { if (U.uRusN.value) U.uRusN.value = 0; return; }
+  const now = U.uTime.value;
+  U.uRusK.value.set(K.spring, K.swayBoost, K.springRate, K.damping);
+  if (U.uRusL) U.uRusL.value.set(K.lag, Math.max(1, K.bendH), 0, 0);
+  const cam = camera.position, R2 = K.range * K.range;
+  let movers = 0, nearN = 0;
+  const visit = (obj, pos, vel, R, rocket) => {
+    const cdx = pos.x - cam.x, cdz = pos.z - cam.z;
+    if (cdx * cdx + cdz * cdz > R2) return;
+    let st = _RUS.st.get(obj);
+    if (!st) { st = { nextEmit: 0, nextSound: 0, px: pos.x, py: pos.y, pz: pos.z }; _RUS.st.set(obj, st); }
+    let vx = 0, vy = 0, vz = 0;
+    if (vel && (vel.x || vel.y || vel.z)) { vx = vel.x; vy = vel.y; vz = vel.z; }
+    else if (dt > 0) { vx = (pos.x - st.px) / dt; vy = (pos.y - st.py) / dt; vz = (pos.z - st.pz) / dt; }   // peers carry no velocity
+    st.px = pos.x; st.py = pos.y; st.pz = pos.z;
+    const sp = Math.hypot(vx, vy, vz);
+    if (!(sp >= K.minSpeed) || sp > 60000) return;              // still, or a teleport
+    movers++;
+    const near = _RUS.near;
+    if (!_rusNearest(pos.x, pos.y, pos.z, R, near)) return;
+    nearN++;
+    const s = Math.min(1.3, Math.max(0.25, sp / K.vRef)) * (rocket ? 0.8 : 1);
+    if (now >= st.nextEmit) {
+      const h = Math.hypot(vx, vz) || 1;
+      _rusEmit(pos.x, pos.y, pos.z, R, s, vx / h, vz / h, now);
+      st.nextEmit = now + K.emitDt;
+    }
+    if (K.sound && near.d < K.soundR && now >= st.nextSound && typeof playSpatialSound === 'function') {
+      const lx = near.x - cam.x, ly = near.y - cam.y, lz = near.z - cam.z;
+      if (lx * lx + ly * ly + lz * lz < K.hearR * K.hearR) {
+        const hard = near.d < K.soundR * 0.45 && sp > K.vRef * 0.45;   // through it, fast - not past it
+        const v = _RUS.v3 || (_RUS.v3 = new THREE.Vector3());
+        try { playSpatialSound(hard ? 'foliage_rustle' : 'foliage_rustle_soft', v.set(near.x, near.y, near.z), { refDistance: 120, rolloffFactor: 1.3 }); _RUS.stats.sounds++; } catch (_) {}
+        st.nextSound = now + K.soundDt * (0.75 + Math.random() * 0.5);
+      }
+    }
+  };
+  try { if (player && player.position && player.shipState !== 'dead') visit(player, player.position, player.velocity, K.shipR, false); } catch (_) {}
+  const ents = game.entities || [];
+  for (let i = 0; i < ents.length; i++) { const e = ents[i]; if (e && e.alive !== false && e.position) visit(e, e.position, e.velocity, K.shipR, false); }
+  const projs = game.projectiles || [];
+  for (let i = 0; i < projs.length; i++) { const p = projs[i]; if (p && p.alive && p.smokeTrail && p.position) visit(p, p.position, p.velocity, K.rocketR, true); }
+  // pack the live events for the shader, plus a sphere around them for its early-out
+  const life = 4.5 / Math.max(0.2, K.damping);
+  const A = U.uRus.value, B = U.uRusB.value;
+  let n = 0, sx = 0, sy = 0, sz = 0;
+  for (let i = 0; i < 16; i++) {
+    const e = _RUS.ev[i];
+    if (!e || now - e.t > life || now < e.t) continue;
+    A[n].set(e.x, e.y, e.z, e.t); B[n].set(e.R, e.s, e.dx, e.dz);
+    sx += e.x; sy += e.y; sz += e.z; n++;
+  }
+  U.uRusN.value = n;
+  if (n) {
+    sx /= n; sy /= n; sz /= n;
+    let r = 0;
+    for (let i = 0; i < n; i++) r = Math.max(r, Math.hypot(A[i].x - sx, A[i].y - sy, A[i].z - sz) + B[i].x);
+    U.uRusC.value.set(sx, sy, sz, r + 320);   // + the tallest crown above its base: the shader tests the BASE
+  }
+  const S = _RUS.stats; S.movers = movers; S.nearFoliage = nearN; S.live = n;
+}
+if (typeof window !== 'undefined') window.__rustleStats = () => Object.assign({ knobs: Object.assign({}, _rusK()) }, _RUS.stats);
 // (v33.92) Low-frequency FOREST PATCH mask — large zones (~thousands of units) of DENSE forest amid the sparse
 // scatter. Drives both tree density (_swBuildTrees) AND where birds roost (_birdComputePerches), so the birds
 // actually sit in real trees. Returns 0 (no forest) .. 1 (forest core).
@@ -43133,6 +43373,21 @@ function _hzDuskLights() {
 // the rift's roundEnd->warmup rebuild machinery; MODE stays 'freeflight'
 // throughout so Aegis XP + the freeflight respawn loop keep working inside.
 const _HZ_CAVERN = { portals: null, DIST: 21500, ALT: 1400, COOLDOWN: 120, coolBySector: {}, _pre: false, _returnPos: null };
+// ⭐⭐ (v51.31) "SOLO" MEANS NOBODY ELSE IS HERE, NOT "NO ROOM OBJECT". Owner: "if you click into
+// elimination mode, and then change the mode in the ship selection screen to exhibition, there's no
+// rift portals".
+// The rifts are solo-only because the cavern traverse is not networked: a peer would stay in the
+// overworld while you flew a world they cannot see. Every gate tested that as `net.active` - and
+// ELIMINATION from the menu always opens a room ("Uses the room code above, or creates one for you"),
+// so after the ROOM MODE arrows switch it to EXHIBITION the hub is up with net.active true and ZERO
+// peers. Measured on 51.30: mode freeflight, netActive true, peers [] -> _hzPortalsFrame disposed the
+// rings every frame. A menu EXHIBITION with a code typed in hits the same wall.
+// Peers are what the rule is about, so peers are what it now reads. If someone DROPS IN while you are
+// inside a rift, _hzPortalsFrame takes the rift home (see there) - the room's briefing describes the
+// overworld, so that is where the two of you can actually meet.
+function _hzRoomShared() {
+  try { return !!(net && net.active && net.peers && net.peers.size > 0); } catch (_) { return false; }
+}
 // (v42.70) THE WARP TUNNEL HAS TWO SWITCHES AND ONLY ONE OF THEM IS Overlays.warp.
 // Owner: "in exhibition, i went through a portal, and in the ship selection screen, i could see
 // the portal effects overtop".
@@ -43298,7 +43553,7 @@ function _hzCavernStep(dt) {
   if (!J.n) cv._noSpawn = true;   // nothing built at all - let the failsafe open the way home
 }
 function _hzEnterCavern(p) {
-  if (game._cavern || (net && net.active)) return;
+  if (game._cavern || _hzRoomShared()) return;   // (v51.31) peers, not net.active - see _hzRoomShared
   // (v36.27) Arm the staged world-swap BEFORE applyMapPreset below — see
   // _rrStagedSwap and the setSandwichBiome note. This is the EXHIBITION rift
   // portal, i.e. the owner's reported freeze path.
@@ -43473,7 +43728,7 @@ function _hzGuardsFrame(p, d, dt) {
     // The models streamed in async — stand down if the world moved on
     // (portals rebuilt, cavern entered, room went networked, round ended).
     if (!_HZ_CAVERN.portals || _HZ_CAVERN.portals.indexOf(p) < 0) return;
-    if (game._cavern || (net && net.active) || game.state !== 'playing') return;
+    if (game._cavern || _hzRoomShared() || game.state !== 'playing') return;   // (v51.31) peers, not net.active
     if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight') return;
     // (v46.92) Hand the job to the per-frame builder instead of making all four here. The banner and
     // the stinger stay on the FIRST hull so the warning is never late.
@@ -43490,7 +43745,7 @@ function _hzGuardsBuildStep(p, dt) {
   const B = p._guardBuild;
   if (!B) return;
   const _stand = (!_HZ_CAVERN.portals || _HZ_CAVERN.portals.indexOf(p) < 0) ||
-                 game._cavern || (net && net.active) || game.state !== 'playing' ||
+                 game._cavern || _hzRoomShared() || game.state !== 'playing' ||   // (v51.31) peers, not net.active
                  (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight');
   if (_stand) {
     // Whatever is already flying stays — it is in game.entities and owns itself now.
@@ -43554,10 +43809,18 @@ function _hzPortalsFrame(dt) {
   // Per-sector re-entry cooldowns tick everywhere in freeflight (hub + rifts).
   const _cbs = _HZ_CAVERN.coolBySector;
   for (const s in _cbs) { _cbs[s] -= dt; if (_cbs[s] <= 0) delete _cbs[s]; }
-  if (game._cavern) { _hzCavernFrame(dt); return; }
+  if (game._cavern) {
+    // (v51.31) Somebody dropped into the room while we were inside a rift. The drop-in briefing
+    // describes the overworld (and the cavern is not networked), so take the rift home - the same
+    // traverse the cleared ring runs; FreeFlightMode._resetHub sweeps any garrison still flying.
+    // Only from a settled 'playing' frame: never mid-stage, and the arrival countdown finishes first.
+    // No banner of its own - _hzReturnToHub raises RIFT HOME (and new callouts are the owner's call).
+    if (_hzRoomShared() && game.state === 'playing' && !game._swapStaging) { _hzReturnToHub(); return; }
+    _hzCavernFrame(dt); return;
+  }
   const T = game.sandwichTerrain;
   if (!T || !T.ON || T.biome !== 'mossy') return;
-  if (net && net.active) { _hzPortalsDispose(); return; }   // solo-only, like the rift
+  if (_hzRoomShared()) { _hzPortalsDispose(); return; }   // solo-only, like the rift - (v51.31) peers, not net.active
   // (v37.81) CYBERPUNK CITY uses the portal LOCATIONS as its launch points and nothing else - the
   // owner's rule is that the rings themselves are disabled for the duration, so nobody flies off
   // into a cavern mid-match.
@@ -56913,10 +57176,42 @@ function _hcMakeMeshes(city, site) {
   // cannot cross the opaque/transparent split, see the VR launch cover), and a
   // matching polygonOffset stops the ground's own offset from winning the depth test
   // at range.
+  //
+  // ⭐⭐⭐ (v51.32 -> v51.33) THE DECK SHOWED THROUGH ISLANDS AND TREES: SLOPE-SCALED OFFSETS, EDGE-ON.
+  // Owner, skimming the archipelago toward the hub: "see the horizontal blue line? ... i can only
+  // see it from this exact angle", "i must be level with the city floor and i think it's cutting
+  // through the other geometry", "foliage, not islands" -> "actually, no.. islands too", and "if you
+  // move the cam, it comes back, then gets smaller and fades" (a sub-pixel sliver: it aliases to a
+  // full line when the dynamic resolution drops on movement and averages away as it climbs back).
+  // polygonOffsetFactor multiplies the polygon's depth SLOPE, which is unbounded for a flat surface
+  // seen exactly edge-on, and skimming at ~80 u over the water (-720) parks the chase camera exactly
+  // at deck height (-638.6; measured cam -638.82 on the frame the owner saw the line). The deck's -2
+  // then pulled its sliver in front of every island chunk and plant between you and the city (and
+  // into the water's reflection).
+  // v51.32 set the deck to -1 to match the clipmap's slope factor and win on units. NOT FIXED: half
+  // of unbounded is unbounded, and the clipmap's own -1 pulled the flat city pad through the same
+  // islands one layer down. v51.33: NO SLOPE TERM ANYWHERE IN THE STACK - clipmap, deck and pad rings
+  // all factor 0 (see the clipmap's `polygonOffsetFactor = 0` note) - and every coplanar tie decided
+  // on UNITS: the deck 2 steps past the finest clipmap ring, the rings 2 past the deck. Owner-verified
+  // live on the spot: "fixed :)".
+  // ⚠ "Factor 0 loses to the pad" (measured while working this) is true ONLY while the clipmap keeps
+  //   its -1: a slope term on one side of a coplanar tie and none on the other always loses edge-on.
+  //   Keep these factors EQUAL, and keep them 0.
+  // ⚠ Off-screen measurement trap: a plain renderer.render(scene, camera) of the SAME frame differed
+  //   from the game's own scene pass in 22 % of pixels (the frame is several passes with per-pass
+  //   state), so "floor on vs hidden" re-renders were misleading here. Judge this class of bug live.
+  // ⚠ The LANDING PADS changed too: the `cyl` pad tops sit 7.5 u above the deck and the old -2 let the
+  //   deck's paving show through them by view angle (hollow-looking pads, dark wedges - likely the
+  //   "see the cut" above). They now read as solid tops inside their glow rings.
+  // A/B: window.__cityFloorDepth('old' | 'new' | { floor: [f, u], ring: [f, u] }) (deck + rings only;
+  // the clipmap's factor is window.__clipPO(f)).
+  let _hcClipL = 6; try { _hcClipL = _CLIP_LEVELS; } catch (_) {}   // TDZ-safe: declared later in the file
+  const _HC_FLOOR_PO = [0, -(_hcClipL * 2 + 2)];                   // finest clipmap ring is -(L*2) units
+  const _HC_RING_PO  = [0, _HC_FLOOR_PO[1] - 2];
   const ringMat = _padGlowPatch(_lssAddOnePass(new THREE.MeshBasicMaterial({
     color: 0xffffff, blending: THREE.AdditiveBlending, transparent: true,
     depthWrite: false, toneMapped: false, side: THREE.DoubleSide,
-    polygonOffset: true, polygonOffsetFactor: -8, polygonOffsetUnits: -8,
+    polygonOffset: true, polygonOffsetFactor: _HC_RING_PO[0], polygonOffsetUnits: _HC_RING_PO[1],   // (v51.33) was -8/-8
   })), true);
   const add = (key, geo, mat, maxH, shad) => {
     const arr = city.layers[key];
@@ -56952,7 +57247,7 @@ function _hcMakeMeshes(city, site) {
       map: albTex, emissive: 0xffffff, emissiveMap: emiTex, transparent: true,
       color: new THREE.Color(0.85, 0.85, 0.85),
       emissiveIntensity: 0.22,
-      polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+      polygonOffset: true, polygonOffsetFactor: _HC_FLOOR_PO[0], polygonOffsetUnits: _HC_FLOOR_PO[1],   // (v51.33) was -2/-2 - see the ring note above
     })
   );
   // world-space detail shader: fine two-octave brightness noise close to the
@@ -56990,6 +57285,15 @@ function _hcMakeMeshes(city, site) {
       if (typeof glow === 'number') gnd.material.emissiveIntensity = glow;
       gnd.material.needsUpdate = true;
       return { albedo: gnd.material.color.r, glow: gnd.material.emissiveIntensity };
+    };
+    // (v51.32) the deck + pad-ring depth offsets, live (render state only - no relink).
+    window.__cityFloorDepth = function (v) {
+      const set = (m, po) => { if (m && po) { m.polygonOffsetFactor = po[0]; m.polygonOffsetUnits = po[1]; } };
+      if (v === 'old') { set(gnd.material, [-2, -2]); set(ringMat, [-8, -8]); }
+      else if (v === 'new') { set(gnd.material, _HC_FLOOR_PO); set(ringMat, _HC_RING_PO); }
+      else if (v && typeof v === 'object') { set(gnd.material, v.floor); set(ringMat, v.ring); }
+      return { floor: [gnd.material.polygonOffsetFactor, gnd.material.polygonOffsetUnits],
+               ring: [ringMat.polygonOffsetFactor, ringMat.polygonOffsetUnits] };
     };
   } catch (_) {}
 
@@ -67163,6 +67467,15 @@ try { window.__clipPeak = _CLIP_PEAK; } catch (_) {}
 // full _stGroundYCarved (and, on levels >= _CLIP_PEAK.minLevel, FIVE of them for the peak-max loop).
 // These counters say which. window.__clipReport() prints hit/miss and per-level bake ms.
 const _CLIP_STAT = { hit: 0, missBase: 0, missPeak: 0, lvl: [], calls: [] };
+// (v51.33) live knob for the clipmap's polygonOffsetFactor (render state only - no relink). 0 ships
+// (see the v51.33 note at the level build); __clipPO(-1) reproduces v51.32 and older for an A/B.
+try {
+  window.__clipPO = function (f) {
+    const lv = (_clipmap && _clipmap.levels) || [];
+    if (typeof f === 'number') for (const L of lv) if (L && L.mat) L.mat.polygonOffsetFactor = f;
+    return lv.map((L) => (L && L.mat) ? [L.k, L.mat.polygonOffsetFactor, L.mat.polygonOffsetUnits] : null);
+  };
+} catch (_) {}
 try {
   window.__clipReport = function () {
     const o = { hit: _CLIP_STAT.hit, missBase: _CLIP_STAT.missBase, missPeak: _CLIP_STAT.missPeak, perLevel: [] };
@@ -67336,7 +67649,21 @@ function _clipBuild() {
     // ground plane); v35.14 reverted it. Re-measured that exact risk here:
     //   city pad, same probe  -1.0/x1 2049 · -1.5/x4 2927 (REGRESSES) · -1.0/x2 1667 (safe)
     // -1.5/x4 buys a bit more terrain (357) and is NOT worth reopening v35.13.
-    mat.polygonOffset = true; mat.polygonOffsetFactor = -1.0; mat.polygonOffsetUnits = -(_CLIP_LEVELS - k) * 2;
+    // ⭐⭐⭐ (v51.33) ...AND NOW THE FACTOR IS 0. REVERSES "FACTOR STAYS -1.0" ABOVE. That rule was right
+    // for the question it answered (which slope factor stops the pad flickering against the city deck),
+    // but it never tested 0, and the slope term is the bug: polygonOffsetFactor multiplies each
+    // polygon's depth slope, which is UNBOUNDED for a flat surface seen exactly edge-on. Skimming the
+    // archipelago puts the chase camera level with the city pad and deck (water -720, deck -638.6;
+    // measured cam -638.82 on the frame the owner saw it), and the flat pad / deck then out-voted every
+    // island chunk and tree in front of them: a 1-2 px line at deck height, blinking with the dynamic
+    // resolution (owner: "i can only see it from this exact angle", "it's cutting through the other
+    // geometry", "if you move the cam, it comes back, then gets smaller and fades"). v51.32 halved the
+    // deck's factor to match this one and did not fix it - half of unbounded is unbounded.
+    // Between clipmap levels the factor never mattered (every level carried the same one; the ring
+    // overlaps resolve on these UNITS), so 0 changes only how terrain ties with OTHER geometry. The
+    // city deck and pad rings went to factor 0 with it and win on units alone (see _HC_FLOOR_PO).
+    // Owner-verified live on the same spot: "fixed :)".
+    mat.polygonOffset = true; mat.polygonOffsetFactor = 0; mat.polygonOffsetUnits = -(_CLIP_LEVELS - k) * 2;
     const mesh = new THREE.Mesh(k === 0 ? _clipmap.solidGeo : _clipmap.ringGeo, mat);
     mesh.receiveShadow = true;
     mesh.scale.set(spacing, 1, spacing);
@@ -99789,6 +100116,10 @@ async function _prebakeGpuPrime() {
 // window.__lssModelWarmMats).
 // ⚠ PER-KEY MEMO (_ENT_PRIME.keys) — a second traverse in the same page is a
 // no-op, so the cost below is paid once per key per session, not per swap.
+// (v51.31) ⚠ ...PER KEY *PER ENVIRONMENT* (`key@_programEnvSig()`). A key primed
+// under the hub's weather is NOT warm in a cavern: the env map and the shadow rig
+// are program-key terms, and the per-key memo let the rift garrison link its hull
+// program on the LAUNCH frame. See the note at the memo test.
 //
 // SCOPE, per mode (see _entPrimeHoardKeys) — this is where the loading-time
 // budget is actually spent, so it is deliberately narrow:
@@ -99856,7 +100187,19 @@ function _entPrimeHoardKeys() {
   return out;
 }
 
-function _entPrimePlan() { return _entPrimeShipKeys().concat(_entPrimeHoardKeys()); }
+function _entPrimePlan() {
+  // (v51.31) A zone-rift cavern spawns ONLY the garrison it named at _hzEnterCavern (hoard hulls on a
+  // VORTEX loadout - no bot dealer, no playable models, no rift guards in there). Now that the memo is
+  // per environment, the playable seven would otherwise be cloned and drawn again under the cavern's
+  // lighting on every first visit, for ships that never appear in it. The player's own hull is in the
+  // live scene, so the stage's frame0 renderFrame already draws it there.
+  try {
+    if (typeof game !== 'undefined' && game && game._cavern && game._cavern._picks && game._cavern._picks.length) {
+      return _entPrimeHoardKeys();
+    }
+  } catch (_) {}
+  return _entPrimeShipKeys().concat(_entPrimeHoardKeys());
+}
 
 async function _primeEntityModels(keys, tStart, budgetMs) {
   const t0 = _pbNow();
@@ -99873,12 +100216,32 @@ async function _primeEntityModels(keys, tStart, budgetMs) {
         typeof createShipMesh !== 'function' || typeof shipModelCache === 'undefined') return rep;
     if (renderer.xr && renderer.xr.isPresenting) { rep.capped = 'xr'; return rep; }   // headset owns its own passes
     const cap = (typeof budgetMs === 'number') ? budgetMs : _ENT_PRIME_MAX_MS;
+    // ⭐⭐⭐ (v51.31) THE MEMO IS PER HULL *PER ENVIRONMENT*. Owner: "we had a hitch going into the rift
+    // through a portal, from exhibition mode... it counts 3, 2, 1, and at 1 or just after, it hitches".
+    // MEASURED on 51.30 (`?pbhud`, F8 auto mark): the LAUNCH frame ran 5850 ms, 5799 of it in
+    // renderFrame and all of THAT in one getProgramParameter - program p519, `Material_0.001`, the hoard
+    // hulls' material - first-drawn by `Mesh0` / `mesh_0` the instant the garrison spawned on the first
+    // 'playing' frame, enemy name labels appearing in the same frame. (5.8 s is this pane's cold ANGLE
+    // cache; on a warm machine the same single link is the short, sharp stall the owner felt.)
+    // The prime DID run for that hull - in the HUB. The launch prebake drew every HOARD_SHIPS key under
+    // the overworld's weather, and the old per-KEY memo then answered the cavern's own prime with a full
+    // hit (`__swapReport().ms.ent` = 0). But the environment is part of three's program cache key. The
+    // hub program p345 and the cavern program p519 differ in exactly three slots: cubeUV height 64 vs
+    // 1024 (the weather's 64x32 day env vs the base env; _wxDispose puts it back for a cavern), one light
+    // / shadow count 1 vs 0 and one flags bit (the weather's shadow rig is hub-only). Every one of those
+    // is a term of `_programEnvSig`, so the memo key is now `hull@signature`: a traverse into a world
+    // that lights ships differently primes its hulls again, behind the cover, and a traverse back into
+    // an environment already seen is still a free memo hit. A null signature never memoizes (re-prime).
+    const envSig = (typeof _programEnvSig === 'function') ? _programEnvSig() : null;
+    const memoKey = (k) => (envSig != null) ? (k + '@' + envSig) : null;
     const todo = [];
     for (const k of keys) {
       if (!k) continue;
-      if (_ENT_PRIME.keys.has(k)) { rep.memo++; continue; }
+      const mk = memoKey(k);
+      if (mk && _ENT_PRIME.keys.has(mk)) { rep.memo++; continue; }
       if (todo.indexOf(k) < 0) todo.push(k);
     }
+    rep.env = envSig;
     const rt = (typeof postFX !== 'undefined' && postFX && postFX.rtScene) ? postFX.rtScene : null;
     // Fleet B green: bots wearing a hoard hull are always on Fleet B, and the
     // team tint is a material COLOR, not a program-key term, so one pass covers
@@ -99922,7 +100285,7 @@ async function _primeEntityModels(keys, tStart, budgetMs) {
           });
           built.push(m);
           scene.add(m);
-          _ENT_PRIME.keys.add(k);
+          { const mk = memoKey(k); if (mk) _ENT_PRIME.keys.add(mk); }   // (v51.31) hull@environment
         }
         if (built.length) {
           // ⭐⭐⭐ (v46.94) THIS PRIME EXISTED AND DID NOT TAKE. Owner, on the rift garrison: "a lot of
@@ -100138,7 +100501,15 @@ if (typeof window !== 'undefined') window.__monPrime = () => _MON_PRIME.last;
 // Report: window.__swapReport() -> the last traverse's phase timings.
 // ============================================================================
 const _SWAP = { staging: false, last: null };
-const _SWAP_MAX_MS = 12000;   // hard ceiling: a stage that hangs is worse than one that misses
+// (v51.31) ⚠ THE LAUNCH PREBAKE'S v49.46 RULE, APPLIED TO THE TRAVERSE IT MISSED. This was a flat
+// 12 s, and every later phase of _rrStagedSwap (gpu0, gpu, frame0, the fence) is SKIPPED once the
+// stage passes it - so a slow stage hands its warms to the first frames of play. Measured on 51.30,
+// pane, Exhibition -> zone rift: the `shaders` phase alone ran 19.2 s (ANGLE links of ~5 s each,
+// cold cache), and gpu0 / gpu / frame0 all came back 0 ms. The owner's rule (2026-09-27): "the loading
+// time is fine, as long as there is no hitches after the curtain lifts". So the same ceilings as the
+// launch: 48 s desktop / 12 s phones + LITE, `?pbmax=` A/Bs both. Still a HANG guard, never a target -
+// and the countdown is shortened by the stage (floor 4 s), so a long stage costs digits, not seconds.
+const _SWAP_MAX_MS = _PREBAKE_MAX_MS;   // hard ceiling: a stage that hangs is worse than one that misses
 // Smaller streaming slice than the launch prebake's 40 ms. The launch prebake is
 // racing a cinematic that has not started yet, so it takes the throughput; a
 // traverse is spending countdown time it already had, so it takes the pacing.
@@ -149702,6 +150073,7 @@ function _gameLoopBody(timestamp) {
       _swU.uCam.value.set(_fX, _cineActive ? camera.position.y : player.position.y, _fZ);
       try { _swTreeVisTick(_fX, _fZ); } catch (_) {}   // (v47.05) must stay ABOVE the bend unmap below - _fX/_fZ are still in the space uCam just got
       try { _swFolVisExtra(_fX, _fZ); } catch (_) {}   // (v48.33) sky-island + city-park foliage, same rule; its own try so neither can starve the other
+      try { _rusTick(dt); } catch (e) { if (!_RUS.err) { _RUS.err = 1; try { console.warn('[rustle] tick threw:', e); } catch (_) {} } }   // (v51.34) foliage rustle - reports once
       try { _volcSync(_fX, _fZ); } catch (_) {}
       try { _skFrame(_fX, _cineActive ? camera.position.y : player.position.y, _fZ); } catch (_) {}
       // (v48.33) the foliage gates + volcano sync + sky islands, measured on their own: island builds
@@ -156540,6 +156912,29 @@ const DEFAULT_SOUND_LIBRARY = {
       "recipeGain": 1
     },
     {
+      "name": "foliage_rustle",
+      "description": "leaves and branches thrashed by a ship or rocket going THROUGH foliage (v51.34 _rusTick)",
+      "category": "AMBIENT",
+      "layers": [
+        { "kind": "noise", "duration": 0.03, "volume": 0.2, "startOffset": 0, "filterFreq": 4200, "filterQ": 1.2, "filterType": "bandpass", "varDur": 0.6, "varVol": 0.7, "varFreq": 0.45, "chance": 1, "count": 11, "spacing": 0.026, "spacingVar": 0.9, "countDecay": 0.06, "peakGain": 0, "reverseEnvelope": false },
+        { "kind": "noise", "duration": 0.016, "volume": 0.12, "startOffset": 0.012, "filterFreq": 7200, "filterQ": 1.6, "filterType": "bandpass", "varDur": 0.5, "varVol": 0.8, "varFreq": 0.4, "chance": 1, "count": 9, "spacing": 0.031, "spacingVar": 0.95, "countDecay": 0.08, "peakGain": 0, "reverseEnvelope": false },
+        { "kind": "noise", "duration": 0.12, "volume": 0.07, "startOffset": 0, "filterFreq": 2400, "filterQ": 0.6, "filterType": "bandpass", "varDur": 0.2, "varVol": 0.2, "varFreq": 0.25, "chance": 1, "count": 1, "spacing": 0, "spacingVar": 0, "countDecay": 0, "peakGain": 0, "reverseEnvelope": true },
+        { "kind": "noise", "duration": 0.3, "volume": 0.08, "startOffset": 0.11, "filterFreq": 1900, "filterQ": 0.6, "filterType": "bandpass", "varDur": 0.25, "varVol": 0.25, "varFreq": 0.25, "chance": 1, "count": 1, "spacing": 0, "spacingVar": 0, "countDecay": 0, "peakGain": 0, "reverseEnvelope": false }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "foliage_rustle_soft",
+      "description": "a soft leaf rustle as a ship passes close over or beside foliage (v51.34 _rusTick)",
+      "category": "AMBIENT",
+      "layers": [
+        { "kind": "noise", "duration": 0.022, "volume": 0.1, "startOffset": 0, "filterFreq": 4800, "filterQ": 1.3, "filterType": "bandpass", "varDur": 0.6, "varVol": 0.7, "varFreq": 0.45, "chance": 1, "count": 7, "spacing": 0.034, "spacingVar": 0.9, "countDecay": 0.09, "peakGain": 0, "reverseEnvelope": false },
+        { "kind": "noise", "duration": 0.09, "volume": 0.04, "startOffset": 0, "filterFreq": 2800, "filterQ": 0.7, "filterType": "bandpass", "varDur": 0.2, "varVol": 0.2, "varFreq": 0.25, "chance": 1, "count": 1, "spacing": 0, "spacingVar": 0, "countDecay": 0, "peakGain": 0, "reverseEnvelope": true },
+        { "kind": "noise", "duration": 0.22, "volume": 0.045, "startOffset": 0.08, "filterFreq": 2300, "filterQ": 0.7, "filterType": "bandpass", "varDur": 0.25, "varVol": 0.25, "varFreq": 0.25, "chance": 1, "count": 1, "spacing": 0, "spacingVar": 0, "countDecay": 0, "peakGain": 0, "reverseEnvelope": false }
+      ],
+      "recipeGain": 1
+    },
+    {
       "name": "bird_chirp",
       "description": "ambient songbird chirps : hub bird flock roost",
       "category": "AMBIENT",
@@ -156980,6 +157375,7 @@ const _AUDIO_BAKE_HOT = {
   fire_spread: 1, fire_salvo: 1, fire_buckshot: 1, fire_leadwall: 1,
   explosion: 1, rocket_salvo: 1, tracker_rockets: 1, cluster_missile_fire: 1,
   death: 1, hit: 1, laser_shot: 1, damage: 1,
+  foliage_rustle: 1, foliage_rustle_soft: 1,   // (v51.34) fires every ~0.2 s through a forest - one take would loop audibly
 };
 
 // How long a recipe needs, from its own layers. Offline renders are fixed
@@ -157802,6 +158198,8 @@ _loadPersistedSoundRecipes();
 const _SOUND_MIN_GAP = {
   monster_zap:     0.12,
   bird_chirp:      0.09,
+  foliage_rustle:  0.10,   // (v51.34) several movers in one forest fold into one rustle per 0.1 s
+  foliage_rustle_soft: 0.14,
   water_bloop:     0.25,
   water_bloop_soft: 0.25,
   water_drag:      0.22,
@@ -157869,6 +158267,7 @@ const _AUDIO_SKIPPABLE = {
   laser_core: 1, blaster_power: 1, plasma_railgun: 1,
   siphon_drain: 1, siphon_hit: 1, stun: 1,
   bird_chirp: 1, water_drag: 1, water_bloop_soft: 1,
+  foliage_rustle: 1, foliage_rustle_soft: 1,   // (v51.34) cosmetic - first to go under load
 };
 const _AUDIO_LEAN_RECIPE_TYPES = {
   fire_hitscan: 1, fire_minigun: 1, fire_spread: 1, fire_projectile: 1,
@@ -160534,6 +160933,19 @@ function _mp3SyncToState() {
   // cleared ctxName, so the release re-enters this as a fresh context switch.
   if (_audioHoldSettling()) return;
   if (typeof audio !== 'undefined' && audio.musicEnabled === false) { _mp3Stop(); return; }
+  // ⭐ (v51.31) A WORLD SWAP IS ARMED: KEEP WHATEVER IS PLAYING UNTIL THE CURTAIN TAKES IT. Owner: "it
+  // also plays music for 1 second just as you first start going into a rift portal".
+  // _hzEnterCavern sets game._cavern on the frame you touch the ring, then holds 'roundEnd' for 2 s
+  // before the staged swap raises the loading overlay (and with it the audio hold above). This tick
+  // read game._cavern straight away as "in the cavern" and _mp3Play('battle')'d a fresh track -
+  // measured on 51.30: mp3 context 'battle', playing, on the very first roundEnd frame - and the
+  // overlay's _mp3Stop cut it off ~2 s later. The trip home is the same shape mirrored
+  // (_hzReturnToHub nulls game._cavern up front: the hub cycle started, then died), and so are the
+  // campaign rifts. All of them arm _beginWorldSwap first, so that is the gate: no context switch
+  // while a traverse is armed and the round is still in its roundEnd beat. The destination's music
+  // starts where it always did, when the audio hold releases after the stage.
+  // ⚠ try/catch: _swapArmed reads _pbNow, and this runs off a boot-time interval (the TDZ rule).
+  try { if (game && game.state === 'roundEnd' && _swapArmed()) return; } catch (_) {}
   const _ff = (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight');
   // (v35.15) EXHIBITION zone-rift caverns cut over to the BATTLE playlist
   // (however many tracks it holds), entering at the track picked by the

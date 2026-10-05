@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "51.30";
+const LSS_BUILD = "51.36";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -23058,6 +23058,12 @@ const _swU = { uTime:{value:0}, uYMid:{value:0}, uAMP:{value:1}, uSnow:{value:0.
                uPatchMix:{value:new THREE.Vector3(0.85, 0.55, 0.70)}, uPatchScale:{value:1.0},
                uSway:{value:0.075},
                uColDirt:{value:new THREE.Color(0x54371f)} };
+_swU.uRus  = { value: Array.from({ length: 16 }, () => new THREE.Vector4(0, -1e6, 0, -100)) };
+_swU.uRusB = { value: Array.from({ length: 16 }, () => new THREE.Vector4(0, 0, 0, 0)) };
+_swU.uRusN = { value: 0 };
+_swU.uRusK = { value: new THREE.Vector4(0.50, 3.0, 6.5, 2.2) };
+_swU.uRusC = { value: new THREE.Vector4(0, -1e6, 0, 0) };
+_swU.uRusL = { value: new THREE.Vector4(0.012, 45.0, 0, 0) };   // (v51.36) crown lag (rad per unit of height), bend reference height
 if (typeof window !== 'undefined') {
 
   window.__treeSway = function (v) {
@@ -24297,13 +24303,203 @@ function _swFoliageMat(glow){
   const m=new THREE.MeshStandardMaterial({vertexColors:true,color:0xffffff,roughness:1,metalness:0,side:THREE.DoubleSide});
   m.envMapIntensity = 0.18;
   if(glow){ m.emissive=new THREE.Color(glow); m.emissiveIntensity=0.5; }
+  const _rus = !!(_swU.uRus && _swU.uRusB && _swU.uRusN && _swU.uRusK && _swU.uRusC && _swU.uRusL);
+  const RUS_DECL = _rus ? 'uniform vec4 uRus[16];\nuniform vec4 uRusB[16];\nuniform int uRusN;\nuniform vec4 uRusK;\nuniform vec4 uRusC;\nuniform vec4 uRusL;\n' : '';
+  const RUS_PRE = !_rus ? '' :
+    ' float _rb01 = 0.0; vec2 _rvS = vec2(0.0); vec2 _rvC = vec2(0.0);\n' +
+    ' if (uRusN > 0) {\n' +
+    '  vec3 _rb = (modelMatrix * vec4(ip, 1.0)).xyz;\n' +
+    '  if (distance(_rb, uRusC.xyz) < uRusC.w) {\n' +
+    '   float _acc = 0.0;\n' +
+    '   for (int i = 0; i < 16; i++) {\n' +
+    '    if (i >= uRusN) break;\n' +
+    '    vec4 e = uRus[i]; vec4 b = uRusB[i];\n' +
+    '    vec3 d = _rb - e.xyz; float dh = length(d.xz);\n' +
+    '    float dist = length(vec2(dh, max(0.0, abs(d.y) - 120.0)));\n' +
+    '    if (dist >= b.x) continue;\n' +
+    '    float age = uTime - e.w; if (age < 0.0) continue;\n' +
+    '    float f = b.y * (1.0 - smoothstep(b.x * 0.35, b.x, dist));\n' +
+    '    float dmp = exp(-age * uRusK.w);\n' +
+    '    _acc += (1.0 - exp(-age * 25.0)) * dmp * f;\n' +
+    '    vec2 away = dh > 1.0 ? d.xz / dh : b.zw;\n' +
+    '    vec2 w = (away + b.zw * 0.5) * (f * dmp);\n' +
+    '    float _rph = age * uRusK.z;\n' +
+    '    _rvS += w * sin(_rph); _rvC += w * cos(_rph);\n' +
+    '   }\n' +
+    '   _rb01 = min(_acc, 1.0);\n' +
+    '   float _rl = length(_rvS); if (_rl > 1.6) _rvS *= 1.6 / _rl;\n' +
+    '   _rl = length(_rvC); if (_rl > 1.6) _rvC *= 1.6 / _rl;\n' +
+    '  }\n' +
+    ' }\n' +
+    ' cf *= 1.0 + uRusK.y * _rb01;\n';
+  const RUS_POST = !_rus ? '' :
+    ' if (_rb01 > 0.0) {\n' +
+    '  mat3 _rm = mat3(modelMatrix) * mat3(instanceMatrix);\n' +
+    '  vec3 _ro = _rm * transformed;\n' +
+    '  float _h = max(0.0, _ro.y);\n' +
+    '  float _lag = _h * uRusL.x;\n' +
+    '  vec2 _v = (_rvS * cos(_lag) - _rvC * sin(_lag)) * (uRusK.x * _h * _h / (_h + uRusL.y));\n' +
+    '  vec3 _rpush = vec3(_v.x, -dot(_v, _v) / (2.0 * max(_h, 1.0)), _v.y);\n' +
+    '  transformed += transpose(_rm) * _rpush / max(dot(_rm[0], _rm[0]), 1e-6);\n' +
+    ' }\n';
   m.onBeforeCompile=(sh)=>{ sh.uniforms.uTime=_swU.uTime; sh.uniforms.uCam=_swU.uCam; sh.uniforms.uTreeFadeA=_swU.uTreeFadeA; sh.uniforms.uTreeFadeB=_swU.uTreeFadeB; sh.uniforms.uSway=_swU.uSway;
-    sh.vertexShader='uniform float uTime,uTreeFadeA,uTreeFadeB,uSway;\nuniform vec3 uCam;\n'+sh.vertexShader.replace('#include <begin_vertex>',
-      '#include <begin_vertex>\n vec3 ip=vec3(instanceMatrix[3][0],instanceMatrix[3][1],instanceMatrix[3][2]);\n float ph=ip.x*0.05+ip.z*0.05;\n float vph=ph+transformed.x*0.08+transformed.z*0.08+transformed.y*0.05;\n float canopy=max(0.0,transformed.y-18.0);\n float cf=canopy*canopy*0.0012+canopy*0.015;\n cf=min(cf,transformed.y*uSway);\n float gust=0.6+0.4*sin(uTime*0.13+ph*0.3);\n float swayX=(sin(uTime*0.9+vph)*0.85+sin(uTime*1.9+vph*1.7)*0.4)*gust;\n float swayZ=(sin(uTime*0.8+vph*1.2+1.7)*0.7+sin(uTime*2.3+vph*1.5)*0.3)*gust;\n transformed.x+=swayX*cf;\n transformed.z+=swayZ*cf;\n transformed.y+=sin(uTime*3.1+vph*2.0)*cf*0.22;\n float tfade=1.0-smoothstep(uTreeFadeA,uTreeFadeB,distance(ip.xz,uCam.xz));\n transformed*=tfade;'); };
+    if (_rus) { sh.uniforms.uRus=_swU.uRus; sh.uniforms.uRusB=_swU.uRusB; sh.uniforms.uRusN=_swU.uRusN; sh.uniforms.uRusK=_swU.uRusK; sh.uniforms.uRusC=_swU.uRusC; sh.uniforms.uRusL=_swU.uRusL; }
+    sh.vertexShader='uniform float uTime,uTreeFadeA,uTreeFadeB,uSway;\nuniform vec3 uCam;\n'+RUS_DECL+sh.vertexShader.replace('#include <begin_vertex>',
+      '#include <begin_vertex>\n vec3 ip=vec3(instanceMatrix[3][0],instanceMatrix[3][1],instanceMatrix[3][2]);\n float ph=ip.x*0.05+ip.z*0.05;\n float vph=ph+transformed.x*0.08+transformed.z*0.08+transformed.y*0.05;\n float canopy=max(0.0,transformed.y-18.0);\n float cf=canopy*canopy*0.0012+canopy*0.015;\n cf=min(cf,transformed.y*uSway);\n'+RUS_PRE+' float gust=0.6+0.4*sin(uTime*0.13+ph*0.3);\n float swayX=(sin(uTime*0.9+vph)*0.85+sin(uTime*1.9+vph*1.7)*0.4)*gust;\n float swayZ=(sin(uTime*0.8+vph*1.2+1.7)*0.7+sin(uTime*2.3+vph*1.5)*0.3)*gust;\n transformed.x+=swayX*cf;\n transformed.z+=swayZ*cf;\n transformed.y+=sin(uTime*3.1+vph*2.0)*cf*0.22;\n'+RUS_POST+' float tfade=1.0-smoothstep(uTreeFadeA,uTreeFadeB,distance(ip.xz,uCam.xz));\n transformed*=tfade;'); };
   return m;
 }
 function _swTreeMatGet(){ if(!_swTreeMat){ _swTreeMat=_swFoliageMat(0); if(_swTreeStyleRibbon()) _swRibbonPatchMat(_swTreeMat); } return _swTreeMat; }   // (v50.63) the ribbon trees' atlas + cut-out + canopy lighting
 function _swShroomMatGet(){ if(!_swShroomMat) _swShroomMat=_swFoliageMat(0x2a55ff); return _swShroomMat; }
+const _RUS = { head: 0, ev: [], st: new WeakMap(), pts: new WeakMap(), near: { x: 0, y: 0, z: 0, d: 0 },
+               v3: null, err: 0, stats: { emits: 0, sounds: 0, movers: 0, nearFoliage: 0, live: 0 } };
+function _rusK() {
+  const W = (typeof window !== 'undefined' && window.__rustle) || {};
+  const o = _rusK.o || (_rusK.o = {});
+  const n = (k, d) => (W[k] != null && isFinite(+W[k])) ? +W[k] : d;
+  o.on = W.on !== false;
+  o.shipR = n('shipR', 300);       // disturbance radius around a ship (world units; v51.35 owner-tested live)
+  o.rocketR = n('rocketR', 180);   // ...and a rocket
+  o.minSpeed = n('minSpeed', 60);  // slower than this disturbs nothing (hovering, landed)
+  o.vRef = n('vRef', 900);         // the speed that counts as full strength
+  o.emitDt = n('emitDt', 0.09);    // seconds between events per mover while it is near foliage
+  o.spring = n('spring', 0.50);    // (v51.35) the spring's lean at full strength (v51.36: on the bent profile)
+  o.swayBoost = n('swayBoost', 3.0); // ...and the wind sway multiplied by up to 1 + this while it rings
+  o.springRate = n('springRate', 6.5); // spring angular rate, rad/s (v51.36 6.5 = ~1 swing a second; was 10)
+  o.damping = n('damping', 2.2);   // 1/s - rings ~1-1.5 s ("sway for a second ... springs back")
+  o.lag = n('lag', 0.012);         // (v51.36) crown lag, radians per world unit of height (whip, not pendulum)
+  o.bendH = n('bendH', 45);        // (v51.36) bend reference height: below it the offset grows ~h^2, above ~h
+  o.range = n('range', 3000);      // movers further than this from the camera are skipped
+  o.sound = W.sound !== false;
+  o.soundR = n('soundR', 140);     // a mover must pass this close to a plant to make it sound
+  o.hearR = n('hearR', 1100);      // ...and the plant must be this close to the listener
+  o.soundDt = n('soundDt', 0.22);  // seconds between rustles per mover (jittered)
+  return o;
+}
+function _rusPtsOf(im) {
+  let P = _RUS.pts.get(im);
+  const n = im.count | 0;
+  if (P && P.n === n) return P;
+  const a = im.instanceMatrix && im.instanceMatrix.array;
+  if (!a || !n) return null;
+  const g = im.geometry;
+  if (g && !g.boundingBox) { try { g.computeBoundingBox(); } catch (_) {} }
+  const gh = (g && g.boundingBox && isFinite(g.boundingBox.max.y)) ? Math.max(1, g.boundingBox.max.y) : 40;
+  const m = im.matrixWorld.elements, my = Math.hypot(m[4], m[5], m[6]) || 1;
+  const arr = new Float32Array(n * 4);
+  for (let i = 0; i < n; i++) {
+    const o = i * 16, x = a[o + 12], y = a[o + 13], z = a[o + 14];
+    arr[i * 4]     = m[0] * x + m[4] * y + m[8]  * z + m[12];
+    arr[i * 4 + 1] = m[1] * x + m[5] * y + m[9]  * z + m[13];
+    arr[i * 4 + 2] = m[2] * x + m[6] * y + m[10] * z + m[14];
+    arr[i * 4 + 3] = gh * Math.hypot(a[o + 4], a[o + 5], a[o + 6]) * my;
+  }
+  P = { n: n, arr: arr };
+  _RUS.pts.set(im, P);
+  return P;
+}
+function _rusNearest(x, y, z, R, out) {
+  const chunks = game.sandwichChunks;
+  if (!chunks || !chunks.size) return false;
+  const C = _SW_CHUNK;
+  const cx0 = Math.floor((x - R) / C), cx1 = Math.floor((x + R) / C);
+  const cz0 = Math.floor((z - R) / C), cz1 = Math.floor((z + R) / C);
+  let best = R * R, hit = false;
+  for (let cx = cx0; cx <= cx1; cx++) for (let cz = cz0; cz <= cz1; cz++) {
+    const c = chunks.get(cx + ',' + cz);
+    const list = c && c.trees;
+    if (!list) continue;
+    for (let j = 0; j < list.length; j++) {
+      const im = list[j];
+      if (!im || !im.isInstancedMesh || !im.visible) continue;   // drapes are plain meshes; far-gated meshes are hidden
+      const P = _rusPtsOf(im);
+      if (!P) continue;
+      const A = P.arr;
+      for (let i = 0, k = 0; i < P.n; i++, k += 4) {
+        const dx = A[k] - x, dz = A[k + 2] - z;
+        const h2 = dx * dx + dz * dz;
+        if (h2 >= best) continue;
+        const by = A[k + 1], ty = by + A[k + 3];
+        const dy = y < by ? by - y : (y > ty ? y - ty : 0);
+        const d2 = h2 + dy * dy;
+        if (d2 < best) { best = d2; hit = true; out.x = A[k]; out.y = Math.min(ty, Math.max(by, y)); out.z = A[k + 2]; }
+      }
+    }
+  }
+  if (hit) out.d = Math.sqrt(best);
+  return hit;
+}
+function _rusEmit(x, y, z, R, s, dx, dz, now) {
+  const i = _RUS.head;
+  const e = _RUS.ev[i] || (_RUS.ev[i] = { x: 0, y: 0, z: 0, t: -1e9, R: 0, s: 0, dx: 0, dz: 0 });
+  e.x = x; e.y = y; e.z = z; e.t = now; e.R = R; e.s = s; e.dx = dx; e.dz = dz;
+  _RUS.head = (i + 1) % 16;
+  _RUS.stats.emits++;
+}
+function _rusTick(dt) {
+  const U = _swU;
+  if (!U || !U.uRus) return;
+  const K = _rusK();
+  if (!K.on || game.bendWorld || !game.sandwichChunks || !camera) { if (U.uRusN.value) U.uRusN.value = 0; return; }
+  const now = U.uTime.value;
+  U.uRusK.value.set(K.spring, K.swayBoost, K.springRate, K.damping);
+  if (U.uRusL) U.uRusL.value.set(K.lag, Math.max(1, K.bendH), 0, 0);
+  const cam = camera.position, R2 = K.range * K.range;
+  let movers = 0, nearN = 0;
+  const visit = (obj, pos, vel, R, rocket) => {
+    const cdx = pos.x - cam.x, cdz = pos.z - cam.z;
+    if (cdx * cdx + cdz * cdz > R2) return;
+    let st = _RUS.st.get(obj);
+    if (!st) { st = { nextEmit: 0, nextSound: 0, px: pos.x, py: pos.y, pz: pos.z }; _RUS.st.set(obj, st); }
+    let vx = 0, vy = 0, vz = 0;
+    if (vel && (vel.x || vel.y || vel.z)) { vx = vel.x; vy = vel.y; vz = vel.z; }
+    else if (dt > 0) { vx = (pos.x - st.px) / dt; vy = (pos.y - st.py) / dt; vz = (pos.z - st.pz) / dt; }   // peers carry no velocity
+    st.px = pos.x; st.py = pos.y; st.pz = pos.z;
+    const sp = Math.hypot(vx, vy, vz);
+    if (!(sp >= K.minSpeed) || sp > 60000) return;              // still, or a teleport
+    movers++;
+    const near = _RUS.near;
+    if (!_rusNearest(pos.x, pos.y, pos.z, R, near)) return;
+    nearN++;
+    const s = Math.min(1.3, Math.max(0.25, sp / K.vRef)) * (rocket ? 0.8 : 1);
+    if (now >= st.nextEmit) {
+      const h = Math.hypot(vx, vz) || 1;
+      _rusEmit(pos.x, pos.y, pos.z, R, s, vx / h, vz / h, now);
+      st.nextEmit = now + K.emitDt;
+    }
+    if (K.sound && near.d < K.soundR && now >= st.nextSound && typeof playSpatialSound === 'function') {
+      const lx = near.x - cam.x, ly = near.y - cam.y, lz = near.z - cam.z;
+      if (lx * lx + ly * ly + lz * lz < K.hearR * K.hearR) {
+        const hard = near.d < K.soundR * 0.45 && sp > K.vRef * 0.45;   // through it, fast - not past it
+        const v = _RUS.v3 || (_RUS.v3 = new THREE.Vector3());
+        try { playSpatialSound(hard ? 'foliage_rustle' : 'foliage_rustle_soft', v.set(near.x, near.y, near.z), { refDistance: 120, rolloffFactor: 1.3 }); _RUS.stats.sounds++; } catch (_) {}
+        st.nextSound = now + K.soundDt * (0.75 + Math.random() * 0.5);
+      }
+    }
+  };
+  try { if (player && player.position && player.shipState !== 'dead') visit(player, player.position, player.velocity, K.shipR, false); } catch (_) {}
+  const ents = game.entities || [];
+  for (let i = 0; i < ents.length; i++) { const e = ents[i]; if (e && e.alive !== false && e.position) visit(e, e.position, e.velocity, K.shipR, false); }
+  const projs = game.projectiles || [];
+  for (let i = 0; i < projs.length; i++) { const p = projs[i]; if (p && p.alive && p.smokeTrail && p.position) visit(p, p.position, p.velocity, K.rocketR, true); }
+  const life = 4.5 / Math.max(0.2, K.damping);
+  const A = U.uRus.value, B = U.uRusB.value;
+  let n = 0, sx = 0, sy = 0, sz = 0;
+  for (let i = 0; i < 16; i++) {
+    const e = _RUS.ev[i];
+    if (!e || now - e.t > life || now < e.t) continue;
+    A[n].set(e.x, e.y, e.z, e.t); B[n].set(e.R, e.s, e.dx, e.dz);
+    sx += e.x; sy += e.y; sz += e.z; n++;
+  }
+  U.uRusN.value = n;
+  if (n) {
+    sx /= n; sy /= n; sz /= n;
+    let r = 0;
+    for (let i = 0; i < n; i++) r = Math.max(r, Math.hypot(A[i].x - sx, A[i].y - sy, A[i].z - sz) + B[i].x);
+    U.uRusC.value.set(sx, sy, sz, r + 320);   // + the tallest crown above its base: the shader tests the BASE
+  }
+  const S = _RUS.stats; S.movers = movers; S.nearFoliage = nearN; S.live = n;
+}
+if (typeof window !== 'undefined') window.__rustleStats = () => Object.assign({ knobs: Object.assign({}, _rusK()) }, _RUS.stats);
 function _swForestAt(x, z) {
   if (typeof _stNoise2 !== 'function') return 0;
   const n = (_stNoise2(x * 0.00035 + 11.0, z * 0.00035 - 7.0) + 1) * 0.5;
@@ -25329,6 +25525,9 @@ function _hzDuskLights() {
 }
 
 const _HZ_CAVERN = { portals: null, DIST: 21500, ALT: 1400, COOLDOWN: 120, coolBySector: {}, _pre: false, _returnPos: null };
+function _hzRoomShared() {
+  try { return !!(net && net.active && net.peers && net.peers.size > 0); } catch (_) { return false; }
+}
 function _ovWarpClear() {
   try { if (window.Overlays && Overlays.warp) Overlays.warp(false); } catch (_) {}
   try {
@@ -25436,7 +25635,7 @@ function _hzCavernStep(dt) {
   if (!J.n) cv._noSpawn = true;   // nothing built at all - let the failsafe open the way home
 }
 function _hzEnterCavern(p) {
-  if (game._cavern || (net && net.active)) return;
+  if (game._cavern || _hzRoomShared()) return;   // (v51.31) peers, not net.active - see _hzRoomShared
   try { if (typeof _beginWorldSwap === 'function') _beginWorldSwap('zone-rift', 'ENTERING THE DEEP'); } catch (_) {}
   _hzPortalsDispose();
   if (_HZ_CAVERN._pre) { _HZ_CAVERN._pre = false; }
@@ -25540,7 +25739,7 @@ function _hzGuardsFrame(p, d, dt) {
   Promise.all(picks.map(k => loadHoardModel(k))).then((protos) => {
     p._guardsPending = false;
     if (!_HZ_CAVERN.portals || _HZ_CAVERN.portals.indexOf(p) < 0) return;
-    if (game._cavern || (net && net.active) || game.state !== 'playing') return;
+    if (game._cavern || _hzRoomShared() || game.state !== 'playing') return;   // (v51.31) peers, not net.active
     if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight') return;
     p._guardBuild = { picks, protos, i: 0, flight: [], t: 0 };
     p._guardsPending = false;
@@ -25550,7 +25749,7 @@ function _hzGuardsBuildStep(p, dt) {
   const B = p._guardBuild;
   if (!B) return;
   const _stand = (!_HZ_CAVERN.portals || _HZ_CAVERN.portals.indexOf(p) < 0) ||
-                 game._cavern || (net && net.active) || game.state !== 'playing' ||
+                 game._cavern || _hzRoomShared() || game.state !== 'playing' ||   // (v51.31) peers, not net.active
                  (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight');
   if (_stand) {
     p._guardBuild = null;
@@ -25604,10 +25803,13 @@ function _hzPortalsFrame(dt) {
   if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight') return;
   const _cbs = _HZ_CAVERN.coolBySector;
   for (const s in _cbs) { _cbs[s] -= dt; if (_cbs[s] <= 0) delete _cbs[s]; }
-  if (game._cavern) { _hzCavernFrame(dt); return; }
+  if (game._cavern) {
+    if (_hzRoomShared() && game.state === 'playing' && !game._swapStaging) { _hzReturnToHub(); return; }
+    _hzCavernFrame(dt); return;
+  }
   const T = game.sandwichTerrain;
   if (!T || !T.ON || T.biome !== 'mossy') return;
-  if (net && net.active) { _hzPortalsDispose(); return; }   // solo-only, like the rift
+  if (_hzRoomShared()) { _hzPortalsDispose(); return; }   // solo-only, like the rift - (v51.31) peers, not net.active
   if (game._cyber && game._cyber.armed) { _hzPortalsDispose(); return; }
   if (_HZ_CAVERN._returnPos && player && player.position) {
     player.position.copy(_HZ_CAVERN._returnPos);
@@ -33981,10 +34183,13 @@ function _hcMakeMeshes(city, site) {
   const twrMat = _hcTowerMat();
   const neonMat = _hcNeonMat();
   const holoMat = _hcHoloMat();
+  let _hcClipL = 6; try { _hcClipL = _CLIP_LEVELS; } catch (_) {}   // TDZ-safe: declared later in the file
+  const _HC_FLOOR_PO = [0, -(_hcClipL * 2 + 2)];                   // finest clipmap ring is -(L*2) units
+  const _HC_RING_PO  = [0, _HC_FLOOR_PO[1] - 2];
   const ringMat = _padGlowPatch(_lssAddOnePass(new THREE.MeshBasicMaterial({
     color: 0xffffff, blending: THREE.AdditiveBlending, transparent: true,
     depthWrite: false, toneMapped: false, side: THREE.DoubleSide,
-    polygonOffset: true, polygonOffsetFactor: -8, polygonOffsetUnits: -8,
+    polygonOffset: true, polygonOffsetFactor: _HC_RING_PO[0], polygonOffsetUnits: _HC_RING_PO[1],   // (v51.33) was -8/-8
   })), true);
   const add = (key, geo, mat, maxH, shad) => {
     const arr = city.layers[key];
@@ -34013,7 +34218,7 @@ function _hcMakeMeshes(city, site) {
       map: albTex, emissive: 0xffffff, emissiveMap: emiTex, transparent: true,
       color: new THREE.Color(0.85, 0.85, 0.85),
       emissiveIntensity: 0.22,
-      polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+      polygonOffset: true, polygonOffsetFactor: _HC_FLOOR_PO[0], polygonOffsetUnits: _HC_FLOOR_PO[1],   // (v51.33) was -2/-2 - see the ring note above
     })
   );
   gnd.material.onBeforeCompile = (sh) => {
@@ -34042,6 +34247,14 @@ function _hcMakeMeshes(city, site) {
       if (typeof glow === 'number') gnd.material.emissiveIntensity = glow;
       gnd.material.needsUpdate = true;
       return { albedo: gnd.material.color.r, glow: gnd.material.emissiveIntensity };
+    };
+    window.__cityFloorDepth = function (v) {
+      const set = (m, po) => { if (m && po) { m.polygonOffsetFactor = po[0]; m.polygonOffsetUnits = po[1]; } };
+      if (v === 'old') { set(gnd.material, [-2, -2]); set(ringMat, [-8, -8]); }
+      else if (v === 'new') { set(gnd.material, _HC_FLOOR_PO); set(ringMat, _HC_RING_PO); }
+      else if (v && typeof v === 'object') { set(gnd.material, v.floor); set(ringMat, v.ring); }
+      return { floor: [gnd.material.polygonOffsetFactor, gnd.material.polygonOffsetUnits],
+               ring: [ringMat.polygonOffsetFactor, ringMat.polygonOffsetUnits] };
     };
   } catch (_) {}
 
@@ -41347,6 +41560,13 @@ try { window.__clipPeak = _CLIP_PEAK; } catch (_) {}
 
 const _CLIP_STAT = { hit: 0, missBase: 0, missPeak: 0, lvl: [], calls: [] };
 try {
+  window.__clipPO = function (f) {
+    const lv = (_clipmap && _clipmap.levels) || [];
+    if (typeof f === 'number') for (const L of lv) if (L && L.mat) L.mat.polygonOffsetFactor = f;
+    return lv.map((L) => (L && L.mat) ? [L.k, L.mat.polygonOffsetFactor, L.mat.polygonOffsetUnits] : null);
+  };
+} catch (_) {}
+try {
   window.__clipReport = function () {
     const o = { hit: _CLIP_STAT.hit, missBase: _CLIP_STAT.missBase, missPeak: _CLIP_STAT.missPeak, perLevel: [] };
     o.total = o.hit + o.missBase + o.missPeak;
@@ -41461,7 +41681,7 @@ function _clipBuild() {
     const spacing = _CLIP_M0 * Math.pow(2, k);
     const mat = _clipMat();
     if (mat._clipSpacingU) mat._clipSpacingU.value = spacing;   
-    mat.polygonOffset = true; mat.polygonOffsetFactor = -1.0; mat.polygonOffsetUnits = -(_CLIP_LEVELS - k) * 2;
+    mat.polygonOffset = true; mat.polygonOffsetFactor = 0; mat.polygonOffsetUnits = -(_CLIP_LEVELS - k) * 2;
     const mesh = new THREE.Mesh(k === 0 ? _clipmap.solidGeo : _clipmap.ringGeo, mat);
     mesh.receiveShadow = true;
     mesh.scale.set(spacing, 1, spacing);
@@ -64352,7 +64572,14 @@ function _entPrimeHoardKeys() {
   return out;
 }
 
-function _entPrimePlan() { return _entPrimeShipKeys().concat(_entPrimeHoardKeys()); }
+function _entPrimePlan() {
+  try {
+    if (typeof game !== 'undefined' && game && game._cavern && game._cavern._picks && game._cavern._picks.length) {
+      return _entPrimeHoardKeys();
+    }
+  } catch (_) {}
+  return _entPrimeShipKeys().concat(_entPrimeHoardKeys());
+}
 
 async function _primeEntityModels(keys, tStart, budgetMs) {
   const t0 = _pbNow();
@@ -64365,12 +64592,16 @@ async function _primeEntityModels(keys, tStart, budgetMs) {
         typeof createShipMesh !== 'function' || typeof shipModelCache === 'undefined') return rep;
     if (renderer.xr && renderer.xr.isPresenting) { rep.capped = 'xr'; return rep; }   // headset owns its own passes
     const cap = (typeof budgetMs === 'number') ? budgetMs : _ENT_PRIME_MAX_MS;
+    const envSig = (typeof _programEnvSig === 'function') ? _programEnvSig() : null;
+    const memoKey = (k) => (envSig != null) ? (k + '@' + envSig) : null;
     const todo = [];
     for (const k of keys) {
       if (!k) continue;
-      if (_ENT_PRIME.keys.has(k)) { rep.memo++; continue; }
+      const mk = memoKey(k);
+      if (mk && _ENT_PRIME.keys.has(mk)) { rep.memo++; continue; }
       if (todo.indexOf(k) < 0) todo.push(k);
     }
+    rep.env = envSig;
     const rt = (typeof postFX !== 'undefined' && postFX && postFX.rtScene) ? postFX.rtScene : null;
     const teamCol = 0x44bb44;
     for (let i = 0; i < todo.length; i += _ENT_PRIME_BATCH) {
@@ -64406,7 +64637,7 @@ async function _primeEntityModels(keys, tStart, budgetMs) {
           });
           built.push(m);
           scene.add(m);
-          _ENT_PRIME.keys.add(k);
+          { const mk = memoKey(k); if (mk) _ENT_PRIME.keys.add(mk); }   // (v51.31) hull@environment
         }
         if (built.length) {
           const _np0 = (renderer.info && renderer.info.programs) ? renderer.info.programs.length : 0;
@@ -64500,7 +64731,7 @@ async function _primeMonsterModels(tStart, budgetMs) {
 if (typeof window !== 'undefined') window.__monPrime = () => _MON_PRIME.last;
 
 const _SWAP = { staging: false, last: null };
-const _SWAP_MAX_MS = 12000;   // hard ceiling: a stage that hangs is worse than one that misses
+const _SWAP_MAX_MS = _PREBAKE_MAX_MS;   // hard ceiling: a stage that hangs is worse than one that misses
 const _SWAP_SLICE_MS = 12;
 function _beginWorldSwap(label, title) {
   if (typeof game === 'undefined') return;
@@ -98701,6 +98932,7 @@ function _gameLoopBody(timestamp) {
       _swU.uCam.value.set(_fX, _cineActive ? camera.position.y : player.position.y, _fZ);
       try { _swTreeVisTick(_fX, _fZ); } catch (_) {}   // (v47.05) must stay ABOVE the bend unmap below - _fX/_fZ are still in the space uCam just got
       try { _swFolVisExtra(_fX, _fZ); } catch (_) {}   // (v48.33) sky-island + city-park foliage, same rule; its own try so neither can starve the other
+      try { _rusTick(dt); } catch (e) { if (!_RUS.err) { _RUS.err = 1; try { console.warn('[rustle] tick threw:', e); } catch (_) {} } }   // (v51.34) foliage rustle - reports once
       try { _volcSync(_fX, _fZ); } catch (_) {}
       try { _skFrame(_fX, _cineActive ? camera.position.y : player.position.y, _fZ); } catch (_) {}
       __pmark('hub:sky');
@@ -104957,6 +105189,29 @@ const DEFAULT_SOUND_LIBRARY = {
       "recipeGain": 1
     },
     {
+      "name": "foliage_rustle",
+      "description": "leaves and branches thrashed by a ship or rocket going THROUGH foliage (v51.34 _rusTick)",
+      "category": "AMBIENT",
+      "layers": [
+        { "kind": "noise", "duration": 0.03, "volume": 0.2, "startOffset": 0, "filterFreq": 4200, "filterQ": 1.2, "filterType": "bandpass", "varDur": 0.6, "varVol": 0.7, "varFreq": 0.45, "chance": 1, "count": 11, "spacing": 0.026, "spacingVar": 0.9, "countDecay": 0.06, "peakGain": 0, "reverseEnvelope": false },
+        { "kind": "noise", "duration": 0.016, "volume": 0.12, "startOffset": 0.012, "filterFreq": 7200, "filterQ": 1.6, "filterType": "bandpass", "varDur": 0.5, "varVol": 0.8, "varFreq": 0.4, "chance": 1, "count": 9, "spacing": 0.031, "spacingVar": 0.95, "countDecay": 0.08, "peakGain": 0, "reverseEnvelope": false },
+        { "kind": "noise", "duration": 0.12, "volume": 0.07, "startOffset": 0, "filterFreq": 2400, "filterQ": 0.6, "filterType": "bandpass", "varDur": 0.2, "varVol": 0.2, "varFreq": 0.25, "chance": 1, "count": 1, "spacing": 0, "spacingVar": 0, "countDecay": 0, "peakGain": 0, "reverseEnvelope": true },
+        { "kind": "noise", "duration": 0.3, "volume": 0.08, "startOffset": 0.11, "filterFreq": 1900, "filterQ": 0.6, "filterType": "bandpass", "varDur": 0.25, "varVol": 0.25, "varFreq": 0.25, "chance": 1, "count": 1, "spacing": 0, "spacingVar": 0, "countDecay": 0, "peakGain": 0, "reverseEnvelope": false }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "foliage_rustle_soft",
+      "description": "a soft leaf rustle as a ship passes close over or beside foliage (v51.34 _rusTick)",
+      "category": "AMBIENT",
+      "layers": [
+        { "kind": "noise", "duration": 0.022, "volume": 0.1, "startOffset": 0, "filterFreq": 4800, "filterQ": 1.3, "filterType": "bandpass", "varDur": 0.6, "varVol": 0.7, "varFreq": 0.45, "chance": 1, "count": 7, "spacing": 0.034, "spacingVar": 0.9, "countDecay": 0.09, "peakGain": 0, "reverseEnvelope": false },
+        { "kind": "noise", "duration": 0.09, "volume": 0.04, "startOffset": 0, "filterFreq": 2800, "filterQ": 0.7, "filterType": "bandpass", "varDur": 0.2, "varVol": 0.2, "varFreq": 0.25, "chance": 1, "count": 1, "spacing": 0, "spacingVar": 0, "countDecay": 0, "peakGain": 0, "reverseEnvelope": true },
+        { "kind": "noise", "duration": 0.22, "volume": 0.045, "startOffset": 0.08, "filterFreq": 2300, "filterQ": 0.7, "filterType": "bandpass", "varDur": 0.25, "varVol": 0.25, "varFreq": 0.25, "chance": 1, "count": 1, "spacing": 0, "spacingVar": 0, "countDecay": 0, "peakGain": 0, "reverseEnvelope": false }
+      ],
+      "recipeGain": 1
+    },
+    {
       "name": "bird_chirp",
       "description": "ambient songbird chirps : hub bird flock roost",
       "category": "AMBIENT",
@@ -105311,6 +105566,7 @@ const _AUDIO_BAKE_HOT = {
   fire_spread: 1, fire_salvo: 1, fire_buckshot: 1, fire_leadwall: 1,
   explosion: 1, rocket_salvo: 1, tracker_rockets: 1, cluster_missile_fire: 1,
   death: 1, hit: 1, laser_shot: 1, damage: 1,
+  foliage_rustle: 1, foliage_rustle_soft: 1,   // (v51.34) fires every ~0.2 s through a forest - one take would loop audibly
 };
 
 function _audioBakeLen(recipe) {
@@ -105919,6 +106175,8 @@ _loadPersistedSoundRecipes();
 const _SOUND_MIN_GAP = {
   monster_zap:     0.12,
   bird_chirp:      0.09,
+  foliage_rustle:  0.10,   // (v51.34) several movers in one forest fold into one rustle per 0.1 s
+  foliage_rustle_soft: 0.14,
   water_bloop:     0.25,
   water_bloop_soft: 0.25,
   water_drag:      0.22,
@@ -105969,6 +106227,7 @@ const _AUDIO_SKIPPABLE = {
   laser_core: 1, blaster_power: 1, plasma_railgun: 1,
   siphon_drain: 1, siphon_hit: 1, stun: 1,
   bird_chirp: 1, water_drag: 1, water_bloop_soft: 1,
+  foliage_rustle: 1, foliage_rustle_soft: 1,   // (v51.34) cosmetic - first to go under load
 };
 const _AUDIO_LEAN_RECIPE_TYPES = {
   fire_hitscan: 1, fire_minigun: 1, fire_spread: 1, fire_projectile: 1,
@@ -108038,6 +108297,7 @@ if (typeof document !== 'undefined') {
 function _mp3SyncToState() {
   if (_audioHoldSettling()) return;
   if (typeof audio !== 'undefined' && audio.musicEnabled === false) { _mp3Stop(); return; }
+  try { if (game && game.state === 'roundEnd' && _swapArmed()) return; } catch (_) {}
   const _ff = (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight');
   const _cavern = _ff && !!game._cavern;
   const _cyberM = _ff && game.state !== 'select' && !!(game._cyber && game._cyber.armed);
