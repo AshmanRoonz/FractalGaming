@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "51.57";
+const LSS_BUILD = "51.61";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -23631,6 +23631,13 @@ function _swGrassK() {
   o.view = Math.max(1, Math.min(5, Math.round(n('view', 4))));   // (v51.54: SUPERSEDED by plantMargin - kept for old knob strings) (v51.50: 4; v51.48: 3; v51.47: back to 2 -
   o.mode = (K.mode === 'rank') ? 'rank' : 'tree';
   o.shrink = n('shrink', 0.3);     // (v51.57) tree mode: how much of the fade is a shrink (1 = the trees' full shrink; the opacity does the rest)
+  o.thin = n('thin', 0.8);         // 0..1: tree mode also THINS the band by rank (each tuft fading out translucently) + trims the draw
+  o.lite = (K.lite != null) ? !!K.lite : true;   // Lambert tufts instead of Standard (no GGX, no IBL - see liteAmb*)
+  o.liteAmbR = n('liteAmbR', 0.68);
+  o.liteAmbG = n('liteAmbG', 0.46);
+  o.liteAmbB = n('liteAmbB', 1.20);
+  o.liteAmbBase = n('liteAmbBase', 0.6);
+  o.liteAmbGain = n('liteAmbGain', 2.0);
   o.fadeA = n('fadeA', o.mode === 'tree' ? 1800 : 900);   // full size (tree) / every tuft present (rank) inside this...
   o.fadeB = n('fadeB', o.mode === 'tree' ? 3400 : 3900);  // ...shrunk to nothing (tree) / the last tuft gone (rank) here
   o.detailW = n('detailW', 0.22);  // detail-level span over which an arrived tuft's own shading fades in
@@ -23660,7 +23667,7 @@ function _swGrassK() {
   o.wisps = n('wisps', 16);
   o.seeds = n('seeds', 0.35);
   o.cards = n('cards', 3);
-  o.leanCards = n('leanCards', 2);
+  o.leanCards = n('leanCards', 1);   // (v51.61: 2 -> 1 - four cards a tuft; the perf pass, see `thin`)
   o.cardW = n('cardW', 1);
   o.cardH = n('cardH', 1);
   return o;
@@ -23934,14 +23941,21 @@ function _swGrassTuftGeos() {
   return S.g;
 }
 function _swGrassTuftMatGet() {
-  const S = _swGrassTuftMatGet;
-  if (S.m) return S.m;
+  const S = _swGrassTuftMatGet, lite = !!_swGrassK().lite, key = lite ? 'lam' : 'std';
+  if (!S.mats) S.mats = {};
+  if (!S.mats[key]) { const other = S.mats[lite ? 'std' : 'lam']; S.mats[key] = _swGrassTuftMatMake(lite, other ? other._lssGrass : null); }
+  const first = !S.m;
+  S.m = S.mats[key];
+  if (first) _swGrassUniTick();
+  return S.m;
+}
+function _swGrassTuftMatMake(lite, U0) {
   const A = _swGrassAtlasGet(), K = _swGrassK();
-  const m = _swFoliageMat(0, true);
+  const m = _swFoliageMat(0, true, lite);
   m.map = A.tex; m.alphaTest = 0.42; m.roughness = 0.9;
   m.transparent = (K.mode === 'tree'); m.depthWrite = true; m.forceSinglePass = true;
-  m.envMapIntensity = 0.12;
-  const U = {
+  if (!lite) m.envMapIntensity = 0.12;
+  const U = U0 || {
     uA: { value: K.fadeA }, uB: { value: K.fadeB },
     uW: { value: new THREE.Vector4() }, uD: { value: new THREE.Vector4() },
     uL: { value: new THREE.Vector4() },
@@ -23949,6 +23963,8 @@ function _swGrassTuftMatGet() {
     uRank: { value: A.rank }, uNorm: { value: 1 / Math.max(0.05, A.mean || 0.4) },
     uDW: { value: K.detailW }, uMap: { value: _swGrassMapInit().rt.texture }, uMapBox: { value: _GRM.box },   // (v51.50)
     uFlat: { value: new THREE.Vector3(1, 1, 1) },   // (v51.51) the flat colour's calibration (flatR/G/B)
+    uAmb: { value: new THREE.Vector3(0, 0, 0) },    // (v51.59) the Lambert tufts' stand-in for the sky light Standard gets (liteAmb*)
+    uAmbF: { value: new THREE.Vector2(1, 0) },      // (v51.60) ...rising toward grazing views (liteAmbBase / liteAmbGain)
   };
   const ob = m.onBeforeCompile;
   m.onBeforeCompile = function (sh, r) {
@@ -23959,13 +23975,15 @@ function _swGrassTuftMatGet() {
     sh.uniforms.uAtlasPx = U.uPx; sh.uniforms.uCoverK = U.uCov; sh.uniforms.uGrassRank = U.uRank; sh.uniforms.uGrassNorm = U.uNorm;
     sh.uniforms.uGrassDW = U.uDW; sh.uniforms.uGrassMap = U.uMap; sh.uniforms.uGrassMapBox = U.uMapBox;   // (v51.50)
     sh.uniforms.uGrassFlat = U.uFlat;   // (v51.51)
+    sh.uniforms.uGrassAmb = U.uAmb;     // (v51.59)
+    sh.uniforms.uGrassAmbF = U.uAmbF;   // (v51.60)
     sh.uniforms.uPatchMix = _swU.uPatchMix; sh.uniforms.uPatchScale = _swU.uPatchScale;
     sh.uniforms.uYMid = _swU.uYMid; sh.uniforms.uAMP = _swU.uAMP; sh.uniforms.uSlopeRock = _swU.uSlopeRock;
     sh.uniforms.uAO = { get value() { return window.__terrainAOU ? window.__terrainAOU.value : 0.55; } };
     sh.uniforms.uSat = { get value() { return window.__terrainSatU ? window.__terrainSatU.value : 0.40; } };
     sh.uniforms.uSunTop = _swU.uSunTop; sh.uniforms.uSunTopBox = _swU.uSunTopBox; sh.uniforms.uSunTopK = _swU.uSunTopK;
     sh.uniforms.uAerial = _swU.uAerial; sh.uniforms.uAerialStart = _swU.uAerialStart; sh.uniforms.uAerialFar = _swU.uAerialFar; sh.uniforms.uAerialColor = _swU.uAerialColor;   // (v51.49)
-    sh.vertexShader = _SUNTOP_GLSL + 'uniform float uAerial, uAerialStart, uAerialFar, uAO, uYMid, uAMP, uSlopeRock;\nuniform sampler2D uGrassMap;\nuniform vec4 uGrassMapBox;\nvarying vec2 vGT;\nvarying vec3 vGC;\nvarying float vSV, vAP;\n' + sh.vertexShader.replace('#include <color_vertex>',
+    sh.vertexShader = _SUNTOP_GLSL + 'uniform float uAerial, uAerialStart, uAerialFar, uAO, uYMid, uAMP, uSlopeRock;\nuniform sampler2D uGrassMap;\nuniform vec4 uGrassMapBox;\nvarying vec2 vGT;\nvarying vec3 vGC;\nvarying float vSV, vAP, vGV;\n' + sh.vertexShader.replace('#include <color_vertex>',
       '#include <color_vertex>\n vec3 _gip = vec3(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2]);\n' +
       ' vec4 _gm = texture2D(uGrassMap, (_gip.xz - uGrassMapBox.xy) / uGrassMapBox.zw);\n float _gBare = _gm.a;\n' +
       '#ifdef USE_INSTANCING_COLOR\n vGT = instanceColor.xy;\n vColor.rgb = color.rgb;\n float _gny = instanceColor.z;\n#else\n vGT = vec2(1.0);\n float _gny = 1.0;\n#endif\n' +
@@ -23974,14 +23992,16 @@ function _swGrassTuftMatGet() {
       ' vGC = _gm.rgb * mix(1.0, clamp(mix(0.62, 1.0, smoothstep(uSlopeRock, 1.0, clamp(_gny, 0.0, 1.0))) * mix(0.80, 1.0, _gth), 0.45, 1.08), uAO * _gaf);\n' +
       ' vSV = (uSunTopK.x > 0.5) ? _lssSunVisT(_gip) : 1.0;\n' +
       ' vAP = (uAerial > 0.001) ? clamp(smoothstep(uAerialStart, uAerialFar, length(uCam.xz - _gip.xz)) * uAerial * (1.0 - clamp((_gip.y - (uYMid - uAMP * 0.2)) / (uAMP * 1.4), 0.0, 1.0) * 0.55), 0.0, 0.85) : 0.0;\n' +
+      ' vGV = 1.0 - abs(normalize(_gip - cameraPosition).y);\n' +   // (v51.60) how edge-on the eye sees this tuft
       ' float _gGrow = 1.0 - smoothstep(0.35, 0.60, _gBare);')
       .replace('#include <project_vertex>', ' transformed *= _gGrow;\n#include <project_vertex>');
-    sh.fragmentShader = 'uniform vec2 uAtlasPx;\nuniform float uCoverK, uGrassTint, uGrassNorm;\nuniform vec3 uAerialColor, uGrassFlat;\nvarying vec2 vGT;\nvarying float vGF, vGD, vGE;\nvarying vec3 vGC;\nvarying float vSV, vAP;\nfloat _lssSunVis = 1.0;\n' + sh.fragmentShader
+    sh.fragmentShader = 'uniform vec2 uAtlasPx;\nuniform float uCoverK, uGrassTint, uGrassNorm;\nuniform vec3 uAerialColor, uGrassFlat, uGrassAmb;\nuniform vec2 uGrassAmbF;\nvarying float vGV;\nvarying vec2 vGT;\nvarying float vGF, vGD, vGE;\nvarying vec3 vGC;\nvarying float vSV, vAP;\nfloat _lssSunVis = 1.0;\n' + sh.fragmentShader
       .replace('void main() {', 'void main() {\n _lssSunVis = vSV;')
       .replace('#include <lights_pars_begin>', _sunTopPars())
       .replace('#include <color_fragment>', '#include <color_fragment>\n' +
         ' diffuseColor.rgb = mix(vGC * uGrassTint * uGrassFlat, diffuseColor.rgb * vGC * (vGT.y * uGrassTint * uGrassNorm), vGD);\n' +
-        ' diffuseColor.rgb = mix(diffuseColor.rgb, uAerialColor, vAP);')
+        ' diffuseColor.rgb = mix(diffuseColor.rgb, uAerialColor, vAP);\n' +
+        ' { float _gv4 = vGV * vGV; _gv4 *= _gv4; totalEmissiveRadiance += diffuseColor.rgb * uGrassAmb * (uGrassAmbF.x + uGrassAmbF.y * _gv4); }')   // (v51.60) x (base + gain x grazing^4)
       .replace('#include <alphatest_fragment>',
         '{ vec2 _rdx = dFdx(vMapUv * uAtlasPx), _rdy = dFdy(vMapUv * uAtlasPx);\n' +
         '  float _rmip = max(0.0, 0.5 * log2(max(dot(_rdx, _rdx), dot(_rdy, _rdy))));\n' +
@@ -23990,11 +24010,9 @@ function _swGrassTuftMatGet() {
         'diffuseColor.a = vGE;')   // (v51.57) a kept texel is solid, times the outer ring's opacity (blended: the material is transparent)
       .replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\n#ifdef DOUBLE_SIDED\n  normal *= faceDirection;\n#endif');
   };
-  m.customProgramCacheKey = () => 'lss-grass-tuft-7';
+  m.customProgramCacheKey = () => (lite ? 'lss-grass-tuft-8L' : 'lss-grass-tuft-8');
   try { Object.defineProperty(m, '_lssGrass', { value: U, enumerable: false, configurable: true }); } catch (_) {}
   m.needsUpdate = true;
-  S.m = m;
-  _swGrassUniTick();
   return m;
 }
 function _swGrassUniTick() {
@@ -24005,9 +24023,13 @@ function _swGrassUniTick() {
   U.uA.value = K.fadeA; U.uB.value = Math.max(K.fadeA + 1, K.fadeB);
   U.uW.value.set(K.sway, K.lean, 6.2832 / Math.max(10, K.waveLen), K.waveSpeed);
   U.uD.value.set(Math.cos(K.windDir), Math.sin(K.windDir), 0, H);
-  U.uL.value.set(0, Math.max(0.01, K.detailW), Math.max(0, Math.min(1, K.shrink)), K.mode === 'tree' ? 1 : 0);   // (v51.51) y = the per-tuft detail span; (v51.56) w = TREE mode; (v51.57) z = shrink
-  { const tr = (K.mode === 'tree'); if (m.transparent !== tr) { m.transparent = tr; m.needsUpdate = true; } }   // (v51.57) the blend follows the mode
+  U.uL.value.set(Math.max(0, Math.min(1, K.thin)), Math.max(0.01, K.detailW), Math.max(0, Math.min(1, K.shrink)), K.mode === 'tree' ? 1 : 0);   // (v51.58) x = thin; (v51.51) y = the per-tuft detail span; (v51.56) w = TREE mode; (v51.57) z = shrink
+  { const tr = (K.mode === 'tree'), Ms = _swGrassTuftMatGet.mats || {};   // (v51.57) the blend follows the mode - on both materials
+    for (const k in Ms) { const mm = Ms[k]; if (mm && mm.transparent !== tr) { mm.transparent = tr; mm.needsUpdate = true; } } }
+  if (!!K.lite !== (m === (_swGrassTuftMatGet.mats || {}).lam)) _swGrassTuftMatGet();   // (v51.58) `lite` flipped: make / pick the other
   U.uFlat.value.set(K.flatR, K.flatG, K.flatB);
+  if (K.lite) U.uAmb.value.set(K.liteAmbR, K.liteAmbG, K.liteAmbB); else U.uAmb.value.set(0, 0, 0);   // (v51.59)
+  U.uAmbF.value.set(K.liteAmbBase, K.liteAmbGain);   // (v51.60)
   U.uTint.value = K.tint * K.match; U.uCov.value = K.cover; U.uDW.value = Math.max(0.01, K.detailW);
   const A = _swGrassAtlasGet.a; if (A && A.mean) U.uNorm.value = 1 / Math.max(0.05, A.mean);
   try { _swGrassMapTick(); } catch (e) { if (!_GRM.err) { _GRM.err = 1; try { console.warn('[grass] map tick threw:', e); } catch (_) {} } }   // (v51.50)
@@ -24891,9 +24913,10 @@ function _swTreeGeoGet(){
   }
   return _swTreeGeos;
 }
-function _swFoliageMat(glow, grass){
-  const m=new THREE.MeshStandardMaterial({vertexColors:true,color:0xffffff,roughness:1,metalness:0,side:THREE.DoubleSide});
-  m.envMapIntensity = 0.18;
+function _swFoliageMat(glow, grass, lambert){
+  const m = lambert ? new THREE.MeshLambertMaterial({vertexColors:true,color:0xffffff,side:THREE.DoubleSide})
+                    : new THREE.MeshStandardMaterial({vertexColors:true,color:0xffffff,roughness:1,metalness:0,side:THREE.DoubleSide});
+  if (!lambert) m.envMapIntensity = 0.18;
   if(glow){ m.emissive=new THREE.Color(glow); m.emissiveIntensity=0.5; }
   const _rus = !!(_swU.uRus && _swU.uRusB && _swU.uRusN && _swU.uRusK && _swU.uRusC && _swU.uRusL);
   const RUS_DECL = _rus ? 'uniform vec4 uRus[16];\nuniform vec4 uRusB[16];\nuniform int uRusN;\nuniform vec4 uRusK;\nuniform vec4 uRusC;\nuniform vec4 uRusL;\n' : '';
@@ -24951,7 +24974,8 @@ function _swFoliageMat(glow, grass){
   const FADE = grass ?
     ' vGF=1.0-smoothstep(uTreeFadeA,uTreeFadeB,distance(ip,uCam));\n' +
     '#ifdef USE_INSTANCING_COLOR\n float _gtr=instanceColor.x;\n#else\n float _gtr=0.0;\n#endif\n' +
-    ' if (uGrassL.w > 0.5) { vGD = 1.0; vGE = vGF; transformed *= mix(1.0, vGF, uGrassL.z); if (vGF <= 0.0) transformed = vec3(0.0); }\n' +
+    ' if (uGrassL.w > 0.5) { float _gth = _gtr * uGrassL.x * 0.85; float _gtm = uGrassL.x > 0.0 ? smoothstep(_gth, _gth + 0.15, vGF) : 1.0;\n' +
+    '   vGD = 1.0; vGE = vGF * _gtm; transformed *= mix(1.0, vGF, uGrassL.z); if (vGE <= 0.0) transformed = vec3(0.0); }\n' +
     ' else { vGD=smoothstep(_gtr,_gtr+uGrassL.y,vGF); vGE = 1.0; if (vGF <= _gtr) transformed = vec3(0.0); }'
     : ' float tfade=1.0-smoothstep(uTreeFadeA,uTreeFadeB,distance(ip.xz,uCam.xz));\n transformed*=tfade;';
   m.onBeforeCompile=(sh)=>{ sh.uniforms.uTime=_swU.uTime; sh.uniforms.uCam=_swU.uCam; sh.uniforms.uTreeFadeA=_swU.uTreeFadeA; sh.uniforms.uTreeFadeB=_swU.uTreeFadeB; sh.uniforms.uSway=_swU.uSway;
@@ -25346,6 +25370,7 @@ function _swTreeVisTick(cx, cz) {
   const _PK = _swPlantK(), _PB2 = _PK.fadeB * _PK.fadeB;
   try { const _pmM = _swPlantMatGet.m; if (_pmM && _pmM._lssFade) { _pmM._lssFade.uA.value = _PK.fadeA; _pmM._lssFade.uB.value = _PK.fadeB; } } catch (_) {}
   const _GK = _swGrassK(), _GE = _GK.fadeB, _GB2 = _GE * _GE, _GSR2 = _GK.shadowR * _GK.shadowR;
+  const _gMat = _swGrassTuftMatGet.m;   // (v51.58) the active tuft material (Standard / Lambert)
   const _GFA = _GK.fadeA, _GFW = Math.max(1, _GK.fadeB - _GK.fadeA);
   try { _swGrassUniTick(); } catch (_) {}
   for (const c of chunks.values()) {
@@ -25363,7 +25388,14 @@ function _swTreeVisTick(cx, cz) {
       const R = u._ranks;
       if (R) {
         const t = Math.min(1, Math.max(0, (Math.sqrt(_n2) - _GFA) / _GFW)), lvl = 1 - t * t * (3 - 2 * t);
-        if (_GK.mode === 'tree') cnt = lvl > 0 ? R.length : 0;   // (v51.56) the trees' uniform shrink: all or nothing per mesh
+        if (_GK.mode === 'tree') {
+          if (lvl <= 0) cnt = 0;
+          else if (_GK.thin > 0) {
+            const cut = lvl / (_GK.thin * 0.85);
+            if (cut >= 1) cnt = R.length;
+            else { let lo = 0, hi = R.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (R[mid] < cut) lo = mid + 1; else hi = mid; } cnt = lo; }
+          } else cnt = R.length;
+        }
         else {
           let lo = 0, hi = R.length;
           while (lo < hi) { const mid = (lo + hi) >> 1; if (R[mid] < lvl) lo = mid + 1; else hi = mid; }
@@ -25373,6 +25405,7 @@ function _swTreeVisTick(cx, cz) {
       }
       const vv = v && _n2 < _GB2 && cnt > 0;
       if (im.visible !== vv) im.visible = vv;
+      if (_gMat && im.material !== _gMat && im.material && im.material._lssGrass) im.material = _gMat;   // (v51.58) `lite` swap
       const rs = _n2 < _GSR2;   // (v51.50) a uniform in r165, so flipping it costs no program
       if (im.receiveShadow !== rs) im.receiveShadow = rs;
     }

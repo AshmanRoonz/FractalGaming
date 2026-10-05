@@ -177,4 +177,6 @@ In order of impact per unit of GPU cost — the first three are free:
 - This repo has a history of perf changes that looked free and weren't
   (`antialias:false`, the terrain tile cache). If a change adds a pass, it gets
   measured on its own before it stays.
-- Keep `antialias: true`. Keep grass off. Don't re-add projectile/tracer pooling.
+- Keep `antialias: true`. Don't re-add projectile/tracer pooling. ("Keep grass off" was the v33
+  one-blade grass; since v51.41 the blade TUFTS are on - lss.map.md `GRASS: BLADE TUFTS, AND THE LONG
+  ROAD`. Grass colour work: use the off-screen A/B measurement harness described there.)

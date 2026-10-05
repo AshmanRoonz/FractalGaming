@@ -1,0 +1,705 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>warm CLOUD lab — thermodynamic cumulus (BOMEX)</title>
+<!--
+  Milestone 1 of docs/warm_cloud_brief.md. Grown from labs/fluid_cloud_lab.html (left untouched):
+  same 64^3-in-512^2 packing, MacCormack advection, red-black SOR projection, vorticity confinement.
+  New: physical units (50 m cells, seconds, K, kg/kg), potential-temperature perturbation + vapor +
+  cloud water, saturation adjustment with latent heat, buoyancy from theta' + vapor - liquid loading,
+  BOMEX sounding, surface heat/moisture fluxes, periodic sides, sponge lid, q_c raymarch.
+  The visible cloud (q_c) is a passenger: it never drives buoyancy except as a weight.
+-->
+<style>
+  html,body{margin:0;height:100%;background:#02060a;overflow:hidden;font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;color:#cfe}
+  #c{position:fixed;inset:0;width:100%;height:100%;display:block;cursor:grab}
+  #panel{position:fixed;top:10px;left:10px;width:290px;max-height:calc(100vh - 20px);overflow-y:auto;overflow-x:hidden;background:rgba(8,14,22,.86);border:1px solid #1d2b3a;border-radius:10px;padding:11px;backdrop-filter:blur(6px);box-sizing:border-box}
+  #panel h1{font-size:13px;margin:0 0 2px;color:#8fd}
+  #panel h2{font-size:11px;margin:10px 0 3px;color:#7ab;text-transform:uppercase;letter-spacing:.06em;border-top:1px solid #1d2b3a;padding-top:7px}
+  #panel .sub{color:#6a8;font-size:11px;margin:0 0 8px}
+  .row{display:flex;align-items:center;gap:8px;margin:4px 0}
+  .row label{flex:0 0 104px;color:#9bd;white-space:nowrap}
+  .row input[type=range]{flex:1;min-width:0;accent-color:#3fd8b0}
+  .row .v{flex:0 0 40px;text-align:right;color:#bdf}
+  .row.chk label{flex:1}
+  .row select{flex:1;background:#0d1a26;color:#cfe;border:1px solid #2a5366;border-radius:4px;font:inherit}
+  .hint{color:#69859a;font-size:10.5px;margin-top:6px}
+  button{background:#16384a;color:#bff;border:1px solid #2a5366;border-radius:6px;padding:4px 9px;cursor:pointer;font:inherit}
+  #stats{white-space:pre;font-size:11px;color:#bde;line-height:1.45}
+  #stats b{color:#fd8;font-weight:normal}
+  #prof{display:block;margin-top:6px;background:#06101a;border:1px solid #1d2b3a;border-radius:4px}
+  .fps{position:fixed;bottom:8px;right:10px;color:#577;font-size:11px}
+  #slabel{position:fixed;color:#bde;font-size:11px;background:rgba(6,12,20,.75);padding:2px 6px;border-radius:4px;pointer-events:none}
+  .err{position:fixed;top:0;left:0;right:0;padding:14px;background:#3a1015;color:#fbb;font-size:12px;white-space:pre-wrap;display:none;z-index:9}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="err" class="err"></div>
+<div id="slabel"></div>
+<div id="panel">
+  <h1>warm CLOUD lab</h1>
+  <p class="sub">cumulus from thermodynamics · BOMEX sounding · 3.2 km cube</p>
+  <div class="hint">Nobody paints these clouds. The ground warms and wets the lowest air; thermals rise, cool, and where the vapor reaches saturation it condenses into cloud water, releasing latent heat that lifts it further. The visible cloud is a passenger: it only ever counts as a weight.</div>
+
+  <h2>simulation</h2>
+  <div class="row"><label>substeps/frame</label><input id="subs" type="range" min="1" max="8" step="1" value="3"><span class="v" id="subs_v"></span></div>
+  <div class="row"><label>dt (s)</label><input id="dt" type="range" min="0.5" max="3" step="0.25" value="2"><span class="v" id="dt_v"></span></div>
+  <div class="row"><label>surface flux x</label><input id="flux" type="range" min="0" max="5" step="0.05" value="2"><span class="v" id="flux_v"></span></div>
+  <div class="row"><label>patchiness</label><input id="patch" type="range" min="0" max="1" step="0.01" value="0.6"><span class="v" id="patch_v"></span></div>
+  <div class="row"><label>eddy K m²/s</label><input id="kdiff" type="range" min="0" max="80" step="1" value="20"><span class="v" id="kdiff_v"></span></div>
+  <div class="row"><label>condense tau s</label><input id="tau" type="range" min="0" max="10" step="0.5" value="0"><span class="v" id="tau_v"></span></div>
+  <div class="row"><label>vorticity</label><input id="vort" type="range" min="0" max="0.02" step="0.0005" value="0.003"><span class="v" id="vort_v"></span></div>
+  <div class="row"><label>pressure iters</label><input id="iters" type="range" min="4" max="40" step="1" value="16"><span class="v" id="iters_v"></span></div>
+  <div class="row chk"><label for="latent">latent heating (L key)</label><input type="checkbox" id="latent" checked></div>
+  <div class="row" style="gap:6px"><button id="pause">pause</button><button id="reset">reset</button><button id="kick">+30 min</button></div>
+
+  <h2>render</h2>
+  <div class="row"><label>sun azimuth</label><input id="sunaz" type="range" min="0" max="6.28" step="0.01" value="0.6"><span class="v" id="sunaz_v"></span></div>
+  <div class="row"><label>sun elevation</label><input id="sunel" type="range" min="0.05" max="1.5" step="0.01" value="0.75"><span class="v" id="sunel_v"></span></div>
+  <div class="row"><label>extinction x</label><input id="ext" type="range" min="0.1" max="3" step="0.05" value="1"><span class="v" id="ext_v"></span></div>
+  <div class="row"><label>exposure</label><input id="expo" type="range" min="0.3" max="3" step="0.05" value="1.1"><span class="v" id="expo_v"></span></div>
+  <div class="row"><label>tiles</label><input id="tiles" type="range" min="1" max="5" step="2" value="3"><span class="v" id="tiles_v"></span></div>
+  <div class="row"><label>render scale</label><input id="rscale" type="range" min="0.3" max="1" step="0.05" value="0.7"><span class="v" id="rscale_v"></span></div>
+  <div class="row chk"><label for="spin">auto-orbit camera</label><input type="checkbox" id="spin"></div>
+
+  <h2>debug slice</h2>
+  <div class="row"><label>field (Y)</label><select id="field">
+    <option value="0">cloud water q_c</option>
+    <option value="1">theta' (K)</option>
+    <option value="2">supersaturation</option>
+    <option value="3">vertical wind w</option>
+    <option value="4">vapor anomaly q_v'</option>
+  </select></div>
+  <div class="row"><label>slice z</label><input id="slz" type="range" min="0" max="63" step="1" value="32"><span class="v" id="slz_v"></span></div>
+  <div class="row chk"><label for="showslice">show slice</label><input type="checkbox" id="showslice" checked></div>
+
+  <h2>checks</h2>
+  <div id="stats">waiting for first readback…</div>
+  <canvas id="prof" width="248" height="150"></canvas>
+  <div class="hint">profile: cloud fraction by height (cyan), mean w inside cloud (orange). Yellow dash = parcel LCL of the surface air; grey band = BOMEX inversion. Slice outline = cloud edge.<br>Drag = orbit, wheel = zoom. Space pause, R reset. Pad: L-stick orbit, triggers zoom, A pause, Y slice field, B latent.</div>
+</div>
+<div class="fps" id="fps"></div>
+
+<script>
+'use strict';
+const cv = document.getElementById('c'), errEl = document.getElementById('err');
+const gl = cv.getContext('webgl2', { antialias:false, alpha:false });
+function fail(m){ errEl.style.display='block'; errEl.textContent = m; throw new Error(m); }
+if (!gl) fail('WebGL2 not available.');
+if (!gl.getExtension('EXT_color_buffer_float')) fail('EXT_color_buffer_float not supported (need float render targets).');
+
+// ---------- physical setup ----------
+const N = 64, RES2 = 512;            // 64^3 grid packed into a 512^2 texture: idx = x | y<<6 | z<<12, texel = (idx&511, idx>>9)
+const DX = 50;                       // m per cell -> 3.2 km cube; y is up
+const H = N*DX;
+const G = 9.81, CP = 1005, RD = 287, RV = 461.5, LV = 2.5e6, P0 = 1.0e5;
+const PSURF = 101500;                // BOMEX surface pressure. With 1000 hPa at z=0 the 520 m level starts supersaturated.
+const F_TH = 8e-3, F_Q = 5.2e-5;     // BOMEX surface sensible (K m/s) and moisture ((kg/kg) m/s) fluxes
+// BOMEX-like sounding (Siebesma et al. 2003, approx): z m, theta K, total water g/kg
+const SOUNDING = [[0,298.7,17.0],[520,298.7,16.3],[1480,302.4,10.7],[2000,308.2,4.2],[3000,311.85,3.0],[3200,312.58,2.76]];
+function sound(z){
+  for (let k=0;k<SOUNDING.length-1;k++){ const a=SOUNDING[k], b=SOUNDING[k+1];
+    if (z<=b[0]){ const t=(z-a[0])/(b[0]-a[0]); return [a[1]+(b[1]-a[1])*t, (a[2]+(b[2]-a[2])*t)*1e-3]; } }
+  const l=SOUNDING[SOUNDING.length-1]; return [l[1], l[2]*1e-3];
+}
+const pbarAt = z => PSURF*Math.exp(-z/8400);
+const exnerAt = z => Math.pow(pbarAt(z)/P0, RD/CP);
+const qsatAt = (T,p) => { const Tc=T-273.15; return (380.2/p)*Math.exp(17.67*Tc/(Tc+243.5)); };
+const BASE = { thb:new Float32Array(N), qvb:new Float32Array(N), pb:new Float32Array(N), pi:new Float32Array(N), dth:new Float32Array(N) };
+for (let j=0;j<N;j++){ const z=(j+0.5)*DX, s=sound(z);
+  BASE.thb[j]=s[0]; BASE.qvb[j]=s[1]; BASE.pb[j]=pbarAt(z); BASE.pi[j]=exnerAt(z); }
+for (let j=0;j<N;j++){ const a=BASE.thb[Math.max(0,j-1)], b=BASE.thb[Math.min(N-1,j+1)];
+  BASE.dth[j]=(b-a)/(DX*((j>0&&j<N-1)?2:1)); }
+
+// ---------- GLSL ----------
+const VERT = `#version 300 es
+in vec2 aPos; void main(){ gl_Position = vec4(aPos,0.,1.); }`;
+
+const HEAD = `#version 300 es
+precision highp float; precision highp int; precision highp sampler2D; precision highp sampler3D;
+const int MASK3=63, MASK2=511;
+const float GG=${G.toFixed(2)}, CP=${CP.toFixed(1)}, RV=${RV.toFixed(1)}, LV=${LV.toFixed(1)};
+uniform float uDt, uDx;
+uniform sampler2D tBase;                 // row0 (thbar, qvbar, pbar, exner), row1 (dthbar/dz, -, -, -) per level
+out vec4 o;
+ivec3 g_i;
+void baseInit(){ ivec2 f=ivec2(gl_FragCoord.xy); int idx=f.x|(f.y<<9); g_i=ivec3(idx&MASK3,(idx>>6)&MASK3,(idx>>12)&MASK3); }
+// x,z periodic; y clamped (free-slip lid and floor)
+ivec2 to2D(ivec3 i){ i=ivec3(i.x&MASK3, clamp(i.y,0,MASK3), i.z&MASK3); int idx=i.x|(i.y<<6)|(i.z<<12); return ivec2(idx&MASK2, idx>>9); }
+vec4 F(sampler2D t, ivec3 i){ return texelFetch(t, to2D(i), 0); }
+vec4 base0(int j){ return texelFetch(tBase, ivec2(j,0), 0); }
+vec4 base1(int j){ return texelFetch(tBase, ivec2(j,1), 0); }
+// trilinear in cell coords (centers at i+0.5); also returns the min/max of the 8 corners (MacCormack limiter)
+vec4 tri(sampler2D t, vec3 c, out vec4 mn, out vec4 mx){
+  vec3 f=c-0.5; vec3 fl=floor(f); vec3 fr=f-fl; ivec3 a=ivec3(fl);
+  vec4 c000=F(t,a),               c100=F(t,a+ivec3(1,0,0));
+  vec4 c010=F(t,a+ivec3(0,1,0)),  c110=F(t,a+ivec3(1,1,0));
+  vec4 c001=F(t,a+ivec3(0,0,1)),  c101=F(t,a+ivec3(1,0,1));
+  vec4 c011=F(t,a+ivec3(0,1,1)),  c111=F(t,a+ivec3(1,1,1));
+  mn=min(min(min(c000,c100),min(c010,c110)),min(min(c001,c101),min(c011,c111)));
+  mx=max(max(max(c000,c100),max(c010,c110)),max(max(c001,c101),max(c011,c111)));
+  vec4 x00=mix(c000,c100,fr.x), x10=mix(c010,c110,fr.x), x01=mix(c001,c101,fr.x), x11=mix(c011,c111,fr.x);
+  return mix(mix(x00,x10,fr.y), mix(x01,x11,fr.y), fr.z);
+}
+float qsat(float T, float p){ float Tc=T-273.15; return (380.2/p)*exp(17.67*Tc/(Tc+243.5)); }
+// STAGGERED (MAC) velocity: at index i, A.x = u on the -x face, A.y = w on the floor face, A.z = v on the -z face.
+// (The collocated layout of the original lab let checkerboard buoyancy grow unopposed and created water.)
+const ivec3 DXI=ivec3(1,0,0), DYI=ivec3(0,1,0), DZI=ivec3(0,0,1);
+float wF(sampler2D t, ivec3 i){ return (i.y<=0 || i.y>63) ? 0.0 : F(t,i).y; }   // floor face and the implicit lid face are 0
+vec3 velC(sampler2D t, ivec3 i){ vec4 a=F(t,i); return 0.5*vec3(a.x+F(t,i+DXI).x, wF(t,i)+wF(t,i+DYI), a.z+F(t,i+DZI).z); }
+vec3 velU(sampler2D t, ivec3 i){ return vec3(F(t,i).x, 0.25*(wF(t,i)+wF(t,i+DYI)+wF(t,i-DXI)+wF(t,i-DXI+DYI)), 0.25*(F(t,i).z+F(t,i+DZI).z+F(t,i-DXI).z+F(t,i-DXI+DZI).z)); }
+vec3 velW(sampler2D t, ivec3 i){ return vec3(0.25*(F(t,i).x+F(t,i+DXI).x+F(t,i-DYI).x+F(t,i-DYI+DXI).x), wF(t,i), 0.25*(F(t,i).z+F(t,i+DZI).z+F(t,i-DYI).z+F(t,i-DYI+DZI).z)); }
+vec3 velV(sampler2D t, ivec3 i){ return vec3(0.25*(F(t,i).x+F(t,i+DXI).x+F(t,i-DZI).x+F(t,i-DZI+DXI).x), 0.25*(wF(t,i)+wF(t,i+DYI)+wF(t,i-DZI)+wF(t,i-DZI+DYI)), F(t,i).z); }
+`;
+
+// textures: A = (u, w(up), v, theta')   B = (q_v, q_c, q_r, spare)   [kg/kg]
+const F_INIT = HEAD + `uniform int uOut; uniform uint uSeed;
+uint hsh(uint v){ v=v*747796405u+2891336453u; uint w=((v>>((v>>28u)+4u))^v)*277803737u; return (w>>22u)^w; }
+float rnd(uint k){ return float(hsh(uint(g_i.x)+64u*uint(g_i.y)+4096u*uint(g_i.z)+262144u*k+uSeed*1048576u))/4294967295.0; }
+void main(){ baseInit();
+  float z=(float(g_i.y)+0.5)*uDx;
+  float lo = z<1000.0 ? 1.0 : 0.0;                         // perturb the lower layers only
+  float thp = lo*(rnd(1u)-0.5)*0.2;                        // +/-0.1 K
+  float qv  = base0(g_i.y).y + lo*(rnd(2u)-0.5)*0.05e-3;   // +/-0.025 g/kg
+  o = uOut==0 ? vec4(0,0,0,thp) : vec4(qv,0,0,0);
+}`;
+
+// MacCormack step 1: semi-Lagrangian forward prediction
+// Each channel lives on its own lattice (u/w/v faces, scalars at centres). In index space every lattice point of
+// index i sits at i+0.5, so a channel back-traces from i+0.5 by the velocity AT ITS OWN location.
+const F_ADV_P = HEAD + `uniform sampler2D tVel, tSrc; uniform int uStag;
+void main(){ baseInit();
+  vec3 c0=vec3(g_i)+0.5; float k=uDt/uDx; vec4 mn,mx;
+  vec3 vc=velC(tVel,g_i);
+  if (uStag==0){ o=tri(tSrc, c0-vc*k, mn, mx); return; }
+  o = vec4(tri(tSrc, c0-velU(tVel,g_i)*k, mn, mx).x, tri(tSrc, c0-velW(tVel,g_i)*k, mn, mx).y,
+           tri(tSrc, c0-velV(tVel,g_i)*k, mn, mx).z, tri(tSrc, c0-vc*k, mn, mx).w);
+}`;
+// MacCormack step 2: back-trace the prediction, correct by half the round-trip error EVERYWHERE, clamp to the
+// source neighbourhood (the original lab corrected only the density channel and only in wall cells)
+const F_ADV_C = HEAD + `uniform sampler2D tVel, tSrc, tPred; uniform int uStag;
+float corr(vec3 v, int ch){
+  vec3 c0=vec3(g_i)+0.5; float k=uDt/uDx; vec4 mn,mx,d0,d1;
+  float back=tri(tPred, c0+v*k, d0, d1)[ch];
+  tri(tSrc, c0-v*k, mn, mx);
+  return clamp(F(tPred,g_i)[ch] + 0.5*(F(tSrc,g_i)[ch]-back), mn[ch], mx[ch]);
+}
+void main(){ baseInit();
+  vec3 vc=velC(tVel,g_i);
+  if (uStag==0){
+    vec3 c0=vec3(g_i)+0.5; float k=uDt/uDx; vec4 mn,mx,d0,d1;
+    vec4 back=tri(tPred, c0+vc*k, d0, d1); tri(tSrc, c0-vc*k, mn, mx);
+    o=clamp(F(tPred,g_i) + 0.5*(F(tSrc,g_i)-back), mn, mx); return; }
+  o = vec4(corr(velU(tVel,g_i),0), corr(velW(tVel,g_i),1), corr(velV(tVel,g_i),2), corr(vc,3));
+  if (g_i.y==0) o.y=0.0;
+}`;
+
+// subgrid eddy diffusion (constant K, conservative 7-point, no flux through floor/lid). Without it the surface
+// moisture piles up in the lowest cell and cloud cores rise undiluted (no entrainment) -> 25+ m/s runaway updrafts.
+const F_DIFF = HEAD + `uniform sampler2D tSrc; uniform float uK; uniform int uStag;
+void main(){ baseInit();
+  ivec3 i=g_i; vec4 c=F(tSrc,i);
+  vec4 s=F(tSrc,i+DXI)+F(tSrc,i-DXI)+F(tSrc,i+DZI)+F(tSrc,i-DZI)-4.0*c;
+  if (i.y>0)  s+=F(tSrc,i-DYI)-c;
+  if (i.y<63) s+=F(tSrc,i+DYI)-c;
+  vec4 r=c+uK*uDt/(uDx*uDx)*s;
+  if (uStag==1 && i.y==0) r.y=0.0;
+  o=r;
+}`;
+
+// stratification, surface fluxes, saturation adjustment + latent heat, buoyancy, sponge.
+// Run twice per substep (uOut 0 -> A, 1 -> B); the arithmetic is identical so both halves agree.
+const F_PHYS = HEAD + `uniform sampler2D tA, tB, tFlux; uniform int uOut;
+uniform float uFth, uFq, uLatent, uRelax, uSpongeZ, uSpongeRate;
+// cell-centred thermodynamics for cell i: returns (theta', q_v, q_c, buoyancy) after this substep's sources
+vec4 cellState(ivec3 i, out float qr){
+  vec4 a=F(tA,i), b=F(tB,i); int j=i.y; qr=b.z;
+  vec4 bs=base0(j); float thb=bs.x, qvb=bs.y, p=bs.z, ex=bs.w;
+  float th=a.w - velC(tA,i).y*base1(j).x*uDt;                 // theta' sees the base-state gradient as air moves vertically
+  float qv=b.x, qc=b.y;
+  if (j==0){ vec2 fm=texelFetch(tFlux, i.xz, 0).rg;           // surface fluxes into the lowest cell
+    th += uFth*fm.x/uDx*uDt; qv += uFq*fm.y/uDx*uDt; }
+  float T=(thb+th)*ex;
+  float qs=qsat(T,p);
+  float dq=(qv-qs)/(1.0+(LV*LV*qs)/(CP*RV*T*T));              // linearised saturation adjustment
+  dq=max(dq,-qc)*uRelax;                                      // only evaporate liquid that exists
+  qv-=dq; qc+=dq;
+  th += uLatent*(LV/(CP*ex))*dq;                              // ~ +2.5 K per g/kg condensed
+  float buoy=GG*(th/thb + 0.608*(qv-qvb) - qc - qr);          // warm + light vapour - liquid loading
+  return vec4(th, qv, qc, buoy);
+}
+void main(){ baseInit();
+  float qr, qr2; vec4 s=cellState(g_i, qr);
+  int j=g_i.y;
+  if (uOut==1){ o=vec4(s.y, s.z, qr, 0.0); return; }
+  vec4 a=F(tA,g_i); a.w=s.x;
+  if (j==0) a.y=0.0;
+  else a.y += 0.5*(s.w + cellState(g_i-DYI, qr2).w)*uDt;     // buoyancy on the floor face, from the two cells it separates
+  float z=float(j)*uDx, H=64.0*uDx;
+  if (z>uSpongeZ){ float sp=(z-uSpongeZ)/(H-uSpongeZ); float r=min(1.0,uSpongeRate*sp*sp*uDt); a*=1.0-r; }
+  o=a;
+}`;
+
+const F_VORT = HEAD + `uniform sampler2D tA; uniform float uEps;
+vec3 curl(ivec3 i){
+  ivec2 d=ivec2(1,0);
+  vec3 x1=velC(tA,i-d.xyy), x2=velC(tA,i+d.xyy);
+  vec3 y1=velC(tA,i-d.yxy), y2=velC(tA,i+d.yxy);
+  vec3 z1=velC(tA,i-d.yyx), z2=velC(tA,i+d.yyx);
+  return 0.5*vec3((y2.z-y1.z)-(z2.y-z1.y),(z2.x-z1.x)-(x2.z-x1.z),(x2.y-x1.y)-(y2.x-y1.x));
+}
+void main(){ baseInit();
+  vec4 a=F(tA,g_i);
+  if (g_i.y<1 || g_i.y>61){ o=a; return; }
+  ivec2 d=ivec2(1,0); ivec3 i=g_i;
+  vec3 eta=vec3(length(curl(i+d.xyy))-length(curl(i-d.xyy)),
+                length(curl(i+d.yxy))-length(curl(i-d.yxy)),
+                length(curl(i+d.yyx))-length(curl(i-d.yyx)));
+  float l2=dot(eta,eta); vec3 nn = l2>0.0 ? eta*inversesqrt(l2) : vec3(0);
+  a.xyz += uEps*uDt*cross(nn, curl(i));   // centre force applied to this index's faces (half-cell offset; it's a small artificial term)
+  o=a;
+}`;
+
+// projection on the MAC grid: P = (divergence, pressure). Exact discrete projection; floor and lid faces are w = 0.
+const F_DIV = HEAD + `uniform sampler2D tA, tP;
+void main(){ baseInit();
+  ivec3 i=g_i; vec4 a=F(tA,i);
+  float div = (F(tA,i+DXI).x-a.x) + (wF(tA,i+DYI)-wF(tA,i)) + (F(tA,i+DZI).z-a.z);
+  o = vec4(div, F(tP,i).y, 0, 0);            // warm start from the last pressure
+}`;
+const F_POIS = HEAD + `uniform sampler2D tP; uniform int uParity;
+void main(){ baseInit();
+  ivec3 i=g_i; vec4 r=F(tP,i);
+  if (((i.x^i.y^i.z^uParity)&1)==0){ o=r; return; }
+  ivec2 d=ivec2(1,0);
+  float s=F(tP,i-d.xyy).y+F(tP,i+d.xyy).y+F(tP,i-d.yyx).y+F(tP,i+d.yyx).y; float n=4.0;
+  if (i.y>0) { s+=F(tP,i-d.yxy).y; n+=1.0; }                 // Neumann at floor and lid
+  if (i.y<63){ s+=F(tP,i+d.yxy).y; n+=1.0; }
+  r.y += ((s-r.x)/n - r.y)*1.6;                               // red-black SOR
+  o=r;
+}`;
+const F_PRS = HEAD + `uniform sampler2D tA, tP;
+void main(){ baseInit();
+  ivec3 i=g_i;
+  vec4 a=F(tA,i); float pc=F(tP,i).y;
+  a.x -= pc-F(tP,i-DXI).y;
+  a.z -= pc-F(tP,i-DZI).y;
+  a.y = i.y==0 ? 0.0 : a.y-(pc-F(tP,i-DYI).y);                // free slip: no flow through the floor
+  o=a;
+}`;
+
+// copy one z-layer of (q_c, q_r) in g/kg into a real 3D texture so the raymarch gets hardware trilinear + wrap
+const F_PACK = HEAD + `uniform sampler2D tB; uniform int uLayer;
+void main(){ ivec3 i=ivec3(int(gl_FragCoord.x), int(gl_FragCoord.y), uLayer); vec4 b=F(tB,i); o=vec4(b.y*1000.0, b.z*1000.0, 0, 1); }`;
+
+const F_RENDER = HEAD + `uniform sampler3D tCloud; uniform sampler2D tFlux;
+uniform vec3 uCamPos,uCamFwd,uCamRight,uCamUp,uSunDir; uniform vec2 uRes, uYBand; uniform float uTiles,uExt,uExpo;
+const vec3 SUNC=vec3(1.0,0.95,0.87)*2.6, SKYA=vec3(0.32,0.46,0.75)*0.55;
+float hg(float mu,float g){ float g2=g*g; return (1.0-g2)/pow(1.0+g2-2.0*g*mu,1.5); }   // 4pi-normalised
+float qcAt(vec3 w){ if (abs(w.x)>uTiles||abs(w.z)>uTiles) return 0.0; return texture(tCloud, w*0.5+0.5).r; }  // g/kg
+const float M = ${(H/2).toFixed(1)};                                    // metres per world unit
+// sun optical depth: physical extinction sigma = 1.5 rho_air q_c / (rho_w r_e) ~ 0.165 per m per g/kg (r_e 10 um)
+float sunTau(vec3 w, int n, float seg){ float tau=0.0, d=0.0;
+  for (int i=0;i<24;i++){ if (i>=n) break; vec3 q=w+uSunDir*(d+seg*0.5); if (q.y>1.0) break; tau+=qcAt(q)*seg; d+=seg; seg*=1.45; }
+  return tau*0.165*uExt*M; }
+vec3 skyCol(vec3 rd){
+  vec3 c=mix(vec3(0.62,0.74,0.9), vec3(0.13,0.3,0.62), pow(clamp(rd.y,0.0,1.0),0.6));
+  float s=max(dot(rd,uSunDir),0.0); c+=SUNC*(pow(s,1200.0)*8.0 + pow(s,24.0)*0.06);
+  return rd.y<0.0 ? vec3(0.55,0.62,0.7) : c; }
+void main(){
+  vec2 ndc=gl_FragCoord.xy/uRes*2.0-1.0;
+  vec3 ro=uCamPos, rd=normalize(uCamFwd*1.6 + uCamRight*ndc.x*(uRes.x/uRes.y) + uCamUp*ndc.y);
+  vec3 bg=skyCol(rd); float gT=1e9;
+  if (rd.y<0.0 && ro.y>-1.0){                                   // ground at the domain floor
+    gT=(-1.0-ro.y)/rd.y; vec3 gp=ro+rd*gT; vec4 fm=texture(tFlux, gp.xz*0.5+0.5);
+    vec3 alb=mix(vec3(0.07,0.12,0.045), vec3(0.2,0.16,0.09), clamp(fm.r-0.5,0.0,1.0));
+    alb=mix(alb, vec3(0.025,0.06,0.1), fm.b);
+    float sh=exp(-sunTau(gp+vec3(0,0.001,0), 20, 0.03));
+    vec3 gc=alb*(SUNC*max(uSunDir.y,0.0)*sh + SKYA*0.7);
+    bg=mix(gc, vec3(0.55,0.64,0.76), 1.0-exp(-gT*0.06));
+  }
+  vec3 bmin=vec3(-uTiles,uYBand.x,-uTiles), bmax=vec3(uTiles,uYBand.y,uTiles), inv=1.0/rd;   // only the heights that hold cloud
+  vec3 t0=(bmin-ro)*inv, t1=(bmax-ro)*inv, tmn=min(t0,t1), tmx=max(t0,t1);
+  float tn=max(max(max(tmn.x,tmn.y),tmn.z),0.0), tf=min(min(min(tmx.x,tmx.y),tmx.z),gT);
+  vec3 col=vec3(0); float T=1.0;
+  if (tf>tn){
+    float ds=max((tf-tn)/220.0, 0.012);
+    float t=tn+ds*fract(sin(dot(gl_FragCoord.xy,vec2(12.9898,78.233)))*43758.5453);
+    float mu=dot(rd,uSunDir); int empty=0;
+    for (int k=0;k<400;k++){
+      if (t>tf || T<0.01) break;
+      vec3 p=ro+rd*t; float q=qcAt(p);
+      if (q<=0.002){ t+=ds*(empty>3?3.0:1.0); empty++; continue; }   // stride through clear air
+      if (empty>3){ t-=ds*2.0; empty=0; continue; }                   // overshot into cloud: back up, resume fine steps
+      empty=0;
+      {
+        float sig=0.165*q*uExt;                                 // 1/m
+        float tau=sunTau(p, 7, 0.02);
+        float L=0.0, ea=1.0, eb=1.0, ec=1.0;                    // multiple-scattering octaves
+        for (int oc=0;oc<3;oc++){ L+=eb*mix(hg(mu,0.8*ec), hg(mu,-0.25*ec), 0.3)*exp(-tau*ea); ea*=0.25; eb*=0.5; ec*=0.5; }
+        float powder=1.0-0.6*exp(-sig*250.0)*(0.5-0.5*mu);      // thin sunward-facing edges read darker
+        vec3 amb=SKYA*(0.3+0.7*clamp(p.y*0.5+0.5,0.0,1.0));
+        vec3 lum=SUNC*L*powder*0.55 + amb;
+        float tr=exp(-sig*ds*M);
+        col+=T*lum*(1.0-tr); T*=tr;
+      }
+      t+=ds;
+    }
+  }
+  vec3 c=col+T*bg;
+  c=1.0-exp(-c*uExpo);
+  o=vec4(pow(c,vec3(1.0/2.2)),1.0);
+}`;
+
+// debug slice: an x-y (horizontal x, height y) cross-section at z = uSlz, drawn into a corner rectangle
+const F_SLICE = HEAD + `uniform sampler2D tA, tB; uniform vec4 uRect; uniform int uField, uSlz; uniform float uLcl;
+vec3 div3(float v){ v=clamp(v,-1.0,1.0); return v>0.0 ? mix(vec3(0.04,0.05,0.07), vec3(1.0,0.32,0.18), v) : mix(vec3(0.04,0.05,0.07), vec3(0.25,0.55,1.0), -v); }
+bool cloudy(ivec3 i){ return F(tB,i).y>1e-5; }
+void main(){
+  vec2 uv=(gl_FragCoord.xy-uRect.xy)/uRect.zw;
+  vec2 cc=uv*64.0; ivec3 i=ivec3(int(cc.x), int(cc.y), uSlz);
+  vec4 a=F(tA,i), b=F(tB,i); vec4 bs=base0(i.y);
+  vec3 c;
+  if (uField==0)      c=mix(vec3(0.04,0.07,0.12), vec3(1.0), 1.0-exp(-b.y*1000.0*3.0));
+  else if (uField==1) c=div3(a.w/1.0);
+  else if (uField==2){ float T=(bs.x+a.w)*bs.w; c=div3((b.x/qsat(T,bs.z)-1.0)/0.02); }
+  else if (uField==3) c=div3(velC(tA,i).y/3.0);
+  else                c=div3((b.x-bs.y)*1000.0/2.0);
+  bool cl=cloudy(i);
+  vec2 fr=fract(cc);
+  if (fr.x<0.22 && cloudy(i-ivec3(1,0,0))!=cl) c=vec3(1);
+  if (fr.y<0.22 && cloudy(i-ivec3(0,1,0))!=cl) c=vec3(1);
+  float zl=uv.y*64.0*uDx;
+  if (uLcl>0.0 && abs(zl-uLcl)<12.0 && fract(uv.x*16.0)<0.6) c=vec3(1.0,0.86,0.2);
+  if (min(min(uv.x,uv.y),min(1.0-uv.x,1.0-uv.y))<0.004) c=vec3(0.3,0.45,0.55);
+  o=vec4(c,1);
+}`;
+
+// ---------- GL plumbing ----------
+function compile(type, src){ const s=gl.createShader(type); gl.shaderSource(s, src.trim()); gl.compileShader(s);
+  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)) fail(gl.getShaderInfoLog(s)+'\n\n'+src.split('\n').map((l,i)=>(i+1)+': '+l).join('\n')); return s; }
+function program(fsrc){ const p=gl.createProgram(); gl.attachShader(p,compile(gl.VERTEX_SHADER,VERT)); gl.attachShader(p,compile(gl.FRAGMENT_SHADER,fsrc)); gl.bindAttribLocation(p,0,'aPos'); gl.linkProgram(p);
+  if(!gl.getProgramParameter(p,gl.LINK_STATUS)) fail(gl.getProgramInfoLog(p)); return { p, loc:{} }; }
+const PR = { init:program(F_INIT), adP:program(F_ADV_P), adC:program(F_ADV_C), phys:program(F_PHYS), vort:program(F_VORT),
+  diff:program(F_DIFF), div:program(F_DIV), pois:program(F_POIS), prs:program(F_PRS), pack:program(F_PACK), render:program(F_RENDER), slice:program(F_SLICE) };
+
+const vbo=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,vbo);
+gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
+
+function makeTex(){ const t=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,t);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,RES2,RES2,0,gl.RGBA,gl.FLOAT,null);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
+  const f=gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER,f);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,t,0);
+  return { tex:t, fbo:f }; }
+function pingpong(){ return { a:makeTex(), b:makeTex(), swap(){ const x=this.a; this.a=this.b; this.b=x; } }; }
+const A=pingpong(), B=pingpong(), P=pingpong(), TA=makeTex(), TB=makeTex();
+
+// base-state texture: 64 x 2
+const baseTex={ tex:gl.createTexture() };
+{ const d=new Float32Array(N*2*4);
+  for (let j=0;j<N;j++){ d.set([BASE.thb[j],BASE.qvb[j],BASE.pb[j],BASE.pi[j]], j*4); d.set([BASE.dth[j],0,0,0], (N+j)*4); }
+  gl.bindTexture(gl.TEXTURE_2D,baseTex.tex); gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,N,2,0,gl.RGBA,gl.FLOAT,d);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST); }
+
+// 3D cloud texture for rendering: x,z repeat (periodic field), y clamp
+const cloud3={ tex:gl.createTexture(), target:gl.TEXTURE_3D };
+gl.bindTexture(gl.TEXTURE_3D,cloud3.tex);
+gl.texImage3D(gl.TEXTURE_3D,0,gl.RG16F,N,N,N,0,gl.RG,gl.HALF_FLOAT,null);
+gl.texParameteri(gl.TEXTURE_3D,gl.TEXTURE_MIN_FILTER,gl.LINEAR); gl.texParameteri(gl.TEXTURE_3D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_3D,gl.TEXTURE_WRAP_S,gl.REPEAT); gl.texParameteri(gl.TEXTURE_3D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_3D,gl.TEXTURE_WRAP_R,gl.REPEAT);
+const packFbo=gl.createFramebuffer();
+
+// surface flux map: R = heat multiplier, G = moisture multiplier (both mean 1), B = lake mask (render only)
+const fluxTex={ tex:gl.createTexture() };
+let fluxSumG=N*N;
+function rngFrom(seed){ let s=seed>>>0; return ()=>{ s=(s*1664525+1013904223)>>>0; return s/4294967296; }; }
+let seed=(Math.random()*1e9)|0;
+function buildFlux(){
+  const rnd=rngFrom(seed^0x5bd1e995), patch=+el.patch.value;
+  const field=()=>{ const m=[]; for(let k=0;k<7;k++){ const kx=Math.floor(rnd()*4)-1, kz=1+Math.floor(rnd()*3);
+      m.push([rnd()<.5?kx:kz, rnd()<.5?kz:-kx, rnd()*6.283, 1/(1+Math.hypot(kx,kz))]); }
+    const f=new Float32Array(N*N); let mx=0;
+    for(let z=0;z<N;z++) for(let x=0;x<N;x++){ let s=0; for(const [a,b,ph,amp] of m) s+=amp*Math.cos(6.2832*(a*x+b*z)/N+ph); f[x+N*z]=s; mx=Math.max(mx,Math.abs(s)); }
+    for(let i=0;i<f.length;i++) f[i]/=mx; return f; };
+  const n1=field(), n2=field();
+  const heat=new Float32Array(N*N), moist=new Float32Array(N*N), lake=new Float32Array(N*N);
+  let sh=0, sm=0;
+  for(let i=0;i<N*N;i++){ const lk=Math.min(1,Math.max(0,(n2[i]-0.45)/0.25)); lake[i]=lk*patch;
+    heat[i]=Math.max(0.05, 1+patch*(0.9*n1[i]-0.6*lk)); moist[i]=Math.max(0.05, 1+patch*(0.4*n1[i]+1.2*lk)); sh+=heat[i]; sm+=moist[i]; }
+  const d=new Float32Array(N*N*4); fluxSumG=0;
+  for(let i=0;i<N*N;i++){ const h=heat[i]*N*N/sh, m=moist[i]*N*N/sm; d[i*4]=h; d[i*4+1]=m; d[i*4+2]=lake[i]; d[i*4+3]=1; fluxSumG+=m; }
+  gl.bindTexture(gl.TEXTURE_2D,fluxTex.tex); gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA16F,N,N,0,gl.RGBA,gl.FLOAT,d);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.REPEAT); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.REPEAT);
+}
+
+function U(pr,n){ let l=pr.loc[n]; if(l===undefined) l=pr.loc[n]=gl.getUniformLocation(pr.p,n); return l; }
+function run(pr, fbo, w, h, tex, uni){
+  gl.useProgram(pr.p); let unit=0;
+  const all=Object.assign({ tBase:baseTex }, tex);
+  for (const k in all){ const t=all[k]; gl.activeTexture(gl.TEXTURE0+unit); gl.bindTexture(t.target||gl.TEXTURE_2D, t.tex); gl.uniform1i(U(pr,k),unit); unit++; }
+  const u=Object.assign({ uDt:simDt, uDx:DX }, uni);
+  for (const k in u){ const v=u[k], l=U(pr,k); if (l===null) continue;
+    if (typeof v==='number') gl.uniform1f(l,v);
+    else if (v.i!==undefined) gl.uniform1i(l,v.i);
+    else if (v.u!==undefined) gl.uniform1ui(l,v.u);
+    else if (v.length===2) gl.uniform2fv(l,v); else if (v.length===3) gl.uniform3fv(l,v); else gl.uniform4fv(l,v); }
+  gl.bindFramebuffer(gl.FRAMEBUFFER,fbo); gl.viewport(0,0,w,h); gl.drawArrays(gl.TRIANGLES,0,3);
+}
+
+// ---------- controls ----------
+const ids=['subs','dt','flux','patch','kdiff','tau','vort','iters','sunaz','sunel','ext','expo','tiles','rscale','slz'];
+const el={}; ids.forEach(id=>{ el[id]=document.getElementById(id); const vv=document.getElementById(id+'_v');
+  const upd=()=>{ const v=+el[id].value; vv.textContent = Math.abs(v)<0.1&&v!==0 ? v.toFixed(4) : (Number.isInteger(v)?v:v.toFixed(2)); };
+  el[id].addEventListener('input',upd); upd(); });
+el.patch.addEventListener('change',buildFlux);
+el.rscale.addEventListener('input',resize);
+const latentEl=document.getElementById('latent'), spinEl=document.getElementById('spin'), fieldEl=document.getElementById('field'), showSliceEl=document.getElementById('showslice');
+const pauseBtn=document.getElementById('pause');
+let paused=false, simDt=2;
+function setPaused(p){ paused=p; pauseBtn.textContent=paused?'resume':'pause'; }
+pauseBtn.onclick=()=>setPaused(!paused);
+document.getElementById('reset').onclick=()=>reset();
+document.getElementById('kick').onclick=()=>simulate(Math.round(1800/(+el.dt.value)));
+
+// ---------- simulation ----------
+let simTime=0, W0=null, Wadded=0, stats=null, lastLcl=0, yBand=[0,H];
+function reset(newSeed=true){
+  if (newSeed) seed=(Math.random()*1e9)|0;
+  buildFlux();
+  run(PR.init, A.a.fbo, RES2,RES2, {}, { uOut:{i:0}, uSeed:{u:seed>>>0} });
+  run(PR.init, B.a.fbo, RES2,RES2, {}, { uOut:{i:1}, uSeed:{u:seed>>>0} });
+  gl.bindFramebuffer(gl.FRAMEBUFFER,P.a.fbo); gl.clearColor(0,0,0,0); gl.clear(gl.COLOR_BUFFER_BIT);
+  simTime=0; Wadded=0; W0=null; stats=null;
+  W0=readAndAnalyze().W;
+}
+function substep(){
+  simDt=+el.dt.value;
+  const fmul=+el.flux.value, tau=+el.tau.value;
+  // 1. advect everything by the current (divergence-free) velocity
+  run(PR.adP, TA.fbo, RES2,RES2, { tVel:A.a, tSrc:A.a }, { uStag:{i:1} });
+  run(PR.adP, TB.fbo, RES2,RES2, { tVel:A.a, tSrc:B.a }, { uStag:{i:0} });
+  run(PR.adC, A.b.fbo, RES2,RES2, { tVel:A.a, tSrc:A.a, tPred:TA }, { uStag:{i:1} });
+  run(PR.adC, B.b.fbo, RES2,RES2, { tVel:A.a, tSrc:B.a, tPred:TB }, { uStag:{i:0} });
+  A.swap(); B.swap();
+  // 1b. subgrid eddy diffusion
+  const K=+el.kdiff.value;
+  if (K>0){
+    run(PR.diff, A.b.fbo, RES2,RES2, { tSrc:A.a }, { uK:K, uStag:{i:1} });
+    run(PR.diff, B.b.fbo, RES2,RES2, { tSrc:B.a }, { uK:K, uStag:{i:0} });
+    A.swap(); B.swap();
+  }
+  // 2-4. surface fluxes, microphysics, buoyancy, sponge
+  const pu={ uFth:F_TH*fmul, uFq:F_Q*fmul, uLatent:latentEl.checked?1:0, uRelax: tau>0?Math.min(1,simDt/tau):1, uSpongeZ:H*0.86, uSpongeRate:1/60 };
+  run(PR.phys, A.b.fbo, RES2,RES2, { tA:A.a, tB:B.a, tFlux:fluxTex }, Object.assign({ uOut:{i:0} }, pu));
+  run(PR.phys, B.b.fbo, RES2,RES2, { tA:A.a, tB:B.a, tFlux:fluxTex }, Object.assign({ uOut:{i:1} }, pu));
+  A.swap(); B.swap();
+  // 5. vorticity confinement (small)
+  const eps=+el.vort.value;
+  if (eps>0){ run(PR.vort, A.b.fbo, RES2,RES2, { tA:A.a }, { uEps:eps }); A.swap(); }
+  // 6. pressure projection
+  run(PR.div, P.b.fbo, RES2,RES2, { tA:A.a, tP:P.a }); P.swap();
+  const it=+el.iters.value;
+  for (let k=0;k<it*2;k++){ run(PR.pois, P.b.fbo, RES2,RES2, { tP:P.a }, { uParity:{i:k&1} }); P.swap(); }
+  run(PR.prs, A.b.fbo, RES2,RES2, { tA:A.a, tP:P.a }); A.swap();
+  simTime+=simDt;
+  Wadded+=F_Q*fmul/DX*simDt*fluxSumG;     // what the surface flux put in, in the same units as the grid sum
+}
+function simulate(n){ for (let k=0;k<n;k++) substep(); }
+function packCloud(){
+  gl.bindFramebuffer(gl.FRAMEBUFFER,packFbo);
+  gl.useProgram(PR.pack.p);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,B.a.tex); gl.uniform1i(U(PR.pack,'tB'),0);
+  gl.viewport(0,0,N,N);
+  for (let z=0;z<N;z++){
+    gl.framebufferTextureLayer(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,cloud3.tex,0,z);
+    gl.uniform1i(U(PR.pack,'uLayer'),z); gl.drawArrays(gl.TRIANGLES,0,3);
+  }
+}
+
+// ---------- readback + acceptance metrics ----------
+const bufA=new Float32Array(RES2*RES2*4), bufB=new Float32Array(RES2*RES2*4);
+function parcelLCL(th, qv){ for (let z=25; z<H; z+=5){ const p=pbarAt(z), T=th*exnerAt(z); if (qv>=qsatAt(T,p)) return z; } return H; }
+function readAndAnalyze(){
+  gl.bindFramebuffer(gl.FRAMEBUFFER,A.a.fbo); gl.readPixels(0,0,RES2,RES2,gl.RGBA,gl.FLOAT,bufA);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,B.a.fbo); gl.readPixels(0,0,RES2,RES2,gl.RGBA,gl.FLOAT,bufB);
+  const cf=new Float64Array(N), wIn=new Float64Array(N), qcm=new Float64Array(N);
+  const colBase=new Int16Array(N*N).fill(-1), colTop=new Int16Array(N*N).fill(-1);
+  let W=0, wmax=0, cells=0, th0=0, qv0=0, divAbs=0, uAbs=0;
+  const CL=1e-5;
+  const wc=new Float32Array(N*N*N);                 // cell-centre w from the staggered faces
+  for (let idx=0; idx<N*N*N; idx++){ const y=(idx>>6)&63; wc[idx]=0.5*(bufA[idx*4+1]+(y<63?bufA[(idx+64)*4+1]:0)); }
+  for (let idx=0; idx<N*N*N; idx++){
+    const o=idx*4, y=(idx>>6)&63, col=(idx&63)+N*(idx>>12), x=idx&63, z=idx>>12;
+    const qv=bufB[o], qc=bufB[o+1], qr=bufB[o+2], w=wc[idx];
+    const ix=((x+1)&63)|(y<<6)|(z<<12), iz=x|(y<<6)|(((z+1)&63)<<12);
+    divAbs+=Math.abs(bufA[ix*4]-bufA[o] + (y<63?bufA[(idx+64)*4+1]:0)-(y>0?bufA[o+1]:0) + bufA[iz*4+2]-bufA[o+2]);
+    uAbs+=Math.abs(bufA[o])+Math.abs(bufA[o+1])+Math.abs(bufA[o+2]);
+    W+=qv+qc+qr; if (w>wmax) wmax=w;
+    if (y===0){ th0+=bufA[o+3]; qv0+=qv; }
+    if (qc>CL){ cells++; cf[y]++; wIn[y]+=w; qcm[y]+=qc; if (colBase[col]<0) colBase[col]=y; colTop[col]=y; }
+  }
+  // subsiding shell: clear cells with a cloudy horizontal neighbour, versus the clear air further out
+  let shellW=0, shellN=0, envW=0, envN=0, inW=0;
+  for (let idx=0; idx<N*N*N; idx++){
+    const y=(idx>>6)&63; if (cf[y]===0) continue;
+    const o=idx*4; if (bufB[o+1]>CL){ inW+=wc[idx]; continue; }
+    const x=idx&63, z=idx>>12;
+    const nb=(dx,dz)=>bufB[((((x+dx)&63)|(y<<6)|(((z+dz)&63)<<12))*4)+1]>CL;
+    if (nb(1,0)||nb(-1,0)||nb(0,1)||nb(0,-1)){ shellW+=wc[idx]; shellN++; } else { envW+=wc[idx]; envN++; }
+  }
+  const nn=N*N; th0/=nn; qv0/=nn;
+  const T0=(BASE.thb[0]+th0)*BASE.pi[0], p0=BASE.pb[0];
+  const e=qv0*p0/(0.622+qv0), lg=Math.log(e/611.2), Td=273.15+243.5*lg/(17.67-lg);
+  const z0=DX*0.5, espy=z0+125*(T0-Td), lcl=parcelLCL(BASE.thb[0]+th0, qv0);
+  let bs=0, bs2=0, bn=0, topMax=-1;
+  for (let c=0;c<N*N;c++) if (colBase[c]>=0){ const zb=colBase[c]*DX; bs+=zb; bs2+=zb*zb; bn++; topMax=Math.max(topMax,colTop[c]); }
+  const baseMean=bn?bs/bn:NaN, baseStd=bn?Math.sqrt(Math.max(0,bs2/bn-baseMean*baseMean)):NaN;
+  let lowest=-1, highest=-1, anyLo=-1, anyHi=-1;
+  for (let j=0;j<N;j++){ if (cf[j]>=4){ if (lowest<0) lowest=j; highest=j; } if (cf[j]>0){ if (anyLo<0) anyLo=j; anyHi=j; } }
+  // render band (metres): clouds can grow between readbacks, so leave generous room above
+  yBand = anyLo<0 ? [Math.max(0,lcl-300), Math.min(H,lcl+600)] : [Math.max(0,anyLo*DX-150), Math.min(H,(anyHi+1)*DX+700)];
+  for (let j=0;j<N;j++){ wIn[j]=cf[j]?wIn[j]/cf[j]:0; qcm[j]=cf[j]?qcm[j]/cf[j]:0; cf[j]/=nn; }
+  lastLcl=lcl;
+  return { t:simTime, W, cells, divRel: uAbs>0 ? divAbs/uAbs*3 : 0, cover:bn/nn, wmax, cf, wIn, qcm,
+    baseMean, baseStd, baseLow: lowest<0?NaN:lowest*DX, top: highest<0?NaN:(highest+1)*DX, topMax: topMax<0?NaN:(topMax+1)*DX,
+    lclParcel:lcl, lclEspy:espy, T0, Td, th0, qv0,
+    shellW: shellN?shellW/shellN:NaN, envW: envN?envW/envN:NaN, inW: cells?inW/cells:NaN, latent:latentEl.checked };
+}
+const statsEl=document.getElementById('stats'), prof=document.getElementById('prof'), pctx=prof.getContext('2d');
+function fmtT(s){ const m=Math.floor(s/60); return (m>=60? Math.floor(m/60)+'h'+String(m%60).padStart(2,'0') : m+'m')+String(Math.floor(s%60)).padStart(2,'0')+'s'; }
+function showStats(s){
+  const dW=s.W-W0, f=n=>isNaN(n)?'—':n.toFixed(0);
+  statsEl.innerHTML =
+`sim time     <b>${fmtT(s.t)}</b>   cover <b>${(s.cover*100).toFixed(1)}%</b>
+cloud base   <b>${f(s.baseMean)} m</b>  ±${f(s.baseStd)} (col std)
+lowest base  <b>${f(s.baseLow)} m</b>   top <b>${f(s.top)} m</b>
+LCL parcel   <b>${f(s.lclParcel)} m</b>   Espy <b>${f(s.lclEspy)} m</b>
+surface      T ${(s.T0-273.15).toFixed(2)}C  Td ${(s.Td-273.15).toFixed(2)}C
+w max        <b>${s.wmax.toFixed(2)} m/s</b>  in-cloud ${isNaN(s.inW)?'—':s.inW.toFixed(2)}
+shell w      <b>${isNaN(s.shellW)?'—':s.shellW.toFixed(3)}</b>  env ${isNaN(s.envW)?'—':s.envW.toFixed(3)} m/s
+water ΔΣq    <b>${dW.toFixed(3)}</b> / flux ${Wadded.toFixed(3)}
+budget err   <b>${((dW-Wadded)/W0*100).toFixed(3)}%</b> of Σq0
+latent heat  <b>${s.latent?'ON':'OFF'}</b>`;
+  // profile
+  const w=prof.width, h=prof.height; pctx.fillStyle='#06101a'; pctx.fillRect(0,0,w,h);
+  const zy=z=>h-4-(z/H)*(h-8);
+  pctx.fillStyle='rgba(120,140,160,.18)'; pctx.fillRect(0,zy(2000),w,zy(1480)-zy(2000));
+  let mx=0; for (let j=0;j<N;j++) mx=Math.max(mx,s.cf[j]); mx=Math.max(mx,0.02);
+  pctx.strokeStyle='#3fd8d0'; pctx.lineWidth=1.5; pctx.beginPath();
+  for (let j=0;j<N;j++){ const x=4+s.cf[j]/mx*(w*0.55), y=zy((j+0.5)*DX); j?pctx.lineTo(x,y):pctx.moveTo(x,y); } pctx.stroke();
+  pctx.strokeStyle='#f0a040'; pctx.beginPath(); const cx=w*0.78;
+  pctx.moveTo(cx,4); pctx.lineTo(cx,h-4); pctx.stroke();
+  pctx.beginPath(); let first=true;
+  for (let j=0;j<N;j++){ if (!s.cf[j]) { first=true; continue; } const x=cx+s.wIn[j]/3*(w*0.2), y=zy((j+0.5)*DX); first?pctx.moveTo(x,y):pctx.lineTo(x,y); first=false; } pctx.stroke();
+  pctx.setLineDash([4,3]); pctx.strokeStyle='#fd4'; pctx.beginPath(); pctx.moveTo(0,zy(s.lclParcel)); pctx.lineTo(w,zy(s.lclParcel)); pctx.stroke(); pctx.setLineDash([]);
+  pctx.fillStyle='#6a8'; pctx.font='10px monospace';
+  pctx.fillText('cf max '+(mx*100).toFixed(1)+'%',4,11); pctx.fillText('w ±3',cx+4,11);
+  for (const z of [1000,2000,3000]){ pctx.fillText(z/1000+'km',w-26,zy(z)+3); }
+}
+
+// ---------- camera + input ----------
+let az=0.5, elv=0.32, dist=4.6, dragging=false, lx=0, ly=0;
+cv.addEventListener('mousedown',e=>{ dragging=true; lx=e.clientX; ly=e.clientY; cv.style.cursor='grabbing'; });
+addEventListener('mouseup',()=>{ dragging=false; cv.style.cursor='grab'; });
+addEventListener('mousemove',e=>{ if(!dragging) return; az-=(e.clientX-lx)*0.005; elv=Math.min(1.45,Math.max(-0.2,elv+(e.clientY-ly)*0.005)); lx=e.clientX; ly=e.clientY; });
+cv.addEventListener('wheel',e=>{ e.preventDefault(); dist=Math.min(14,Math.max(1.2,dist*Math.exp(e.deltaY*0.001))); },{passive:false});
+addEventListener('keydown',e=>{
+  if (e.target.tagName==='INPUT'||e.target.tagName==='SELECT') return;
+  if (e.code==='Space'){ e.preventDefault(); setPaused(!paused); }
+  else if (e.code==='KeyR') reset();
+  else if (e.code==='KeyL') latentEl.checked=!latentEl.checked;
+});
+const padPrev={};
+function pollPad(){
+  const pads=navigator.getGamepads?navigator.getGamepads():[]; let gp=null; for (const p of pads) if (p&&p.connected){ gp=p; break; }
+  if (!gp) return;
+  const dz=v=>Math.abs(v)<0.15?0:v;
+  az-=dz(gp.axes[0])*0.03; elv=Math.min(1.45,Math.max(-0.2,elv-dz(gp.axes[1])*0.02));
+  const zt=(gp.buttons[7]?.value||0)-(gp.buttons[6]?.value||0); dist=Math.min(14,Math.max(1.2,dist*Math.exp(zt*0.025)));
+  const edge=k=>{ const d=!!gp.buttons[k]?.pressed, r=d&&!padPrev[k]; padPrev[k]=d; return r; };
+  if (edge(0)) setPaused(!paused);
+  if (edge(3)) fieldEl.value=String((+fieldEl.value+1)%5);
+  if (edge(1)) latentEl.checked=!latentEl.checked;
+}
+let cam={ pos:[0,0,4], fwd:[0,0,-1], right:[1,0,0], up:[0,1,0] };
+function updateCam(){
+  if (spinEl.checked && !dragging) az+=0.0015;
+  const cy=Math.cos(elv), sy=Math.sin(elv);
+  const tgt=[0,-0.45,0], pos=[Math.sin(az)*cy*dist, tgt[1]+sy*dist, Math.cos(az)*cy*dist];
+  let f=[tgt[0]-pos[0],tgt[1]-pos[1],tgt[2]-pos[2]]; const fl=Math.hypot(...f); f=f.map(v=>v/fl);
+  let r=[-f[2],0,f[0]]; const rl=Math.hypot(...r)||1; r=r.map(v=>v/rl);
+  const u=[r[1]*f[2]-r[2]*f[1], r[2]*f[0]-r[0]*f[2], r[0]*f[1]-r[1]*f[0]];
+  cam={ pos, fwd:f, right:r, up:u };
+}
+function resize(){ const s=+el.rscale.value; cv.width=Math.max(2,Math.round(innerWidth*s)); cv.height=Math.max(2,Math.round(innerHeight*s)); }
+addEventListener('resize',resize); resize();
+
+// ---------- frame ----------
+const slabel=document.getElementById('slabel');
+const FIELD_NAMES=['cloud water q_c','theta\' ±1 K','supersaturation ±2%','w ±3 m/s (red up)','q_v\' ±2 g/kg'];
+function render(){
+  packCloud();
+  const se=+el.sunel.value, sa=+el.sunaz.value;
+  run(PR.render, null, cv.width, cv.height, { tCloud:cloud3, tFlux:fluxTex },
+    { uCamPos:cam.pos, uCamFwd:cam.fwd, uCamRight:cam.right, uCamUp:cam.up,
+      uSunDir:[Math.cos(sa)*Math.cos(se), Math.sin(se), Math.sin(sa)*Math.cos(se)],
+      uRes:[cv.width,cv.height], uYBand:[yBand[0]/(H/2)-1, yBand[1]/(H/2)-1], uTiles:+el.tiles.value, uExt:+el.ext.value, uExpo:+el.expo.value });
+  if (showSliceEl.checked){
+    const sz=Math.round(Math.min(cv.height*0.42, cv.width*0.3)), m=Math.round(10*(+el.rscale.value));
+    const rect=[cv.width-sz-m, m+Math.round(18*(+el.rscale.value)), sz, sz];
+    gl.enable(gl.SCISSOR_TEST); gl.scissor(rect[0],rect[1],rect[2],rect[3]);
+    gl.useProgram(PR.slice.p);
+    run(PR.slice, null, cv.width, cv.height, { tA:A.a, tB:B.a }, { uRect:rect, uField:{i:+fieldEl.value}, uSlz:{i:+el.slz.value}, uLcl:lastLcl });
+    gl.disable(gl.SCISSOR_TEST);
+    const k=1/(+el.rscale.value);
+    slabel.style.display='block';
+    slabel.style.left=(rect[0]*k)+'px'; slabel.style.top=((cv.height-rect[1]-rect[3])*k-20)+'px';
+    slabel.textContent='x-z slice · '+FIELD_NAMES[+fieldEl.value]+' · yellow = LCL';
+  } else slabel.style.display='none';
+}
+let last=performance.now(), fc=0, fa=0, frame=0; const fpsEl=document.getElementById('fps');
+function loop(now){
+  const dtw=(now-last)/1000; last=now; fa+=dtw; if (++fc>=30){ fpsEl.textContent=(fc/fa).toFixed(0)+' fps · '+(+el.subs.value*+el.dt.value).toFixed(1)+' sim s/frame'; fc=0; fa=0; }
+  frame++;
+  pollPad(); updateCam();
+  if (!paused) simulate(+el.subs.value);
+  if (frame%30===0){ stats=readAndAnalyze(); showStats(stats); }
+  render();
+  requestAnimationFrame(loop);
+}
+reset();
+requestAnimationFrame(loop);
+
+// test hooks
+window.WC = {
+  simulate(n){ simulate(n); stats=readAndAnalyze(); showStats(stats); return this.summary(); },
+  minutes(m){ return this.simulate(Math.round(m*60/(+el.dt.value))); },
+  stats(){ stats=readAndAnalyze(); showStats(stats); return stats; },
+  summary(){ const s=stats; if(!s) return null; const r=v=>Math.round(v*1000)/1000;
+    return { t:s.t, divRel:r(s.divRel), cover:r(s.cover), baseMean:r(s.baseMean), baseStd:r(s.baseStd), baseLow:s.baseLow, top:s.top, topMax:s.topMax,
+      lclParcel:s.lclParcel, lclEspy:r(s.lclEspy), wmax:r(s.wmax), inW:r(s.inW), shellW:r(s.shellW), envW:r(s.envW),
+      dW:r(s.W-W0), fluxW:r(Wadded), budgetErrPct:r((s.W-W0-Wadded)/W0*100), latent:s.latent }; },
+  reset(s){ if (s!==undefined){ seed=s; reset(false); } else reset(); return seed; },
+  set(id,v){ if (id==='latent') latentEl.checked=!!v; else if (el[id]){ el[id].value=v; el[id].dispatchEvent(new Event('input')); if(id==='patch') buildFlux(); } },
+  pause(p=true){ setPaused(p); },
+  probe(){ readAndAnalyze(); let mi=0, mv=-1e9; for (let idx=0;idx<N*N*N;idx++){ const v=bufA[idx*4+1]; if (v>mv){ mv=v; mi=idx; } }
+    const x=mi&63, z=mi>>12, col=[];
+    for (let j=0;j<N;j+=2){ const o=((x)|(j<<6)|(z<<12))*4; col.push([j*DX, +bufA[o+1].toFixed(2), +bufA[o].toFixed(2), +bufA[o+2].toFixed(2), +bufA[o+3].toFixed(2), +(bufB[o]*1e3).toFixed(2), +(bufB[o+1]*1e3).toFixed(3)]); }
+    return { at:[x,(mi>>6)&63,z], wmax:mv, cols:'z, w(face), u, v, thp, qv, qc', col }; },
+  levels(step=4){ readAndAnalyze(); const out=[];   // horizontal means per level: theta', q_v, q_c (g/kg), RH
+    for (let j=0;j<N;j+=step){ let th=0,qv=0,qc=0; for (let k=0;k<N*N;k++){ const idx=(k&63)|(j<<6)|((k>>6)<<12), o=idx*4; th+=bufA[o+3]; qv+=bufB[o]; qc+=bufB[o+1]; }
+      th/=N*N; qv/=N*N; qc/=N*N; const T=(BASE.thb[j]+th)*BASE.pi[j];
+      out.push({ z:(j+0.5)*DX, thp:+th.toFixed(3), qv:+(qv*1e3).toFixed(3), qvb:+(BASE.qvb[j]*1e3).toFixed(3), qc:+(qc*1e3).toFixed(4), RH:+(qv/qsatAt(T,BASE.pb[j])).toFixed(3) }); }
+    return out; },
+  render(){ updateCam(); render(); },
+  get el(){ return el; }, BASE
+};
+</script>
+</body>
+</html>

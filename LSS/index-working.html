@@ -7342,7 +7342,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "51.57";
+const LSS_BUILD = "51.61";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -40757,6 +40757,29 @@ function _swGrassK() {
   // visible), so the band sits nearer than the rank mode's did. mode: 'rank' brings back v51.51-55 for an A/B.
   o.mode = (K.mode === 'rank') ? 'rank' : 'tree';
   o.shrink = n('shrink', 0.3);     // (v51.57) tree mode: how much of the fade is a shrink (1 = the trees' full shrink; the opacity does the rest)
+  // ⭐ (v51.58) THE PERF OPTIONS for v51.57's look (owner: "yeah it drops like 30 fps... we can try all 3 options").
+  // MEASURED on v51.57: 72 fps plugged in at the governor's floor, the grass 4.1 ms of GPU, every tuft to 3.4 km drawn.
+  // ⭐⭐ (v51.61) ALL THREE ON. MEASURED, the grass draws' own GPU time at native (median / avg), parked low over a big
+  // field / 900 u up: v51.57 3.56 / 4.57 | 3.37 / 4.28 ms -> lite 2.30 / 2.99 | 2.18 / 2.90 -> + 4 cards 2.03 / 2.61 |
+  // 1.89 / 2.46 -> + thin 0.8 1.77 / 2.27 | 1.55 / 2.00: half the cost. Lite is look-neutral once its sky fill is
+  // calibrated (below); 4 cards barely shows; THIN is the one that changes the far ring (sparser) - __grass.thin = 0 to
+  // compare. (fps was useless for this A/B in the pane: it drifted 144 -> 104 inside one 5 s window on a single setting.)
+  o.thin = n('thin', 0.8);         // 0..1: tree mode also THINS the band by rank (each tuft fading out translucently) + trims the draw
+  o.lite = (K.lite != null) ? !!K.lite : true;   // Lambert tufts instead of Standard (no GGX, no IBL - see liteAmb*)
+  // (v51.59) MEASURED (parked over the field, the frame off-screen with the same tufts as Standard then Lambert): Standard
+  // came out 1.5-2.2x brighter, bluest in blue - three's IBL (the sky env) lights a Standard material and never a Lambert
+  // one. These put that fill back as an unshadowed emissive (albedo x colour); calibrated with the same harness.
+  // (v51.60) MEASURED by solving per pixel (Lambert with fill 0 and fill 1 give the albedo; Standard - Lambert(0) the
+  // missing light): (0.57, 0.42, 1.14) on the near + mid field - but a constant left Lambert 14 % bright near and
+  // 15-40 % dark mid / far: Standard's IBL rises toward grazing views (Fresnel), so the fill does too,
+  // x (liteAmbBase + liteAmbGain x g^4), g = how edge-on the eye sees the tuft.
+  // (v51.61) re-measured with the grazing term, Lambert / Standard per band, low and 900 u up: within ~5 % nearly
+  // everywhere (worst 11 %, R, mid band from low) at these
+  o.liteAmbR = n('liteAmbR', 0.68);
+  o.liteAmbG = n('liteAmbG', 0.46);
+  o.liteAmbB = n('liteAmbB', 1.20);
+  o.liteAmbBase = n('liteAmbBase', 0.6);
+  o.liteAmbGain = n('liteAmbGain', 2.0);
   o.fadeA = n('fadeA', o.mode === 'tree' ? 1800 : 900);   // full size (tree) / every tuft present (rank) inside this...
   o.fadeB = n('fadeB', o.mode === 'tree' ? 3400 : 3900);  // ...shrunk to nothing (tree) / the last tuft gone (rank) here
   // ⭐⭐⭐ (v51.50) SOLID -> DETAILED, NOT ABSENT -> PRESENT. Owner: "things looks dumb when they pop into existence, and
@@ -40834,7 +40857,7 @@ function _swGrassK() {
   o.wisps = n('wisps', 16);
   o.seeds = n('seeds', 0.35);
   o.cards = n('cards', 3);
-  o.leanCards = n('leanCards', 2);
+  o.leanCards = n('leanCards', 1);   // (v51.61: 2 -> 1 - four cards a tuft; the perf pass, see `thin`)
   o.cardW = n('cardW', 1);
   o.cardH = n('cardH', 1);
   return o;
@@ -41164,11 +41187,20 @@ function _swGrassTuftGeos() {
   if (!S.g) S.g = { short: _swGenGrassTuft(7, 'short'), tall: _swGenGrassTuft(19, 'tall') };
   return S.g;
 }
+// (v51.58) the active tuft material: Standard, or Lambert with __grass.lite (one shared uniform set, so every knob moves
+// both; the chunk gate swaps the meshes over the frame `lite` changes)
 function _swGrassTuftMatGet() {
-  const S = _swGrassTuftMatGet;
-  if (S.m) return S.m;
+  const S = _swGrassTuftMatGet, lite = !!_swGrassK().lite, key = lite ? 'lam' : 'std';
+  if (!S.mats) S.mats = {};
+  if (!S.mats[key]) { const other = S.mats[lite ? 'std' : 'lam']; S.mats[key] = _swGrassTuftMatMake(lite, other ? other._lssGrass : null); }
+  const first = !S.m;
+  S.m = S.mats[key];
+  if (first) _swGrassUniTick();
+  return S.m;
+}
+function _swGrassTuftMatMake(lite, U0) {
   const A = _swGrassAtlasGet(), K = _swGrassK();
-  const m = _swFoliageMat(0, true);
+  const m = _swFoliageMat(0, true, lite);
   m.map = A.tex; m.alphaTest = 0.42; m.roughness = 0.9;
   // ⭐⭐ (v51.57) THE OUTER RING FADES OUT TRANSLUCENT. Owner: "what about making the very outer ring edge of the grass half
   // translucent" (after "trees just fade to/from fog i think... convergence"). A real blend, not a screen door: the
@@ -41178,8 +41210,8 @@ function _swGrassTuftMatGet() {
   // transparent DoubleSide material twice (map O2.11). Only overlapping TRANSLUCENT far tufts can mis-order (a near one
   // drawn first hides a farther one behind it), between tufts of one colour. Rank mode stays opaque.
   m.transparent = (K.mode === 'tree'); m.depthWrite = true; m.forceSinglePass = true;
-  m.envMapIntensity = 0.12;
-  const U = {
+  if (!lite) m.envMapIntensity = 0.12;
+  const U = U0 || {
     uA: { value: K.fadeA }, uB: { value: K.fadeB },
     uW: { value: new THREE.Vector4() }, uD: { value: new THREE.Vector4() },
     uL: { value: new THREE.Vector4() },
@@ -41187,6 +41219,8 @@ function _swGrassTuftMatGet() {
     uRank: { value: A.rank }, uNorm: { value: 1 / Math.max(0.05, A.mean || 0.4) },
     uDW: { value: K.detailW }, uMap: { value: _swGrassMapInit().rt.texture }, uMapBox: { value: _GRM.box },   // (v51.50)
     uFlat: { value: new THREE.Vector3(1, 1, 1) },   // (v51.51) the flat colour's calibration (flatR/G/B)
+    uAmb: { value: new THREE.Vector3(0, 0, 0) },    // (v51.59) the Lambert tufts' stand-in for the sky light Standard gets (liteAmb*)
+    uAmbF: { value: new THREE.Vector2(1, 0) },      // (v51.60) ...rising toward grazing views (liteAmbBase / liteAmbGain)
   };
   const ob = m.onBeforeCompile;
   m.onBeforeCompile = function (sh, r) {
@@ -41197,6 +41231,8 @@ function _swGrassTuftMatGet() {
     sh.uniforms.uAtlasPx = U.uPx; sh.uniforms.uCoverK = U.uCov; sh.uniforms.uGrassRank = U.uRank; sh.uniforms.uGrassNorm = U.uNorm;
     sh.uniforms.uGrassDW = U.uDW; sh.uniforms.uGrassMap = U.uMap; sh.uniforms.uGrassMapBox = U.uMapBox;   // (v51.50)
     sh.uniforms.uGrassFlat = U.uFlat;   // (v51.51)
+    sh.uniforms.uGrassAmb = U.uAmb;     // (v51.59)
+    sh.uniforms.uGrassAmbF = U.uAmbF;   // (v51.60)
     // (v51.47) the ground's colour pipeline (_GRASS_GROUND_GLSL) reads the terrain's own uniforms - the same objects,
     // so zone recolours, __terrainSat / __terrainAO and the patch knobs move the tufts with the ground. uAO / uSat are
     // created by the terrain's first compile with tier-aware defaults; read through, never create them here.
@@ -41209,7 +41245,7 @@ function _swGrassTuftMatGet() {
     // instanceColor is DATA here (x = moss->grass mix (v51.47: unused - the ground colour has its own), y = brightness,
     // z = the ground normal's y at the tuft): keep three from multiplying it into vColor
     // (v51.50) the ground colour comes from the map (_GRM): one read; the slope / height AO stays per tuft
-    sh.vertexShader = _SUNTOP_GLSL + 'uniform float uAerial, uAerialStart, uAerialFar, uAO, uYMid, uAMP, uSlopeRock;\nuniform sampler2D uGrassMap;\nuniform vec4 uGrassMapBox;\nvarying vec2 vGT;\nvarying vec3 vGC;\nvarying float vSV, vAP;\n' + sh.vertexShader.replace('#include <color_vertex>',
+    sh.vertexShader = _SUNTOP_GLSL + 'uniform float uAerial, uAerialStart, uAerialFar, uAO, uYMid, uAMP, uSlopeRock;\nuniform sampler2D uGrassMap;\nuniform vec4 uGrassMapBox;\nvarying vec2 vGT;\nvarying vec3 vGC;\nvarying float vSV, vAP, vGV;\n' + sh.vertexShader.replace('#include <color_vertex>',
       '#include <color_vertex>\n vec3 _gip = vec3(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2]);\n' +
       ' vec4 _gm = texture2D(uGrassMap, (_gip.xz - uGrassMapBox.xy) / uGrassMapBox.zw);\n float _gBare = _gm.a;\n' +
       '#ifdef USE_INSTANCING_COLOR\n vGT = instanceColor.xy;\n vColor.rgb = color.rgb;\n float _gny = instanceColor.z;\n#else\n vGT = vec2(1.0);\n float _gny = 1.0;\n#endif\n' +
@@ -41220,15 +41256,18 @@ function _swGrassTuftMatGet() {
       // (v51.49) the terrain's aerial haze (same formula, same uniforms) at the tuft's base: from 1200 u the ground
       // hazes toward uAerialColor and the tufts measured ~0.8x it until they did too
       ' vAP = (uAerial > 0.001) ? clamp(smoothstep(uAerialStart, uAerialFar, length(uCam.xz - _gip.xz)) * uAerial * (1.0 - clamp((_gip.y - (uYMid - uAMP * 0.2)) / (uAMP * 1.4), 0.0, 1.0) * 0.55), 0.0, 0.85) : 0.0;\n' +
+      ' vGV = 1.0 - abs(normalize(_gip - cameraPosition).y);\n' +   // (v51.60) how edge-on the eye sees this tuft
       ' float _gGrow = 1.0 - smoothstep(0.35, 0.60, _gBare);')
       .replace('#include <project_vertex>', ' transformed *= _gGrow;\n#include <project_vertex>');
-    sh.fragmentShader = 'uniform vec2 uAtlasPx;\nuniform float uCoverK, uGrassTint, uGrassNorm;\nuniform vec3 uAerialColor, uGrassFlat;\nvarying vec2 vGT;\nvarying float vGF, vGD, vGE;\nvarying vec3 vGC;\nvarying float vSV, vAP;\nfloat _lssSunVis = 1.0;\n' + sh.fragmentShader
+    sh.fragmentShader = 'uniform vec2 uAtlasPx;\nuniform float uCoverK, uGrassTint, uGrassNorm;\nuniform vec3 uAerialColor, uGrassFlat, uGrassAmb;\nuniform vec2 uGrassAmbF;\nvarying float vGV;\nvarying vec2 vGT;\nvarying float vGF, vGD, vGE;\nvarying vec3 vGC;\nvarying float vSV, vAP;\nfloat _lssSunVis = 1.0;\n' + sh.fragmentShader
       .replace('void main() {', 'void main() {\n _lssSunVis = vSV;')
       .replace('#include <lights_pars_begin>', _sunTopPars())
       // (v51.50 / 51.51) SOLID -> DETAILED (see detailW in _swGrassK): flat ground colour -> the tuft's own shading, by vGD
       .replace('#include <color_fragment>', '#include <color_fragment>\n' +
         ' diffuseColor.rgb = mix(vGC * uGrassTint * uGrassFlat, diffuseColor.rgb * vGC * (vGT.y * uGrassTint * uGrassNorm), vGD);\n' +
-        ' diffuseColor.rgb = mix(diffuseColor.rgb, uAerialColor, vAP);')
+        ' diffuseColor.rgb = mix(diffuseColor.rgb, uAerialColor, vAP);\n' +
+        // (v51.59) Lambert only (0 on Standard): albedo x the sky's fill, unshadowed like three's IBL - see liteAmb*
+        ' { float _gv4 = vGV * vGV; _gv4 *= _gv4; totalEmissiveRadiance += diffuseColor.rgb * uGrassAmb * (uGrassAmbF.x + uGrassAmbF.y * _gv4); }')   // (v51.60) x (base + gain x grazing^4)
       .replace('#include <alphatest_fragment>',
         '{ vec2 _rdx = dFdx(vMapUv * uAtlasPx), _rdy = dFdy(vMapUv * uAtlasPx);\n' +
         '  float _rmip = max(0.0, 0.5 * log2(max(dot(_rdx, _rdx), dot(_rdy, _rdy))));\n' +
@@ -41237,11 +41276,9 @@ function _swGrassTuftMatGet() {
         'diffuseColor.a = vGE;')   // (v51.57) a kept texel is solid, times the outer ring's opacity (blended: the material is transparent)
       .replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\n#ifdef DOUBLE_SIDED\n  normal *= faceDirection;\n#endif');
   };
-  m.customProgramCacheKey = () => 'lss-grass-tuft-7';
+  m.customProgramCacheKey = () => (lite ? 'lss-grass-tuft-8L' : 'lss-grass-tuft-8');
   try { Object.defineProperty(m, '_lssGrass', { value: U, enumerable: false, configurable: true }); } catch (_) {}
   m.needsUpdate = true;
-  S.m = m;
-  _swGrassUniTick();
   return m;
 }
 // the live knobs -> the grass uniforms (from _swTreeVisTick, every frame; a few float writes)
@@ -41253,9 +41290,13 @@ function _swGrassUniTick() {
   U.uA.value = K.fadeA; U.uB.value = Math.max(K.fadeA + 1, K.fadeB);
   U.uW.value.set(K.sway, K.lean, 6.2832 / Math.max(10, K.waveLen), K.waveSpeed);
   U.uD.value.set(Math.cos(K.windDir), Math.sin(K.windDir), 0, H);
-  U.uL.value.set(0, Math.max(0.01, K.detailW), Math.max(0, Math.min(1, K.shrink)), K.mode === 'tree' ? 1 : 0);   // (v51.51) y = the per-tuft detail span; (v51.56) w = TREE mode; (v51.57) z = shrink
-  { const tr = (K.mode === 'tree'); if (m.transparent !== tr) { m.transparent = tr; m.needsUpdate = true; } }   // (v51.57) the blend follows the mode
+  U.uL.value.set(Math.max(0, Math.min(1, K.thin)), Math.max(0.01, K.detailW), Math.max(0, Math.min(1, K.shrink)), K.mode === 'tree' ? 1 : 0);   // (v51.58) x = thin; (v51.51) y = the per-tuft detail span; (v51.56) w = TREE mode; (v51.57) z = shrink
+  { const tr = (K.mode === 'tree'), Ms = _swGrassTuftMatGet.mats || {};   // (v51.57) the blend follows the mode - on both materials
+    for (const k in Ms) { const mm = Ms[k]; if (mm && mm.transparent !== tr) { mm.transparent = tr; mm.needsUpdate = true; } } }
+  if (!!K.lite !== (m === (_swGrassTuftMatGet.mats || {}).lam)) _swGrassTuftMatGet();   // (v51.58) `lite` flipped: make / pick the other
   U.uFlat.value.set(K.flatR, K.flatG, K.flatB);
+  if (K.lite) U.uAmb.value.set(K.liteAmbR, K.liteAmbG, K.liteAmbB); else U.uAmb.value.set(0, 0, 0);   // (v51.59)
+  U.uAmbF.value.set(K.liteAmbBase, K.liteAmbGain);   // (v51.60)
   U.uTint.value = K.tint * K.match; U.uCov.value = K.cover; U.uDW.value = Math.max(0.01, K.detailW);
   const A = _swGrassAtlasGet.a; if (A && A.mean) U.uNorm.value = 1 / Math.max(0.05, A.mean);
   try { _swGrassMapTick(); } catch (e) { if (!_GRM.err) { _GRM.err = 1; try { console.warn('[grass] map tick threw:', e); } catch (_) {} } }   // (v51.50)
@@ -42337,9 +42378,11 @@ function _swTreeGeoGet(){
 // (v35.12) Shared foliage material factory — trees and mushrooms use the
 // identical sway/fade vertex patch; mushrooms add a soft blue emissive so
 // they read as bioluminescent in the dark blue zones.
-function _swFoliageMat(glow, grass){
-  const m=new THREE.MeshStandardMaterial({vertexColors:true,color:0xffffff,roughness:1,metalness:0,side:THREE.DoubleSide});
-  m.envMapIntensity = 0.18;
+function _swFoliageMat(glow, grass, lambert){
+  // (v51.58) `lambert`: the same patches on a MeshLambertMaterial (the grass's `lite` option - no GGX, no IBL)
+  const m = lambert ? new THREE.MeshLambertMaterial({vertexColors:true,color:0xffffff,side:THREE.DoubleSide})
+                    : new THREE.MeshStandardMaterial({vertexColors:true,color:0xffffff,roughness:1,metalness:0,side:THREE.DoubleSide});
+  if (!lambert) m.envMapIntensity = 0.18;
   if(glow){ m.emissive=new THREE.Color(glow); m.emissiveIntensity=0.5; }
   // (v51.34 -> v51.35) FOLIAGE RUSTLE = A SPRING, PLUS THE WIND SWAY TURNED UP. Owner, on v51.34's lean-away
   // push: "i didn't see much or any movement" -> "just like increase the sway by a lot for a second" -> "it would
@@ -42428,7 +42471,11 @@ function _swFoliageMat(glow, grass){
     ' vGF=1.0-smoothstep(uTreeFadeA,uTreeFadeB,distance(ip,uCam));\n' +
     '#ifdef USE_INSTANCING_COLOR\n float _gtr=instanceColor.x;\n#else\n float _gtr=0.0;\n#endif\n' +
     // (v51.57) tree mode: the opacity follows the fade (vGE, the tuft material blends it) and the shrink is partial (uGrassL.z)
-    ' if (uGrassL.w > 0.5) { vGD = 1.0; vGE = vGF; transformed *= mix(1.0, vGF, uGrassL.z); if (vGF <= 0.0) transformed = vec3(0.0); }\n' +
+    // (v51.58) + THIN (uGrassL.x): inside the band each tuft also fades out over its own 0.15 of the level, at
+    // rank x thin x 0.85 - translucently, never in one frame - so the far ring is sparser as well as fainter, and the
+    // rank prefix the gate draws shrinks with it
+    ' if (uGrassL.w > 0.5) { float _gth = _gtr * uGrassL.x * 0.85; float _gtm = uGrassL.x > 0.0 ? smoothstep(_gth, _gth + 0.15, vGF) : 1.0;\n' +
+    '   vGD = 1.0; vGE = vGF * _gtm; transformed *= mix(1.0, vGF, uGrassL.z); if (vGE <= 0.0) transformed = vec3(0.0); }\n' +
     ' else { vGD=smoothstep(_gtr,_gtr+uGrassL.y,vGF); vGE = 1.0; if (vGF <= _gtr) transformed = vec3(0.0); }'
     : ' float tfade=1.0-smoothstep(uTreeFadeA,uTreeFadeB,distance(ip.xz,uCam.xz));\n transformed*=tfade;';
   m.onBeforeCompile=(sh)=>{ sh.uniforms.uTime=_swU.uTime; sh.uniforms.uCam=_swU.uCam; sh.uniforms.uTreeFadeA=_swU.uTreeFadeA; sh.uniforms.uTreeFadeB=_swU.uTreeFadeB; sh.uniforms.uSway=_swU.uSway;
@@ -43007,6 +43054,7 @@ function _swTreeVisTick(cx, cz) {
   try { const _pmM = _swPlantMatGet.m; if (_pmM && _pmM._lssFade) { _pmM._lssFade.uA.value = _PK.fadeA; _pmM._lssFade.uB.value = _PK.fadeB; } } catch (_) {}
   // (v51.41) the grass tufts: their knobs -> uniforms, and the same nearest-corner gate on THEIR fade end
   const _GK = _swGrassK(), _GE = _GK.fadeB, _GB2 = _GE * _GE, _GSR2 = _GK.shadowR * _GK.shadowR;
+  const _gMat = _swGrassTuftMatGet.m;   // (v51.58) the active tuft material (Standard / Lambert)
   const _GFA = _GK.fadeA, _GFW = Math.max(1, _GK.fadeB - _GK.fadeA);
   try { _swGrassUniTick(); } catch (_) {}
   for (const c of chunks.values()) {
@@ -43027,7 +43075,16 @@ function _swTreeVisTick(cx, cz) {
       const R = u._ranks;
       if (R) {
         const t = Math.min(1, Math.max(0, (Math.sqrt(_n2) - _GFA) / _GFW)), lvl = 1 - t * t * (3 - 2 * t);
-        if (_GK.mode === 'tree') cnt = lvl > 0 ? R.length : 0;   // (v51.56) the trees' uniform shrink: all or nothing per mesh
+        if (_GK.mode === 'tree') {
+          // (v51.56) the trees' uniform shrink: all or nothing per mesh - (v51.58) unless thinning, where a tuft is gone
+          // once the level is under rank x thin x 0.85, so the drawable ranks are those under level / (thin x 0.85)
+          if (lvl <= 0) cnt = 0;
+          else if (_GK.thin > 0) {
+            const cut = lvl / (_GK.thin * 0.85);
+            if (cut >= 1) cnt = R.length;
+            else { let lo = 0, hi = R.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (R[mid] < cut) lo = mid + 1; else hi = mid; } cnt = lo; }
+          } else cnt = R.length;
+        }
         else {
           let lo = 0, hi = R.length;
           while (lo < hi) { const mid = (lo + hi) >> 1; if (R[mid] < lvl) lo = mid + 1; else hi = mid; }
@@ -43037,6 +43094,7 @@ function _swTreeVisTick(cx, cz) {
       }
       const vv = v && _n2 < _GB2 && cnt > 0;
       if (im.visible !== vv) im.visible = vv;
+      if (_gMat && im.material !== _gMat && im.material && im.material._lssGrass) im.material = _gMat;   // (v51.58) `lite` swap
       const rs = _n2 < _GSR2;   // (v51.50) a uniform in r165, so flipping it costs no program
       if (im.receiveShadow !== rs) im.receiveShadow = rs;
     }
