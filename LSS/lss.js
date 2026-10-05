@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "51.56";
+const LSS_BUILD = "51.57";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -23630,6 +23630,7 @@ function _swGrassK() {
   o.plantMargin = n('plantMargin', 1300);   // (v51.54) chunks are planted within fadeB + this (nearest point), dropped past it + 450
   o.view = Math.max(1, Math.min(5, Math.round(n('view', 4))));   // (v51.54: SUPERSEDED by plantMargin - kept for old knob strings) (v51.50: 4; v51.48: 3; v51.47: back to 2 -
   o.mode = (K.mode === 'rank') ? 'rank' : 'tree';
+  o.shrink = n('shrink', 0.3);     // (v51.57) tree mode: how much of the fade is a shrink (1 = the trees' full shrink; the opacity does the rest)
   o.fadeA = n('fadeA', o.mode === 'tree' ? 1800 : 900);   // full size (tree) / every tuft present (rank) inside this...
   o.fadeB = n('fadeB', o.mode === 'tree' ? 3400 : 3900);  // ...shrunk to nothing (tree) / the last tuft gone (rank) here
   o.detailW = n('detailW', 0.22);  // detail-level span over which an arrived tuft's own shading fades in
@@ -23938,6 +23939,7 @@ function _swGrassTuftMatGet() {
   const A = _swGrassAtlasGet(), K = _swGrassK();
   const m = _swFoliageMat(0, true);
   m.map = A.tex; m.alphaTest = 0.42; m.roughness = 0.9;
+  m.transparent = (K.mode === 'tree'); m.depthWrite = true; m.forceSinglePass = true;
   m.envMapIntensity = 0.12;
   const U = {
     uA: { value: K.fadeA }, uB: { value: K.fadeB },
@@ -23974,7 +23976,7 @@ function _swGrassTuftMatGet() {
       ' vAP = (uAerial > 0.001) ? clamp(smoothstep(uAerialStart, uAerialFar, length(uCam.xz - _gip.xz)) * uAerial * (1.0 - clamp((_gip.y - (uYMid - uAMP * 0.2)) / (uAMP * 1.4), 0.0, 1.0) * 0.55), 0.0, 0.85) : 0.0;\n' +
       ' float _gGrow = 1.0 - smoothstep(0.35, 0.60, _gBare);')
       .replace('#include <project_vertex>', ' transformed *= _gGrow;\n#include <project_vertex>');
-    sh.fragmentShader = 'uniform vec2 uAtlasPx;\nuniform float uCoverK, uGrassTint, uGrassNorm;\nuniform vec3 uAerialColor, uGrassFlat;\nvarying vec2 vGT;\nvarying float vGF, vGD;\nvarying vec3 vGC;\nvarying float vSV, vAP;\nfloat _lssSunVis = 1.0;\n' + sh.fragmentShader
+    sh.fragmentShader = 'uniform vec2 uAtlasPx;\nuniform float uCoverK, uGrassTint, uGrassNorm;\nuniform vec3 uAerialColor, uGrassFlat;\nvarying vec2 vGT;\nvarying float vGF, vGD, vGE;\nvarying vec3 vGC;\nvarying float vSV, vAP;\nfloat _lssSunVis = 1.0;\n' + sh.fragmentShader
       .replace('void main() {', 'void main() {\n _lssSunVis = vSV;')
       .replace('#include <lights_pars_begin>', _sunTopPars())
       .replace('#include <color_fragment>', '#include <color_fragment>\n' +
@@ -23984,10 +23986,11 @@ function _swGrassTuftMatGet() {
         '{ vec2 _rdx = dFdx(vMapUv * uAtlasPx), _rdy = dFdy(vMapUv * uAtlasPx);\n' +
         '  float _rmip = max(0.0, 0.5 * log2(max(dot(_rdx, _rdx), dot(_rdy, _rdy))));\n' +
         '  diffuseColor.a *= 1.0 + _rmip * uCoverK; }\n' +
-        'if ( diffuseColor.a < alphaTest ) discard;')
+        'if ( diffuseColor.a < alphaTest ) discard;\n' +
+        'diffuseColor.a = vGE;')   // (v51.57) a kept texel is solid, times the outer ring's opacity (blended: the material is transparent)
       .replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\n#ifdef DOUBLE_SIDED\n  normal *= faceDirection;\n#endif');
   };
-  m.customProgramCacheKey = () => 'lss-grass-tuft-6';
+  m.customProgramCacheKey = () => 'lss-grass-tuft-7';
   try { Object.defineProperty(m, '_lssGrass', { value: U, enumerable: false, configurable: true }); } catch (_) {}
   m.needsUpdate = true;
   S.m = m;
@@ -24002,7 +24005,8 @@ function _swGrassUniTick() {
   U.uA.value = K.fadeA; U.uB.value = Math.max(K.fadeA + 1, K.fadeB);
   U.uW.value.set(K.sway, K.lean, 6.2832 / Math.max(10, K.waveLen), K.waveSpeed);
   U.uD.value.set(Math.cos(K.windDir), Math.sin(K.windDir), 0, H);
-  U.uL.value.set(0, Math.max(0.01, K.detailW), 0, K.mode === 'tree' ? 1 : 0);   // (v51.51) y = the per-tuft detail span; (v51.56) w = TREE mode
+  U.uL.value.set(0, Math.max(0.01, K.detailW), Math.max(0, Math.min(1, K.shrink)), K.mode === 'tree' ? 1 : 0);   // (v51.51) y = the per-tuft detail span; (v51.56) w = TREE mode; (v51.57) z = shrink
+  { const tr = (K.mode === 'tree'); if (m.transparent !== tr) { m.transparent = tr; m.needsUpdate = true; } }   // (v51.57) the blend follows the mode
   U.uFlat.value.set(K.flatR, K.flatG, K.flatB);
   U.uTint.value = K.tint * K.match; U.uCov.value = K.cover; U.uDW.value = Math.max(0.01, K.detailW);
   const A = _swGrassAtlasGet.a; if (A && A.mean) U.uNorm.value = 1 / Math.max(0.05, A.mean);
@@ -24930,7 +24934,7 @@ function _swFoliageMat(glow, grass){
     '  vec3 _rpush = vec3(_v.x, -dot(_v, _v) / (2.0 * max(_h, 1.0)), _v.y);\n' +
     '  transformed += transpose(_rm) * _rpush / max(dot(_rm[0], _rm[0]), 1e-6);\n' +
     ' }\n';
-  const GDECL = grass ? 'uniform vec4 uGrassW, uGrassD, uGrassL;\nvarying float vGF, vGD;\n' : '';
+  const GDECL = grass ? 'uniform vec4 uGrassW, uGrassD, uGrassL;\nvarying float vGF, vGD, vGE;\n' : '';
   const CF = grass ? ' float cf=max(transformed.y,0.0)*uGrassW.x;\n'
     : ' float canopy=max(0.0,transformed.y-18.0);\n float cf=canopy*canopy*0.0012+canopy*0.015;\n cf=min(cf,transformed.y*uSway);\n';
   const GWIND = !grass ? '' :
@@ -24947,8 +24951,8 @@ function _swFoliageMat(glow, grass){
   const FADE = grass ?
     ' vGF=1.0-smoothstep(uTreeFadeA,uTreeFadeB,distance(ip,uCam));\n' +
     '#ifdef USE_INSTANCING_COLOR\n float _gtr=instanceColor.x;\n#else\n float _gtr=0.0;\n#endif\n' +
-    ' if (uGrassL.w > 0.5) { vGD = 1.0; transformed *= vGF; if (vGF <= 0.0) transformed = vec3(0.0); }\n' +
-    ' else { vGD=smoothstep(_gtr,_gtr+uGrassL.y,vGF); if (vGF <= _gtr) transformed = vec3(0.0); }'
+    ' if (uGrassL.w > 0.5) { vGD = 1.0; vGE = vGF; transformed *= mix(1.0, vGF, uGrassL.z); if (vGF <= 0.0) transformed = vec3(0.0); }\n' +
+    ' else { vGD=smoothstep(_gtr,_gtr+uGrassL.y,vGF); vGE = 1.0; if (vGF <= _gtr) transformed = vec3(0.0); }'
     : ' float tfade=1.0-smoothstep(uTreeFadeA,uTreeFadeB,distance(ip.xz,uCam.xz));\n transformed*=tfade;';
   m.onBeforeCompile=(sh)=>{ sh.uniforms.uTime=_swU.uTime; sh.uniforms.uCam=_swU.uCam; sh.uniforms.uTreeFadeA=_swU.uTreeFadeA; sh.uniforms.uTreeFadeB=_swU.uTreeFadeB; sh.uniforms.uSway=_swU.uSway;
     if (_rus) { sh.uniforms.uRus=_swU.uRus; sh.uniforms.uRusB=_swU.uRusB; sh.uniforms.uRusN=_swU.uRusN; sh.uniforms.uRusK=_swU.uRusK; sh.uniforms.uRusC=_swU.uRusC; sh.uniforms.uRusL=_swU.uRusL; }

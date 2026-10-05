@@ -7342,7 +7342,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "51.56";
+const LSS_BUILD = "51.57";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -40756,6 +40756,7 @@ function _swGrassK() {
   // ground of its own colour by fadeB. It draws every tuft out to fadeB (the rank trim cannot drop a tuft that is still
   // visible), so the band sits nearer than the rank mode's did. mode: 'rank' brings back v51.51-55 for an A/B.
   o.mode = (K.mode === 'rank') ? 'rank' : 'tree';
+  o.shrink = n('shrink', 0.3);     // (v51.57) tree mode: how much of the fade is a shrink (1 = the trees' full shrink; the opacity does the rest)
   o.fadeA = n('fadeA', o.mode === 'tree' ? 1800 : 900);   // full size (tree) / every tuft present (rank) inside this...
   o.fadeB = n('fadeB', o.mode === 'tree' ? 3400 : 3900);  // ...shrunk to nothing (tree) / the last tuft gone (rank) here
   // ⭐⭐⭐ (v51.50) SOLID -> DETAILED, NOT ABSENT -> PRESENT. Owner: "things looks dumb when they pop into existence, and
@@ -41169,6 +41170,14 @@ function _swGrassTuftMatGet() {
   const A = _swGrassAtlasGet(), K = _swGrassK();
   const m = _swFoliageMat(0, true);
   m.map = A.tex; m.alphaTest = 0.42; m.roughness = 0.9;
+  // ⭐⭐ (v51.57) THE OUTER RING FADES OUT TRANSLUCENT. Owner: "what about making the very outer ring edge of the grass half
+  // translucent" (after "trees just fade to/from fog i think... convergence"). A real blend, not a screen door: the
+  // tufts go in three's TRANSPARENT pass with their alpha = the band's fade (vGE: 1 at fadeA -> 0 at fadeB), so the far
+  // edge melts into ground of its own colour the way a tree melts into the haze. depthWrite stays on (the solid near
+  // grass still sorts itself by depth - inner tufts output alpha 1); forceSinglePass, or three r165 draws a
+  // transparent DoubleSide material twice (map O2.11). Only overlapping TRANSLUCENT far tufts can mis-order (a near one
+  // drawn first hides a farther one behind it), between tufts of one colour. Rank mode stays opaque.
+  m.transparent = (K.mode === 'tree'); m.depthWrite = true; m.forceSinglePass = true;
   m.envMapIntensity = 0.12;
   const U = {
     uA: { value: K.fadeA }, uB: { value: K.fadeB },
@@ -41213,7 +41222,7 @@ function _swGrassTuftMatGet() {
       ' vAP = (uAerial > 0.001) ? clamp(smoothstep(uAerialStart, uAerialFar, length(uCam.xz - _gip.xz)) * uAerial * (1.0 - clamp((_gip.y - (uYMid - uAMP * 0.2)) / (uAMP * 1.4), 0.0, 1.0) * 0.55), 0.0, 0.85) : 0.0;\n' +
       ' float _gGrow = 1.0 - smoothstep(0.35, 0.60, _gBare);')
       .replace('#include <project_vertex>', ' transformed *= _gGrow;\n#include <project_vertex>');
-    sh.fragmentShader = 'uniform vec2 uAtlasPx;\nuniform float uCoverK, uGrassTint, uGrassNorm;\nuniform vec3 uAerialColor, uGrassFlat;\nvarying vec2 vGT;\nvarying float vGF, vGD;\nvarying vec3 vGC;\nvarying float vSV, vAP;\nfloat _lssSunVis = 1.0;\n' + sh.fragmentShader
+    sh.fragmentShader = 'uniform vec2 uAtlasPx;\nuniform float uCoverK, uGrassTint, uGrassNorm;\nuniform vec3 uAerialColor, uGrassFlat;\nvarying vec2 vGT;\nvarying float vGF, vGD, vGE;\nvarying vec3 vGC;\nvarying float vSV, vAP;\nfloat _lssSunVis = 1.0;\n' + sh.fragmentShader
       .replace('void main() {', 'void main() {\n _lssSunVis = vSV;')
       .replace('#include <lights_pars_begin>', _sunTopPars())
       // (v51.50 / 51.51) SOLID -> DETAILED (see detailW in _swGrassK): flat ground colour -> the tuft's own shading, by vGD
@@ -41224,10 +41233,11 @@ function _swGrassTuftMatGet() {
         '{ vec2 _rdx = dFdx(vMapUv * uAtlasPx), _rdy = dFdy(vMapUv * uAtlasPx);\n' +
         '  float _rmip = max(0.0, 0.5 * log2(max(dot(_rdx, _rdx), dot(_rdy, _rdy))));\n' +
         '  diffuseColor.a *= 1.0 + _rmip * uCoverK; }\n' +
-        'if ( diffuseColor.a < alphaTest ) discard;')
+        'if ( diffuseColor.a < alphaTest ) discard;\n' +
+        'diffuseColor.a = vGE;')   // (v51.57) a kept texel is solid, times the outer ring's opacity (blended: the material is transparent)
       .replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\n#ifdef DOUBLE_SIDED\n  normal *= faceDirection;\n#endif');
   };
-  m.customProgramCacheKey = () => 'lss-grass-tuft-6';
+  m.customProgramCacheKey = () => 'lss-grass-tuft-7';
   try { Object.defineProperty(m, '_lssGrass', { value: U, enumerable: false, configurable: true }); } catch (_) {}
   m.needsUpdate = true;
   S.m = m;
@@ -41243,7 +41253,8 @@ function _swGrassUniTick() {
   U.uA.value = K.fadeA; U.uB.value = Math.max(K.fadeA + 1, K.fadeB);
   U.uW.value.set(K.sway, K.lean, 6.2832 / Math.max(10, K.waveLen), K.waveSpeed);
   U.uD.value.set(Math.cos(K.windDir), Math.sin(K.windDir), 0, H);
-  U.uL.value.set(0, Math.max(0.01, K.detailW), 0, K.mode === 'tree' ? 1 : 0);   // (v51.51) y = the per-tuft detail span; (v51.56) w = TREE mode
+  U.uL.value.set(0, Math.max(0.01, K.detailW), Math.max(0, Math.min(1, K.shrink)), K.mode === 'tree' ? 1 : 0);   // (v51.51) y = the per-tuft detail span; (v51.56) w = TREE mode; (v51.57) z = shrink
+  { const tr = (K.mode === 'tree'); if (m.transparent !== tr) { m.transparent = tr; m.needsUpdate = true; } }   // (v51.57) the blend follows the mode
   U.uFlat.value.set(K.flatR, K.flatG, K.flatB);
   U.uTint.value = K.tint * K.match; U.uCov.value = K.cover; U.uDW.value = Math.max(0.01, K.detailW);
   const A = _swGrassAtlasGet.a; if (A && A.mean) U.uNorm.value = 1 / Math.max(0.05, A.mean);
@@ -42395,7 +42406,7 @@ function _swFoliageMat(glow, grass){
   // those at its own uniforms) against the tuft's RANK (v51.51, see _swGrassK): absent below it, arriving flat and
   // taking its shading over uGrassL.y (vGD). v51.41b-44 scaled tufts here instead (shrink + widen) - the owner's
   // "warping in front of me"; v51.45-50 dissolved them per blade / per pixel - "still popping".
-  const GDECL = grass ? 'uniform vec4 uGrassW, uGrassD, uGrassL;\nvarying float vGF, vGD;\n' : '';
+  const GDECL = grass ? 'uniform vec4 uGrassW, uGrassD, uGrassL;\nvarying float vGF, vGD, vGE;\n' : '';
   const CF = grass ? ' float cf=max(transformed.y,0.0)*uGrassW.x;\n'
     : ' float canopy=max(0.0,transformed.y-18.0);\n float cf=canopy*canopy*0.0012+canopy*0.015;\n cf=min(cf,transformed.y*uSway);\n';
   const GWIND = !grass ? '' :
@@ -42416,8 +42427,9 @@ function _swFoliageMat(glow, grass){
     // over the band exactly as the trees' fade does (transformed *= fade), no tuft ever arriving on its own.
     ' vGF=1.0-smoothstep(uTreeFadeA,uTreeFadeB,distance(ip,uCam));\n' +
     '#ifdef USE_INSTANCING_COLOR\n float _gtr=instanceColor.x;\n#else\n float _gtr=0.0;\n#endif\n' +
-    ' if (uGrassL.w > 0.5) { vGD = 1.0; transformed *= vGF; if (vGF <= 0.0) transformed = vec3(0.0); }\n' +
-    ' else { vGD=smoothstep(_gtr,_gtr+uGrassL.y,vGF); if (vGF <= _gtr) transformed = vec3(0.0); }'
+    // (v51.57) tree mode: the opacity follows the fade (vGE, the tuft material blends it) and the shrink is partial (uGrassL.z)
+    ' if (uGrassL.w > 0.5) { vGD = 1.0; vGE = vGF; transformed *= mix(1.0, vGF, uGrassL.z); if (vGF <= 0.0) transformed = vec3(0.0); }\n' +
+    ' else { vGD=smoothstep(_gtr,_gtr+uGrassL.y,vGF); vGE = 1.0; if (vGF <= _gtr) transformed = vec3(0.0); }'
     : ' float tfade=1.0-smoothstep(uTreeFadeA,uTreeFadeB,distance(ip.xz,uCam.xz));\n transformed*=tfade;';
   m.onBeforeCompile=(sh)=>{ sh.uniforms.uTime=_swU.uTime; sh.uniforms.uCam=_swU.uCam; sh.uniforms.uTreeFadeA=_swU.uTreeFadeA; sh.uniforms.uTreeFadeB=_swU.uTreeFadeB; sh.uniforms.uSway=_swU.uSway;
     if (_rus) { sh.uniforms.uRus=_swU.uRus; sh.uniforms.uRusB=_swU.uRusB; sh.uniforms.uRusN=_swU.uRusN; sh.uniforms.uRusK=_swU.uRusK; sh.uniforms.uRusC=_swU.uRusC; sh.uniforms.uRusL=_swU.uRusL; }
