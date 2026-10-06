@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "51.82";
+const LSS_BUILD = "51.91";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -9186,6 +9186,7 @@ function handleNetEvent(evt, fromPeerId) {
     }
     return;
   }
+  if (evt.type === 'setp_brk' || evt.type === 'setp_dmg') { try { _setpOnNet(evt); } catch (_) {} return; }   // (51.86/91) a set piece's chunk broke on a peer / a peer's damage to it
   if (evt.type === 'obj_destroy' && typeof evt.objId === 'number') {
     const cluster = game.clusters && game.clusters[evt.objId];
     if (cluster && !cluster.broken) {
@@ -9831,6 +9832,7 @@ function handleNetEvent(evt, fromPeerId) {
   }
   if (evt.type === 'world_objects' && Array.isArray(evt.clusters)) {
     applyWorldObjectsManifest(evt.clusters);
+    if (evt.setp) { try { _setpApplyManifest(evt.setp); } catch (_) {} }   // (51.91) the set piece's HP and breaks
     return;
   }
   if (evt.type === 'game_sync') {
@@ -35010,6 +35012,7 @@ function _hcMakeMeshes(city, site) {
     lights.add(holder);
   }
   group.add(lights);
+  try { _WX2.veilGroup(group); } catch (_) {}
   return { group, lights, beam, twrMat };
 }
 
@@ -38249,6 +38252,7 @@ function _skMats() {
     color: 0x7df0ff, blending: THREE.AdditiveBlending, depthWrite: false,
     transparent: true, toneMapped: false, side: THREE.DoubleSide,
   })), false);
+  try { _WX2.veilMat(_skGlowMat); _WX2.veilMat(_skRingMat); } catch (_) {}
   _skBldMat = new THREE.MeshLambertMaterial();
   _skBldMat.onBeforeCompile = (sh) => {
     sh.vertexShader = sh.vertexShader
@@ -41475,9 +41479,12 @@ const _WX2 = (function () {
     lightning: 1,       // (51.79) x the storm's flash rate (Price & Rind 1992 for its top, gated on charging-zone graupel). 0 = none
     thunder: 1,         // thunder through the SFX bus, distance / 343 m/s after each flash
     boltW: 1,           // the channel's width x
+    veil: 1,            // (51.84) the cities' glow dimmed by the cloud in front of it (see THE VEIL). 0 = the 51.83 look: drawn over the clouds
   };
   function KN(k) { let w = null; try { w = window.__wx2; } catch (_) {} return (w && w[k] != null) ? w[k] : DEF[k]; }
+  let sessionPick = null, lastT = null;
   function optedIn() {
+    if (sessionPick != null) return sessionPick;
     try {
       const m = /[?&]wx2(?:=([^&#]*))?/i.exec(location.search || '');
       if (m) return m[1] !== '0';
@@ -42021,7 +42028,8 @@ uniform vec4 uStorm; uniform float uStormP; uniform vec3 uStormK; uniform vec2 u
 // lightning: up to 4 glows along the live channel (fair-sim xyz, brightness), their colour, their reach; the scene's flash
 uniform vec3 uCityGlow; uniform vec4 uFl[4]; uniform vec3 uFlC; uniform float uFlL, uFlashS, uBowK;   // (51.80) uBowK: the bow fades with the dusk's sun
 ` + REG_GLSL + DETAIL_GLSL + `
-out vec4 o;
+layout(location=0) out vec4 o;
+layout(location=1) out vec4 oZ;                                // (51.84) THE VEIL's data: see the end of main()
 const float CELL=2.0/64.0;
 float stepAt(float t){ return clamp(0.008*t, 0.3*CELL, max(1.2*CELL, 0.01*t))*uStepK; }
 float hg(float mu,float g){ float g2=g*g; return (1.0-g2)/pow(1.0+g2-2.0*g*mu,1.5); }
@@ -42144,6 +42152,7 @@ void main(){
   bool fairOn=tf>tn, stormOn=sb>sa;
   float tA0=min(fairOn?tn:1e9, stormOn?sa:1e9), tA1=max(fairOn?tf:-1e9, stormOn?sb:-1e9);
   vec3 col=vec3(0); float T=1.0;
+  float tF=-1.0, tB=-1.0;                                      // (51.84) where this ray's cloud begins and ends (sim units)
   if (tA1>tA0){
     float mu=dot(rd,uSunDir); vec3 bow=rainbow(mu), glo=glory(mu);
     uvec2 pq=uvec2(gl_FragCoord.xy);
@@ -42203,6 +42212,7 @@ void main(){
         lum=mix(uHazeC, lum/max(sig,1e-9)*uBright, exp(-uHaze*t));   // the air between the eye and the cloud (Koschmieder)
         float tr=exp(-sig*ds*uM);
         col+=T*lum*(1.0-tr); T*=tr;
+        if (tr<0.999){ if (tF<0.0 && T<0.985) tF=t; tB=t+ds; }
       }
       t+=ds;
     }
@@ -42221,6 +42231,13 @@ void main(){
   // (51.81) a flash lights the scene: ADDED light (the scene target is RGBA8 - measured rtType 1009 - so 51.79's alpha > 1 was
   // clamped to nothing), dimmed by the cloud between the eye and whatever it lit
   o=vec4(col + uFlashS*vec3(0.30,0.33,0.42)*(0.35+0.65*T), T*shf);   // premultiplied: dst = dst * a + rgb
+  // (51.84) THE VEIL's data: where this ray's cloud begins and ends AS THE DEPTH BUFFER HOLDS THEM - this camera's own depth
+  // row (near/far in the main view, the oblique water plane in the mirror), so a city fragment compares its gl_FragCoord.z
+  // as it is - and how much light the cloud lets through. No cloud on the ray: nothing behind it is veiled
+  vec4 z4=vec4(2.0, 2.0, 1.0, 0.0);
+  if (tF>=0.0){ vec3 vf=vd*(tF*uUpw), vb=vd*(max(tB,tF)*uUpw);
+    z4=vec4(0.5*dot(uZRow, vec4(vf,1.0))/max(-vf.z,1e-6)+0.5, 0.5*dot(uZRow, vec4(vb,1.0))/max(-vb.z,1e-6)+0.5, T, 0.0); }
+  oZ=z4;
   if (uDbg>0.5) o=vec4(dz, min(tGeo, 9.0), T, shf);           // __wx2.dbg = 1: the raw terms, read by __wx2Dbg() (no composite)
   if (uDbg>1.5) o=vec4(dbS, dbF, dbT, rd.y);                  // __wx2.dbg = 2: the ground shadow's own terms
 }`;
@@ -42259,12 +42276,17 @@ void main(){
 const F_BOLT = `#version 300 es
 precision highp float; precision highp sampler2D;
 uniform sampler2D tDepth; uniform vec3 uBoltC; uniform float uI, uNear, uFar, uSkyT; uniform vec2 uTanHV, uRes;
+uniform float uObl, uDomeR; uniform vec4 uZRow; uniform vec3 uDomeO; uniform mat4 uCamWorld;   // (51.83) the water's mirror
 in float vS; in float vB; in float vZ; out vec4 o;
 void main(){
   float dz=texelFetch(tDepth, ivec2(gl_FragCoord.xy), 0).r;
-  if (dz<1.0){ float vz=2.0*uNear*uFar/(uFar+uNear-(dz*2.0-1.0)*(uFar-uNear));
-    vec2 nd=gl_FragCoord.xy/uRes*2.0-1.0; float tu=vz*sqrt(1.0+dot(nd*uTanHV, nd*uTanHV));
-    if (tu<uSkyT && vz<vZ) discard; }                          // a building or hill in front of the channel
+  if (dz<1.0){ vec2 nd=gl_FragCoord.xy/uRes*2.0-1.0, dxy=nd*uTanHV; float zn=dz*2.0-1.0, rl=sqrt(1.0+dot(dxy,dxy));
+    if (uObl<0.5){ float vz=2.0*uNear*uFar/(uFar+uNear-zn*(uFar-uNear));
+      if (vz*rl<uSkyT && vz<vZ) discard; }                     // a building or hill in front of the channel
+    else {   // (51.83) in the MIRROR: its oblique depth row, and the dome pinned to the player's eye - F_CLOUD's uObl branch
+      float vz=uZRow.w/(zn-(uZRow.x*dxy.x+uZRow.y*dxy.y-uZRow.z));
+      vec3 rd=normalize(mat3(uCamWorld)*vec3(dxy,-1.0)); float b=dot(uDomeO,rd), h=b*b-(dot(uDomeO,uDomeO)-uDomeR*uDomeR), tD=h>0.0 ? -b+sqrt(h) : 1e9;
+      if (vz>0.0 && vz*rl<0.96*tD && vz<vZ) discard; } }
   float s=abs(vS); o=vec4(uBoltC*(uI*vB*(exp(-s*s*30.0)+0.22*exp(-s*s*3.5))), 1.0); }`;
 const F_COMP = `#version 300 es
 precision highp float; uniform sampler2D tCld; uniform vec2 uInv; out vec4 o;
@@ -42552,6 +42574,47 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
     const s = a.slice().sort((x, y) => x - y), m = a.reduce((x, y) => x + y, 0) / a.length;
     return { n: a.length, med: +s[s.length >> 1].toFixed(3), mean: +m.toFixed(3), p90: +s[Math.floor(s.length * 0.9)].toFixed(3) };
   }
+  const VU = { d: { value: new THREE.Texture() }, dM: { value: new THREE.Texture() }, v: { value: new THREE.Vector4() }, vM: { value: new THREE.Vector4() },
+    c: { value: new THREE.Vector3() }, cM: { value: new THREE.Vector3() } };
+  let veilN = 0;
+  function veilGLSL(pm) { return `
+uniform sampler2D uWxD, uWxDM; uniform vec4 uWxV, uWxVM; uniform vec3 uWxC, uWxCM;
+float wxVeil(){ vec4 c;
+  if (uWxV.z>0.5 && distance(cameraPosition, uWxC)<0.5) c=textureLod(uWxD, gl_FragCoord.xy*uWxV.xy, 0.0);
+  else if (uWxVM.z>0.5 && distance(cameraPosition, uWxCM)<0.5) c=textureLod(uWxDM, gl_FragCoord.xy*uWxVM.xy, 0.0);
+  else return 1.0;
+  if (gl_FragCoord.z<=c.x) return 1.0;
+  return mix(1.0, c.z, c.y>c.x ? clamp((gl_FragCoord.z-c.x)/(c.y-c.x), 0.0, 1.0) : 1.0); }
+void wxMain();
+void main(){ wxMain(); gl_FragColor${pm === 'P' ? '' : '.a'}*=wxVeil(); }
+`; }
+  function veilMat(m) {
+    try { if (typeof _LSS_TOUCH_PHONE !== 'undefined' && _LSS_TOUCH_PHONE) return false; } catch (_) {}   // no volumetric sky there
+    if (!m || !m.transparent || (m.userData && m.userData._wxVeil)) return false;
+    const pm = (m.blending === THREE.CustomBlending) ? (m.blendSrc === THREE.OneFactor ? 'P' : 'A') : (m.premultipliedAlpha ? 'P' : 'A');
+    const k0 = m.customProgramCacheKey(), ob = m.onBeforeCompile;
+    m.onBeforeCompile = function (sh, r) {
+      if (ob) ob.call(this, sh, r);
+      Object.assign(sh.uniforms, { uWxD: VU.d, uWxDM: VU.dM, uWxV: VU.v, uWxVM: VU.vM, uWxC: VU.c, uWxCM: VU.cM });
+      sh.fragmentShader = sh.fragmentShader.replace(/void\s+main\s*\(\s*(?:void\s*)?\)/, veilGLSL(pm) + 'void wxMain()');
+    };
+    m.customProgramCacheKey = () => k0 + '|wxveil' + pm;
+    m.userData._wxVeil = 1; veilN++;
+    return true;
+  }
+  function veilGroup(root) {
+    let n = 0;
+    if (root && root.traverse) root.traverse(o => { const ms = Array.isArray(o.material) ? o.material : (o.material ? [o.material] : []); for (const m of ms) if (veilMat(m)) n++; });
+    return n;
+  }
+  function veilSet(cam, V, aw, ah, eye) {
+    const tx = eye ? VU.dM.value : VU.d.value, pp = renderer.properties.get(tx);
+    if (pp.__webglTexture !== V.cldZ.tex) { pp.__webglTexture = V.cldZ.tex; pp.__webglInit = true; }
+    (eye ? VU.vM : VU.v).value.set(1 / aw, 1 / ah, (+KN('veil') && !+KN('dbg')) ? 1 : 0, 0);   // dbg: no composite, no veil
+    (eye ? VU.cM : VU.c).value.setFromMatrixPosition(cam.matrixWorld);
+  }
+  function veilOff() { VU.v.value.z = 0; VU.vM.value.z = 0; }
+  function veilDrop() { veilOff(); for (const u of [VU.d, VU.dM]) { try { renderer.properties.get(u.value).__webglTexture = undefined; } catch (_) {} } }
   function hook(r, sc, cam) {
     try {
       if (!S || !S.drawable || +KN('on') === 0 || document.hidden) return;
@@ -42604,6 +42667,7 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
         tNoise: S.noise3, tV0: m.vel3, tV1: t(1).vel3, tV2: t(2).vel3, tV3: t(3).vel3 }, S.unit0);
       setU(PR.cloud, cloudUniforms(cam, aw, ah, lw, lh, eye));
       gl.drawArrays(gl.TRIANGLES, 0, 3);
+      veilSet(cam, V, aw, ah, eye);                                 // (51.84) the cities' glow drawn after this reads it
       if (+KN('dbg')) { if (!eye) S.drawn++; return; }            // diagnostic: leave the raw terms for __wx2Dbg() (main view)
       gl.bindFramebuffer(gl.FRAMEBUFFER, st.dr);
       gl.viewport(0, 0, aw, ah);
@@ -42613,7 +42677,8 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
       bindTex(PR.comp, { tCld: V.cld }, S.unit0);
       setU(PR.comp, { uInv: [1 / aw, 1 / ah] });
       gl.drawArrays(gl.TRIANGLES, 0, 3);
-      if (eye) S.drawnM++; else { S.drawn++; drawBolt(cam, aw, ah, V); }   // (51.79) the lightning channel, main view
+      if (eye) { S.drawnM++; drawBolt(cam, aw, ah, V, eye); }       // (51.83) owner: "bolts should appear in the water/reflections"
+      else { S.drawn++; drawBolt(cam, aw, ah, V, null); }          // (51.79) the lightning channel, main view
     } finally {
       if (tq) tqEnd(tq, eye ? 'mirror' : 'main');
       for (let u = 0; u < _hookUnits; u++) { gl.activeTexture(gl.TEXTURE0 + S.unit0 + u);
@@ -42657,12 +42722,19 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
   function ensureCld(V, w, h) {
     if (V.cld && V.cldW === w && V.cldH === h) return;
     if (V.cld) { gl.deleteTexture(V.cld.tex); gl.deleteFramebuffer(V.cld.fbo); }
+    if (V.cldZ) { gl.deleteTexture(V.cldZ.tex); V.cldZ = null; }
     const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, null);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const tz = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tz);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, w, h, 0, gl.RGBA, gl.FLOAT, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     const f = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, f); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
-    V.cld = { tex: t, fbo: f }; V.cldW = w; V.cldH = h;
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, tz, 0);
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);   // per framebuffer: only F_CLOUD ever draws into this one
+    V.cld = { tex: t, fbo: f }; V.cldZ = { tex: tz }; V.cldW = w; V.cldH = h;
   }
   function cloudUniforms(cam, aw, ah, lw, lh, eye) {
     if (S.cxFair) useCtx(S.cxFair);                               // (51.77) the render's frame is the far field's (whichever sim stepped last)
@@ -42815,19 +42887,22 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
       scene = Math.min(1.2, I * 0.9 / (1 + dk * dk / 9)) * pres; }
     return { fl, c: [4.5 * pres, 4.8 * pres, 6.0 * pres], L: 2000 * upm() / U_, scene, I };
   }
-  function drawBolt(cam, aw, ah, V) {
+  function drawBolt(cam, aw, ah, V, eye) {
     const f = LT.cur; if (!f || !f.nv || !S.boltTex || !V.depthTex) return;
     const pres = stormPresence(), I = flashI(f, performance.now() / 1000) * pres; if (I <= 0.002) return;
     const st = S.sims[3]; if (!st || !st.live) return;
     const U_ = upm() * H / 2, sk = H / S.cxStorm.H, kmU = 1000 * upm() / U_;
     const vp = new THREE.Matrix4().multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
-    const pe = cam.projectionMatrix.elements, dm = (typeof _WX !== 'undefined' && _WX && _WX.distMul > 0) ? _WX.distMul : 1;
+    const pe = (eye || cam).projectionMatrix.elements, pz = cam.projectionMatrix.elements, dm = (typeof _WX !== 'undefined' && _WX && _WX.distMul > 0) ? _WX.distMul : 1;
+    let dO = [0, 0, 0];
+    if (eye) { const dp = (typeof _WX !== 'undefined' && _WX && _WX.dome) ? _WX.dome.position : eye.position, ce = cam.matrixWorld.elements; dO = [ce[12] - dp.x, ce[13] - dp.y, ce[14] - dp.z]; }
     gl.useProgram(PR.bolt.p);
     bindTex(PR.bolt, { tBoltV: S.boltTex, tC3: st.cloud3, tDepth: V.depthTex }, S.unit0);
     setU(PR.bolt, { uVP: { m4: vp.elements }, uRes: [aw, ah], uW: Math.max(2.5, ah / 160) * +KN('boltW'), uUpw: U_, uY0: S.Y0, uExt: +KN('ext'), uM: H / 2,
       uCamU: [cam.matrixWorld.elements[12], cam.matrixWorld.elements[13], cam.matrixWorld.elements[14]],
       uStorm: [HUB_CITY.x / U_, +KN('stormR') * kmU, HUB_CITY.z / U_, Math.max(1e-3, +KN('stormFade') * kmU)], uStormK: [sk, 0, 0],
-      uBoltC: [1.7, 1.8, 2.2], uI: I, uNear: cam.near, uFar: cam.far, uSkyT: 20500 * dm * 0.96, uTanHV: [1 / pe[0], 1 / pe[5]] });
+      uBoltC: [1.7, 1.8, 2.2], uI: I, uNear: cam.near, uFar: cam.far, uSkyT: 20500 * dm * 0.96, uTanHV: [1 / pe[0], 1 / pe[5]],
+      uObl: eye ? 1 : 0, uZRow: [pz[2], pz[6], pz[10], pz[14]], uDomeO: dO, uDomeR: 20500 * dm, uCamWorld: { m4: cam.matrixWorld.elements } });
     gl.viewport(0, 0, aw, ah);
     gl.enable(gl.BLEND); gl.blendEquation(gl.FUNC_ADD); gl.blendFuncSeparate(gl.ONE, gl.ONE, gl.ZERO, gl.ONE);
     gl.disableVertexAttribArray(0);
@@ -42870,6 +42945,7 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
     return true;
   }
   function init(T) {
+    lastT = T;                                                     // (51.83) what the Settings switch starts it with, live
     if (S) dispose();
     if (!wanted(T)) return;
     const g = renderer && renderer.getContext && renderer.getContext();
@@ -42890,7 +42966,7 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
       const mg = new THREE.BufferGeometry(); mg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(9), 3));
       const mm = new THREE.ShaderMaterial({ vertexShader: 'void main(){ gl_Position = vec4(0.0, 0.0, 2.0, 1.0); }',
         fragmentShader: 'void main(){ gl_FragColor = vec4(0.0); }', transparent: true, depthTest: false, depthWrite: false, colorWrite: false });
-      const mk = new THREE.Mesh(mg, mm); mk.name = 'wx2Marker'; mk.frustumCulled = false; mk.renderOrder = -1e9; mk.onBeforeRender = hook;
+      const mk = new THREE.Mesh(mg, mm); mk.name = 'wx2Marker'; mk.frustumCulled = false; mk.renderOrder = -0.5; mk.onBeforeRender = hook;
       scene.add(mk); S.marker = mk;
     } catch (e) { console.warn('[wx2] marker failed:', e); }
     console.log('[wx2] volumetric weather: compiling ' + Object.keys(PR).length + ' programs' + (PX ? ' (parallel)' : ''));
@@ -42988,6 +43064,7 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
     }
   }
   function frame(dt) {
+    veilOff();                                                      // (51.84) re-armed by this frame's draw(s), if any
     if (!S) return;
     try {
       if (S.phase === 'compile') {
@@ -43022,6 +43099,7 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
         try { lightningTick(Math.max(0, dt), pres); } catch (_) {}
       }
       work(budget);
+      if (S.marker && typeof camera !== 'undefined' && camera) { S.under = camera.matrixWorld.elements[13] < S.Y0; S.marker.renderOrder = S.under ? -1e9 : -0.5; }
       const bill = (+KN('on') === 0) || !S.drawable;
       if (typeof _WX !== 'undefined' && _WX) {
         if (_WX.clouds && _WX.clouds.visible !== bill) _WX.clouds.visible = bill;
@@ -43055,7 +43133,9 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
       if (S.tqP) for (const p of S.tqP) gl.deleteQuery(p[0]);
       for (const V of [S.vMain, S.vMirror]) { if (!V) continue;
         if (V.cld) { gl.deleteTexture(V.cld.tex); gl.deleteFramebuffer(V.cld.fbo); }
+        if (V.cldZ) gl.deleteTexture(V.cldZ.tex);
         if (V.depthTex) { gl.deleteTexture(V.depthTex.tex); gl.deleteFramebuffer(V.depthFbo); } }
+      veilDrop();
       if (S.vao) { gl.deleteVertexArray(S.vao); gl.deleteBuffer(S.vbo); }
       renderer.resetState();
     } catch (_) {}
@@ -43073,6 +43153,7 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
         boxKm: S.cxStorm && S.cxStorm.H / 1000, presence: +stormPresence().toFixed(2),
         flash: { I: +(S.flI || 0).toFixed(3), scene: +(S.flS || 0).toFixed(3), boltDraws: S.boltN || 0, cur: !!LT.cur, nv: LT.cur ? LT.cur.nv : 0, rtType: (typeof postFX !== 'undefined' && postFX && postFX.rtScene) ? postFX.rtScene.texture.type : null },
         lightning: { rate: +LT.rate.toFixed(2), pr: +LT.pr.toFixed(2), gate: +LT.gate.toFixed(2), gMax: +LT.gMax.toFixed(2), hCore: LT.hCore, count: LT.count, cg: LT.cg, last: LT.last } } : null,
+      veil: { mats: veilN, main: VU.v.value.z, mirror: VU.vM.value.z }, markerRO: S.marker ? S.marker.renderOrder : null, under: !!S.under,   // (51.84-85)
       hookErr: S.hookErr || null, knobs: Object.assign({}, DEF, window.__wx2 || {}) };
   }
   function selftest(o) {
@@ -43117,7 +43198,14 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
     return { w, h, rows };
   }
   try { window.__wx2Info = info; window.__wx2Dbg = dbg; window.__wx2Flash = t => { const f = S && spawnFlash(t || null); return f ? { cg: f.cg, segs: f.segs.length, strokes: f.strokes.length, last: LT.last } : null; }; } catch (_) {}
-  return { init, frame, dispose, info };
+  function setEnabled(on) {
+    sessionPick = !!on;
+    try { localStorage.setItem('lss_wx2', on ? '1' : '0'); } catch (_) {}
+    if (!on) { dispose(); return false; }
+    try { if (!S && typeof _WX !== 'undefined' && _WX && _WX.on && lastT) init(lastT); } catch (e) { console.warn('[wx2] enable failed:', e); }
+    return !!S;
+  }
+  return { init, frame, dispose, info, optedIn, setEnabled, veilGroup, veilMat };
 })();
 
 function _wxInit(T) {
@@ -46380,6 +46468,7 @@ function resolveCollision(pos, velocity, radius, entity) {
   if (typeof _owCollide === 'function') _owCollide(pos, velocity, radius);   // (v38.78) overworld cities, their carriers, the leviathan
   if (typeof _wildCollide === 'function') _wildCollide(pos, velocity, radius);   // (v42.82) the wild leviathan families
   if (typeof _skCollide === 'function') _skCollide(pos, velocity, radius);   // (v46.10) the sky islands are solid
+  if (typeof _setpCollide === 'function') _setpCollide(pos, velocity, radius);   // (51.86) so is a cavern's set piece
 
   const CONTAIN_RANGE = radius * 2.5;
   const CONTAIN_STRENGTH = 12000;
@@ -46713,6 +46802,7 @@ function raycastLevel(origin, dir, maxDist, coarse, skipCarrier, skipSky) {
     const skd = _skRayHit(origin, dir, nearest, coarse);
     if (skd < nearest) nearest = skd;
   }
+  if (typeof _setpRayHit === 'function') { const spd = _setpRayHit(origin, dir, nearest); if (spd < nearest) nearest = spd; }
   const sdfHit = sdfRaycast(origin.x, origin.y, origin.z, dir.x, dir.y, dir.z, nearest, coarse);
   if (sdfHit < nearest) nearest = sdfHit;
 
@@ -46721,6 +46811,7 @@ function raycastLevel(origin, dir, maxDist, coarse, skipCarrier, skipSky) {
 
 function getWallNormal(point) {
   if (_skHitOk && point && Math.abs(point.x - _skHitP.x) + Math.abs(point.y - _skHitP.y) + Math.abs(point.z - _skHitP.z) < 60) return _skHitN.clone();
+  if (_SETP && _SETP.hit.ok && point && Math.abs(point.x - _SETP.hit.p.x) + Math.abs(point.y - _SETP.hit.p.y) + Math.abs(point.z - _SETP.hit.p.z) < 60) return _SETP.hit.n.clone();
   const n = sdfNormal(point.x, point.y, point.z);
   return n.negate();
 }
@@ -54032,6 +54123,11 @@ class Projectile {
           return;
         }
         const shouldExplode = this.isCluster || this.isArcWave || this.tracking || this.salvoGuided || this.isPyroThermite || (this.splash > 0 && !this.isFireSource);
+        const _spCi = (typeof _setpWallChunk === 'function') ? _setpWallChunk(wallDist) : -1;
+        if (_spCi >= 0) {
+          _setpHitChunk(_spCi, this.damage, hitPoint);
+          if (!shouldExplode) { spawnImpactSparks(hitPoint, 4); this.destroy(); return; }
+        }
 
         if (shouldExplode) {
           this.position.copy(hitPoint);
@@ -54377,6 +54473,7 @@ class Projectile {
   }
 
   splashDamage() {
+    try { if (typeof _setpSplash === 'function') _setpSplash(this.position, this.splash, this.damage * 0.75); } catch (_) {}   // (51.86) the set piece's chunks in range
     const _splTeam = (this.owner === 'player') ? player.team
                    : (this.ownerTeam != null ? this.ownerTeam : player.team);
     for (const bot of game.entities) {
@@ -59187,6 +59284,752 @@ function clearVRRockObstacles() {
   if (typeof disposeAllDots === 'function') { try { disposeAllDots(); } catch (_) {} }
 }
 
+var _SETP = {
+  MAPS: { hourglass: 'wreck', arc: 'leviathan' },
+  cur: null, gltf: {}, uT: { value: 0 },
+  hit: { ok: false, ci: -1, d: 0, p: new THREE.Vector3(), n: new THREE.Vector3() },
+  nRay: 0, nStep: 0, nCall: 0, perFrame: null,   // (51.88) how much marching the piece costs: calls, rays that entered its box, steps
+  outDmg: new Map(), outT: 0, manifest: null,     // (51.91) this machine's damage not yet sent; a joiner's manifest waiting for the build
+};
+const _SETP_DEF = { on: 1, hp: 1, chunks: 30, wreckLen: 2400, wreckGap: 320, fire: 1, smoke: 1, embed: 0.07, budget: 4, lite: 0 };
+function _setpK(k) { let w = null; try { w = window.__setp; } catch (_) {} return (w && w[k] != null) ? w[k] : _SETP_DEF[k]; }
+function _setpClaimsRoom(r) {
+  try { return !!(r && r.id === 'center' && game && _SETP.MAPS[game.selectedMap] && !(typeof LSS !== 'undefined' && LSS.MODE === 'campaign')); } catch (_) { return false; }
+}
+function _setpLoad(url) {
+  let p = _SETP.gltf[url];
+  if (p) return p;
+  p = new Promise((res, rej) => {
+    try {
+      new THREE.GLTFLoader().load(url, g => { try { _lssCapModelTextures(g.scene, 'setpiece'); } catch (_) {} res(g); }, undefined, e => rej(e));
+    } catch (e) { rej(e); }
+  });
+  _SETP.gltf[url] = p;   // parsed once per session: a later round re-poses the same scene, it never re-parses
+  p.catch(() => { if (_SETP.gltf[url] === p) delete _SETP.gltf[url]; });
+  return p;
+}
+
+function _setpBuild() {
+  _setpDispose();
+  if (typeof scene === 'undefined' || !scene || typeof game === 'undefined' || !game || !+_setpK('on')) return;
+  try { if (typeof LSS !== 'undefined' && LSS.MODE === 'campaign') return; } catch (_) {}
+  const key = game.selectedMap, kind = _SETP.MAPS[key], T = game.sandwichTerrain;
+  if (!kind || !T) return;
+  const rooms = game.sdfRoomData || [];
+  const ra = rooms.find(r => r && r.team === 'A'), rb = rooms.find(r => r && r.team === 'B');
+  let c = rooms.find(r => r && r.id === 'center');
+  if (!c && ra && rb) c = { x: (ra.x + rb.x) / 2, y: (ra.y + rb.y) / 2, z: (ra.z + rb.z) / 2, r: 300 };
+  if (!c) return;
+  let fy = c.y - 640, cy = c.y + 760;
+  try { fy = _stGroundYCarved(c.x, c.z, T); cy = _stCeilYCarved(c.x, c.z, T); } catch (_) {}
+  if (!(cy > fy + 300)) { fy = c.y - 640; cy = c.y + 760; }
+  let seed = null;
+  try { seed = getRoundSeed(((game.currentRound || 0) >>> 0) + 7919); } catch (_) {}
+  if (seed == null) seed = (Math.random() * 4294967296) >>> 0;   // solo: "random each time"
+  const rnd = mulberry32(seed >>> 0);
+  const sp = {
+    kind, key, g: key + ':' + (game.currentRound || 0), rnd, cx: c.x, cz: c.z, roomR: c.r || 375, floorY: fy, ceilY: cy, lite: false,
+    axis: (ra && rb) ? Math.atan2(rb.x - ra.x, rb.z - ra.z) : 0,   // the spawn axis (yaw of A -> B)
+    group: new THREE.Group(), chunks: [], mats: [], fires: [], ready: false, job: null, grid: null, gridDirty: false,
+    lightT: 0, t0: performance.now(), pend: null, broken: 0,
+  };
+  sp.group.name = 'setPiece:' + kind;
+  sp.lite = !!+_setpK('lite');
+  sp.model = (kind === 'leviathan') ? MONSTER_DEFS[Math.floor(rnd() * MONSTER_DEFS.length) % MONSTER_DEFS.length].key : (sp.lite ? 'carrier2_wreck' : 'carrier2');
+  _SETP.cur = sp;
+  scene.add(sp.group);
+  const url = MONSTER_BASE_URL + sp.model + '.glb' + _MODEL_CACHE_BUST;
+  const go = (g) => { if (_SETP.cur === sp) { sp.loadMs = Math.round(performance.now() - sp.t0); sp.job = (kind === 'wreck') ? _setpWreckG(sp, g) : _setpLeviG(sp, g); } };
+  _setpLoad(url).then(go).catch(e => {
+    console.warn('[setp] ' + url + ' failed:', e && e.message ? e.message : e);
+    if (kind === 'wreck') _setpLoad(MONSTER_BASE_URL + 'carrier2.glb' + _MODEL_CACHE_BUST).then(go).catch(() => {});   // the full hull, then
+  });
+  console.log('[setp] ' + key + ': ' + kind + ' (' + sp.model + ') at (' + Math.round(c.x) + ', ' + Math.round(c.z) + '), floor ' + Math.round(fy) + ', ceiling ' + Math.round(cy));
+}
+function _setpDispose() {
+  const sp = _SETP.cur;
+  if (!sp) return;
+  _SETP.cur = null; _SETP.hit.ok = false; _SETP.outDmg.clear();
+  sp.job = null;
+  try { if (sp.group.parent) sp.group.parent.remove(sp.group); } catch (_) {}
+  for (const ch of sp.chunks) { try { ch.mesh.geometry.dispose(); } catch (_) {} }
+  for (const m of sp.mats) { try { m.dispose(); } catch (_) {} }   // clones: their textures belong to the cached GLB
+  for (const f of sp.fires) _setpFireKill(f);
+  sp.chunks = []; sp.fires = []; sp.mats = [];
+}
+
+function* _setpExtractG(root) {
+  root.updateMatrixWorld(true);
+  const meshes = [];
+  root.traverse(o => { if (o.isMesh && o.geometry && o.geometry.attributes && o.geometry.attributes.position) meshes.push(o); });
+  let nt = 0;
+  for (const m of meshes) { const g = m.geometry; nt += Math.floor((g.index ? g.index.count : g.attributes.position.count) / 3); }
+  const P = new Float32Array(nt * 9), N = new Float32Array(nt * 9), UV = new Float32Array(nt * 6), MI = new Uint8Array(nt), mats = [];
+  const v = new THREE.Vector3();
+  let t = 0;
+  for (const m of meshes) {
+    const g = m.geometry, pa = g.attributes.position, ua = g.attributes.uv || null, ix = g.index, nv = pa.count;
+    const src = Array.isArray(m.material) ? m.material[0] : m.material;
+    let mi = mats.indexOf(src);
+    if (mi < 0) { mi = mats.length; mats.push(src); }
+    const wp = new Float32Array(nv * 3);
+    for (let i = 0; i < nv; i++) {
+      v.fromBufferAttribute(pa, i);
+      if (m.isSkinnedMesh) m.applyBoneTransform(i, v);
+      v.applyMatrix4(m.matrixWorld);
+      wp[i * 3] = v.x; wp[i * 3 + 1] = v.y; wp[i * 3 + 2] = v.z;
+      if ((i & 8191) === 8191) yield;
+    }
+    const tg = new THREE.BufferGeometry();
+    tg.setAttribute('position', new THREE.BufferAttribute(wp, 3));
+    if (ix) tg.setIndex(ix);
+    tg.computeVertexNormals();
+    const wn = tg.attributes.normal.array;
+    const n = ix ? ix.count : nv;
+    for (let k = 0; k + 2 < n; k += 3) {
+      for (let j = 0; j < 3; j++) {
+        const vi = ix ? ix.getX(k + j) : k + j, o9 = t * 9 + j * 3, o6 = t * 6 + j * 2;
+        P[o9] = wp[vi * 3]; P[o9 + 1] = wp[vi * 3 + 1]; P[o9 + 2] = wp[vi * 3 + 2];
+        N[o9] = wn[vi * 3]; N[o9 + 1] = wn[vi * 3 + 1]; N[o9 + 2] = wn[vi * 3 + 2];
+        if (ua) { UV[o6] = ua.getX(vi); UV[o6 + 1] = ua.getY(vi); }
+      }
+      MI[t] = mi; t++;
+      if ((t & 16383) === 16383) yield;
+    }
+    yield;
+  }
+  return { P, N, UV, MI, mats, nt: t, H: null };
+}
+function _setpXform(X, M, from, to, pieceOf, piece) {
+  const e = M.elements, P = X.P, N = X.N;
+  for (let t = from; t < to; t++) {
+    if (pieceOf && pieceOf[t] !== piece) continue;
+    for (let j = 0; j < 3; j++) {
+      const o = t * 9 + j * 3, x = P[o], y = P[o + 1], z = P[o + 2], nx = N[o], ny = N[o + 1], nz = N[o + 2];
+      P[o] = e[0] * x + e[4] * y + e[8] * z + e[12]; P[o + 1] = e[1] * x + e[5] * y + e[9] * z + e[13]; P[o + 2] = e[2] * x + e[6] * y + e[10] * z + e[14];
+      let ax = e[0] * nx + e[4] * ny + e[8] * nz, ay = e[1] * nx + e[5] * ny + e[9] * nz, az = e[2] * nx + e[6] * ny + e[10] * nz;
+      const l = Math.hypot(ax, ay, az) || 1; N[o] = ax / l; N[o + 1] = ay / l; N[o + 2] = az / l;
+    }
+  }
+}
+
+function* _setpLeviG(sp, gltf) {
+  const root = gltf.scene, clips = gltf.animations || [];
+  let mixer = null;
+  try {
+    if (clips.length) {   // "frozen mid-pose": a random moment of a random clip
+      mixer = new THREE.AnimationMixer(root);
+      const clip = clips[Math.floor(sp.rnd() * clips.length) % clips.length];
+      mixer.clipAction(clip).play();
+      mixer.setTime(sp.rnd() * Math.max(0.01, clip.duration));
+      sp.clip = clip.name;
+    }
+  } catch (e) { console.warn('[setp] pose failed:', e); }
+  const X = yield* _setpExtractG(root);
+  try { if (mixer) { mixer.stopAllAction(); mixer.uncacheRoot(root); } } catch (_) {}
+  if (!X.nt) return;
+  const P = X.P, nC = X.nt * 3, step = Math.max(1, Math.floor(nC / 4000));
+  let mx = 0, my = 0, mz = 0, cnt = 0;
+  for (let i = 0; i < nC; i += step) { mx += P[i * 3]; my += P[i * 3 + 1]; mz += P[i * 3 + 2]; cnt++; }
+  mx /= cnt; my /= cnt; mz /= cnt;
+  let cxx = 0, cxy = 0, cxz = 0, cyy = 0, cyz = 0, czz = 0;
+  for (let i = 0; i < nC; i += step) {
+    const x = P[i * 3] - mx, y = P[i * 3 + 1] - my, z = P[i * 3 + 2] - mz;
+    cxx += x * x; cxy += x * y; cxz += x * z; cyy += y * y; cyz += y * z; czz += z * z;
+  }
+  const u = new THREE.Vector3(0.3, 1, 0.2).normalize();
+  for (let k = 0; k < 32; k++) {
+    const x = cxx * u.x + cxy * u.y + cxz * u.z, y = cxy * u.x + cyy * u.y + cyz * u.z, z = cxz * u.x + cyz * u.y + czz * u.z;
+    u.set(x, y, z).normalize();
+  }
+  if (sp.rnd() < 0.5) u.negate();   // head to the ceiling, or diving into the floor
+  const yaw = sp.rnd() * Math.PI * 2, spin = sp.rnd() * Math.PI * 2, H = sp.ceilY - sp.floorY;
+  const embed = Math.max(0, Math.min(0.25, +_setpK('embed')));
+  let th = (63 + sp.rnd() * 17) * Math.PI / 180, M = null, s = 1;
+  const R = new THREE.Matrix4(), q = new THREE.Quaternion(), q2 = new THREE.Quaternion(), d = new THREE.Vector3();
+  for (let tries = 0; tries < 6; tries++) {
+    d.set(Math.cos(th) * Math.sin(yaw), Math.sin(th), Math.cos(th) * Math.cos(yaw));
+    q.setFromUnitVectors(u, d); q2.setFromAxisAngle(d, spin); q.premultiply(q2);
+    R.makeRotationFromQuaternion(q);
+    const e = R.elements;
+    let y0 = Infinity, y1 = -Infinity, hx = 0;
+    for (let i = 0; i < nC; i += step) {
+      const x = P[i * 3] - mx, y = P[i * 3 + 1] - my, z = P[i * 3 + 2] - mz;
+      const ry = e[1] * x + e[5] * y + e[9] * z;
+      if (ry < y0) y0 = ry; if (ry > y1) y1 = ry;
+      const rx = e[0] * x + e[4] * y + e[8] * z, rz = e[2] * x + e[6] * y + e[10] * z;
+      hx = Math.max(hx, Math.hypot(rx, rz));
+    }
+    s = (H * (1 + 2 * embed)) / Math.max(1, y1 - y0);   // floor to ceiling, and a little of each
+    M = new THREE.Matrix4().makeTranslation(sp.cx, (sp.floorY + sp.ceilY) / 2 - s * (y0 + y1) / 2, sp.cz)
+      .multiply(new THREE.Matrix4().makeScale(s, s, s)).multiply(R).multiply(new THREE.Matrix4().makeTranslation(-mx, -my, -mz));
+    if (hx * s <= sp.roomR * 1.45 || th > 1.5) break;   // too wide for the hub: stand it straighter
+    th = Math.min(Math.PI / 2, th + 0.09);
+  }
+  _setpXform(X, M, 0, X.nt);
+  sp.scale = s; sp.tiltDeg = Math.round(th * 180 / Math.PI);
+  yield;
+  yield* _setpFinishG(sp, X, src => _setpStoneMat(src, sp.lite), 26000);
+}
+
+function* _setpWreckG(sp, gltf) {
+  const X = yield* _setpExtractG(gltf.scene);
+  if (!X.nt) return;
+  const P = X.P, nt = X.nt;
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+  for (let i = 0; i < nt * 9; i += 3) {
+    const x = P[i], y = P[i + 1], z = P[i + 2];
+    if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; if (z < z0) z0 = z; if (z > z1) z1 = z;
+  }
+  const L = Math.max(200, +_setpK('wreckLen')), s = L / Math.max(1e-6, x1 - x0), hullH = (y1 - y0) * s;
+  const xs = x0 + (x1 - x0) * (0.40 + 0.12 * sp.rnd());   // the break, 40-52% from the -X end
+  const B = new THREE.Vector3(xs, (y0 + y1) / 2, (z0 + z1) / 2);
+  const pieceOf = new Uint8Array(nt), heat = new Float32Array(nt * 3);
+  for (let t = 0; t < nt; t++) {
+    const o = t * 9, cx = (P[o] + P[o + 3] + P[o + 6]) / 3;
+    pieceOf[t] = cx < xs ? 0 : 1;
+    for (let j = 0; j < 3; j++) heat[t * 3 + j] = Math.exp(-Math.abs(P[o + j * 3] - xs) * s / Math.min(260, 0.11 * L));   // hottest at the break
+  }
+  const rad = Math.PI / 180, rr = () => sp.rnd() * 2 - 1;
+  const pitch = [(19 + 10 * sp.rnd()) * rad, (7 + 7 * sp.rnd()) * rad], roll = [rr() * 16 * rad, rr() * 11 * rad];
+  const gap = Math.max(0, +_setpK('wreckGap')) * (0.85 + 0.3 * sp.rnd()), sink = 0.14 * hullH;   // the gap is the spawn-to-spawn route
+  const yaw = sp.axis + rr() * 25 * rad;
+  const off = new THREE.Vector3(rr() * 60, 0, rr() * 60);
+  const Mw = new THREE.Matrix4().makeTranslation(sp.cx + off.x, 0, sp.cz + off.z).multiply(new THREE.Matrix4().makeRotationY(yaw));
+  for (let k = 0; k < 2; k++) {
+    const Mp = new THREE.Matrix4().makeRotationX(roll[k]).multiply(new THREE.Matrix4().makeRotationZ(pitch[k]))
+      .multiply(new THREE.Matrix4().makeScale(s, s, s)).multiply(new THREE.Matrix4().makeTranslation(-B.x, -B.y, -B.z));
+    _setpXform(X, Mp, 0, nt, pieceOf, k);
+    let ymin = Infinity;   // sit it on (and a little into) the floor
+    for (let t = 0; t < nt; t++) if (pieceOf[t] === k) for (let j = 0; j < 3; j++) ymin = Math.min(ymin, P[t * 9 + j * 3 + 1]);
+    const Mt = new THREE.Matrix4().copy(Mw).multiply(new THREE.Matrix4().makeTranslation((k ? 1 : -1) * gap / 2, sp.floorY - sink - ymin, 0));
+    _setpXform(X, Mt, 0, nt, pieceOf, k);
+    yield;
+  }
+  X.H = heat;
+  sp.pieceOf = pieceOf;
+  yield* _setpFinishG(sp, X, src => _setpScorchMat(src, sp.lite), 30000);
+  const ends = [[], []], tops = [];
+  const Nn = X.N;
+  for (let t = 0; t < nt; t += 7) {
+    const o = t * 9, h = (heat[t * 3] + heat[t * 3 + 1] + heat[t * 3 + 2]) / 3;
+    const p = [(P[o] + P[o + 3] + P[o + 6]) / 3, (P[o + 1] + P[o + 4] + P[o + 7]) / 3, (P[o + 2] + P[o + 5] + P[o + 8]) / 3];
+    if (h > 0.8) ends[pieceOf[t]].push(p);
+    else if (Nn[o + 1] > 0.6 && sp.rnd() < 0.02) tops.push(p);
+  }
+  const pick = (arr, n) => { const out = []; for (let i = 0; i < n && arr.length; i++) out.push(arr.splice(Math.floor(sp.rnd() * arr.length), 1)[0]); return out; };
+  const nEnd = sp.lite ? 1 : 2;
+  const spots = [...pick(ends[0], nEnd), ...pick(ends[1], nEnd), ...pick(tops, 2)];
+  if (+_setpK('fire')) for (let i = 0; i < spots.length; i++) {
+    const p = spots[i];
+    _setpFireAdd(sp, new THREE.Vector3(p[0], p[1], p[2]), i < 2 * nEnd ? (sp.lite ? 85 : 70) + 30 * sp.rnd() : (sp.lite ? 50 : 45) + 20 * sp.rnd(), Infinity);
+  }
+}
+
+function* _setpFinishG(sp, X, matFor, hpTotal) {
+  const P = X.P, nt = X.nt, rnd = sp.rnd;
+  const K = Math.max(6, Math.min(60, Math.round(+_setpK('chunks'))));
+  const cen = new Float32Array(nt * 3), area = new Float32Array(nt);
+  for (let t = 0; t < nt; t++) {
+    const o = t * 9;
+    cen[t * 3] = (P[o] + P[o + 3] + P[o + 6]) / 3; cen[t * 3 + 1] = (P[o + 1] + P[o + 4] + P[o + 7]) / 3; cen[t * 3 + 2] = (P[o + 2] + P[o + 5] + P[o + 8]) / 3;
+    const ax = P[o + 3] - P[o], ay = P[o + 4] - P[o + 1], az = P[o + 5] - P[o + 2], bx = P[o + 6] - P[o], by = P[o + 7] - P[o + 1], bz = P[o + 8] - P[o + 2];
+    area[t] = 0.5 * Math.hypot(ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx);
+  }
+  yield;
+  const S = Math.min(nt, 2400), sub = new Uint32Array(S);
+  for (let i = 0; i < S; i++) sub[i] = Math.floor(rnd() * nt) % nt;
+  const seeds = new Float32Array(K * 3), best = new Float32Array(S).fill(Infinity);
+  let pick = sub[0];
+  for (let k = 0; k < K; k++) {
+    seeds[k * 3] = cen[pick * 3]; seeds[k * 3 + 1] = cen[pick * 3 + 1]; seeds[k * 3 + 2] = cen[pick * 3 + 2];
+    let far = -1, fi = 0;
+    for (let i = 0; i < S; i++) {
+      const t = sub[i], dx = cen[t * 3] - seeds[k * 3], dy = cen[t * 3 + 1] - seeds[k * 3 + 1], dz = cen[t * 3 + 2] - seeds[k * 3 + 2];
+      const dd = dx * dx + dy * dy + dz * dz;
+      if (dd < best[i]) best[i] = dd;
+      if (best[i] > far) { far = best[i]; fi = i; }
+    }
+    pick = sub[fi];
+  }
+  const nearest = (x, y, z) => {
+    let bi = 0, bd = Infinity;
+    for (let k = 0; k < K; k++) { const dx = x - seeds[k * 3], dy = y - seeds[k * 3 + 1], dz = z - seeds[k * 3 + 2], dd = dx * dx + dy * dy + dz * dz; if (dd < bd) { bd = dd; bi = k; } }
+    return bi;
+  };
+  { const acc = new Float64Array(K * 4);
+    for (let i = 0; i < S; i++) { const t = sub[i], k = nearest(cen[t * 3], cen[t * 3 + 1], cen[t * 3 + 2]); acc[k * 4] += cen[t * 3]; acc[k * 4 + 1] += cen[t * 3 + 1]; acc[k * 4 + 2] += cen[t * 3 + 2]; acc[k * 4 + 3]++; }
+    for (let k = 0; k < K; k++) if (acc[k * 4 + 3] > 0) { seeds[k * 3] = acc[k * 4] / acc[k * 4 + 3]; seeds[k * 3 + 1] = acc[k * 4 + 1] / acc[k * 4 + 3]; seeds[k * 3 + 2] = acc[k * 4 + 2] / acc[k * 4 + 3]; } }
+  const asg = new Uint8Array(nt);
+  for (let t = 0; t < nt; t++) { asg[t] = nearest(cen[t * 3], cen[t * 3 + 1], cen[t * 3 + 2]); if ((t & 8191) === 8191) yield; }
+  const mats = X.mats.map(m => { const mm = matFor(m); sp.mats.push(mm); return mm; });
+  const counts = new Uint32Array(K), areaK = new Float64Array(K);
+  for (let t = 0; t < nt; t++) { counts[asg[t]]++; areaK[asg[t]] += area[t]; }
+  let areaAll = 0; for (let k = 0; k < K; k++) areaAll += areaK[k];
+  const lists = []; for (let k = 0; k < K; k++) lists.push(new Uint32Array(counts[k]));
+  const fill = new Uint32Array(K);
+  for (let t = 0; t < nt; t++) { const k = asg[t]; lists[k][fill[k]++] = t; }
+  const hpMul = Math.max(0.05, +_setpK('hp'));
+  const remap = new Int16Array(K).fill(-1);
+  for (let k = 0; k < K; k++) {
+    const L = lists[k], n = L.length;
+    if (!n) continue;
+    L.sort((a, b) => X.MI[a] - X.MI[b]);
+    const pos = new Float32Array(n * 9), nrm = new Float32Array(n * 9), uv = new Float32Array(n * 6), ht = X.H ? new Float32Array(n * 3) : null;
+    let sx = 0, sy = 0, sz = 0, sw = 0;
+    for (let i = 0; i < n; i++) {
+      const t = L[i];
+      pos.set(P.subarray(t * 9, t * 9 + 9), i * 9); nrm.set(X.N.subarray(t * 9, t * 9 + 9), i * 9); uv.set(X.UV.subarray(t * 6, t * 6 + 6), i * 6);
+      if (ht) ht.set(X.H.subarray(t * 3, t * 3 + 3), i * 3);
+      const w = area[t] + 1e-6; sx += cen[t * 3] * w; sy += cen[t * 3 + 1] * w; sz += cen[t * 3 + 2] * w; sw += w;
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
+    geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+    if (ht) geo.setAttribute('aHeat', new THREE.BufferAttribute(ht, 1));
+    let g0 = 0;
+    for (let i = 1; i <= n; i++) if (i === n || X.MI[L[i]] !== X.MI[L[g0]]) { geo.addGroup(g0 * 3, (i - g0) * 3, X.MI[L[g0]]); g0 = i; }
+    geo.computeBoundingSphere();
+    const mesh = new THREE.Mesh(geo, mats);
+    mesh.matrixAutoUpdate = false; mesh.castShadow = false; mesh.receiveShadow = false;
+    sp.group.add(mesh);
+    const c = new THREE.Vector3(sx / sw, sy / sw, sz / sw);
+    let r = 0; for (let i = 0; i < n * 3; i++) { const dx = pos[i * 3] - c.x, dy = pos[i * 3 + 1] - c.y, dz = pos[i * 3 + 2] - c.z; r = Math.max(r, dx * dx + dy * dy + dz * dz); }
+    const hp = Math.max(300, hpTotal * hpMul * areaK[k] / Math.max(1e-6, areaAll));
+    remap[k] = sp.chunks.length;
+    sp.chunks.push({ i: sp.chunks.length, mesh, c, r: Math.sqrt(r), hp, max: hp, alive: true, fxT: 0 });
+    yield;
+  }
+  for (let t = 0; t < nt; t++) asg[t] = remap[asg[t]] + 1;   // owner ids (chunk index + 1) for the grid
+  yield* _setpGridMakeG(sp, X, asg);
+  sp.ready = true;
+  sp.buildMs = Math.round(performance.now() - sp.t0);
+  console.log('[setp] ' + sp.kind + ' (' + sp.model + ') built: ' + nt + ' tris, ' + sp.chunks.length + ' chunks, grid ' + sp.grid.nx + 'x' + sp.grid.ny + 'x' + sp.grid.nz + ' @ ' + Math.round(sp.grid.cs) + 'u, ' + sp.buildMs + ' ms');
+  if (sp.pend) { for (const i of sp.pend) _setpBreak(sp, i, false); sp.pend = null; }
+  if (sp.pendDmg) { for (const r of sp.pendDmg) if (Array.isArray(r)) _setpHitChunk(r[0] | 0, +r[1], null, true); sp.pendDmg = null; }
+  if (_SETP.manifest && _SETP.manifest.g === sp.g) _setpApplyManifest(_SETP.manifest);
+}
+function* _setpGridMakeG(sp, X, owner) {
+  const P = X.P, nt = X.nt;
+  let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
+  for (let i = 0; i < nt * 9; i += 3) {
+    const x = P[i], y = P[i + 1], z = P[i + 2];
+    if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; if (z < z0) z0 = z; if (z > z1) z1 = z;
+  }
+  const cs = Math.max(16, Math.max(x1 - x0, y1 - y0, z1 - z0) / 56);
+  const nx = Math.ceil((x1 - x0) / cs) + 5, ny = Math.ceil((y1 - y0) / cs) + 5, nz = Math.ceil((z1 - z0) / cs) + 5;
+  const G = { o: [x0 - 2.5 * cs, y0 - 2.5 * cs, z0 - 2.5 * cs], cs, nx, ny, nz, own: new Uint8Array(nx * ny * nz), dist: new Float32Array(nx * ny * nz) };
+  const own = G.own, ics = 1 / cs;
+  const mark = (x, y, z, id) => {
+    const i = Math.floor((x - G.o[0]) * ics), j = Math.floor((y - G.o[1]) * ics), k = Math.floor((z - G.o[2]) * ics);
+    if (i >= 0 && j >= 0 && k >= 0 && i < nx && j < ny && k < nz) own[i + nx * (j + ny * k)] = id;
+  };
+  for (let t = 0; t < nt; t++) {
+    const o = t * 9, id = owner[t];
+    const ax = P[o], ay = P[o + 1], az = P[o + 2], bx = P[o + 3] - ax, by = P[o + 4] - ay, bz = P[o + 5] - az, cx = P[o + 6] - ax, cy = P[o + 7] - ay, cz = P[o + 8] - az;
+    const m = Math.min(24, Math.ceil(Math.max(Math.hypot(bx, by, bz), Math.hypot(cx, cy, cz), Math.hypot(bx - cx, by - cy, bz - cz)) * ics * 2));
+    if (m <= 1) { mark(ax + (bx + cx) / 3, ay + (by + cy) / 3, az + (bz + cz) / 3, id); mark(ax, ay, az, id); continue; }
+    for (let a = 0; a <= m; a++) for (let b = 0; a + b <= m; b++) { const u = a / m, w = b / m; mark(ax + bx * u + cx * w, ay + by * u + cy * w, az + bz * u + cz * w, id); }
+    if ((t & 8191) === 8191) yield;
+  }
+  sp.grid = G;
+  _setpGridMeasure(G);
+}
+function _setpGridMeasure(G) {
+  const { nx, ny, nz, own, dist } = G, N = nx * ny * nz, out = new Uint8Array(N), q = new Int32Array(N);
+  let qh = 0, qt = 0;
+  const push = (i) => { if (!out[i] && !own[i]) { out[i] = 1; q[qt++] = i; } };
+  for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++)
+    if (i === 0 || j === 0 || k === 0 || i === nx - 1 || j === ny - 1 || k === nz - 1) push(i + nx * (j + ny * k));
+  const sxy = nx * ny;
+  while (qh < qt) {
+    const c = q[qh++], i = c % nx, j = ((c / nx) | 0) % ny, k = (c / sxy) | 0;
+    if (i > 0) push(c - 1); if (i < nx - 1) push(c + 1);
+    if (j > 0) push(c - nx); if (j < ny - 1) push(c + nx);
+    if (k > 0) push(c - sxy); if (k < nz - 1) push(c + sxy);
+  }
+  for (let c = 0; c < N; c++) dist[c] = out[c] ? 1e6 : 0;
+  const offs = [], ws = [];
+  for (let dk = -1; dk <= 0; dk++) for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
+    if (dk === 0 && (dj > 0 || (dj === 0 && di >= 0))) continue;
+    offs.push(di + nx * (dj + ny * dk)); ws.push(Math.sqrt(Math.abs(di) + Math.abs(dj) + Math.abs(dk)));
+  }
+  const no = offs.length;
+  for (let k = 1; k < nz - 1; k++) for (let j = 1; j < ny - 1; j++) { const row = nx * (j + ny * k);
+    for (let i = 1; i < nx - 1; i++) { const c = row + i; let d = dist[c]; if (d === 0) continue;
+      for (let q2 = 0; q2 < no; q2++) { const v = dist[c + offs[q2]] + ws[q2]; if (v < d) d = v; }
+      dist[c] = d; } }
+  for (let k = nz - 2; k >= 1; k--) for (let j = ny - 2; j >= 1; j--) { const row = nx * (j + ny * k);
+    for (let i = nx - 2; i >= 1; i--) { const c = row + i; let d = dist[c]; if (d === 0) continue;
+      for (let q2 = 0; q2 < no; q2++) { const v = dist[c - offs[q2]] + ws[q2]; if (v < d) d = v; }
+      dist[c] = d; } }
+}
+function _setpSdf(G, x, y, z) {
+  const ics = 1 / G.cs, fx = (x - G.o[0]) * ics - 0.5, fy = (y - G.o[1]) * ics - 0.5, fz = (z - G.o[2]) * ics - 0.5;
+  if (fx < 0 || fy < 0 || fz < 0 || fx > G.nx - 1.001 || fy > G.ny - 1.001 || fz > G.nz - 1.001) {
+    const ox = Math.max(0, -fx, fx - (G.nx - 1.001)), oy = Math.max(0, -fy, fy - (G.ny - 1.001)), oz = Math.max(0, -fz, fz - (G.nz - 1.001));
+    return (Math.hypot(ox, oy, oz) + 2) * G.cs;   // outside the box: at least the two-voxel margin away
+  }
+  const i = fx | 0, j = fy | 0, k = fz | 0, u = fx - i, v = fy - j, w = fz - k, nx = G.nx, sxy = nx * G.ny, D = G.dist, c = i + nx * j + sxy * k;
+  const d00 = D[c] + (D[c + 1] - D[c]) * u, d10 = D[c + nx] + (D[c + nx + 1] - D[c + nx]) * u;
+  const d01 = D[c + sxy] + (D[c + sxy + 1] - D[c + sxy]) * u, d11 = D[c + sxy + nx] + (D[c + sxy + nx + 1] - D[c + sxy + nx]) * u;
+  const dd = (d00 + (d10 - d00) * v) + ((d01 + (d11 - d01) * v) - (d00 + (d10 - d00) * v)) * w;
+  return (Math.min(dd, 64) - 0.5) * G.cs;
+}
+function _setpGrad(G, x, y, z, out) {
+  const h = 0.6 * G.cs;
+  out.set(_setpSdf(G, x + h, y, z) - _setpSdf(G, x - h, y, z), _setpSdf(G, x, y + h, z) - _setpSdf(G, x, y - h, z), _setpSdf(G, x, y, z + h) - _setpSdf(G, x, y, z - h));
+  if (out.lengthSq() < 1e-8) out.set(0, 1, 0); else out.normalize();
+  return out;
+}
+function _setpOwnerNear(G, x, y, z) {
+  const ics = 1 / G.cs, ci = Math.floor((x - G.o[0]) * ics), cj = Math.floor((y - G.o[1]) * ics), ck = Math.floor((z - G.o[2]) * ics);
+  let best = -1, bd = Infinity;
+  for (let dk = -2; dk <= 2; dk++) for (let dj = -2; dj <= 2; dj++) for (let di = -2; di <= 2; di++) {
+    const i = ci + di, j = cj + dj, k = ck + dk;
+    if (i < 0 || j < 0 || k < 0 || i >= G.nx || j >= G.ny || k >= G.nz) continue;
+    const o = G.own[i + G.nx * (j + G.ny * k)];
+    if (!o) continue;
+    const d = di * di + dj * dj + dk * dk;
+    if (d < bd) { bd = d; best = o - 1; }
+  }
+  return best;
+}
+
+const _setpV = new THREE.Vector3();
+function _setpRayHit(o, d, maxDist) {
+  const H = _SETP ? _SETP.hit : null, sp = _SETP ? _SETP.cur : null;
+  if (!H) return Infinity;
+  H.ok = false; _SETP.nCall++;
+  if (!sp || !sp.ready || !sp.grid || !(maxDist > 0)) return Infinity;
+  const G = sp.grid;
+  let t0 = 0, t1 = maxDist;
+  for (let a = 0; a < 3; a++) {
+    const oa = a === 0 ? o.x : a === 1 ? o.y : o.z, da = a === 0 ? d.x : a === 1 ? d.y : d.z;
+    const lo = G.o[a], hi = G.o[a] + (a === 0 ? G.nx : a === 1 ? G.ny : G.nz) * G.cs;
+    if (Math.abs(da) < 1e-9) { if (oa < lo || oa > hi) return Infinity; continue; }
+    let ta = (lo - oa) / da, tb = (hi - oa) / da;
+    if (ta > tb) { const s = ta; ta = tb; tb = s; }
+    if (ta > t0) t0 = ta; if (tb < t1) t1 = tb;
+    if (t0 > t1) return Infinity;
+  }
+  let t = t0;
+  _SETP.nRay++;
+  for (let k = 0; k < 200 && t <= t1; k++) {
+    _SETP.nStep++;
+    const px = o.x + d.x * t, py = o.y + d.y * t, pz = o.z + d.z * t, s = _setpSdf(G, px, py, pz);
+    if (s < 0.3 * G.cs) {
+      H.ok = true; H.d = t; H.p.set(px, py, pz); H.ci = _setpOwnerNear(G, px, py, pz);
+      _setpGrad(G, px, py, pz, H.n);
+      return t;
+    }
+    t += Math.max(s * 0.9, 0.35 * G.cs);
+  }
+  return Infinity;
+}
+function _setpWallChunk(wallDist) {
+  const H = _SETP ? _SETP.hit : null;
+  return (H && H.ok && H.d === wallDist) ? H.ci : -1;
+}
+const _setpN = new THREE.Vector3();
+function _setpCollide(pos, vel, radius) {
+  const sp = _SETP ? _SETP.cur : null;
+  if (!sp || !sp.ready || !sp.grid || !pos) return;
+  const G = sp.grid, s = _setpSdf(G, pos.x, pos.y, pos.z);
+  if (s >= radius) return;
+  _setpGrad(G, pos.x, pos.y, pos.z, _setpN);
+  pos.addScaledVector(_setpN, radius - s);
+  if (vel) { const vn = vel.x * _setpN.x + vel.y * _setpN.y + vel.z * _setpN.z; if (vn < 0) vel.addScaledVector(_setpN, -vn * 1.25); }
+}
+function _setpHitChunk(ci, dmg, p, remote) {
+  const sp = _SETP ? _SETP.cur : null;
+  if (!sp || !sp.ready) return;
+  const ch = sp.chunks[ci];
+  if (!ch || !ch.alive || !(dmg > 0)) return;
+  ch.hp -= dmg;
+  if (!remote && typeof net !== 'undefined' && net && net.active) _SETP.outDmg.set(ci, (_SETP.outDmg.get(ci) || 0) + dmg);
+  const now = performance.now();
+  if (p && now - ch.fxT > 70) {
+    ch.fxT = now;
+    try {
+      if (sp.kind === 'wreck') spawnImpactSparks(p, 5);
+      else _setpDust(p, 26 + Math.random() * 18, 0x7c756a, 0.45, 1.6);
+    } catch (_) {}
+  }
+  if (ch.hp <= 0) _setpBreak(sp, ci, true);
+}
+function _setpSplash(pos, radius, dmg) {
+  const sp = _SETP ? _SETP.cur : null;
+  if (!sp || !sp.ready || !pos || !(radius > 0) || !(dmg > 0)) return;
+  for (const ch of sp.chunks) {
+    if (!ch.alive) continue;
+    const d = pos.distanceTo(ch.c) - ch.r * 0.6;
+    if (d < radius) _setpHitChunk(ch.i, dmg * (1 - Math.max(0, d) / radius), pos);
+  }
+}
+function _setpShotProbe(origin, dir, maxDist) {
+  const d = _setpRayHit(origin, dir, maxDist + 2);
+  if (!(d <= maxDist + 2) || _SETP.hit.ci < 0) return null;
+  const ci = _SETP.hit.ci, p = _SETP.hit.p.clone();
+  return { proj: d, obj: { alive: true, name: 'SetPiece', position: p, collisionRadius: 1, takeDamage(dmg) { _setpHitChunk(ci, dmg, p); return 0; } } };
+}
+function _setpClearSpot(pos, clear) {
+  const sp = _SETP ? _SETP.cur : null;
+  if (!sp || !sp.ready || !sp.grid || !pos) return;
+  const G = sp.grid, ok = (x, y, z) => _setpSdf(G, x, y, z) > clear && (typeof worldSDF !== 'function' || worldSDF(x, y, z) < -150);
+  if (ok(pos.x, pos.y, pos.z)) return;
+  for (const dy of [250, 400, 550, 700, 850]) if (ok(pos.x, pos.y + dy, pos.z)) { pos.y += dy; return; }
+  for (let r = 250; r <= 700; r += 150) for (let a = 0; a < 12; a++) for (const dy of [0, 300, 600]) {
+    const x = pos.x + Math.cos(a * Math.PI / 6) * r, z = pos.z + Math.sin(a * Math.PI / 6) * r;
+    if (ok(x, pos.y + dy, z)) { pos.set(x, pos.y + dy, z); return; }
+  }
+}
+
+function _setpBreak(sp, i, broadcast, quiet) {
+  const ch = sp && sp.chunks[i];
+  if (!ch || !ch.alive) return;
+  ch.alive = false; ch.hp = 0; sp.broken++;
+  ch.mesh.visible = false;
+  const G = sp.grid;
+  if (G) { const id = i + 1, own = G.own; for (let c = 0; c < own.length; c++) if (own[c] === id) own[c] = 0; sp.gridDirty = true; }
+  const c = ch.c, big = Math.min(70, 12 + ch.r * 0.12);
+  if (!quiet) try {
+    if (sp.kind === 'wreck') {
+      spawnExplosion(c, big);
+      if (typeof _spawnExplosionFireCloud === 'function') _spawnExplosionFireCloud(c, big * 0.8);
+      if (typeof v8SpawnDebris === 'function') v8SpawnDebris(c, 12, Math.max(6, ch.r * 0.05), 1.2);
+      if (+_setpK('fire') && sp.fires.length < 12) _setpFireAdd(sp, c.clone(), 40 + Math.min(50, ch.r * 0.25), 9 + Math.random() * 6);
+    } else {
+      for (let k = 0; k < 3; k++) spawnRockChunks(c.clone().add(new THREE.Vector3((Math.random() - 0.5) * ch.r * 0.5, (Math.random() - 0.5) * ch.r * 0.5, (Math.random() - 0.5) * ch.r * 0.5)), 0x6e675d, Math.min(120, ch.r * 0.45));
+      for (let k = 0; k < 4; k++) _setpDust(c.clone().add(new THREE.Vector3((Math.random() - 0.5) * ch.r * 0.6, (Math.random() - 0.5) * ch.r * 0.4, (Math.random() - 0.5) * ch.r * 0.6)), 50 + ch.r * 0.18, 0x6d675e, 0.5, 3.2);
+      if (typeof playSpatialSound === 'function') playSpatialSound('explosion', c.clone(), { refDistance: 400, maxDistance: 6000 });
+      if (typeof applyExplosionPush === 'function') applyExplosionPush(c, 60 + big * 3, 260 + big * 10);
+    }
+  } catch (_) {}
+  if (broadcast && typeof net !== 'undefined' && net && net.active && net.sendEvent) {
+    try { net.sendEvent({ type: 'setp_brk', g: sp.g, i }); } catch (_) {}
+  }
+}
+function _setpOnNet(evt) {
+  const sp = _SETP ? _SETP.cur : null;
+  if (!sp || !evt || evt.g !== sp.g) return;
+  if (evt.type === 'setp_dmg') {   // (51.91) a peer's own hits, pooled into this tally
+    if (!Array.isArray(evt.d)) return;
+    if (!sp.ready) { (sp.pendDmg || (sp.pendDmg = [])).push(...evt.d); return; }
+    for (const r of evt.d) if (Array.isArray(r)) _setpHitChunk(r[0] | 0, +r[1], null, true);
+    return;
+  }
+  if (typeof evt.i !== 'number') return;
+  if (!sp.ready) { (sp.pend || (sp.pend = [])).push(evt.i | 0); return; }   // still building here: break it when built
+  _setpBreak(sp, evt.i | 0, false);
+}
+function _setpSerialize() {
+  const sp = _SETP ? _SETP.cur : null;
+  if (!sp || !sp.ready) return null;
+  return { g: sp.g, hp: sp.chunks.map(c => c.alive ? Math.max(1, Math.round(c.hp)) : 0) };
+}
+function _setpApplyManifest(m) {
+  if (!m || !Array.isArray(m.hp)) return;
+  const sp = _SETP ? _SETP.cur : null;
+  if (!sp || sp.g !== m.g || !sp.ready) { _SETP.manifest = m; return; }   // not built here yet: _setpFinishG applies it
+  _SETP.manifest = null;
+  for (let i = 0; i < m.hp.length && i < sp.chunks.length; i++) {
+    const ch = sp.chunks[i];
+    if (!ch.alive) continue;
+    if (!(m.hp[i] > 0)) _setpBreak(sp, i, false, true);   // broke before you came: no debris for it
+    else ch.hp = Math.min(ch.hp, m.hp[i]);
+  }
+}
+
+const _SETP_NOISE = `
+float spH(vec3 p){ p=fract(p*0.3183099+0.1); p*=17.0; return fract(p.x*p.y*p.z*(p.x+p.y+p.z)); }
+float spN(vec3 x){ vec3 i=floor(x), f=fract(x); f=f*f*(3.0-2.0*f);
+  return mix(mix(mix(spH(i),spH(i+vec3(1,0,0)),f.x), mix(spH(i+vec3(0,1,0)),spH(i+vec3(1,1,0)),f.x), f.y),
+             mix(mix(spH(i+vec3(0,0,1)),spH(i+vec3(1,0,1)),f.x), mix(spH(i+vec3(0,1,1)),spH(i+vec3(1,1,1)),f.x), f.y), f.z); }
+float spF(vec3 p){ return 0.55*spN(p)+0.3*spN(p*2.03+3.1)+0.15*spN(p*4.1+7.7); }`;
+const _SETP_TERR_GLSL = `
+float _spthsh(vec2 p){ return fract(sin(p.x*127.1+p.y*311.7)*43758.5453); }
+float _sptvn(vec2 p){ vec2 i=floor(p), f=fract(p); vec2 u=f*f*(3.0-2.0*f);
+  float a=_spthsh(i), b=_spthsh(i+vec2(1.0,0.0)), c=_spthsh(i+vec2(0.0,1.0)), d=_spthsh(i+vec2(1.0,1.0));
+  return mix(mix(a,b,u.x), mix(c,d,u.x), u.y)*2.0-1.0; }
+vec3 _sptTri(sampler2D t, vec3 mn, vec3 wp, vec3 n, vec3 gx, vec3 gy, float tile, float k){ if(k<0.001) return vec3(1.0);
+  vec3 w=pow(abs(n),vec3(4.0)); w/=max(w.x+w.y+w.z,1e-4); float s=1.0/tile; vec3 c=vec3(0.0); float ws=0.0;
+  if(w.x>0.03){ c+=w.x*textureGrad(t,wp.zy*s+vec2(0.31,0.17),gx.zy*s,gy.zy*s).rgb; ws+=w.x; }
+  if(w.y>0.03){ c+=w.y*textureGrad(t,wp.xz*s,gx.xz*s,gy.xz*s).rgb; ws+=w.y; }
+  if(w.z>0.03){ c+=w.z*textureGrad(t,wp.xy*s+vec2(0.59,0.43),gx.xy*s,gy.xy*s).rgb; ws+=w.z; }
+  c/=max(ws,1e-4); vec3 W=vec3(0.2126,0.7152,0.0722); float lr=dot(c,W)/max(dot(mn,W),1e-3); vec3 r=c/max(mn,vec3(1e-3));
+  return mix(vec3(1.0), mix(vec3(lr),r,uTexChroma), k); }`;
+function _setpStoneMat(src, lite) {
+  const m = new THREE.MeshStandardMaterial({ map: (src && src.map) || null, side: THREE.DoubleSide, roughness: 0.95, metalness: 0.0 });
+  m.onBeforeCompile = (sh) => {
+    for (const k of ['uColRock', 'uTexRock', 'uTexMeanR', 'uTexK2', 'uTexK3', 'uTexBio', 'uStrata', 'uTexChroma', 'uCrystal', 'uTime', 'uSlopeRock', 'uSlopeGrass'])
+      sh.uniforms[k] = (typeof _swU !== 'undefined' && _swU[k]) ? _swU[k] : { value: 0 };
+    sh.vertexShader = 'varying vec3 vSpW; varying vec3 vSpN;\n' + sh.vertexShader
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\n vSpW = (modelMatrix * vec4(transformed, 1.0)).xyz; vSpN = normalize(mat3(modelMatrix) * objectNormal);');
+    sh.fragmentShader = 'varying vec3 vSpW; varying vec3 vSpN;\n'
+      + 'uniform vec3 uColRock, uTexMeanR; uniform sampler2D uTexRock; uniform vec4 uTexK2, uTexK3, uTexBio;\n'
+      + 'uniform float uStrata, uTexChroma, uCrystal, uTime, uSlopeRock, uSlopeGrass;\n' + _SETP_TERR_GLSL + '\n' + sh.fragmentShader
+      .replace('#include <map_fragment>', `#include <map_fragment>
+  { vec3 fn = normalize(vSpN);
+    float lum = dot(diffuseColor.rgb, vec3(0.299, 0.587, 0.114));
+    // the terrain's rock, term for term (vWPos -> vSpW, uCam -> cameraPosition)
+    float rkA=_sptvn(vSpW.xz*0.045+vec2(vSpW.y*0.03)), rkB=_sptvn(vSpW.xz*0.12+vec2(13.0,7.0)), rkC=_sptvn(vSpW.xz*0.30+vec2(vSpW.y*0.05,0.0));
+    float rockMott=clamp(0.5+0.5*(rkA*0.55+rkB*0.3+rkC*0.15),0.0,1.0);
+    float strata=0.5+0.5*sin(vSpW.y*0.05+_sptvn(vSpW.xz*0.025)*3.0);
+    float tF2=1.0-smoothstep(uTexK3.y,uTexK3.z,length(cameraPosition.xz-vSpW.xz));
+    float tkR=clamp(uTexK2.x*tF2*uTexBio.y,0.0,1.0);
+    vec3 rock=uColRock*(0.70+0.55*mix(rockMott,0.5,tkR*0.85))*(1.0-uStrata*0.57+uStrata*strata);
+    rock*=_sptTri(uTexRock,uTexMeanR,vSpW,fn,dFdx(vSpW),dFdy(vSpW),uTexK2.w,tkR);
+    rock*=mix(1.0, 0.72+0.56*lum, 0.45);          // the creature's own markings, as relief in the rock
+    if (!gl_FrontFacing) rock *= 0.4;             // a broken chunk's inside
+    diffuseColor.rgb = rock; }`)
+      .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+  if (uCrystal > 0.02) {   // the crystal caverns' glints, term for term
+    float cfl=clamp((abs(normalize(vSpN).y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0);
+    float cA=_sptvn(vSpW.xz*0.02+vec2(vSpW.y*0.06,4.0))*0.5+_sptvn(vSpW.xz*0.05+vec2(13.0,17.0))*0.3+_sptvn(vSpW.xz*0.12+vec2(5.0,9.0))*0.2;
+    float cryst=smoothstep(0.62,0.82,0.5+0.5*cA);
+    float facet=smoothstep(0.80,0.97,0.5+0.5*_sptvn(vSpW.xz*0.7+vec2(vSpW.y*0.15,0.0)));
+    float twinkle=0.6+0.4*sin(uTime*1.6+cA*9.0+vSpW.y*0.04);
+    vec3 crysCol=mix(vec3(0.25,0.85,1.2),vec3(0.7,0.4,1.3),0.5+0.5*sin(uTime*0.5+cA*4.0+vSpW.x*0.01));
+    totalEmissiveRadiance+=crysCol*(cryst*0.30+facet*1.3*cryst)*twinkle*(1.0-cfl*0.6)*uCrystal; }`);
+  };
+  m.customProgramCacheKey = () => 'setpRock' + (m.map ? 'M' : '');
+  return m;
+}
+function _setpScorchMat(src, lite) {
+  const m = (src && src.isMaterial) ? src.clone() : new THREE.MeshStandardMaterial({ color: 0x6a6e74 });
+  m.side = THREE.DoubleSide;
+  if ('roughness' in m) m.roughness = Math.max(0.75, m.roughness || 0);
+  if ('metalness' in m) m.metalness = Math.min(0.5, m.metalness || 0);
+  m.onBeforeCompile = (sh) => {
+    sh.uniforms.uSpT = _SETP.uT;
+    const pre = lite ? '#define SP_LITE\n' : '';
+    sh.vertexShader = pre + 'attribute float aHeat; varying float vHeat; varying vec3 vSpW; varying vec2 vSpS;\n' + _SETP_NOISE + '\n' + sh.vertexShader
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\n vHeat = aHeat; vSpW = (modelMatrix * vec4(transformed, 1.0)).xyz;\n#ifdef SP_LITE\n vSpS = vec2(spF(vSpW * 0.004), spF(vSpW * 0.018));\n#else\n vSpS = vec2(0.0);\n#endif');
+    sh.fragmentShader = pre + 'varying float vHeat; varying vec3 vSpW; varying vec2 vSpS; uniform float uSpT;\n' + _SETP_NOISE + '\n' + sh.fragmentShader
+      .replace('#include <map_fragment>', `#include <map_fragment>
+  {
+#ifdef SP_LITE
+    float s1 = vSpS.x, s2 = vSpS.y;
+#else
+    float s1 = spF(vSpW * 0.004), s2 = spF(vSpW * 0.018);
+#endif
+    float soot = clamp(0.2 + 0.5 * s1 + 0.6 * vHeat, 0.0, 1.0);
+    diffuseColor.rgb *= mix(1.0, 0.38, soot);
+    diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.06, 0.055, 0.05), smoothstep(0.6, 0.82, s2) * 0.55 * (0.4 + 0.6 * vHeat));
+    if (!gl_FrontFacing) diffuseColor.rgb *= 0.3; }`)
+      .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+  {
+#ifdef SP_LITE
+    float g = (vHeat > 0.02) ? smoothstep(0.45, 0.8, spN(vSpW * 0.009 + vec3(0.0, uSpT * 0.05, 0.0))) : 0.0;
+    float e = vHeat * vHeat * g * (0.65 + 0.35 * sin(uSpT * 4.0 + vSpS.x * 9.0));
+#else
+    float g = smoothstep(0.52, 0.78, spF(vSpW * 0.007 + vec3(0.0, uSpT * 0.05, 0.0)));
+    float e = vHeat * vHeat * g * (0.65 + 0.35 * sin(uSpT * 4.0 + spN(vSpW * 0.012) * 9.0));
+#endif
+    totalEmissiveRadiance += vec3(1.0, 0.36, 0.08) * e * 2.2 + diffuseColor.rgb * 0.2; }`);
+  };
+  m.customProgramCacheKey = () => 'setpScorch3' + (m.map ? 'M' : '') + (m.type || '') + (lite ? 'L' : '');
+  return m;
+}
+
+function _setpFireAdd(sp, p, r, life) {
+  let meshes = null;
+  try { meshes = _spawnFireCloudCluster(p, sp.lite ? { count: 2, radius: r, alpha: 0.62, rise: 1.7, oct: 4 } : { count: 3, radius: r, alpha: 0.62, rise: 1.7 }); } catch (_) {}
+  const f = { p, r, life, meshes: meshes || [], smokeT: Math.random() * 0.6, ph: Math.random() * 6.28 };
+  sp.fires.push(f);
+  return f;
+}
+function _setpFireKill(f) {
+  for (const m of (f.meshes || [])) { try { if (m.parent) m.parent.remove(m); m.material.dispose(); } catch (_) {} }
+  f.meshes = [];
+}
+function _setpDust(p, size, col, alpha, life) {
+  if (typeof _makeSmokeMaterial !== 'function' || typeof _SMOKE_GEO === 'undefined' || !game || !game.effects) return;
+  if (typeof isVRStripFx === 'function' && isVRStripFx()) return;
+  const mesh = new THREE.Mesh(_SMOKE_GEO, _makeSmokeMaterial(col, alpha));
+  mesh.position.copy(p); mesh.scale.setScalar(size); mesh.renderOrder = 1;
+  scene.add(mesh);
+  game.effects.push({ mesh, lifetime: life, age: 0, type: 'shaderSmoke', maxSize: 2.6, baseScale: size, alphaMul: alpha,
+    rotVel: new THREE.Vector3((Math.random() - 0.5) * 0.2, (Math.random() - 0.5) * 0.2, (Math.random() - 0.5) * 0.2),
+    drift: new THREE.Vector3((Math.random() - 0.5) * 30, 12 + Math.random() * 20, (Math.random() - 0.5) * 30) });
+}
+function _setpSmoke(f, lite) {
+  if (typeof _makeSmokeMaterial !== 'function' || typeof _SMOKE_GEO === 'undefined' || !game || !game.effects) return;
+  const mesh = new THREE.Mesh(_SMOKE_GEO, _makeSmokeMaterial(0x1b1917, 0.62));
+  const b = f.r * (0.65 + Math.random() * 0.35);
+  mesh.position.set(f.p.x + (Math.random() - 0.5) * f.r * 0.5, f.p.y + f.r * 0.7, f.p.z + (Math.random() - 0.5) * f.r * 0.5);
+  mesh.scale.setScalar(b); mesh.renderOrder = 1;
+  scene.add(mesh);
+  game.effects.push({ mesh, lifetime: lite ? 5 + Math.random() * 1.5 : 6 + Math.random() * 2.5, age: 0, type: 'shaderSmoke', maxSize: lite ? 3.2 : 4.4, baseScale: b, alphaMul: lite ? 0.55 : 0.5,
+    rotVel: new THREE.Vector3((Math.random() - 0.5) * 0.12, (Math.random() - 0.5) * 0.12, (Math.random() - 0.5) * 0.12),
+    drift: new THREE.Vector3((Math.random() - 0.5) * 24, 70 + Math.random() * 30, (Math.random() - 0.5) * 24) });
+}
+
+function _setpUpdate(dt) {
+  const sp = _SETP ? _SETP.cur : null;
+  if (!sp) return;
+  if (sp.job) {   // the build, a few ms a frame (a 120k-triangle carrier is ~150 ms of work in all)
+    const t0 = performance.now(), budget = (game.state === 'playing') ? Math.max(1, +_setpK('budget')) : 14;
+    try {
+      while (performance.now() - t0 < budget) { const r = sp.job.next(); if (r.done) { sp.job = null; break; } }
+    } catch (e) { console.warn('[setp] build failed:', e); sp.job = null; }
+    sp.workMs = (sp.workMs || 0) + (performance.now() - t0);
+  }
+  if (!sp.ready) return;
+  _SETP.perFrame = { calls: _SETP.nCall, rays: _SETP.nRay, steps: _SETP.nStep }; _SETP.nCall = _SETP.nRay = _SETP.nStep = 0;
+  _SETP.outT -= dt;
+  if (_SETP.outDmg.size && _SETP.outT <= 0) {
+    _SETP.outT = 0.15;
+    if (typeof net !== 'undefined' && net && net.active && net.sendEvent) {
+      const d = []; for (const [i, v] of _SETP.outDmg) d.push([i, Math.round(v)]);
+      try { net.sendEvent({ type: 'setp_dmg', g: sp.g, d }); } catch (_) {}
+    }
+    _SETP.outDmg.clear();
+  }
+  if (sp.gridDirty) { sp.gridDirty = false; _setpGridMeasure(sp.grid); }
+  const t = (game && game.time) || performance.now() / 1000;
+  _SETP.uT.value = t;
+  if (!sp.fires.length) return;
+  const smokeOn = +_setpK('smoke') > 0 && !(typeof isVRStripFx === 'function' && isVRStripFx());
+  for (let k = sp.fires.length - 1; k >= 0; k--) {
+    const f = sp.fires[k];
+    if (f.life !== Infinity) { f.life -= dt; if (f.life <= 0) { _setpFireKill(f); sp.fires.splice(k, 1); continue; } }
+    const fade = (f.life !== Infinity) ? Math.min(1, f.life / 3) : 1;
+    for (let j = 0; j < f.meshes.length; j++) {
+      const m = f.meshes[j], u = m.material && m.material.uniforms;
+      if (u) { u.time.value = t; u.uBaseAlpha.value = 0.62 * fade; }
+      m.scale.setScalar((m.userData._fcR || f.r) * (0.9 + 0.14 * Math.sin(t * (7 + j * 2.3) + f.ph + j)));
+    }
+    if (smokeOn && f.life === Infinity) { f.smokeT -= dt * +_setpK('smoke'); if (f.smokeT <= 0) { f.smokeT = sp.lite ? 1.4 + Math.random() * 0.6 : 0.75 + Math.random() * 0.5; _setpSmoke(f, sp.lite); } }
+  }
+  sp.lightT -= dt;
+  if (sp.lightT <= 0 && typeof spawnDynamicLight === 'function') {
+    sp.lightT = sp.lite ? 0.45 + Math.random() * 0.2 : 0.22 + Math.random() * 0.12;
+    const f = sp.fires[Math.floor(Math.random() * sp.fires.length)];
+    try { spawnDynamicLight(f.p, 0xff6a22, 2.2 + Math.random() * 1.4, 900, 0.36); } catch (_) {}
+  }
+}
+
+try {
+  window.__setpInfo = () => {
+    const sp = _SETP.cur;
+    if (!sp) return { on: false, map: (typeof game !== 'undefined' && game) ? game.selectedMap : null };
+    const alive = sp.chunks.filter(c => c.alive).length;
+    return { kind: sp.kind, model: sp.model, clip: sp.clip || null, g: sp.g, ready: sp.ready, building: !!sp.job, buildMs: sp.buildMs || null,
+      loadMs: sp.loadMs || null, workMs: sp.workMs ? Math.round(sp.workMs) : null, rays: _SETP.perFrame,
+      chunks: sp.chunks.length, alive, broken: sp.broken, fires: sp.fires.length, scale: sp.scale ? +sp.scale.toFixed(2) : null, tiltDeg: sp.tiltDeg || null,
+      floorY: Math.round(sp.floorY), ceilY: Math.round(sp.ceilY), centre: [Math.round(sp.cx), Math.round(sp.cz)],
+      grid: sp.grid ? [sp.grid.nx, sp.grid.ny, sp.grid.nz, Math.round(sp.grid.cs)] : null,
+      hp: sp.chunks.map(c => Math.max(0, Math.round(c.hp))) };
+  };
+  window.__setpBreak = (i) => { const sp = _SETP.cur; if (!sp || !sp.ready) return null; if (i === 'all') { for (const c of sp.chunks) _setpBreak(sp, c.i, true); } else _setpBreak(sp, i | 0, true); return sp.broken; };
+  window.__setpRebuild = () => { _setpBuild(); return _SETP.cur ? _SETP.cur.kind : null; };
+  window.__setpNet = (evt) => { if (evt && evt.hp) _setpApplyManifest(evt); else _setpOnNet(evt); return window.__setpInfo(); };
+  window.__setpManifest = () => _setpSerialize();
+} catch (_) {}
+
 function spawnDynamicObjects(rooms) {
   if (game.clusters) {
     for (const cluster of game.clusters) {
@@ -59221,7 +60064,7 @@ function spawnDynamicObjects(rooms) {
     }
     return true;
   };
-  const nonSpawnRooms = _lssHubWorld() ? [] : rooms.filter(r => !r.team);   // (v46.82) no obstacle clusters in the open overworld, race or free flight   
+  const nonSpawnRooms = _lssHubWorld() ? [] : rooms.filter(r => !r.team && !_setpClaimsRoom(r));   // (51.86) not in a set piece's room   // (v46.82) no obstacle clusters in the open overworld, race or free flight   
   for (const rm of nonSpawnRooms) {
     const count = rm.bend ? 1 : 2 + Math.floor(Math.random() * 2);
     for (let i = 0; i < count; i++) {
@@ -71416,6 +72259,7 @@ function commitLoadout(key) {
       buildRoomGraphLevel(level);
       spawnDynamicObjects(game.sdfRoomData);
       spawnOrganics(game.sdfRoomData);
+      try { _setpBuild(); } catch (e) { console.warn('[setp] build failed:', e); }   // (51.86) the cavern's centrepiece, if it has one
 
       const teamCode = _isAssault() ? _assaultSpawnSide(player.team) : (player.team === LSS.TEAM_FLEET_B ? 'B' : 'A');
       player.position.copy(_spawnPickSet(getValidSpawnPoint(teamCode)));
@@ -75774,6 +76618,10 @@ function fireHitscan(origin, dir, w) {
         bestObstDist = proj;
       }
     }
+  }
+  if (typeof _setpShotProbe === 'function') {
+    const _sq = _setpShotProbe(origin, aimDir, Math.min(w.range, levelDist));
+    if (_sq && _sq.proj < bestObstDist) { bestObstacle = _sq.obj; bestObstDist = _sq.proj; }
   }
   {
     const _tq = _tetherShotProbe(origin, aimDir, Math.min(w.range, levelDist));
@@ -80540,6 +81388,7 @@ function updateRoundSystem(dt) {
           spawnDynamicObjects(game.sdfRoomData);
           const _tB2 = _pbNow();
           spawnOrganics(game.sdfRoomData);
+          try { _setpBuild(); } catch (e) { console.warn('[setp] build failed:', e); }   // (51.86) a fresh one each round
           try {
             game._rrBuildMs = { parts: game._rrBuildParts || null, lvl: Math.round(_tB1 - _tB0), dyn: Math.round(_tB2 - _tB1),
                                 org: Math.round(_pbNow() - _tB2) };
@@ -80925,6 +81774,7 @@ function returnToRootMenu(opts) {
   const _keepRoom = !!(opts && opts.keepRoom);
   try { activeMode().onTeardown(); } catch (_) {}
   try { if (typeof _raceCircuitTeardown === 'function') _raceCircuitTeardown(); } catch (_) {}   // (v46.82) the lap, its cities, its HUD line
+  try { if (typeof _setpDispose === 'function') _setpDispose(); } catch (_) {}   // (51.86) nor a cavern's set piece
   try { if (typeof _swDisposeHubWater === 'function') _swDisposeHubWater(); } catch (_) {}   // (v44.43) no world's sea outlives its match: classic's teardown is empty, only free flight's disposed the water (idempotent after it)
   try { if (typeof LSS !== 'undefined') LSS.MODE = 'classic'; } catch (_) {}
   try { if (typeof net !== 'undefined' && net) net.roomMode = null; } catch (_) {}
@@ -90067,6 +90917,7 @@ function _refreshSettingsValues() {
     if (_hv) _hv.textContent = _hs.toFixed(2) + 'x';
   }
   setChk('set-show-fps', input.showFps);
+  try { setChk('set-wx2', _WX2.optedIn()); } catch (_) {}   // (51.83)
   {
     setSel('set-cockpit-solidity', String(_lssSolidityStep(input.cockpitSolidity)));
   }
@@ -90355,6 +91206,13 @@ function buildSettingsPage() {
           <option value="1" ${_lssLiteStored() === '1' ? 'selected' : ''}>On - phone-class graphics (lighter ships, simpler terrain, no shadows)</option>
           <option value="0" ${_lssLiteStored() === '0' ? 'selected' : ''}>Off - full desktop graphics</option>
         </select>
+      </div>
+      <!-- (51.83) the volumetric sky (_WX2) - owner: "this new weather could be a toggle in the performance settings (weather
+           on/off)". The overworld's simulated clouds, rain and city thunderstorm (desktop only; ~2.5-3 ms of GPU on the owner's
+           laptop); off = the lighter billboard sky. Live, and remembered (localStorage lss_wx2, the key ?wx2 always used). -->
+      <div class="setting-row" id="set-wx2-row" style="${(typeof _LSS_TOUCH_PHONE !== 'undefined' && _LSS_TOUCH_PHONE) ? 'display:none;' : ''}">
+        <label>Volumetric weather</label>
+        <input type="checkbox" id="set-wx2" ${(function(){ try { return _WX2.optedIn() ? 'checked' : ''; } catch (_) { return ''; } })()}>
       </div>
       <div class="setting-row">
         <label>Field of View</label>
@@ -91756,6 +92614,8 @@ function buildSettingsPage() {
       }
     } catch (_) {}
   });
+  const wx2Chk = overlay.querySelector('#set-wx2');
+  if (wx2Chk) wx2Chk.addEventListener('change', () => { try { _WX2.setEnabled(!!wx2Chk.checked); } catch (_) {} });
   const showFpsChk = overlay.querySelector('#set-show-fps');
   if (showFpsChk) showFpsChk.addEventListener('change', () => {
     input.showFps = !!showFpsChk.checked;
@@ -95261,8 +96121,10 @@ function serializeWorldObjects() {
 function broadcastWorldObjects(toPeerId) {
   if (!net.active || !net.sendEvent) return;
   if (!amStasisOwner()) return;
-  if (!game.clusters || game.clusters.length === 0) return;
+  const _sp = (typeof _setpSerialize === 'function') ? _setpSerialize() : null;   // (51.91) the cavern's set piece, for a joiner
+  if ((!game.clusters || game.clusters.length === 0) && !_sp) return;
   const _evt = { type: 'world_objects', clusters: serializeWorldObjects() };
+  if (_sp) _evt.setp = _sp;
   if (toPeerId) net.sendEvent(_evt, toPeerId); else net.sendEvent(_evt);
 }
 
@@ -95363,6 +96225,7 @@ function spawnChampionField() {
       }
     } catch (_) {}
   }
+  try { if (typeof _setpClearSpot === 'function') _setpClearSpot(pos, 340); } catch (_) {}   // (51.86) not inside the set piece
   const fieldId = ++net.stasisIdCounter;
   const field = new StasisField(pos, true);
   field.netId = fieldId;
@@ -101595,6 +102458,7 @@ function _gameLoopBody(timestamp) {
   __pmark('shipAnim+net+misc'); 
   updateDynamicObjects(dt);
   updateMonsters(dt);
+  if (typeof _setpUpdate === 'function') _setpUpdate(dt);   // (51.86) the set piece: its build slices, fires, smoke
   if (game && game.championShell && game.championShell.alive) {
     const _sh = game.championShell;
     if (!game.monsters) game.monsters = [];

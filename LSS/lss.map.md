@@ -825,7 +825,31 @@ Sky dome, sun, volumetric clouds, rainbow, day-lighting env, toggleable shadows.
   - ⚠ **Cost.** The first storm march cost **14.1 ms** under it (51.81, gpuT) vs 2.8 ms at spawn: far-field-sized 22 m steps through 12.8 km of storm, plus the far field still evaluated where the storm covers it. Storm-sized steps / skips and no far-field work at `m > 0.99` brought it to **2.4 ms** (51.82). Re-measure with `__wx2.gpuT` after any storm-render change.
   - Owner: *"the thunder sound lasts a bit too long"* -> a 1.2 s tail (was 3.5), 6 s cap, ~2.2 s fade (was the bolt's whole distance spread, 20 s+).
   - **`__wx2Dbg('selftest', {seed, steps})`** (51.74) hashes the main sim after N fixed-seed steps. RICO stayed `ae9cfe8e/845eec` through the port. ⚠ The FIRST run after live frames differs: some state from earlier activity leaks into a reset's first steps (pre-existing, 51.75; not traced). Do a warm-up run, then compare the later runs.
-  - **Open:** Earth cities (wx2 does not run there); without `?wx2` there is no storm (the billboard sky); bolts are not in the water mirror; lightning is per client (not synced).
+  - **Open:** Earth cities (wx2 does not run there); lightning is per client (not synced).
+- **(51.83) Bolts in the mirror + the Settings switch.** Owner: *"bolts should appear in the water/reflections... this new weather could be a toggle in the performance settings (weather on/off)"*. `drawBolt(cam, aw, ah, V, eye)` now also draws in the Reflector pass; `F_BOLT` takes F_CLOUD's mirror depth (`uObl` / `uZRow` / the dome's far root via `uDomeO`, `uDomeR`, `uCamWorld`). **Settings > Performance > Quality > "Volumetric weather"** (`#set-wx2`, hidden on touch phones) calls `_WX2.setEnabled(on)`. It is live both ways (on: `init(lastT)` compiles behind the play; off: `dispose()` and the billboard deck returns) and stored in `localStorage lss_wx2`, the key `?wx2` always read. A session pick beats `?wx2` / `?wx2=0` until reload. ⚠ The settings overlay pauses the loop, so a fresh enable sits in phase `compile` until the overlay closes.
+- **(51.84) THE VEIL - the cities' glow behind the clouds.** Owner, from above the deck: *"for some reason cities break through the new clouds, from far away"* (a red city's neon grid + lit ground crisp over white cumulus). **Jump:** `THE VEIL: the cities' glow` · `function veilMat` · `oZ=z4` · `_WX2.veilGroup(group)`.
+  - **Cause.** The composite runs at the marker, which is FIRST in the transparent list. Nearly all of a city's light is transparent: neon strips, holo ads, pad rings, beacon, searchlights, even the lit ground disc (transparent for the ring sort, see the pad-ring note). So it drew after the clouds, on top, unattenuated. The towers are opaque and were always covered.
+  - ⚠ **Render order cannot fix it.** The sun's trick (renderOrder -2e9, before the marker) only suits things that are always behind every cloud. In the city the same ads stand IN FRONT of the storm, and drawn before the marker an ad against the anvil would go dark.
+  - **Fix.** F_CLOUD gets a second target, `oZ` (RGBA32F, NEAREST, `V.cldZ`): the cloud's front and back along each ray, as DEPTH-BUFFER values, plus the cloud's transmittance.
+    - The depth values come from this camera's own depth row `uZRow`, so the mirror's oblique projection works with no extra code. They are 32-bit because a depth value km out is 1 - 1e-5, past half-float.
+    - A veiled material's `main()` is renamed `wxMain()` and wrapped. Behind the front, its output is scaled by the transmittance, ramped front -> back.
+    - Straight-alpha blends (additive, normal) scale `.a`; src-ONE blends (the holo ads' premultiplied custom blend) scale the whole vec4.
+    - Main view vs mirror is picked by `cameraPosition` against what the hook stored, so any other render (cube cams, XR) gets no veil.
+    - The patch is applied at build (`_hcMakeMeshes` -> `veilGroup`, skipped on touch phones). The programs link in the city's own warm-up, and toggling the weather never relinks.
+    - The program key is `k0 + '|wxveil' + mode`. The wrapper's source is identical for every material, and three keys custom programs on `onBeforeCompile.toString()`, so the original key MUST be carried.
+    - three binds a version-0 texture's `__webglTexture` as-is, so the placeholders point straight at the raw targets. `dispose()` clears them, or three would bind deleted textures, one GL error per veiled draw.
+  - **Knob:** `__wx2.veil` (0 = the 51.83 look). Readout: `__wx2Info().veil` (`mats` patched, `main` / `mirror` armed this frame).
+  - **Open:** non-city transparents (bot glows, beacons elsewhere) are not veiled. Hub traffic is not veiled either: its materials are the shared ship cache, and patching them would relink at runtime.
+- **(51.85) THE WATER UNDER THE CLOUDS + the islands' glow.** Owner: *"ok, fixed... but the same thing with the water, i can see it through the clouds... when i'm really high up"*, then *"and the floating islands"*. **Jump:** `the water family under the clouds` · `_WX2.veilMat(_skGlowMat)`.
+  - **Cause.** The water family sits at ro -1 (surface, underside, the displaced overlay) and -2 (fish), deliberately first among transparents (v38.67). That is still AFTER a marker at -1e9.
+    - The surface alpha-blends over the composited clouds.
+    - The displaced overlay (a ~17k u disc that follows the camera, 591k verts, depth-writing) painted a crisp circle through the deck under the player. From above, that read as a hole in the clouds with the islands (or their reflections) inside it.
+  - **Fix.** The marker sits at **-0.5** while the eye is above the waterline, so the water family draws first and the clouds composite over it. This is exact, because nothing of the sky exists below WL. The overlay's depth also lands in the depth copy, so the march stops at it.
+    - From BELOW the waterline, `frame()` puts it back at -1e9: clouds seen through the surface must take its tint. `__wx2Info().markerRO` / `.under`.
+    - Bolts are unaffected: `groundAt` already floors strikes at WL.
+  - The sky islands' rock is OPAQUE (MeshLambert, `_skRockMat`), so it was always covered. Their additive beacons (`_skGlowMat`) and pad rings (`_skRingMat`) are now veiled at creation in `_skMats()` (`_WX2.veilMat`, phones skipped).
+  - ⚠ **The CPU raycast cannot see GPU-displaced things.** The clipmap terrain is a flat plane to it, and its hits land at y 0. While hunting "what shows through here", a ray that hits the clipmap at y 0 means "terrain I can't see", not "nothing". Bisect by visibility instead: `__wx2.on = 0`, hide groups.
+  - ⚠ The hubWeather dome mesh reports `depthWrite: false` (ro 3, raycast-hit at ~20.4k u), while the 51.6x note says the dome writes depth. If it really doesn't, the `uSkyT` rule (depth past ~19.7k u = sky) over-covers real geometry 2-6 km out with clouds BEHIND it (ascending rays past an island). Not changed; check before relying on either.
 - **Open (51.70):** from normal flying height the clouds are as crisp as the half-res pass allows - full res at the half-res price needs temporal reprojection (a quarter of the pixels a frame, Nubis-style), not more noise. Brightness/shadow strength need the owner's eye. Not warmed into the prebake; not in XR / mobile / Quest / potato.
 
 ### ═══ PART 11 — Ship models & FX (~23094–24484) ═══
@@ -1013,6 +1037,51 @@ Async precompile that renders representative effects offscreen — the primary "
 #### Destructible & cluster obstacles — `~L29708`
 **Jump:** `class DestructibleObstacle`
 - **Symbols:** `DestructibleObstacle`, `_makeRockGeometry`, `_makeAtomFractalMaterial`, `spawnRockChunks`, `ClusterObstacle`
+
+#### ⭐ SET PIECES — breakable centrepieces in the elimination caverns (51.86-51.90)
+**Jump:** `SET PIECES - breakable centrepieces` · `function _setpBuild` · `function _setpFinishG` · `function _setpGridMeasure` · `function _setpRayHit` · `function _setpStoneMat` · `function _setpScorchMat`
+- **The ask.** Owner: *"one breakable semi-gigantic petrified leviathan in an elimination cavern, also... one breakable, broken down on fire and smoking objects/carrier2.glb in an elimination cavern.... both those things right in the middle, between the two spawns"* → *"one each, two caverns, nexus has the carrier, delta has the leviathan"*, the leviathan *"random each time, and make it big enough so a small part of it is in the ceiling and floor"*, *"Straight into the game"*.
+- **Where.** `_SETP.MAPS` = `{ hourglass: 'wreck', arc: 'leviathan' }`. Each stands in the map's `center` room.
+  - ⚠ The Delta's spawns are (∓975, 0, 750), so the LITERAL midpoint is inside the base tunnel (r 180). The hub at the origin is equidistant from both.
+  - `_setpClaimsRoom` keeps the rock clusters out of that room. It is keyed on the map alone, so cluster net indices still agree across peers.
+  - `_setpClearSpot` pushes the champion field out of the piece.
+- **Built** after `spawnOrganics` in BOTH world builds (the first launch and `buildNextRound`), fresh every round. The GLB is parsed once per session (`_SETP.gltf`). The build is a generator stepped in `_setpUpdate` (14 ms/frame before play, `budget` ms in it).
+  - Measured: the full carrier is 1.6 s to load + parse and about 200 ms of work; a leviathan about 1.4 s + 90 ms. Both finish before the countdown ends.
+- **Chunks.** The posed and placed mesh is baked to world space and cut into 30 nearest-seed clusters (seeded farthest-point sampling + one Lloyd step). HP is proportional to area, with a floor of 300.
+- **The DISTANCE GRID is the hit model.** The surface is voxelised by owning chunk (48-61 cells along the longest side), the outside is flood-filled, and chamfer distance runs outward. It feeds four hooks:
+  - `raycastLevel` → `_setpRayHit`, so it stops bullets, beams and bot sight lines. It sets `_SETP.hit`, which `getWallNormal` reads.
+  - The Projectile wall branch: `_setpWallChunk(wallDist)` names the chunk; a round that would have bounced spends itself.
+  - `splashDamage` → `_setpSplash`.
+  - `fireHitscan` → `_setpShotProbe`, a proxy whose `takeDamage` returns **0**.
+  - `resolveCollision` → `_setpCollide`.
+  - A break clears that chunk's voxels and re-measures, so a breached hull opens to the flood and you can fly in.
+- ⚠ **NOT game.monsters entries** (ChampionShell is one). About 35 damage loops read that list, and they also pay core meter, hit markers and tracker locks, so every rock would charge ultimates. That is also why the hitscan proxy reports 0 dealt.
+- **Sync.** The pick, pose, yaw and chunking come from `getRoundSeed(round + 7919)` (solo: `Math.random`). A break is the event `setp_brk {g, i}`; the first client to empty a chunk sends it. A break that arrives before the piece is built is queued in `sp.pend`.
+  - ⭐ (51.91) **DAMAGE IS POOLED.** Owner: *"the way the leviathan breaks, will it be the same for everyone in multiplayer?"* Before this, each machine tallied only its own player's hits, so two players each doing half a chunk never broke it. The reasons:
+    - A remote player's rounds are 0-damage mirrors (`spawnNetworkProjectile`).
+    - Remote hitscan is a tracer only.
+    - On non-authority peers `bot_fire` draws tracers and particles; the real bot rounds exist only on `_botAuthority()`. So bot damage counts once, and pooling cannot double it.
+  - **How it pools now.** Each machine queues its OWN hits in `_SETP.outDmg` and sends `setp_dmg {g, d: [[i, dmg], ...]}` every 150 ms while shooting. Receivers apply it through `_setpHitChunk(i, d, null, remote = true)`: never re-sent, no impact FX. The first to cross zero sends `setp_brk`; a duplicate is a no-op.
+  - **Late joiners (51.91)** get `world_objects.setp = {g, hp[]}` with the owner's manifest (`broadcastWorldObjects(peerId)`). 0 = broken: a quiet break, no debris. Other HP takes the lower of the two values. If the joiner hasn't built yet, it waits in `_SETP.manifest` (and `sp.pend` / `sp.pendDmg` for events).
+  - Verified by `__setpNet(evt)` / `__setpManifest()` in one tab: damage, wrong round, crossing zero, a repeat break, a manifest's breaks and min-HP, a wrong-round manifest. The SENDING side (outDmg batches) is untested: `net` is closure-scoped and it needs two machines.
+- **THE NEXUS WRECK.** carrier2.glb, broken in two at 40-52%. The bow half noses down, the stern lifts, both roll and sit 14% sunk, scorched, with 6 fires (3 fire-cloud shells each) and shaderSmoke plumes.
+  - It lies ACROSS the spawn axis. Rotated about y by `axis`, the hull's x is perpendicular to A→B; the first cut had `+90°` and would have plugged both spawn tunnels.
+  - 51.86's 900 u: owner *"the wreck is too small"* / *"it needs to be massive"* → `wreckLen` 2400. The bow and stern bury in the rock between the ±30° side tunnels.
+  - The gap between the halves (`wreckGap` 320) is the spawn-to-spawn route.
+- ⚠⚠ **A STARVED CPU FAKED A 5-6 ms COST.** On 51.87 the owner said *"laggy"*, and an interleaved A/B read 48 fps with the piece vs 70-80 without.
+  - 51.88 cut everything: `carrier2_wreck.glb` (tools/make_wreck_glb.mjs; meshopt stops at 56k because it won't collapse across UV seams), 4 fires of 2 shells, a third of the smoke, per-vertex noise.
+  - Then the owner: *"oh shit, duck duck go was eating cpu"*. Clean: 142 / 141.5 fps with vs 143.9 / 143.7 without (*"144 in both"*).
+  - The owner: *"put it back to the way we had it at first, it looked epic"* → 51.89 restored 51.87, measured **114 fps** (46 smoke puffs). The cut-down wreck is `__setp.lite = 1`.
+  - When fps is low everywhere, piece on AND off, ask what else is running before cutting content.
+- **THE DELTA LEVIATHAN.** A random MONSTER_DEFS key per round, posed at a random moment of a random clip (`applyBoneTransform`, smooth normals from the posed index), stood up along its PCA long axis at 63-80° (steeper until it fits 1.45 × the room radius), and scaled to floor-to-ceiling + `embed` 7% at each end.
+  - Seen: VoidGazer (`Happy_Sway_Standing`, 87°) and IronBloom (`walking_man`, 89°). Owner: *"the leviathan is cool"*.
+  - (51.90) Owner: *"the leviathan's texture should be that blue rock, similar to the stage it's in"*. `_setpStoneMat` is now the sandwich terrain's ROCK branch ported term for term: `uColRock` × mottle × strata × triplanar `uTexRock` (`_sptTri`), plus the crystal caverns' `uCrystal` glints. It reads the SAME `_swU` uniforms, so it is the stage's rock wherever it stands.
+- **Knobs** (`window.__setp`, read at the next build): `on`, `hp`, `chunks`, `wreckLen`, `wreckGap`, `fire`, `smoke`, `embed`, `budget`, `lite`. Also `__setpInfo()` (`rays` = per-frame calls/rays/steps), `__setpBreak(i | 'all')`, `__setpRebuild()`.
+- **Open:**
+  - multiplayer untested on two devices (the receiving paths are verified; sending isn't);
+  - abilities (cores, Mega Laser, flame) don't damage chunks; only rounds, hitscan and splash do;
+  - bots may wedge on the pieces;
+  - the 48-u grid is coarse for collision against a 2400-u wreck.
 
 #### Voxel rooms & dynamic object population — `~L30940`
 **Jump:** `class VoxelRoomSystem` (~L31467)
