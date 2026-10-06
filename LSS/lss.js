@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "51.91";
+const LSS_BUILD = "52.01";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -33767,7 +33767,7 @@ function _hubCityBuild(g, site) {
                   (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE));
   const dens = g.density * (_full ? 1 : 0.62);
 
-  const KINDS = ['twr', 'box', 'cyl', 'solar', 'dish', 'neon', 'holo', 'ring'];
+  const KINDS = ['twr', 'box', 'cyl', 'solar', 'dish', 'neon', 'holo', 'ring', 'skirt', 'bevel'];   // (v51.95) skirt, (v51.98) bevel: see _AI_NET / _aiGeoBevel
   const L = {}; for (const k of KINDS) L[k] = [];
   const solids = [];
   const pads = [];
@@ -33866,51 +33866,105 @@ function _hubCityBuild(g, site) {
       push('neon', x + ca * lx - sa * lz, PY, z + sa * lx + ca * lz, 44, 68, 12, yaw, c, 0, rng());
     }
   };
-  const roofscape = (x, roofY, z, w, d, yaw, tall) => {
-    const ca = Math.cos(yaw), sa = Math.sin(yaw);
-    const lp = (lx, lz) => [x + ca * lx - sa * lz, z + sa * lx + ca * lz];
+  const _onStage = (st, lx, lz) => { const ca = Math.cos(st.yaw), sa = Math.sin(st.yaw); return [st.x + ca * lx - sa * lz, st.z + sa * lx + ca * lz]; };
+  const _stageAt = (stages, y, pad) => { let r = null; for (const st of stages) if (st.y <= y + 1e-6 && y + pad <= st.y + st.h + 1e-6) r = st; return r; };
+  const _slabRoof = (x, y, z, w, h, d, yaw) => ({ y: y + h, stages: [{ x, y, z, w, h, d, yaw }] });
+  const neonStages = (stages, prob) => {
+    const c = pick(_HC_NEON_L);
+    const flat = stages.filter((st) => !st.round);
+    for (const [su, sv] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+      if (rng() > prob) continue;
+      const r0 = rng();
+      for (let k = 0; k < flat.length; k++) {
+        const st = flat[k], [ex, ez] = _onStage(st, su * st.w * 0.5, sv * st.d * 0.5);
+        push('neon', ex, st.y, ez, 8, st.h, 8, st.yaw, c, 0, k ? (r0 * 7.31 + k * 0.137) % 1 : r0);
+      }
+    }
+    if (rng() < prob) {
+      const T = flat.length ? flat[flat.length - 1] : null;
+      const P4 = T ? [[0, T.d / 2, T.w + 10, 9], [0, -T.d / 2, T.w + 10, 9], [T.w / 2, 0, 9, T.d + 10], [-T.w / 2, 0, 9, T.d + 10]] : [0, 0, 0, 0];
+      for (const q of P4) {
+        const r1 = rng();
+        if (!T) continue;
+        const [ex, ez] = _onStage(T, q[0], q[1]);
+        push('neon', ex, T.y + T.h - 9, ez, q[2], 9, q[3], T.yaw, c, 0, r1);
+      }
+    }
+  };
+  const roofscape = (x, roofY, z, w, d, yaw, tall, fit) => {
+    const F = fit || { w, d, yaw, dry: false };
+    const ca = Math.cos(F.yaw), sa = Math.sin(F.yaw);
+    const hw = F.w * 0.5 - 4, hd = F.d * 0.5 - 4;   // inside the roof's edge line
+    const fitL = (lx, lz, ex, ez) => (F.dry || ex > hw || ez > hd) ? null
+      : [Math.max(ex - hw, Math.min(hw - ex, lx)), Math.max(ez - hd, Math.min(hd - ez, lz))];
+    const fitK = (ex, ez) => { if (F.dry || hw <= 0 || hd <= 0) return 0; const k = Math.min(1, hw / ex, hd / ez); return k < 0.45 ? 0 : k; };
+    const W = (l) => [x + ca * l[0] - sa * l[1], z + sa * l[0] + ca * l[1]];
     const nBox = 1 + Math.floor(rng() * 3);
     for (let k = 0; k < nBox; k++) {
-      const [px, pz] = lp((rng() - 0.5) * w * 0.55, (rng() - 0.5) * d * 0.55);
-      push('box', px, roofY, pz, 48 + rng() * 68, 30 + rng() * 40, 40 + rng() * 56, yaw + rng() * 0.3, jit(pick(_HC_METAL_L), 0.15), 0, rng());
+      const lx = (rng() - 0.5) * F.w * 0.55, lz = (rng() - 0.5) * F.d * 0.55;
+      const bx = 48 + rng() * 68, by = 30 + rng() * 40, bz = 40 + rng() * 56, byaw = F.yaw + rng() * 0.3;
+      const bc = jit(pick(_HC_METAL_L), 0.15), br = rng();
+      const e = Math.hypot(bx, bz) * 0.5, k = fitK(e, e);   // turned up to 0.3 rad: its circumscribed half-size
+      const l = k ? fitL(lx, lz, e * k, e * k) : null;
+      if (l) { const q = W(l); push('box', q[0], roofY, q[1], bx * k, by * k, bz * k, byaw, bc, 0, br); }
     }
     if (rng() < 0.45) {
-      const [px, pz] = lp((rng() - 0.5) * w * 0.4, (rng() - 0.5) * d * 0.4);
+      const lx = (rng() - 0.5) * F.w * 0.4, lz = (rng() - 0.5) * F.d * 0.4;
       const cr = 76 + rng() * 56, chh = 68 + rng() * 52;
-      push('cyl', px, roofY, pz, cr, chh, cr, 0, jit([0.30, 0.32, 0.34], 0.1), 0, rng());
-      if (rng() < 0.6) push('cyl', px + cr * 1.4, roofY, pz, cr * 0.85, chh * 0.9, cr * 0.85, 0, jit([0.30, 0.32, 0.34], 0.1), 0, rng());
+      const c1 = jit([0.30, 0.32, 0.34], 0.1), r1 = rng();
+      const k = fitK(cr * 0.5, cr * 0.5), l = k ? fitL(lx, lz, cr * 0.5 * k, cr * 0.5 * k) : null;
+      if (l) { const q = W(l); push('cyl', q[0], roofY, q[1], cr * k, chh * k, cr * k, 0, c1, 0, r1); }
+      if (rng() < 0.6) {
+        const c2 = jit([0.30, 0.32, 0.34], 0.1), r2 = rng();
+        const l2 = l ? fitL(l[0] + (l[0] > 0 ? -1 : 1) * cr * k * 1.4, l[1], cr * k * 0.425, cr * k * 0.425) : null;
+        if (l2) { const q = W(l2); push('cyl', q[0], roofY, q[1], cr * k * 0.85, chh * k * 0.9, cr * k * 0.85, 0, c2, 0, r2); }
+      }
     }
     if (rng() < 0.5) {
-      const [px, pz] = lp((rng() - 0.5) * w * 0.5, (rng() - 0.5) * d * 0.5);
+      const lx = (rng() - 0.5) * F.w * 0.5, lz = (rng() - 0.5) * F.d * 0.5;
       const tr = 56 + rng() * 40;
-      push('cyl', px, roofY, pz, tr, 44 + rng() * 32, tr, 0, jit([0.22, 0.21, 0.20], 0.1), 0, rng());
+      const th = 44 + rng() * 32, tc = jit([0.22, 0.21, 0.20], 0.1), trr = rng();
+      const k = fitK(tr * 0.5, tr * 0.5), l = k ? fitL(lx, lz, tr * 0.5 * k, tr * 0.5 * k) : null;
+      if (l) { const q = W(l); push('cyl', q[0], roofY, q[1], tr * k, th * k, tr * k, 0, tc, 0, trr); }
     }
     if (rng() < 0.55) {
       const rows = 1 + Math.floor(rng() * 3);
       for (let r2 = 0; r2 < rows; r2++) {
-        const [px, pz] = lp((rng() - 0.5) * w * 0.4, -d * 0.3 + r2 * (d * 0.25));
-        push('solar', px, roofY, pz, 84 + rng() * 76, 14, 38, yaw, [0.09, 0.13, 0.30], 0, rng());
+        const lx = (rng() - 0.5) * F.w * 0.4, lz = -F.d * 0.3 + r2 * (F.d * 0.25);
+        const sw = 84 + rng() * 76, sr = rng();
+        const k = fitK(sw * 0.5, 19), l = k ? fitL(lx, lz, sw * 0.5 * k, 19 * k) : null;
+        if (l) { const q = W(l); push('solar', q[0], roofY, q[1], sw * k, 14, 38 * k, F.yaw, [0.09, 0.13, 0.30], 0, sr); }
       }
     }
     if (rng() < 0.5) {
-      const [px, pz] = lp((rng() - 0.5) * w * 0.5, (rng() - 0.5) * d * 0.5);
+      const lx = (rng() - 0.5) * F.w * 0.5, lz = (rng() - 0.5) * F.d * 0.5;
       const dr = 40 + rng() * 40;
-      push('dish', px, roofY, pz, dr, dr, dr, rng() * 6.283, jit([0.55, 0.57, 0.60], 0.1), 0, rng());
+      const dyaw = rng() * 6.283, dc = jit([0.55, 0.57, 0.60], 0.1), drr = rng();
+      const k = fitK(dr * 0.5, dr * 0.5), l = k ? fitL(lx, lz, dr * 0.5 * k, dr * 0.5 * k) : null;
+      if (l) { const q = W(l); push('dish', q[0], roofY, q[1], dr * k, dr * k, dr * k, dyaw, dc, 0, drr); }
     }
     const nAnt = tall ? 1 + Math.floor(rng() * 3) : (rng() < 0.5 ? 1 : 0);
     for (let k = 0; k < nAnt; k++) {
-      const [px, pz] = lp((rng() - 0.5) * w * 0.5, (rng() - 0.5) * d * 0.5);
+      const lx = (rng() - 0.5) * F.w * 0.5, lz = (rng() - 0.5) * F.d * 0.5;
       const ah = tall ? 180 + rng() * 330 : 68 + rng() * 100;
-      push('box', px, roofY, pz, 8, ah, 8, 0, [0.13, 0.13, 0.15], 0, rng());
-      push('neon', px, roofY + ah, pz, 14, 14, 14, 0, [1.0, 0.12, 0.10], 2, rng());
+      const ar = rng(), nr = rng();
+      const l = fitL(lx, lz, 7, 7);
+      if (l) {
+        const q = W(l);
+        push('box', q[0], roofY, q[1], 8, ah, 8, 0, [0.13, 0.13, 0.15], 0, ar);
+        push('neon', q[0], roofY + ah, q[1], 14, 14, 14, 0, [1.0, 0.12, 0.10], 2, nr);
+      }
     }
     if (rng() < 0.30 && w > 400) {
-      const [px, pz] = lp((rng() - 0.5) * w * 0.3, (rng() - 0.5) * d * 0.3);
-      const gw = w * (0.30 + rng() * 0.2), gd = d * (0.30 + rng() * 0.2);
-      push('box', px, roofY, pz, gw, 7, gd, yaw, [0.10, 0.22, 0.10], 0, rng());
+      const lx = (rng() - 0.5) * F.w * 0.3, lz = (rng() - 0.5) * F.d * 0.3;
+      const gw = F.w * (0.30 + rng() * 0.2), gd = F.d * (0.30 + rng() * 0.2), gr = rng();
+      const l = fitL(lx, lz, gw * 0.5, gd * 0.5);
+      if (l) { const q = W(l); push('box', q[0], roofY, q[1], gw, 7, gd, F.yaw, [0.10, 0.22, 0.10], 0, gr); }
       const nT = 1 + Math.floor(rng() * 4);
-      for (let k = 0; k < nT; k++)
-        treePts.push(px + (rng() - 0.5) * gw * 0.7, roofY + 6, pz + (rng() - 0.5) * gd * 0.7, 0.6 + rng() * 0.3);
+      for (let k = 0; k < nT; k++) {
+        const tx = (rng() - 0.5) * gw * 0.7, tz = (rng() - 0.5) * gd * 0.7, ts = 0.6 + rng() * 0.3;
+        if (l) { const q = W([l[0] + tx, l[1] + tz]); treePts.push(q[0], roofY + 6, q[1], ts); }
+      }
     }
   };
   const landPad = (x, y, z, r, park) => {
@@ -33991,8 +34045,17 @@ function _hubCityBuild(g, site) {
         const [px, pz] = local(off, 0);
         const pal = pick(_HC_FACADE_L);
         const ph = 144 + rng() * 200;
+        const _t0 = L.twr.length / 12, _c0 = L.cyl.length / 12;   // (v51.95) its instances, for the AI network (podium = _t0)
         solid('twr', px, PY, pz, baseW, ph, baseD, ang, jit(pal, 0.1), 1, rng());
         const tw = baseW * (0.48 + 0.20 * rng()), td = baseD * (0.48 + 0.20 * rng());
+        const _bv = L.bevel.length / 12;   // (v52.00) its index, so the network can light it with its tower
+        push('bevel', px, PY, pz, baseW, ph, baseD, ang, [0.012, 0.013, 0.016], tw / baseW, td / baseD);
+        solids.pop();
+        for (let k = 0; k < 3; k++) {
+          const f = (k + 0.5) / 3;
+          solids.push({ cx: px, cz: pz, yaw: ang, hw: (baseW + (tw - baseW) * f) * 0.5, hd: (baseD + (td - baseD) * f) * 0.5,
+                        y0: PY + ph * k / 3, y1: PY + ph * (k + 1) / 3 });
+        }
         let th = 720 + (0.5 + 1.1 * rng() * rng()) * g.towerH * (0.35 + 0.65 * fall);
         th = Math.min(th, 4200);
         solid('twr', px, PY + ph, pz, tw, th, td, ang, jit(pal, 0.08), 2, rng());
@@ -34006,7 +34069,8 @@ function _hubCityBuild(g, site) {
         const padR = Math.min(cw2, cd2) * 0.46;
         if (rng() < 0.6 && padR > 80) landPad(px, topY, pz, Math.min(padR, 300), true);
         else roofscape(px, topY, pz, cw2, cd2, ang, true);
-        towers.push({ x: px, z: pz, y1: PY + ph + th, w: tw, d: td, yaw: ang });
+        towers.push({ x: px, z: pz, y1: PY + ph + th, w: tw, d: td, yaw: ang,
+                      t0: _t0, t1: L.twr.length / 12, c0: _c0, c1: L.cyl.length / 12, d0: _t0 + 1, top: topY + 40, core: true, bv: _bv });
         count++;
       }
       return count;
@@ -34058,33 +34122,38 @@ function _hubCityBuild(g, site) {
 
     const comTower = (px, pz, fw, fd, h, ang, pal, mode, baseY) => {
       const a = rng();
+      let top = baseY + h;   // (v51.95) returned: the roof the AI network's links leave from
+      const st = [];
+      const stage = (x, y, z, w, sh, d, yaw, c, m, r) => { solid('twr', x, y, z, w, sh, d, yaw, c, m, r); st.push({ x, y, z, w, h: sh, d, yaw }); };
       const mast = (mx, my, mz, mr, mh) => {
         push('cyl', mx, my, mz, mr, mh, mr, 0, pick(_HC_METAL_L), 0, rng());
         push('neon', mx, my + mh, mz, mr * 2.6, mr * 2.6, mr * 2.6, 0, pick(_HC_NEON_L), 2, rng());
       };
       if (a < 0.26) {
-        solid('twr', px, baseY, pz, fw, h, fd, ang, jit(pal, 0.12), mode, rng());
+        stage(px, baseY, pz, fw, h, fd, ang, jit(pal, 0.12), mode, rng());
         if (rng() < 0.5) mast(px, baseY + h, pz, 7 + rng() * 6, 60 + rng() * 150);
       } else if (a < 0.56) {
         let y = baseY, w = fw, d = fd, left = h;
         for (let s = 0; s < 3 && left > 60; s++) {
           const sh = (s === 2) ? left : left * (0.40 + rng() * 0.18);
-          solid('twr', px, y, pz, w, sh, d, ang, jit(pal, 0.09 + s * 0.02), mode, rng());
+          stage(px, y, pz, w, sh, d, ang, jit(pal, 0.09 + s * 0.02), mode, rng());
           y += sh; left -= sh;
           w *= 0.62 + rng() * 0.14; d *= 0.62 + rng() * 0.14;
         }
+        top = y;
         if (rng() < 0.55) mast(px, y, pz, 6 + rng() * 5, 80 + rng() * 200);
       } else if (a < 0.74) {
         const sw = fw * (0.42 + rng() * 0.18), sd = fd * (0.42 + rng() * 0.18);
         const shaft = h * (0.66 + rng() * 0.12);
-        solid('twr', px, baseY, pz, sw, shaft, sd, ang, jit(pal, 0.09), mode, rng());
+        stage(px, baseY, pz, sw, shaft, sd, ang, jit(pal, 0.09), mode, rng());
         let y = baseY + shaft, w = sw, d = sd, left = h - shaft;
         for (let s = 0; s < 3 && left > 40; s++) {
           const sh = left * 0.42;
           w *= 0.66; d *= 0.66;
-          solid('twr', px, y, pz, w, sh, d, ang, jit(pal, 0.07), mode, rng());
+          stage(px, y, pz, w, sh, d, ang, jit(pal, 0.07), mode, rng());
           y += sh; left -= sh;
         }
+        top = y;
         mast(px, y, pz, 5 + rng() * 4, 160 + rng() * 320);
       } else if (a < 0.88) {
         const n = 3 + Math.floor(rng() * 2);
@@ -34092,17 +34161,22 @@ function _hubCityBuild(g, site) {
         const twist = (rng() < 0.5 ? -1 : 1) * (0.10 + rng() * 0.10);
         for (let s = 0; s < n; s++) {
           const sh = h / n;
-          solid('twr', px, y, pz, w, sh, d, ang + twist * s, jit(pal, 0.09), mode, rng());
+          stage(px, y, pz, w, sh, d, ang + twist * s, jit(pal, 0.09), mode, rng());
           y += sh; w *= 0.93; d *= 0.93;
         }
+        top = y;
         if (rng() < 0.4) mast(px, y, pz, 6 + rng() * 5, 70 + rng() * 160);
       } else {
         const r = Math.min(fw, fd) * 0.5;
         push('cyl', px, baseY, pz, r * 2, h, r * 2, 0, jit(pal, 0.09), 0, rng());
         solids.push({ cx: px, cz: pz, yaw: ang, hw: r, hd: r, y0: baseY, y1: baseY + h });
         push('cyl', px, baseY + h, pz, r * 1.25, h * 0.06, r * 1.25, 0, jit(pal, 0.12), 0, rng());
+        top = baseY + h + h * 0.06;
+        st.push({ x: px, y: baseY, z: pz, w: r * 2, h, d: r * 2, yaw: ang, round: true },
+                { x: px, y: baseY + h, z: pz, w: r * 1.25, h: h * 0.06, d: r * 1.25, yaw: ang, round: true });
         mast(px, baseY + h + h * 0.06, pz, 6 + rng() * 5, 90 + rng() * 220);
       }
+      return { y: top, stages: st };
     };
 
     const isCom = type === 'commercial';
@@ -34123,40 +34197,68 @@ function _hubCityBuild(g, site) {
           const pal = pick(_HC_FACADE_L);
           const mode = (isCom && rng() < 0.35) ? 2 : 1;
           const onStilts = rng() < g.stilts && h > 480;
+          const _t0 = L.twr.length / 12, _c0 = L.cyl.length / 12;
+          let _roof = null, _base = PY;
           if (onStilts) {
             const sh = 80 + rng() * 90;
+            _base = PY + sh;
+            const _sc = L.cyl.length / 12, _ss = solids.length;   // (v51.99) the four stilts, moved under a ROUND tower below
             for (const [su, sv] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
               const [qx, qz] = local(x + lw / 2 + su * fw * 0.38, rz + sv * fd * 0.38);
               push('cyl', qx, PY, qz, 36, sh + 8, 36, 0, pick(_HC_METAL_L), 0, rng());
               solids.push({ cx: qx, cz: qz, yaw: ang, hw: 20, hd: 20, y0: PY, y1: PY + sh });
             }
-            if (h > 620) comTower(px, pz, fw, fd, h, ang, pal, mode, PY + sh);
-            else solid('twr', px, PY + sh, pz, fw, h, fd, ang, jit(pal, 0.12), mode, rng());
+            if (h > 620) _roof = comTower(px, pz, fw, fd, h, ang, pal, mode, PY + sh);
+            else { solid('twr', px, PY + sh, pz, fw, h, fd, ang, jit(pal, 0.12), mode, rng()); _roof = _slabRoof(px, PY + sh, pz, fw, h, fd, ang); }
+            if (_roof.stages[0].round) {
+              const rr = _roof.stages[0].w * 0.5 * 0.62 * Math.SQRT1_2, D = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
+              for (let k = 0; k < 4; k++) {
+                const [qx, qz] = local(x + lw / 2 + D[k][0] * rr, rz + D[k][1] * rr), o = (_sc + k) * 12;
+                L.cyl[o] = qx; L.cyl[o + 2] = qz; solids[_ss + k].cx = qx; solids[_ss + k].cz = qz;
+              }
+            }
           } else {
-            if (h > 620) comTower(px, pz, fw, fd, h, ang, pal, mode, PY);
-            else solid('twr', px, PY, pz, fw, h, fd, ang, jit(pal, 0.12), mode, rng());
-            doors(px, pz, fw, fd, ang, 1);
+            if (h > 620) _roof = comTower(px, pz, fw, fd, h, ang, pal, mode, PY);
+            else { solid('twr', px, PY, pz, fw, h, fd, ang, jit(pal, 0.12), mode, rng()); _roof = _slabRoof(px, PY, pz, fw, h, fd, ang); }
+            const s0 = _roof.stages[0];
+            doors(px, pz, s0.w, s0.d, s0.yaw, 1);
           }
+          const stages = _roof.stages, topSt = stages[stages.length - 1];
           count++;
           if (!isCom && rng() < 0.6) {
             const side = rz > 0 ? -1 : 1;
             const nFl = Math.floor(h / 104);
             for (let f2 = 1; f2 < nFl; f2++) {
               if (rng() < 0.35) continue;
-              const [qx, qz] = local(x + lw / 2 + (rng() - 0.5) * fw * 0.5, rz + side * (fd * 0.5 + 2.6));
-              push('box', qx, PY + (onStilts ? 110 : 0) + f2 * 104, qz, 56, 6, 20, ang, jit([0.20, 0.21, 0.24], 0.15), 0, rng());
+              const ru = rng(), bc = jit([0.20, 0.21, 0.24], 0.15), br = rng();
+              const yb = _base + f2 * 104, st = _stageAt(stages, yb, 6);
+              if (!st || st.round) continue;
+              const [qx, qz] = _onStage(st, (ru - 0.5) * st.w * 0.5, side * (st.d * 0.5 + 2.6));
+              push('box', qx, yb, qz, 56, 6, 20, st.yaw, bc, 0, br);
             }
           }
           if (!isCom && rng() < 0.35 && h > 480) {
-            const [ex, ez] = local(x + lw / 2 + (rng() < 0.5 ? -1 : 1) * (fw * 0.5 + 8), rz);
-            push('box', ex, PY + 28, ez, 10, h - 120, 32, ang, [0.16, 0.16, 0.18], 0, rng());
+            const sg = rng() < 0.5 ? -1 : 1, er = rng(), st = stages[0];
+            if (!st.round && st.h > 200) {
+              const [ex, ez] = _onStage(st, sg * (st.w * 0.5 + 8), 0);
+              push('box', ex, st.y + 28, ez, 10, st.h - 120, 32, st.yaw, [0.16, 0.16, 0.18], 0, er);
+            }
           }
           if (isCom) {
-            neonEdges(px, PY + (onStilts ? 110 : 0), pz, fw, h, fd, ang, 0.45);
-            if (rng() < 0.5) holoOn(px, pz, fw, fd, ang, PY + h * (0.5 + rng() * 0.4), 180 + rng() * 220, 110 + rng() * 140);
+            neonStages(stages, 0.45);
+            if (rng() < 0.5) {
+              let hy = PY + h * (0.5 + rng() * 0.4);
+              const hw2 = 180 + rng() * 220, hh2 = 110 + rng() * 140;
+              let st = _stageAt(stages, hy, 0) || topSt;
+              if (Math.min(st.w, st.d) < hw2 * 0.5) { let b = stages[0]; for (const q of stages) if (q.y <= hy && Math.min(q.w, q.d) >= Math.min(b.w, b.d)) b = q; st = b; }
+              hy = Math.max(st.y + 4, Math.min(hy, st.y + st.h - hh2 * 0.6));
+              holoOn(px, pz, st.w, st.d, st.yaw, hy, hw2, hh2);
+            }
           }
-          if (h < 1280) roofscape(px, PY + (onStilts ? 110 : 0) + h, pz, fw, fd, ang, false);
-          if (h >= 1280) towers.push({ x: px, z: pz, y1: PY + h, w: fw, d: fd, yaw: ang });
+          if (h < 1280) roofscape(px, topSt.y + topSt.h, pz, fw, fd, ang, false,
+                                  { w: topSt.w, d: topSt.d, yaw: topSt.yaw, dry: !!topSt.round || Math.min(topSt.w, topSt.d) < 60 });
+          if (h >= 1280) towers.push({ x: px, z: pz, y1: PY + h, w: fw, d: fd, yaw: ang,   // (v51.95) + the AI node (see core)
+                                       t0: _t0, t1: L.twr.length / 12, c0: _c0, c1: L.cyl.length / 12, d0: _t0, top: _roof.y + 40 });
         }
         x += lw;
       }
@@ -34357,6 +34459,33 @@ function _hubCityBuild(g, site) {
     e2.beginPath(); e2.arc(toPx(o.cx), toPz(o.cz), br, 0, 6.283); e2.fill();
   }
   e2.globalCompositeOperation = 'source-over';
+  const AS = 512;
+  const toAx = (wx) => (wx - CX + EXT) / (2 * EXT) * AS, toAz = (wz) => (wz - CZ + EXT) / (2 * EXT) * AS;
+  const aim = document.createElement('canvas'); aim.width = aim.height = AS;
+  const m2 = aim.getContext('2d');
+  m2.fillStyle = 'rgb(255,0,0)'; m2.fillRect(0, 0, AS, AS);
+  m2.globalCompositeOperation = 'multiply';
+  for (const o of solids) {
+    if (o.y0 > PY + 60) continue;
+    const br = (Math.max(o.hw, o.hd) * 1.45) / (2 * EXT) * AS;
+    if (br < 0.6) continue;
+    const gAO = m2.createRadialGradient(toAx(o.cx), toAz(o.cz), br * 0.35, toAx(o.cx), toAz(o.cz), br);
+    gAO.addColorStop(0, 'rgb(72,255,255)'); gAO.addColorStop(0.7, 'rgb(152,255,255)'); gAO.addColorStop(1, 'rgb(255,255,255)');
+    m2.fillStyle = gAO; m2.beginPath(); m2.arc(toAx(o.cx), toAz(o.cz), br, 0, 6.283); m2.fill();
+  }
+  m2.globalCompositeOperation = 'lighter';
+  for (const o of solids) {
+    if (o.y0 > PY + 60) continue;
+    const br = (Math.max(o.hw, o.hd) * 3.4) / (2 * EXT) * AS;
+    if (br < 1.0) continue;
+    const amp = 0.085 + 0.125 * Math.min(1, (o.y1 - o.y0) / 1400);
+    const gD = m2.createRadialGradient(toAx(o.cx), toAz(o.cz), br * 0.18, toAx(o.cx), toAz(o.cz), br);
+    gD.addColorStop(0, 'rgba(0,255,0,' + amp.toFixed(3) + ')');
+    gD.addColorStop(0.45, 'rgba(0,255,0,' + (amp * 0.55).toFixed(3) + ')');
+    gD.addColorStop(1, 'rgba(0,255,0,0)');
+    m2.fillStyle = gD; m2.beginPath(); m2.arc(toAx(o.cx), toAz(o.cz), br, 0, 6.283); m2.fill();
+  }
+  m2.globalCompositeOperation = 'source-over';
 
   const CELL = 256;
   const hash = new Map();
@@ -34386,15 +34515,29 @@ function _hubCityBuild(g, site) {
     for (const v of fp) treePts.push(v);
   }
 
+  const nTwr = L.twr.length / 12;
+  const skirtR = new Float32Array(nTwr), aiFlag = new Uint8Array(nTwr);
+  for (const t of towers) if (t.core) { aiFlag[t.t0] = 2; for (let i = t.d0; i < t.t1; i++) aiFlag[i] = 1; }
+  if (hero && hero.t1 > hero.t0) for (let i = hero.core ? hero.d0 : hero.t0; i < hero.t1; i++) aiFlag[i] = 1;
+  for (let i = 0; i < nTwr; i++) {
+    const o = i * 12;
+    if (aiFlag[i] === 2 || Math.abs(L.twr[o + 1] - PY) > 0.5) continue;
+    const r = _aiSkirtR(L.twr[o + 3], L.twr[o + 4], L.twr[o + 5]);
+    skirtR[i] = r;
+    L.skirt.push(L.twr[o], PY, L.twr[o + 2], L.twr[o + 3], r, L.twr[o + 5], L.twr[o + 6], 0.012, 0.013, 0.016, 0, 0);
+  }
+
   const layers = {};
   for (const k of KINDS) layers[k] = new Float32Array(L[k]);
   return {
     layers, solids, hash, cellSize: CELL, pads, treePts, hero,
     albCanvas: alb, emiCanvas: emi,
+    towers, gAng, aiMask: aim, skirtR, aiFlag,   // (v51.95) the AI city: network nodes, board grid angle, ground mask
     stats: {
       districts: districts.length, blocks: nBlocks, buildings: nBldg,
       bridges: nBridges, solids: solids.length, pads: pads.length,
       trees: treePts.length / 4, genMs: Math.round(performance.now() - t0),
+      nodes: towers.length, skirts: L.skirt.length / 12,
     },
   };
 }
@@ -34460,7 +34603,12 @@ function _padGlowPatch(mat, instanced) {
       ].join('\n'));
     sh.fragmentShader = sh.fragmentShader
       .replace('#include <common>', '#include <common>\nvarying float vPadGlow;')
-      .replace('#include <dithering_fragment>', '#include <dithering_fragment>\ngl_FragColor.rgb *= vPadGlow;');
+      .replace('#include <dithering_fragment>', '#include <dithering_fragment>\n' +
+        (instanced ? 'gl_FragColor.rgb = mix(gl_FragColor.rgb, aiPal(gl_FragColor.rgb), uAiOn);\n' : '') + 'gl_FragColor.rgb *= vPadGlow;');
+    if (instanced) {
+      sh.uniforms.uAiOn = _AI_CITY.u.uAiOn; sh.uniforms.uAiPal = _AI_CITY.u.uAiPal; sh.uniforms.uAiHue = _aiHueOf(mat);
+      sh.fragmentShader = 'uniform float uAiOn;\nuniform float uAiPal;\n' + _AI_PAL_GLSL + sh.fragmentShader;
+    }
   };
   mat.customProgramCacheKey = () => 'padglow' + (instanced ? 'I' : 'M');
   return mat;
@@ -34495,6 +34643,559 @@ function _hcInstMesh(arr, geo, mat, cityR, maxH, site) {
   return mesh;
 }
 
+const _AI_CITY = {
+  u: {
+    uAiOn:  { value: 1 },
+    uAiN:   { value: 0 },                                   // board layers loaded; 0 = the old windows
+    uAiK:   { value: new THREE.Vector4(1.6, 0.35, 1.0, 1.0) },
+    uAiPal: { value: 1 },                                   // 1 = each city's own pair (the hub: green / purple), 0 = the boards' own cyan / pink
+    uAiSelf: { value: 2.2 },
+    uAiGnd:  { value: new THREE.Vector4(640, 0.55, 1.1, 1) },   // GROUND: board size (u), self-lit, line glow, on
+    uAiGndK: { value: new THREE.Vector4(900, 110, 4.0, 0.3) },  // ripples: speed (u/s), ring width (u), gain; board albedo
+    uAiRipN: { value: 16 },                                     // ripple slots read per deck fragment (8 on phones / Quest)
+    uAiNet:  { value: new THREE.Vector4(1, 1.0, 4.0, 2.0) },    // NETWORK: on, link glow, packet glow, beacon glow
+    uAiAct:  { value: new THREE.Vector4(1, 1, 0, 0) },          // a firing tower: spike along its lines, activation glow
+    uAiSk:   { value: 1 },                                       // black junction skirts
+    uAiFib:  { value: new THREE.Vector4(1, 1, 0, 0) },          // FIBRE pillars: on, glow
+    uAiDie:  { value: 1 },                                       // circuit2 DIES on the core district + the hero tower
+    uAiTex: { value: (() => { const t = new THREE.DataArrayTexture(new Uint8Array(4), 1, 1, 1); t.needsUpdate = true; return t; })() },
+    uAiPh:  { value: (() => { const t = new THREE.DataArrayTexture(new Uint8Array([128, 128, 0, 255]), 1, 1, 1); t.needsUpdate = true; return t; })() },
+    uAiBev:   { value: (() => { const t = new THREE.DataTexture(new Uint8Array(4), 1, 1); t.needsUpdate = true; return t; })() },
+    uAiBevPh: { value: (() => { const t = new THREE.DataTexture(new Uint8Array([128, 128, 0, 255]), 1, 1); t.needsUpdate = true; return t; })() },
+    uAiBevN:  { value: 0 },
+  },
+  texV: '52.00',
+  hue0: { value: new THREE.Vector4(0.37, 0.76, 1, 1) },
+  themes: {},
+};
+function _aiHueOf(m) { return (m && m.userData && m.userData.aiHue) || _AI_CITY.hue0; }
+if (typeof window !== 'undefined') window.__aiTheme = function (name, v) {
+  const T = _AI_CITY.themes;
+  if (name && Array.isArray(v) && T[name]) T[name].value.set(+v[0], +v[1], v[2] != null ? +v[2] : 1, v[3] != null ? +v[3] : 1);
+  const out = {}; for (const k in T) out[k] = T[k].value.toArray().map((x) => +x.toFixed(3));
+  return out;
+};
+const _AI_PAL_GLSL = [
+  'uniform vec4 uAiHue;',
+  'vec3 aiRgb2hsv(vec3 c){ vec4 K = vec4(0.0, -1.0/3.0, 2.0/3.0, -1.0);',
+  '  vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g)); vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));',
+  '  float d = q.x - min(q.w, q.y); return vec3(abs(q.z + (q.w - q.y) / (6.0 * d + 1e-10)), d / (q.x + 1e-10), q.x); }',
+  'vec3 aiHsv2rgb(vec3 c){ vec3 p = abs(fract(c.xxx + vec3(1.0, 2.0/3.0, 1.0/3.0)) * 6.0 - 3.0); return c.z * mix(vec3(1.0), clamp(p - 1.0, 0.0, 1.0), c.y); }',
+  'vec3 aiPal(vec3 e){ vec3 h = aiRgb2hsv(max(e, vec3(0.0)));',
+  '  float cy = smoothstep(0.40, 0.46, h.x) * (1.0 - smoothstep(0.64, 0.70, h.x));',
+  '  float pk = smoothstep(0.78, 0.83, h.x) * (1.0 - smoothstep(0.975, 0.995, h.x));',
+  '  vec3 a = aiHsv2rgb(vec3(uAiHue.x, h.y * uAiHue.z, h.z)), b = aiHsv2rgb(vec3(uAiHue.y, h.y * uAiHue.w, h.z));',
+  '  return mix(e, mix(mix(e, a, cy), b, pk), uAiPal); }',
+].join('\n') + '\n';
+const _AI_GND_HEAD = 'uniform float uHcT;\nuniform float uAiOn;\nuniform float uAiN;\nuniform vec4 uAiK;\nuniform float uAiPal;\n' +
+  'uniform highp sampler2DArray uAiTex;\nuniform highp sampler2DArray uAiPh;\nuniform vec4 uAiGnd;\nuniform vec4 uAiGndK;\n' +
+  'uniform int uAiRipN;\nuniform vec4 uAiRip[16];\nuniform vec4 uAiGR;\nuniform sampler2D uAiMask;\n' + _AI_PAL_GLSL;
+const _AI_GND_DIFF = `
+vec2 aiGp = vHcWp.xz - uAiGR.zw;
+vec2 aiGq = vec2(aiGp.x * uAiGR.x + aiGp.y * uAiGR.y, aiGp.y * uAiGR.x - aiGp.x * uAiGR.y) / uAiGnd.x;
+vec2 aiGgx = dFdx(aiGq), aiGgy = dFdy(aiGq);
+bool aiGon = uAiOn > 0.5 && uAiN > 0.5 && uAiGnd.w > 0.5;
+vec3 aiGc = vec3(0.0);
+vec4 aiGph = vec4(0.5, 0.5, 0.0, 1.0);
+vec4 aiGm = vec4(1.0, 0.0, 0.0, 1.0);
+if (aiGon) {
+  aiGc = textureGrad(uAiTex, vec3(fract(aiGq), 0.0), aiGgx, aiGgy).rgb;
+  aiGph = textureGrad(uAiPh, vec3(fract(aiGq), 0.0), aiGgx, aiGgy);
+  aiGm = texture2D(uAiMask, vMapUv);
+  diffuseColor.rgb = diffuse * vec3(dot(aiGc, vec3(0.3, 0.55, 0.15))) * uAiGndK.w * mix(1.0, aiGm.r, 0.8);
+}
+`;
+const _AI_GND_EMIT = `
+if (aiGon) {
+  float aiGmx = max(aiGc.r, max(aiGc.g, aiGc.b)), aiGmn = min(aiGc.r, min(aiGc.g, aiGc.b));
+  float aiGne = smoothstep(0.06, 0.22, aiGmx - aiGmn) * smoothstep(0.04, 0.2, aiGmx);
+  float aiWv = 0.0, aiAc = 0.0;
+  for (int i = 0; i < 16; i++) {
+    if (i >= uAiRipN) break;
+    vec4 aiR = uAiRip[i];
+    float aiA = uHcT - aiR.z;
+    if (aiA < 0.0 || aiA > 4.5) continue;
+    float aiD = max(length(vHcWp.xz - aiR.xy) - aiR.w, 0.0);
+    float aiX = (aiD - aiA * uAiGndK.x) / uAiGndK.y;
+    aiWv = max(aiWv, exp(-aiX * aiX - aiA * 0.8));
+    aiAc = max(aiAc, exp(-aiA * 2.2 - aiD / 220.0));
+  }
+  vec3 aiGe = aiGc * (uAiGnd.y * (0.45 + 1.6 * aiGm.g) + aiGne * uAiGnd.z * (1.0 + 2.5 * aiAc + uAiGndK.z * aiWv));
+  vec2 aiGcs = aiGph.rg * 2.0 - 1.0;
+  float aiGls = smoothstep(0.12, 0.5, length(aiGcs));
+  float aiGdot = pow(max(cos(atan(aiGcs.y, aiGcs.x + 1e-5) - uHcT * 5.0), 0.0), 28.0) * aiGls;
+  aiGe += mix(aiGc / max(aiGmx, 0.03), vec3(1.0), 0.45) * (aiGdot * 2.5 * uAiK.z * (1.0 + 2.0 * aiAc) + aiGls * aiWv * uAiGndK.z * 0.5);
+  totalEmissiveRadiance = aiPal(aiGe) * mix(1.0, aiGm.r, 0.6);
+}
+`;
+function _aiCityTexLoad() {
+  if (_AI_CITY._started) return;
+  _AI_CITY._started = true;
+  const mob = (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) || (typeof isStandaloneQuest === 'function' && isStandaloneQuest());
+  const S = mob ? 512 : 1024;
+  _AI_CITY.u.uAiRipN.value = mob ? 8 : 16;   // (v51.95) the deck's ripple loop
+  const load = (url) => new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = url; });
+  Promise.all([load('tex/ai_boards.webp?v=' + _AI_CITY.texV), load('tex/ai_phase.webp?v=' + _AI_CITY.texV)]).then(([ia, ip]) => {
+    const n = Math.max(1, Math.round(ia.height / ia.width));
+    const cv = document.createElement('canvas'); cv.width = S; cv.height = S * n;
+    const cx = cv.getContext('2d', { willReadFrequently: true });
+    const arr = (im, srgb) => {
+      cx.clearRect(0, 0, cv.width, cv.height);
+      cx.drawImage(im, 0, 0, cv.width, cv.height);
+      const t = new THREE.DataArrayTexture(new Uint8Array(cx.getImageData(0, 0, cv.width, cv.height).data.buffer), S, S, n);
+      t.format = THREE.RGBAFormat; t.type = THREE.UnsignedByteType;
+      t.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+      t.wrapS = t.wrapT = THREE.RepeatWrapping;
+      t.magFilter = THREE.LinearFilter; t.minFilter = THREE.LinearMipmapLinearFilter; t.generateMipmaps = true;
+      try { t.anisotropy = Math.min(mob ? 2 : 8, renderer.capabilities.getMaxAnisotropy()); } catch (_) {}
+      t.needsUpdate = true;
+      try { if (renderer && renderer.initTexture) renderer.initTexture(t); } catch (_) {}
+      return t;
+    };
+    _AI_CITY.u.uAiTex.value = arr(ia, true);
+    _AI_CITY.u.uAiPh.value = arr(ip, false);
+    _AI_CITY.u.uAiN.value = n;
+    console.log('[ai-city] boards in:', n, 'layers @', S, 'px');
+  }).catch((e) => { console.warn('[ai-city] boards failed to load - window towers stay', e); });
+  Promise.all([load('tex/ai_bevel.webp?v=' + _AI_CITY.texV), load('tex/ai_bevel_phase.webp?v=' + _AI_CITY.texV)]).then(([ib, ibp]) => {
+    const BW = mob ? 1024 : 2048, BH = Math.round(BW / 3);
+    const cv = document.createElement('canvas'); cv.width = BW; cv.height = BH;
+    const cx = cv.getContext('2d', { willReadFrequently: true });
+    const tex = (im, srgb) => {
+      cx.clearRect(0, 0, BW, BH);
+      cx.drawImage(im, 0, 0, BW, BH);
+      const t = new THREE.DataTexture(new Uint8Array(cx.getImageData(0, 0, BW, BH).data.buffer), BW, BH);
+      t.format = THREE.RGBAFormat; t.type = THREE.UnsignedByteType;
+      t.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+      t.wrapS = THREE.RepeatWrapping; t.wrapT = THREE.ClampToEdgeWrapping;
+      t.magFilter = THREE.LinearFilter; t.minFilter = THREE.LinearMipmapLinearFilter; t.generateMipmaps = true;
+      try { t.anisotropy = Math.min(mob ? 2 : 8, renderer.capabilities.getMaxAnisotropy()); } catch (_) {}
+      t.needsUpdate = true;
+      try { if (renderer && renderer.initTexture) renderer.initTexture(t); } catch (_) {}
+      return t;
+    };
+    _AI_CITY.u.uAiBev.value = tex(ib, true);
+    _AI_CITY.u.uAiBevPh.value = tex(ibp, false);
+    _AI_CITY.u.uAiBevN.value = 1;
+    console.log('[ai-city] bevel board in @', BW + 'x' + BH);
+  }).catch((e) => { console.warn('[ai-city] bevel board failed to load - the bevels stay black', e); });
+}
+if (typeof window !== 'undefined') window.__aiCity = function (o) {
+  const U = _AI_CITY.u, K = U.uAiK.value;
+  if (o === 0 || o === 1 || o === true || o === false) U.uAiOn.value = o ? 1 : 0;
+  else if (o && typeof o === 'object') {
+    if ('on' in o) U.uAiOn.value = o.on ? 1 : 0;
+    if ('glow' in o) K.x = +o.glow; if ('alb' in o) K.y = +o.alb; if ('dots' in o) K.z = +o.dots; if ('frame' in o) K.w = +o.frame;
+    if ('pal' in o) U.uAiPal.value = +o.pal;
+    if ('self' in o) U.uAiSelf.value = +o.self;
+    const G = U.uAiGnd.value, GK = U.uAiGndK.value, NT = U.uAiNet.value, A = U.uAiAct.value, F = U.uAiFib.value;
+    if ('gnd' in o) G.w = o.gnd ? 1 : 0;
+    if ('gsize' in o) G.x = +o.gsize; if ('gself' in o) G.y = +o.gself; if ('gglow' in o) G.z = +o.gglow;
+    if ('galb' in o) GK.w = +o.galb; if ('ripple' in o) GK.z = +o.ripple; if ('rspeed' in o) GK.x = +o.rspeed; if ('rwidth' in o) GK.y = +o.rwidth;
+    if ('net' in o) NT.x = o.net ? 1 : 0;
+    if ('link' in o) NT.y = +o.link; if ('packet' in o) NT.z = +o.packet; if ('beacon' in o) NT.w = +o.beacon;
+    if ('spike' in o) A.x = +o.spike; if ('act' in o) A.y = +o.act;
+    if ('skirt' in o) U.uAiSk.value = o.skirt ? 1 : 0;
+    if ('fibre' in o) F.x = o.fibre ? 1 : 0; if ('fglow' in o) F.y = +o.fglow;
+    if ('die' in o) U.uAiDie.value = o.die ? 1 : 0;
+    if ('drive' in o) _AI_NET.drive = +o.drive; if ('speed' in o) _AI_NET.speed = +o.speed; if ('weight' in o) _AI_NET.weight = +o.weight;
+  }
+  const G = U.uAiGnd.value, GK = U.uAiGndK.value, NT = U.uAiNet.value, A = U.uAiAct.value, F = U.uAiFib.value;
+  return { on: U.uAiOn.value, self: U.uAiSelf.value, glow: K.x, alb: K.y, dots: K.z, frame: K.w, pal: U.uAiPal.value, layers: U.uAiN.value,
+    gnd: G.w, gsize: G.x, gself: G.y, gglow: G.z, galb: GK.w, ripple: GK.z, rspeed: GK.x, rwidth: GK.y,
+    net: NT.x, link: NT.y, packet: NT.z, beacon: NT.w, spike: A.x, act: A.y, skirt: U.uAiSk.value, fibre: F.x, fglow: F.y,
+    die: U.uAiDie.value, drive: _AI_NET.drive, speed: _AI_NET.speed, weight: _AI_NET.weight };
+};
+
+const _AI_NET = {
+  drive: 1,              // scales every neuron's charging (0 = no new thoughts; packets in flight still land)
+  weight: 0.17,
+  speed: 1500,           // packet speed along a link, u/s
+  leak: 0.05,            // charge leak per second
+  fireHz: 1.4,           // self-fires per second for the whole city (cascades come on top)
+  spread: [0.7, 1.3],    // each node's self-firing period = nodes / fireHz x this
+  refr: 0.7,             // seconds before a neuron can fire again
+  ripGap: 3.2,           // a deck ripple slot is only reused once its ring has faded (no popping)
+  near: 36000,           // a city's network only runs while the camera is within this of its edge
+  maxNodes: 96, width: 14, beacon: 34,   // (v51.97) width 9 -> 14: the links have to read through the dusk fog
+};
+function _aiSkirtR(w, h, d) { return Math.max(10, Math.min(48, 0.05 * Math.min(w, d) + 0.012 * h)); }
+function _aiInstAttr(mesh, size, name, fill) {
+  if (!mesh) return null;
+  const n = mesh.count, a = new Float32Array(n * size);
+  for (let i = 0; i < n; i++) fill(a, i);
+  const at = new THREE.InstancedBufferAttribute(a, size);
+  at.setUsage(THREE.DynamicDrawUsage);
+  mesh.geometry.setAttribute(name, at);
+  return at;
+}
+function _aiFallbackMask() {
+  if (!_AI_CITY._mask1) { const t = new THREE.DataTexture(new Uint8Array([255, 0, 0, 255]), 1, 1); t.needsUpdate = true; _AI_CITY._mask1 = t; }
+  return _AI_CITY._mask1;
+}
+function _aiGeoSkirt(lean) {
+  const M = lean ? 1 : 2, K = lean ? 2 : 3;
+  const SG = [[1, 1], [-1, 1], [-1, -1], [1, -1]];   // corner (x, z) signs, in order of the outward angle (+x, +z, -x, -z)
+  const cols = [];
+  for (let i = 0; i < 4; i++) for (let m = 0; m <= M; m++) cols.push([SG[i][0], SG[i][1], (i + m / M) * Math.PI / 2]);
+  const nC = cols.length, R = K + 1;
+  const pos = new Float32Array(nC * R * 3), nrm = new Float32Array(nC * R * 3), sk = new Float32Array(nC * R * 4);
+  for (let j = 0; j < nC; j++) for (let k = 0; k <= K; k++) {
+    const v = j * R + k, th = k / K * Math.PI / 2, nx = Math.cos(cols[j][2]), nz = Math.sin(cols[j][2]);
+    const o = 0.25 * (1 - Math.sin(th));   // a reference shape (unit box, skirt 0.25) - the shader rebuilds it per instance
+    pos[v * 3] = cols[j][0] * 0.5 + nx * o; pos[v * 3 + 1] = 0.25 * (1 - Math.cos(th)); pos[v * 3 + 2] = cols[j][1] * 0.5 + nz * o;
+    nrm[v * 3] = nx * Math.sin(th); nrm[v * 3 + 1] = Math.cos(th); nrm[v * 3 + 2] = nz * Math.sin(th);
+    sk[v * 4] = cols[j][0]; sk[v * 4 + 1] = cols[j][1]; sk[v * 4 + 2] = cols[j][2]; sk[v * 4 + 3] = th;
+  }
+  const idx = [];
+  for (let j = 0; j < nC; j++) {
+    const jn = (j + 1) % nC;
+    for (let k = 0; k < K; k++) {
+      const a = j * R + k, b = jn * R + k, c = jn * R + k + 1, d = j * R + k + 1;
+      idx.push(a, c, b, a, d, c);
+    }
+  }
+  {
+    const j = M, a = j * R, c = ((j + 1) % nC) * R + 1, b = ((j + 1) % nC) * R;
+    const ax = pos[a * 3], ay = pos[a * 3 + 1], az = pos[a * 3 + 2];
+    const ux = pos[c * 3] - ax, uy = pos[c * 3 + 1] - ay, uz = pos[c * 3 + 2] - az;
+    const vx = pos[b * 3] - ax, vy = pos[b * 3 + 1] - ay, vz = pos[b * 3 + 2] - az;
+    const fx = uy * vz - uz * vy, fy = uz * vx - ux * vz, fz = ux * vy - uy * vx;
+    if (fx * nrm[a * 3] + fy * (nrm[a * 3 + 1] + 0.3) + fz * nrm[a * 3 + 2] < 0) for (let q = 0; q < idx.length; q += 3) { const t = idx[q + 1]; idx[q + 1] = idx[q + 2]; idx[q + 2] = t; }
+  }
+  const gm = new THREE.BufferGeometry();
+  gm.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  gm.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
+  gm.setAttribute('aSk', new THREE.BufferAttribute(sk, 4));
+  gm.setIndex(idx);
+  return gm;
+}
+function _aiSkirtMat() {
+  const mat = new THREE.MeshLambertMaterial({ color: 0xffffff });   // the near-black is the instance colour
+  mat.onBeforeCompile = (sh) => {
+    sh.uniforms.uAiOn = _AI_CITY.u.uAiOn; sh.uniforms.uAiN = _AI_CITY.u.uAiN; sh.uniforms.uAiSk = _AI_CITY.u.uAiSk;
+    sh.vertexShader = 'attribute vec4 aSk;\nuniform float uAiOn;\nuniform float uAiN;\nuniform float uAiSk;\n' + sh.vertexShader
+      .replace('#include <beginnormal_vertex>', `vec3 skS = vec3(1.0);
+#ifdef USE_INSTANCING
+ skS = max(vec3(length(instanceMatrix[0].xyz), length(instanceMatrix[1].xyz), length(instanceMatrix[2].xyz)), vec3(1e-4));
+#endif
+ vec2 skN = vec2(cos(aSk.z), sin(aSk.z));
+ float skSin = sin(aSk.w), skCos = cos(aSk.w);
+ // three divides an instanced normal by the squared scale and multiplies it back by the matrix: pre-scaling by
+ // the scale leaves the true (unscaled) cove normal in world space
+ vec3 objectNormal = vec3(skN.x * skSin, skCos, skN.y * skSin) * skS;`)
+      .replace('#include <begin_vertex>', `float skO = skS.y * (1.0 - skSin);
+ vec3 transformed = vec3(aSk.x * skS.x * 0.5 + skN.x * skO, skS.y * (1.0 - skCos), aSk.y * skS.z * 0.5 + skN.y * skO) / skS;
+ transformed *= step(0.5, uAiOn) * step(0.5, uAiN) * step(0.5, uAiSk);   // off = every vertex at the origin: no fragments`);
+  };
+  return mat;
+}
+function _aiGeoBevel() {
+  const P = [], N = [], I = [];
+  for (const [fx, fz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    const b = P.length / 3, tx = -fz, tz = fx;
+    for (const [sg, y] of [[-1, 0], [1, 0], [1, 1], [-1, 1]]) { P.push(fx * 0.5 + tx * 0.5 * sg, y, fz * 0.5 + tz * 0.5 * sg); N.push(fx, 0, fz); }
+    I.push(b, b + 2, b + 1, b, b + 3, b + 2);   // outward: (v2 - v0) x (v1 - v0) = the side's axis, checked for all four
+  }
+  const gm = new THREE.BufferGeometry();
+  gm.setAttribute('position', new THREE.Float32BufferAttribute(P, 3));
+  gm.setAttribute('normal', new THREE.Float32BufferAttribute(N, 3));
+  gm.setIndex(I);
+  return gm;
+}
+function _aiBevelMat(sunV) {
+  const mat = new THREE.MeshLambertMaterial({ color: 0xffffff });   // the near-black is the instance colour
+  const U = _AI_CITY.u;
+  mat.onBeforeCompile = (sh) => {
+    sh.uniforms.uAiOn = U.uAiOn; sh.uniforms.uAiN = U.uAiN;
+    sh.uniforms.uHcT = _swU.uTime; sh.uniforms.uHcSunV = sunV || { value: new THREE.Vector3(0.27, 0.8, 0.4) };
+    sh.uniforms.uAiK = U.uAiK; sh.uniforms.uAiPal = U.uAiPal; sh.uniforms.uAiSelf = U.uAiSelf; sh.uniforms.uAiAct = U.uAiAct;
+    sh.uniforms.uAiHue = _aiHueOf(mat);
+    sh.uniforms.uAiBev = U.uAiBev; sh.uniforms.uAiBevPh = U.uAiBevPh; sh.uniforms.uAiBevN = U.uAiBevN;
+    sh.fragmentShader = ('uniform float uHcT;\nuniform vec3 uHcSunV;\nuniform float uAiOn;\nuniform vec4 uAiK;\nuniform float uAiPal;\nuniform float uAiSelf;\nuniform vec4 uAiAct;\n' +
+      'uniform sampler2D uAiBev;\nuniform sampler2D uAiBevPh;\nuniform float uAiBevN;\nvarying float vBvU;\nvarying float vBvT;\nvarying vec4 vBvG;\nvarying float vBvF;\n' + _AI_PAL_GLSL) +
+      sh.fragmentShader.replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+{
+  // where on the board: across the face (vBvU, world units, left to right as seen from outside) over one board's width
+  // (3 x the slope), centred; up it from the deck. Coordinates, derivatives and edge distances in uniform flow.
+  float bvSl = max(vBvG.z, 1.0);
+  vec2 bvQ = vec2(vBvU / (3.0 * bvSl) + 0.5, 1.0 - vBvT);
+  vec2 bvGx = dFdx(bvQ), bvGy = dFdy(bvQ);
+  float bvHw = mix(vBvG.x, vBvG.y, vBvT);
+  float bvDE = min(bvHw - abs(vBvU), min(vBvT, 1.0 - vBvT) * bvSl);   // to the face's nearest edge (the frame)
+  float bvPx = max(fwidth(bvDE), 0.001);
+  if (uAiOn > 0.5 && uAiBevN > 0.5) {
+    vec2 bvUV = vec2(fract(bvQ.x), clamp(bvQ.y, 0.0, 1.0));
+    vec3 bvC = textureGrad(uAiBev, bvUV, bvGx, bvGy).rgb;
+    vec4 bvP = textureGrad(uAiBevPh, bvUV, bvGx, bvGy);
+    float bvMx = max(bvC.r, max(bvC.g, bvC.b)), bvMn = min(bvC.r, min(bvC.g, bvC.b));
+    float bvNe = smoothstep(0.06, 0.22, bvMx - bvMn) * smoothstep(0.04, 0.2, bvMx);
+    float bvAge = uHcT - vBvF; bvAge = bvAge < 0.0 ? 99.0 : bvAge;
+    float bvAct = exp(-bvAge * 2.2) * uAiAct.y;
+    vec3 bvE = bvC * (uAiSelf + bvNe * uAiK.x * (1.0 + 1.5 * bvAct));
+    vec2 bvCs = bvP.rg * 2.0 - 1.0;
+    float bvLs = smoothstep(0.12, 0.5, length(bvCs));
+    vec3 bvLc = mix(bvC / max(bvMx, 0.03), vec3(1.0), 0.45);
+    bvE += bvLc * pow(max(cos(atan(bvCs.y, bvCs.x + 1e-5) - uHcT * 5.0), 0.0), 28.0) * bvLs * 2.5 * uAiK.z * (1.0 + 1.6 * bvAct);
+    float bvSf = bvAge * 0.35, bvSd = (bvP.b - bvSf) * 22.0;
+    bvE += mix(bvLc, vec3(1.0), 0.3) * bvLs * 3.0 * uAiAct.x * exp(-bvAge * 0.7)
+         * (exp(-bvSd * bvSd) + 0.4 * exp(-max(bvSf - bvP.b, 0.0) * 6.0) * step(bvP.b, bvSf));
+    // the frame round the face - up its two corner edges, along its foot on the deck and its top under the tower
+    float bvFw = clamp(0.035 * min(bvSl, vBvG.y * 2.0), 6.0, 26.0) * uAiK.w;
+    float bvFm = (1.0 - smoothstep(bvFw - bvPx, bvFw + bvPx, bvDE)) * step(0.01, uAiK.w);
+    float bvStrip = (1.0 - smoothstep(bvFw * 0.07, bvFw * 0.07 + bvPx, abs(bvDE - bvFw * 0.55))) * bvFm;
+    vec3 bvSc = vBvG.w > 0.5 ? vec3(1.0, 0.35, 0.85) : vec3(0.3, 0.85, 1.0);
+    diffuseColor.rgb = mix(vec3(dot(bvC, vec3(0.3, 0.55, 0.15)) * uAiK.y), vec3(0.03, 0.033, 0.04), bvFm);
+    bvE = bvE * (1.0 - bvFm) + bvSc * bvStrip * 1.2 * (1.0 + 2.0 * bvAct);
+    float bvSun = mix(1.0, 0.22, clamp(dot(normalize(normal), normalize(uHcSunV)), 0.0, 1.0));
+    totalEmissiveRadiance += aiPal(bvE) * bvSun;
+  }
+}`);
+    sh.vertexShader = 'attribute vec2 aPrm;\nattribute float aAiF;\nuniform float uAiOn;\nuniform float uAiN;\nvarying float vBvU;\nvarying float vBvT;\nvarying vec4 vBvG;\nvarying float vBvF;\n' + sh.vertexShader
+      .replace('#include <beginnormal_vertex>', `vec3 bvS = vec3(1.0);
+#ifdef USE_INSTANCING
+ bvS = max(vec3(length(instanceMatrix[0].xyz), length(instanceMatrix[1].xyz), length(instanceMatrix[2].xyz)), vec3(1e-4));
+#endif
+ // the slope's true normal at the instance's real size (it rises the podium height over half the size difference),
+ // pre-scaled for three's instanced normal transform (which divides by the squared scale)
+ vec3 bvN = abs(normal.x) > 0.5 ? vec3(normal.x * bvS.y, bvS.x * (1.0 - aPrm.x) * 0.5, 0.0)
+                                : vec3(0.0, bvS.z * (1.0 - aPrm.y) * 0.5, normal.z * bvS.y);
+ vec3 objectNormal = normalize(bvN) * bvS;`)
+      .replace('#include <begin_vertex>', `vec3 transformed = vec3(position.x * mix(1.0, aPrm.x, position.y), position.y, position.z * mix(1.0, aPrm.y, position.y));
+ // (v52.00) where this vertex sits on its face, for the board: across it in world units (left to right as seen from
+ // outside, so no face shows the strip mirrored), up it (0 on the deck, 1 under the tower), the face's half-width on the
+ // deck and at the top, the slope's length, and a per-bevel random from where it stands (its frame strip's hue)
+ bool bvX = abs(normal.x) > 0.5;
+ float bvW0 = 0.5 * (bvX ? bvS.z : bvS.x);
+ vBvU = bvX ? -transformed.z * bvS.z * sign(normal.x) : transformed.x * bvS.x * sign(normal.z);
+ vBvT = position.y;
+ vBvG = vec4(bvW0, bvW0 * (bvX ? aPrm.y : aPrm.x), length(vec2(bvS.y, bvX ? (1.0 - aPrm.x) * 0.5 * bvS.x : (1.0 - aPrm.y) * 0.5 * bvS.z)), 0.0);
+ #ifdef USE_INSTANCING
+ vBvG.w = fract(sin(dot(instanceMatrix[3].xz * 0.001, vec2(12.9898, 78.233))) * 43758.5453);
+ #endif
+ vBvF = aAiF;
+ transformed *= step(0.5, uAiOn) * step(0.5, uAiN);   // off = every vertex at the origin; the podium box shows instead`);
+  };
+  return mat;
+}
+function _aiCylMat() {
+  const mat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+  mat.onBeforeCompile = (sh) => {
+    sh.uniforms.uHcT = _swU.uTime;
+    sh.uniforms.uAiOn = _AI_CITY.u.uAiOn; sh.uniforms.uAiN = _AI_CITY.u.uAiN; sh.uniforms.uAiPal = _AI_CITY.u.uAiPal;
+    sh.uniforms.uAiFib = _AI_CITY.u.uAiFib; sh.uniforms.uAiAct = _AI_CITY.u.uAiAct; sh.uniforms.uAiHue = _aiHueOf(mat);
+    sh.vertexShader = 'attribute vec3 aSize;\nattribute vec2 aPrm;\nattribute float aAiF;\nvarying vec3 vFbL;\nvarying vec3 vFbN;\nvarying vec3 vFbS;\nvarying vec3 vFbP;\n' +
+      sh.vertexShader.replace('#include <begin_vertex>',
+        '#include <begin_vertex>\n vFbL = position * aSize; vFbN = normal; vFbS = aSize; vFbP = vec3(aPrm, aAiF);');
+    sh.fragmentShader = ('uniform float uHcT;\nuniform float uAiOn;\nuniform float uAiN;\nuniform float uAiPal;\nuniform vec4 uAiFib;\nuniform vec4 uAiAct;\n' +
+      'varying vec3 vFbL;\nvarying vec3 vFbN;\nvarying vec3 vFbS;\nvarying vec3 vFbP;\n' + _AI_PAL_GLSL) +
+      sh.fragmentShader.replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+{
+  float fbR = vFbS.x * 0.5;
+  float fbPx = max(length(dFdx(vFbL)), length(dFdy(vFbL)));   // one pixel in world units (no atan seam to trip on)
+  if (uAiOn > 0.5 && uAiN > 0.5 && uAiFib.x > 0.5 && vFbS.y >= 3.0 * vFbS.x && vFbS.x >= 14.0 && abs(vFbN.y) < 0.5) {
+    float fbRnd = floor(vFbP.y * 4096.0 + 0.5) * (1.0 / 4096.0);
+    float fbAge = uHcT - vFbP.z; fbAge = fbAge < 0.0 ? 99.0 : fbAge;
+    float fbAct = exp(-fbAge * 2.2) * uAiAct.y;
+    // strands at the ten facet edges (CylinderGeometry puts them at atan(x, z) = 2 pi i / 10), averaged at range
+    float fbStr = mix(pow(0.5 + 0.5 * cos(atan(vFbL.x, vFbL.z) * 10.0), 8.0), 0.2, smoothstep(0.3, 0.8, fbPx / (0.6283 * fbR)));
+    float fbV = vFbL.y / max(fbR * 0.8, 1.0);
+    float fbSp = 0.7 + 0.6 * fbRnd;
+    float fbPu = pow(fract(fbV * 0.3 - uHcT * fbSp), 18.0) + 0.6 * pow(fract(fbV * 0.3 - uHcT * fbSp * 1.37 + 0.5), 24.0);
+    float fbEnd = 1.0 - smoothstep(0.3 * fbR, 0.65 * fbR, min(vFbL.y, vFbS.y - vFbL.y));   // collars at base and capital
+    vec3 fbCol = fract(fbRnd * 3.1) > 0.6 ? vec3(0.9, 0.55, 1.0) : vec3(0.35, 0.85, 1.0);
+    vec3 fbE = fbCol * (1.0 - fbEnd) * (0.02 + fbStr * (0.5 + 3.0 * fbPu * (0.5 + fbAct) + 1.2 * fbAct) + 0.15 * fbPu);
+    diffuseColor.rgb = mix(vec3(0.03, 0.04, 0.05), vec3(0.06, 0.065, 0.075), fbEnd);
+    totalEmissiveRadiance += aiPal(fbE) * uAiFib.y;
+  }
+}`);
+  };
+  return mat;
+}
+function _aiNetMat() {
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0xffffff, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false, toneMapped: false,
+  });
+  mat.onBeforeCompile = (sh) => {
+    sh.uniforms.uHcT = _swU.uTime;
+    sh.uniforms.uHcPxH = HUB_CITY._uPxH;
+    sh.uniforms.uAiOn = _AI_CITY.u.uAiOn; sh.uniforms.uAiN = _AI_CITY.u.uAiN; sh.uniforms.uAiPal = _AI_CITY.u.uAiPal;
+    sh.uniforms.uAiNet = _AI_CITY.u.uAiNet; sh.uniforms.uAiHue = _aiHueOf(mat);
+    sh.vertexShader = 'attribute vec4 aNet;\nattribute vec4 aNetD;\nuniform float uHcPxH;\nuniform float uAiOn;\nuniform float uAiN;\nuniform vec4 uAiNet;\nvarying vec4 vNet;\nvarying vec4 vNetD;\n' +
+      sh.vertexShader.replace('#include <begin_vertex>', `#include <begin_vertex>
+ vNet = vec4(aNet.x, mix(aNet.y, aNet.z, position.y), aNet.w, 1.0);
+ vNetD = aNetD;
+ #ifdef USE_INSTANCING
+ {
+   // the neon strips' line-AA (v36.07): a thin axis under two pixels is widened to two, so a link never pops between
+   // MSAA coverage levels. Per VERTEX here (one link spans a long way in depth); a beacon widens round its own centre.
+   // (v51.97) Dimmed by what the widening adds ON SCREEN: a line's width grows by one cross-axis factor (the tube
+   // widens both ways, but the eye sees one), a beacon's area by two. v51.95-96 divided by every axis like the neon
+   // strips do, which took a link at 3 k down to ~7 % and left the network as faint violet threads in the dusk fog.
+   vec3 nS = vec3(length(instanceMatrix[0].xyz), length(instanceMatrix[1].xyz), length(instanceMatrix[2].xyz));
+   float nD = length((modelViewMatrix * instanceMatrix * vec4(position, 1.0)).xyz);
+   float nPx = 4.0 * nD / (projectionMatrix[1][1] * max(uHcPxH, 1.0));
+   vec3 nW = clamp(vec3(nPx) / max(nS, vec3(1e-3)), vec3(1.0), vec3(64.0));
+   if (aNet.x < 0.5) nW.y = 1.0;
+   transformed.xz *= nW.xz;
+   transformed.y = 0.5 + (transformed.y - 0.5) * nW.y;
+   vNet.w = aNet.x < 0.5 ? 1.0 / nW.x : 1.0 / (nW.x * nW.y);
+ }
+ #endif
+ if (uAiOn < 0.5 || uAiN < 0.5 || uAiNet.x < 0.5) transformed = vec3(0.0);`);
+    sh.fragmentShader = 'uniform float uHcT;\nuniform float uAiPal;\nuniform vec4 uAiNet;\nvarying vec4 vNet;\nvarying vec4 vNetD;\n' + _AI_PAL_GLSL +
+      sh.fragmentShader.replace('#include <opaque_fragment>', `{
+  float nAge = uHcT - vNetD.w; nAge = nAge < 0.0 ? 99.0 : nAge;
+  vec3 nC;
+  if (vNet.x < 0.5) {
+    // a link: dim at rest, lit while a packet rides it (heat), and the packets themselves - bright ~70 u dashes
+    float nL = max(vNet.z, 1.0) / 70.0, p0 = (vNet.y - vNetD.y) * nL, p1 = (vNet.y - vNetD.z) * nL;
+    nC = vec3(0.25, 0.8, 1.0) * (0.35 + 0.65 * vNetD.x) * uAiNet.y + vec3(0.85, 0.95, 1.0) * (exp(-p0 * p0) + exp(-p1 * p1)) * uAiNet.z;
+  } else {
+    nC = vec3(0.4, 0.85, 1.0) * (0.5 + 6.0 * exp(-nAge * 2.2)) * uAiNet.w;   // a roof beacon: flares as its tower fires
+  }
+  outgoingLight = aiPal(nC) * vNet.w;
+}
+#include <opaque_fragment>`);
+  };
+  return mat;
+}
+function _aiNetBuild(city, site, group, twrAi, cylAi, rip, bevAi, hue) {
+  const C = _AI_NET;
+  const T = (city.towers || []).filter((t) => t && t.t1 !== undefined).sort((a, b) => b.top - a.top).slice(0, C.maxNodes);
+  if (T.length < 2) return null;
+  const nN = T.length;
+  const nodes = T.map((t) => {
+    const per = nN / C.fireHz * (C.spread[0] + Math.random() * (C.spread[1] - C.spread[0]));
+    return { t, x: t.x, z: t.z, y: t.top, r: Math.max(t.w, t.d) * 0.5, links: [],
+      v: Math.random(), act: 0, age: 9, refr: 0, rate: C.leak / (1 - Math.exp(-C.leak * per)) };   // reaches 1 in `per` s
+  });
+  const links = [], seen = new Set();
+  const link = (a, b) => {
+    const k = a < b ? a * 4096 + b : b * 4096 + a;
+    if (a === b || seen.has(k)) return; seen.add(k);
+    const A = nodes[a], B = nodes[b];
+    nodes[a].links.push(links.length); nodes[b].links.push(links.length);
+    links.push({ a, b, len: Math.max(1, Math.hypot(A.x - B.x, A.y - B.y, A.z - B.z)), heat: 0, packets: [] });
+  };
+  for (let i = 0; i < nN; i++) {
+    const order = [];
+    for (let j = 0; j < nN; j++) if (j !== i) order.push(j);
+    const d2 = (j) => (nodes[i].x - nodes[j].x) ** 2 + (nodes[i].z - nodes[j].z) ** 2;
+    order.sort((p2, q2) => d2(p2) - d2(q2));
+    for (let k = 0; k < Math.min(order.length, i === 0 ? 8 : 2); k++) link(i, order[k]);
+  }
+  const SEG = 4, nI = links.length * SEG + nN;
+  const geo = _hcGeoBox();
+  const nmat = _aiNetMat(); if (hue) nmat.userData.aiHue = hue;   // (v52.01) the city's pair
+  const mesh = new THREE.InstancedMesh(geo, nmat, nI);
+  const aNet = new Float32Array(nI * 4), dyn = new Float32Array(nI * 4);
+  const M4 = new THREE.Matrix4(), X = new THREE.Vector3(), Y = new THREE.Vector3(), Z = new THREE.Vector3(), UP = new THREE.Vector3(0, 1, 0);
+  const pa = new THREE.Vector3(), pb = new THREE.Vector3();
+  const bez = (A, Mx, My, Mz, B, s, out) => { const u = 1 - s;
+    return out.set(u * u * A.x + 2 * u * s * Mx + s * s * B.x, u * u * A.y + 2 * u * s * My + s * s * B.y, u * u * A.z + 2 * u * s * Mz + s * s * B.z); };
+  let ii = 0;
+  for (const L of links) {
+    const A = nodes[L.a], B = nodes[L.b];
+    const Mx = (A.x + B.x) / 2, My = (A.y + B.y) / 2 + L.len * 0.18, Mz = (A.z + B.z) / 2;
+    for (let k = 0; k < SEG; k++, ii++) {
+      bez(A, Mx, My, Mz, B, k / SEG, pa); bez(A, Mx, My, Mz, B, (k + 1) / SEG, pb);
+      Y.subVectors(pb, pa);
+      X.crossVectors(Y, UP); if (X.lengthSq() < 1e-6) X.set(1, 0, 0);
+      X.normalize().multiplyScalar(C.width);
+      Z.crossVectors(X, Y).normalize().multiplyScalar(C.width);
+      M4.makeBasis(X, Y, Z); M4.setPosition(pa);
+      mesh.setMatrixAt(ii, M4);
+      aNet.set([0, k / SEG, (k + 1) / SEG, L.len], ii * 4);
+      dyn.set([0, -9, -9, -1e4], ii * 4);
+    }
+  }
+  const beacon0 = ii;
+  for (const n of nodes) {
+    M4.makeScale(C.beacon, C.beacon, C.beacon); M4.setPosition(n.x, n.y - C.beacon * 0.5, n.z);
+    mesh.setMatrixAt(ii, M4);
+    aNet.set([1, 0, 1, 0], ii * 4); dyn.set([0, -9, -9, -1e4], ii * 4);
+    ii++;
+  }
+  geo.setAttribute('aNet', new THREE.InstancedBufferAttribute(aNet, 4));
+  const dynA = new THREE.InstancedBufferAttribute(dyn, 4); dynA.setUsage(THREE.DynamicDrawUsage);
+  geo.setAttribute('aNetD', dynA);
+  mesh.instanceMatrix.needsUpdate = true;
+  mesh.frustumCulled = true;
+  const R = (site.genome && site.genome.radius) || 7500;
+  mesh.boundingSphere = new THREE.Sphere(new THREE.Vector3(site.x, site.padY + 3200, site.z), R + 6400);
+  mesh.userData.isHubCity = true;
+  mesh.name = 'aiNet';
+  group.add(mesh);
+  return { nodes, links, mesh, dynA, beacon0, twrAi, cylAi, bevAi, rip, ripK: 0, cx: site.x, cz: site.z, R, fires: 0 };
+}
+function _aiNetFire(N, i, t, force) {
+  const n = N.nodes[i]; if (!n || (n.refr > 0 && !force)) return false;
+  n.act = 1; n.age = 0; n.v = 0; n.refr = _AI_NET.refr; N.fires++;
+  for (const li of n.links) { const L = N.links[li]; if (L.packets.length < 4) L.packets.push({ s: 0, dir: L.a === i ? 1 : -1 }); }
+  const tw = n.t;
+  if (N.twrAi && tw.t1 > tw.t0) {
+    const A = N.twrAi.array; for (let k = tw.t0; k < tw.t1; k++) A[k * 3] = t;
+    N.twrAi.addUpdateRange(tw.t0 * 3, (tw.t1 - tw.t0) * 3); N.twrAi.needsUpdate = true;
+  }
+  if (N.cylAi && tw.c1 > tw.c0) {
+    const A = N.cylAi.array; for (let k = tw.c0; k < tw.c1; k++) A[k] = t;
+    N.cylAi.addUpdateRange(tw.c0, tw.c1 - tw.c0); N.cylAi.needsUpdate = true;
+  }
+  if (N.bevAi && tw.bv !== undefined) { N.bevAi.array[tw.bv] = t; N.bevAi.addUpdateRange(tw.bv, 1); N.bevAi.needsUpdate = true; }   // (v52.00) its bevel
+  N.dynA.array[(N.beacon0 + i) * 4 + 3] = t;
+  if (N.rip) {
+    const nR = Math.max(1, Math.min(N.rip.length, _AI_CITY.u.uAiRipN.value | 0)), S = N.rip[N.ripK % nR];
+    if (t - S.z > _AI_NET.ripGap || t < S.z) { S.set(n.x, n.z, t, n.r); N.ripK = (N.ripK + 1) % nR; }
+  }
+  return true;
+}
+function _aiNetTick(N, dt, t) {
+  const C = _AI_NET, nodes = N.nodes, links = N.links;
+  const kV = Math.exp(-dt * C.leak), kA = Math.exp(-dt * 2.2), kH = Math.exp(-dt * 1.5);
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i];
+    n.age += dt; n.act *= kA; n.refr -= dt;
+    n.v = n.v * kV + dt * n.rate * C.drive;
+  }
+  for (let i = 0; i < nodes.length; i++) if (nodes[i].v >= 1) _aiNetFire(N, i, t);
+  const D = N.dynA.array;
+  for (let li = 0; li < links.length; li++) {
+    const L = links[li], P = L.packets;
+    for (let q = P.length - 1; q >= 0; q--) {
+      P[q].s += dt * C.speed / L.len;
+      if (P[q].s >= 1) { nodes[P[q].dir > 0 ? L.b : L.a].v += C.weight; P.splice(q, 1); }
+    }
+    L.heat = Math.max(L.heat * kH, P.length ? 1 : 0);
+    const s0 = P.length > 0 ? (P[0].dir > 0 ? P[0].s : 1 - P[0].s) : -9;
+    const s1 = P.length > 1 ? (P[1].dir > 0 ? P[1].s : 1 - P[1].s) : -9;
+    for (let k = 0, o = li * 16; k < 4; k++, o += 4) { D[o] = L.heat; D[o + 1] = s0; D[o + 2] = s1; }
+  }
+  N.dynA.needsUpdate = true;
+}
+function _aiNetFrame(dt) {
+  const U = _AI_CITY.u;
+  if (!(U.uAiOn.value > 0.5) || !(U.uAiN.value > 0.5)) return;
+  if (typeof camera === 'undefined' || !camera || typeof _swU === 'undefined' || !_swU.uTime) return;
+  const t = _swU.uTime.value, cx = camera.position.x, cz = camera.position.z;
+  dt = Math.min(0.1, Math.max(0, +dt || 0));
+  const run = (N) => { if (N && Math.hypot(cx - N.cx, cz - N.cz) < N.R + _AI_NET.near) _aiNetTick(N, dt, t); };
+  try { if (game.hubCity) run(game.hubCity.aiNet); } catch (_) {}
+  try { if (typeof OW !== 'undefined' && OW.cities) for (const c of OW.cities) if (c.built && c.built.aiNet) run(c.built.aiNet); } catch (_) {}
+}
+if (typeof window !== 'undefined') window.__aiNet = {
+  cfg: _AI_NET,
+  info() {
+    const out = [];
+    const one = (name, N) => { if (N) out.push({ name, nodes: N.nodes.length, links: N.links.length, fires: N.fires,
+      packets: N.links.reduce((a, L) => a + L.packets.length, 0), ripK: N.ripK }); };
+    try { if (game.hubCity) one('hub', game.hubCity.aiNet); } catch (_) {}
+    try { if (OW.cities) for (const c of OW.cities) if (c.built) one(c.name, c.built.aiNet); } catch (_) {}
+    return out;
+  },
+  fire(i) { try { const N = game.hubCity && game.hubCity.aiNet; return N ? _aiNetFire(N, i | 0, _swU.uTime.value, true) : false; } catch (_) { return false; } },
+};
+
 function _hcTowerMat() {
   const mat = new THREE.MeshLambertMaterial({ color: 0xffffff });
   mat.userData.uHcSunV = { value: new THREE.Vector3(0.27, 0.8, 0.4) };
@@ -34502,11 +35203,19 @@ function _hcTowerMat() {
     sh.uniforms.uHcT = _swU.uTime;
     sh.uniforms.uHcSunV = mat.userData.uHcSunV;
     sh.uniforms.uHcLodOn = HUB_CITY._uLodOn;
-    sh.vertexShader = 'attribute vec3 aSize;\nattribute vec2 aPrm;\nvarying vec3 vHcL;\nvarying vec3 vHcN;\nvarying vec3 vHcS;\nvarying vec2 vHcP;\n' +
+    sh.uniforms.uAiOn = _AI_CITY.u.uAiOn; sh.uniforms.uAiN = _AI_CITY.u.uAiN; sh.uniforms.uAiK = _AI_CITY.u.uAiK;
+    sh.uniforms.uAiPal = _AI_CITY.u.uAiPal; sh.uniforms.uAiTex = _AI_CITY.u.uAiTex; sh.uniforms.uAiPh = _AI_CITY.u.uAiPh;
+    sh.uniforms.uAiSelf = _AI_CITY.u.uAiSelf; sh.uniforms.uAiHue = _aiHueOf(mat);
+    sh.uniforms.uAiSk = _AI_CITY.u.uAiSk; sh.uniforms.uAiAct = _AI_CITY.u.uAiAct; sh.uniforms.uAiDie = _AI_CITY.u.uAiDie;   // (v51.95)
+    sh.vertexShader = 'attribute vec3 aSize;\nattribute vec2 aPrm;\nattribute vec3 aAi;\nuniform float uAiOn;\nuniform float uAiN;\nvarying vec3 vHcL;\nvarying vec3 vHcN;\nvarying vec3 vHcS;\nvarying vec2 vHcP;\nvarying vec3 vHcF;\n' +
       sh.vertexShader.replace('#include <begin_vertex>',
-        '#include <begin_vertex>\n vHcL = position * aSize; vHcN = normal; vHcS = aSize; vHcP = aPrm;');
-    sh.fragmentShader = ('uniform float uHcT;\nuniform vec3 uHcSunV;\nuniform float uHcLodOn;\nvarying vec3 vHcL;\nvarying vec3 vHcN;\nvarying vec3 vHcS;\nvarying vec2 vHcP;\n' +
-      'float hcH21(vec2 p){ p=fract(p*vec2(123.34,456.21)); p+=dot(p,p+45.32); return fract(p.x*p.y); }\n') +
+        '#include <begin_vertex>\n vHcL = position * aSize; vHcN = normal; vHcS = aSize; vHcP = aPrm; vHcF = aAi;\n' +
+        ' if (aAi.z > 1.5 && uAiOn > 0.5 && uAiN > 0.5) transformed = vec3(0.0);');
+    sh.fragmentShader = ('uniform float uHcT;\nuniform vec3 uHcSunV;\nuniform float uHcLodOn;\nvarying vec3 vHcL;\nvarying vec3 vHcN;\nvarying vec3 vHcS;\nvarying vec2 vHcP;\nvarying vec3 vHcF;\n' +
+      'float hcH21(vec2 p){ p=fract(p*vec2(123.34,456.21)); p+=dot(p,p+45.32); return fract(p.x*p.y); }\n' +
+      'uniform float uAiOn;\nuniform float uAiN;\nuniform vec4 uAiK;\nuniform float uAiPal;\nuniform float uAiSelf;\n' +
+      'uniform float uAiSk;\nuniform vec4 uAiAct;\nuniform float uAiDie;\n' +
+      'uniform highp sampler2DArray uAiTex;\nuniform highp sampler2DArray uAiPh;\n' + _AI_PAL_GLSL) +
       sh.fragmentShader.replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
 {
   float hcMode = vHcP.x, hcRnd = vHcP.y;
@@ -34521,6 +35230,7 @@ function _hcTowerMat() {
   // bit-identical across frames. Zero look change - same values, minus noise.
   hcRnd = floor(hcRnd * 4096.0 + 0.5) * (1.0 / 4096.0);
   if (vHcN.y > 0.5) diffuseColor.rgb *= 0.55;
+  float hcWeath = 1.0;   // (v51.92) kept so the AI boards wear the same grime band + streaks
   if (abs(vHcN.y) < 0.5) {
     // (v35.13) Weathering: an irregular dark grime band where the shell
     // meets the ground/joint below it, plus long vertical rain streaks.
@@ -34530,9 +35240,68 @@ function _hcTowerMat() {
     float gr = hcH21(vec2(floor(wu / 47.0), hcRnd * 53.0));
     float baseAO = smoothstep(0.0, 60.0 + 90.0 * gr, vHcL.y);
     float streak = 0.86 + 0.26 * hcH21(vec2(floor(wu / 13.0), hcRnd * 17.0));
-    diffuseColor.rgb *= mix(0.32, 1.0, baseAO) * streak;
+    hcWeath = mix(0.32, 1.0, baseAO) * streak;
+    diffuseColor.rgb *= hcWeath;
   }
-  if (hcMode > 0.5 && abs(vHcN.y) < 0.5) {
+  // (v51.92) AI CITY FACADE - see _AI_CITY. Board coordinates are computed for every fragment (they are a few
+  // ALU ops) so the derivatives come from uniform control flow; the boards are then sampled with textureGrad.
+  // Roofs wear a board too (the city is seen from the air); undersides keep the old dark.
+  bool aiTop = vHcN.y > 0.5, aiOnX = abs(vHcN.x) > 0.5;
+  float aiSu = aiTop ? vHcS.x : (aiOnX ? vHcS.z : vHcS.x);
+  float aiSv = aiTop ? vHcS.z : vHcS.y;
+  float aiU = (aiTop ? vHcL.x : (aiOnX ? vHcL.z : vHcL.x)) + aiSu * 0.5;
+  float aiV = aiTop ? vHcL.z + aiSv * 0.5 : vHcL.y;
+  float aiT = max(min(aiSu, aiSv), 1.0);
+  vec2 aiNt = max(vec2(1.0), floor(vec2(aiSu, aiSv) / aiT + 0.5));   // whole boards both ways, near-square
+  vec2 aiTc = vec2(aiU, aiV) * aiNt / vec2(aiSu, aiSv);               // continuous board coordinate
+  vec2 aiGx = dFdx(aiTc), aiGy = dFdy(aiTc);
+  // (v51.95) a box standing on the deck has a black junction skirt up to vHcF.y: its base band sits on the box just above
+  // it (owner, in the lab: "it should go on the bottom of the rectangular based prism", not on the connector)
+  float aiVb = aiTop ? aiV : aiV - vHcF.y * step(0.5, uAiSk);
+  float aiDE = min(min(aiU, aiSu - aiU), min(aiVb, aiSv - aiV));      // to the nearest face edge (frame)
+  float aiPx = max(fwidth(aiDE), 0.001);
+  if (uAiOn > 0.5 && uAiN > 0.5 && hcMode > 0.5 && vHcN.y > -0.5) {
+    // (v51.95) THE NETWORK: vHcF.x = when this tower last fired (the uHcT clock; -1e4 = never). A DIE (vHcF.z - the core
+    // district's shafts and crowns, and the hero) wears circuit2 on every face, the lab's processor die.
+    float aiAge = uHcT - vHcF.x; aiAge = aiAge < 0.0 ? 99.0 : aiAge;
+    float aiAct = exp(-aiAge * 2.2) * uAiAct.y;
+    float aiDie = step(0.5, vHcF.z) * step(vHcF.z, 1.5) * step(0.5, uAiDie);   // flag 1 only (2 = a podium)
+    vec3 aiQ = vec3(fract(aiTc), aiDie > 0.5 ? min(1.0, uAiN - 1.0) : floor(hcRnd * uAiN * 0.9999));
+    vec3 aiC = textureGrad(uAiTex, aiQ, aiGx, aiGy).rgb;
+    vec4 aiP = textureGrad(uAiPh, aiQ, aiGx, aiGy);
+    float aiMx = max(aiC.r, max(aiC.g, aiC.b)), aiMn = min(aiC.r, min(aiC.g, aiC.b));
+    // the board is SELF-LIT (uAiSelf: the whole image emits, plates and copper too), and its neon lines
+    // (saturation picks them) glow on top of that (uAiK.x) - harder while the tower fires
+    float aiNeon = smoothstep(0.06, 0.22, aiMx - aiMn) * smoothstep(0.04, 0.2, aiMx);
+    vec3 aiE = aiC * (uAiSelf + aiNeon * uAiK.x * (1.0 + 1.5 * aiAct));
+    // dots riding the lines: (cos, sin) of the distance along the network, magnitude = line strength
+    vec2 aiCs = aiP.rg * 2.0 - 1.0;
+    float aiLs = smoothstep(0.12, 0.5, length(aiCs));
+    float aiDot = pow(max(cos(atan(aiCs.y, aiCs.x + 1e-5) - uHcT * (4.0 + 3.0 * fract(hcRnd * 13.1))), 0.0), 28.0) * aiLs;
+    vec3 aiLc = mix(aiC / max(aiMx, 0.03), vec3(1.0), 0.45);
+    aiE += aiLc * aiDot * 2.5 * uAiK.z * (1.0 + 1.6 * aiAct);
+    // (v51.95) the SPIKE: as the tower fires, a bright front runs out along the board's own lines from each board's seed
+    // (circuit2's from its octagonal heart) with a fading wake. aiP.b = the absolute distance along the line network.
+    float aiSf = aiAge * 0.35, aiSd = (aiP.b - aiSf) * 22.0;
+    aiE += mix(aiLc, vec3(1.0), 0.3) * aiLs * 3.0 * uAiAct.x * exp(-aiAge * 0.7)
+         * (exp(-aiSd * aiSd) + 0.4 * exp(-max(aiSf - aiP.b, 0.0) * 6.0) * step(aiP.b, aiSf));
+    // (v51.95) a DIE's octagonal heart brightens as the tower thinks: cyan at rest, pink as it fires (-> green / purple)
+    if (aiDie > 0.5) {
+      vec2 aiCq = fract(aiTc) - 0.5;
+      float aiHt = 1.0 - smoothstep(0.07, 0.15, max(max(abs(aiCq.x), abs(aiCq.y)), (abs(aiCq.x) + abs(aiCq.y)) * 0.7071));
+      aiE += aiC * aiNeon * aiHt * (1.0 + 5.0 * aiAct) * uAiK.x
+           + mix(vec3(0.3, 0.8, 1.0), vec3(1.0, 0.45, 0.95), aiAct) * aiHt * (0.12 + 0.9 * aiAct);
+    }
+    // the frame: gunmetal band on every edge of the face, a light strip in it (the tower's own hue)
+    float aiFw = clamp(0.035 * aiT, 6.0, 26.0) * uAiK.w;
+    float aiFm = (1.0 - smoothstep(aiFw - aiPx, aiFw + aiPx, aiDE)) * step(0.01, uAiK.w);
+    float aiStrip = (1.0 - smoothstep(aiFw * 0.07, aiFw * 0.07 + aiPx, abs(aiDE - aiFw * 0.55))) * aiFm;
+    vec3 aiSc = fract(hcRnd * 3.7) > 0.5 ? vec3(1.0, 0.35, 0.85) : vec3(0.3, 0.85, 1.0);
+    diffuseColor.rgb = mix(vec3(dot(aiC, vec3(0.3, 0.55, 0.15)) * uAiK.y) * hcWeath, vec3(0.03, 0.033, 0.04), aiFm);
+    aiE = aiE * (1.0 - aiFm) + aiSc * aiStrip * 1.2 * (1.0 + 2.0 * aiAct);
+    float aiSunDim = mix(1.0, 0.22, clamp(dot(normalize(normal), normalize(uHcSunV)), 0.0, 1.0));
+    totalEmissiveRadiance += aiPal(aiE) * aiSunDim;
+  } else if (hcMode > 0.5 && abs(vHcN.y) < 0.5) {
     bool onX = abs(vHcN.x) > 0.5;
     float su = onX ? vHcS.z : vHcS.x;
     float uu = (onX ? vHcL.z : vHcL.x) + su * 0.5;
@@ -34625,6 +35394,8 @@ function _hcNeonMat() {
     sh.uniforms.uHcT = _swU.uTime;
     sh.uniforms.uHcPxH = HUB_CITY._uPxH;
     sh.uniforms.uHcLodOn = HUB_CITY._uLodOn;
+    sh.uniforms.uAiOn = _AI_CITY.u.uAiOn; sh.uniforms.uAiPal = _AI_CITY.u.uAiPal;   // (v51.92) the AI city palette
+    sh.uniforms.uAiHue = _aiHueOf(mat);   // (v52.01) this city's pair
     sh.vertexShader = 'attribute vec2 aPrm;\nuniform float uHcPxH;\nuniform float uHcLodOn;\nvarying vec2 vHcP;\nvarying float vHcDim;\n' +
       sh.vertexShader.replace('#include <begin_vertex>', `#include <begin_vertex>
  vHcP = aPrm;
@@ -34648,9 +35419,9 @@ function _hcNeonMat() {
    vHcDim = 1.0 / (hcW.x * hcW.y * hcW.z);
  }
  #endif`);
-    sh.fragmentShader = 'uniform float uHcT;\nvarying vec2 vHcP;\nvarying float vHcDim;\n' +
+    sh.fragmentShader = 'uniform float uHcT;\nvarying vec2 vHcP;\nvarying float vHcDim;\nuniform float uAiOn;\nuniform float uAiPal;\n' + _AI_PAL_GLSL +
       sh.fragmentShader.replace('#include <opaque_fragment>',
-        'outgoingLight *= vHcDim;\nif (vHcP.x > 1.5) { outgoingLight *= 0.2 + 1.7 * step(fract(uHcT * 0.9 + vHcP.y), 0.22); }\n#include <opaque_fragment>');
+        'outgoingLight = mix(outgoingLight, aiPal(outgoingLight), uAiOn);\noutgoingLight *= vHcDim;\nif (vHcP.x > 1.5) { outgoingLight *= 0.2 + 1.7 * step(fract(uHcT * 0.9 + vHcP.y), 0.22); }\n#include <opaque_fragment>');
   };
   return mat;
 }
@@ -34859,8 +35630,13 @@ function _hcMakeMeshes(city, site) {
   if (!HUB_CITY._uPxH) HUB_CITY._uPxH = { value: (typeof renderer !== 'undefined' && renderer.drawingBufferHeight) || 900 };
   if (!HUB_CITY._uLodOn) HUB_CITY._uLodOn = { value: 1 };
   if (typeof window !== 'undefined') window.__hcLod = (v) => { HUB_CITY._uLodOn.value = v ? 1 : 0; return HUB_CITY._uLodOn.value; };
+  _aiCityTexLoad();   // (v51.92) the AI-city boards (async; the window towers show until they land)
+  const _aiName = (_site === HUB_CITY) ? 'hub' : (_site.name || 'city');
+  const aiHue = { value: new THREE.Vector4().fromArray((_site.palette && _site.palette.ai) || _AI_CITY.hue0.value.toArray()) };
+  _AI_CITY.themes[_aiName] = aiHue;
   const twrMat = _hcTowerMat();
   const neonMat = _hcNeonMat();
+  twrMat.userData.aiHue = aiHue; neonMat.userData.aiHue = aiHue;
   const holoMat = _hcHoloMat();
   let _hcClipL = 6; try { _hcClipL = _CLIP_LEVELS; } catch (_) {}   // TDZ-safe: declared later in the file
   const _HC_FLOOR_PO = [0, -(_hcClipL * 2 + 2)];                   // finest clipmap ring is -(L*2) units
@@ -34870,6 +35646,7 @@ function _hcMakeMeshes(city, site) {
     depthWrite: false, toneMapped: false, side: THREE.DoubleSide,
     polygonOffset: true, polygonOffsetFactor: _HC_RING_PO[0], polygonOffsetUnits: _HC_RING_PO[1],   // (v51.33) was -8/-8
   })), true);
+  ringMat.userData.aiHue = aiHue;
   const add = (key, geo, mat, maxH, shad) => {
     const arr = city.layers[key];
     if (!arr || !arr.length) return null;
@@ -34878,18 +35655,34 @@ function _hcMakeMeshes(city, site) {
     m.userData.hcKey = key; m.userData.hcArr = arr;   // (v49.50) instance i = arr[i*12 ..] (the campaign giant's crush)
     group.add(m); return m;
   };
-  add('twr', _hcGeoBox(), twrMat, 6400, true);
+  const twrMesh = add('twr', _hcGeoBox(), twrMat, 6400, true);
   add('box', _hcGeoBox(), matte, 6400, true);
-  add('cyl', _hcGeoCyl(10), matte, 6400, true);
+  const cylMat = _aiCylMat(); cylMat.userData.aiHue = aiHue;
+  const cylMesh = add('cyl', _hcGeoCyl(10), cylMat, 6400, true);
   add('solar', _hcGeoSolar(), matte, 6400, true);
   add('dish', _hcGeoDish(), matte, 6400, true);
   add('neon', _hcGeoBox(), neonMat, 6600);
   const ringMesh = add('ring', _hcGeoRing(), ringMat, 6400);
   if (ringMesh) ringMesh.renderOrder = 2;   // after the ground disc, always
   add('holo', _hcGeoHolo(), holoMat, 6600);
+  const _sR = city.skirtR, _dI = city.aiFlag;
+  const twrAi = _aiInstAttr(twrMesh, 3, 'aAi', (a, i) => { a[i * 3] = -1e4; a[i * 3 + 1] = (_sR && _sR[i]) || 0; a[i * 3 + 2] = (_dI && _dI[i]) || 0; });
+  const cylAi = _aiInstAttr(cylMesh, 1, 'aAiF', (a, i) => { a[i] = -1e4; });
+  const _aiLean = !!((typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) || (typeof isStandaloneQuest === 'function' && isStandaloneQuest()));
+  const skirtMesh = add('skirt', _aiGeoSkirt(_aiLean), _aiSkirtMat(), 6400, false);
+  if (skirtMesh) skirtMesh.receiveShadow = true;
+  const bevMat = _aiBevelMat(twrMat.userData.uHcSunV); bevMat.userData.aiHue = aiHue;
+  const bevMesh = add('bevel', _aiGeoBevel(), bevMat, 6400, false);
+  const bevAi = _aiInstAttr(bevMesh, 1, 'aAiF', (a, i) => { a[i] = -1e4; });
 
   const albTex = new THREE.CanvasTexture(city.albCanvas);
   const emiTex = new THREE.CanvasTexture(city.emiCanvas);
+  const aiMaskTex = city.aiMask ? new THREE.CanvasTexture(city.aiMask) : null;
+  const gU = {
+    uAiRip: { value: Array.from({ length: 16 }, () => new THREE.Vector4(0, 0, -1e4, 0)) },
+    uAiGR: { value: new THREE.Vector4(Math.cos(city.gAng || 0), Math.sin(city.gAng || 0), _site.x, _site.z) },
+    uAiMask: { value: aiMaskTex || _aiFallbackMask() },
+  };
   const EXT = g.radius * 1.12;
   const gnd = new THREE.Mesh(
     new THREE.CircleGeometry(EXT, 48),
@@ -34902,19 +35695,29 @@ function _hcMakeMeshes(city, site) {
   );
   gnd.material.onBeforeCompile = (sh) => {
     sh.uniforms.uHcCam = _swU.uCam;
+    sh.uniforms.uHcT = _swU.uTime;
+    sh.uniforms.uAiOn = _AI_CITY.u.uAiOn; sh.uniforms.uAiN = _AI_CITY.u.uAiN; sh.uniforms.uAiK = _AI_CITY.u.uAiK;
+    sh.uniforms.uAiPal = _AI_CITY.u.uAiPal; sh.uniforms.uAiTex = _AI_CITY.u.uAiTex; sh.uniforms.uAiPh = _AI_CITY.u.uAiPh;
+    sh.uniforms.uAiHue = _aiHueOf(gnd.material);
+    sh.uniforms.uAiGnd = _AI_CITY.u.uAiGnd; sh.uniforms.uAiGndK = _AI_CITY.u.uAiGndK; sh.uniforms.uAiRipN = _AI_CITY.u.uAiRipN;
+    sh.uniforms.uAiRip = gU.uAiRip; sh.uniforms.uAiGR = gU.uAiGR; sh.uniforms.uAiMask = gU.uAiMask;
     sh.vertexShader = 'varying vec3 vHcWp;\n' + sh.vertexShader.replace('#include <begin_vertex>',
       '#include <begin_vertex>\n vHcWp = (modelMatrix * vec4(transformed, 1.0)).xyz;');
     sh.fragmentShader = ('varying vec3 vHcWp;\nuniform vec3 uHcCam;\n' +
       'float hcgH(vec2 p){ p=fract(p*vec2(123.34,456.21)); p+=dot(p,p+45.32); return fract(p.x*p.y); }\n' +
-      'float hcgN(vec2 p){ vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f); return mix(mix(hcgH(i),hcgH(i+vec2(1,0)),f.x), mix(hcgH(i+vec2(0,1)),hcgH(i+vec2(1,1)),f.x), f.y); }\n') +
+      'float hcgN(vec2 p){ vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f); return mix(mix(hcgH(i),hcgH(i+vec2(1,0)),f.x), mix(hcgH(i+vec2(0,1)),hcgH(i+vec2(1,1)),f.x), f.y); }\n' +
+      _AI_GND_HEAD) +
       sh.fragmentShader.replace('#include <map_fragment>', '#include <map_fragment>\n{\n' +
       '  float hcD = 1.0 - smoothstep(700.0, 2400.0, distance(vHcWp.xz, uHcCam.xz));\n' +
       '  if (hcD > 0.001) {\n' +
       '    float n1 = hcgN(vHcWp.xz * 0.12);\n' +
       '    float n2 = hcgN(vHcWp.xz * 0.033 + 7.0);\n' +
       '    diffuseColor.rgb *= mix(1.0, 0.76 + 0.34 * n1 + 0.14 * n2, hcD);\n' +
-      '  }\n}');
+      '  }\n}\n' + _AI_GND_DIFF)
+      .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\n' + _AI_GND_EMIT);
   };
+  gnd.material.userData._aiMask = aiMaskTex;   // (v51.95) freed with the city (it is not a map, so say so)
+  gnd.material.userData.aiHue = aiHue;          // (v52.01) this city's pair
   gnd.rotation.x = -Math.PI / 2;
   gnd.position.set(_site.x, _site.padY + 0.8, _site.z);
   gnd.userData.isHubCity = true;
@@ -34986,13 +35789,17 @@ function _hcMakeMeshes(city, site) {
   } catch (_) {}
 
   const hero = city.hero;
-  const beam = new THREE.Mesh(
-    new THREE.CylinderGeometry(28, 44, 6000, 10, 1, true),
-    _lssAddOnePass(new THREE.MeshBasicMaterial({
-      color: (_site.palette && _site.palette.beam) || 0x54ffe8, blending: THREE.AdditiveBlending, transparent: true,
-      opacity: 0.30, depthWrite: false, toneMapped: false, side: THREE.DoubleSide,
-    }))
-  );
+  const beamMat = _lssAddOnePass(new THREE.MeshBasicMaterial({
+    color: (_site.palette && _site.palette.beam) || 0x54ffe8, blending: THREE.AdditiveBlending, transparent: true,
+    opacity: 0.30, depthWrite: false, toneMapped: false, side: THREE.DoubleSide,
+  }));
+  beamMat.onBeforeCompile = (sh) => {
+    sh.uniforms.uAiOn = _AI_CITY.u.uAiOn; sh.uniforms.uAiPal = _AI_CITY.u.uAiPal; sh.uniforms.uAiHue = _aiHueOf(beamMat);
+    sh.fragmentShader = 'uniform float uAiOn;\nuniform float uAiPal;\n' + _AI_PAL_GLSL +
+      sh.fragmentShader.replace('#include <opaque_fragment>', 'outgoingLight = mix(outgoingLight, aiPal(outgoingLight), uAiOn);\n#include <opaque_fragment>');
+  };
+  beamMat.userData.aiHue = aiHue;
+  const beam = new THREE.Mesh(new THREE.CylinderGeometry(28, 44, 6000, 10, 1, true), beamMat);
   beam.position.set(hero.x, hero.y1 + 3000, hero.z);
   group.add(beam);
   const lights = new THREE.Group();
@@ -35012,8 +35819,10 @@ function _hcMakeMeshes(city, site) {
     lights.add(holder);
   }
   group.add(lights);
+  let aiNet = null;
+  try { aiNet = _aiNetBuild(city, _site, group, twrAi, cylAi, gU.uAiRip.value, bevAi, aiHue); } catch (e) { console.warn('[ai-city] network build failed', e); }
   try { _WX2.veilGroup(group); } catch (_) {}
-  return { group, lights, beam, twrMat };
+  return { group, lights, beam, twrMat, aiNet };
 }
 
 const _HC_TRAF = { ships: [], obbs: [], ready: false };
@@ -35922,6 +36731,7 @@ function _hcCollideIn(city, site, pos, velocity, radius) {
 }
 
 function _hubCityGroundBlocked(x, z) {
+  try { if (_AI_CITY.u.uAiOn.value > 0.5 && _AI_CITY.u.uAiGnd.value.w > 0.5) return true; } catch (_) {}
   const hc = game.hubCity;
   if (!hc) return true;
   const arr = hc.city.hash.get(Math.floor(x / hc.city.cellSize) + ',' + Math.floor(z / hc.city.cellSize));
@@ -36010,7 +36820,7 @@ function _hubCityInit() {
   const made = _hcMakeMeshes(city);
   scene.add(made.group);
   game.hubCity = {
-    city, group: made.group, lights: made.lights, twrMat: made.twrMat,
+    city, group: made.group, lights: made.lights, twrMat: made.twrMat, aiNet: made.aiNet,
     fogBase: (scene.fog && scene.fog.color) ? scene.fog.color.clone() : null,
     fogTint: new THREE.Color(0x2a1040),
   };
@@ -36034,7 +36844,7 @@ function _hubCityDispose() {
         try {
           const m = o.material;   // (v39.85) same churn as _owDrop - retain the program, free the canvases
           if (m) {
-            try { if (m.map) m.map.dispose(); if (m.emissiveMap) m.emissiveMap.dispose(); } catch (_) {}
+            try { if (m.map) m.map.dispose(); if (m.emissiveMap) m.emissiveMap.dispose(); if (m.userData && m.userData._aiMask) m.userData._aiMask.dispose(); } catch (_) {}
             if (typeof _lssRetainMat === 'function') _lssRetainMat(m); else if (m.dispose) m.dispose();
           }
         } catch (_) {}
@@ -38949,12 +39759,18 @@ const OW = {
   XP: { carrier: 5, boss: 30 },
   NAMES: { volcanic: 'EMBER REACH', goldmine: 'GILT HOLLOW', crystalcave: 'PRISM VAULT', snow: 'FROSTMARCH', rocky: 'CAIRN DEEP', brokensim: 'NULL SECTOR' },
   PAL: {
-    volcanic:    { facade: [[0.16,0.07,0.06],[0.20,0.09,0.07],[0.12,0.06,0.06],[0.22,0.12,0.09]], neon: [[1.0,0.36,0.10],[1.0,0.62,0.16],[1.0,0.22,0.18],[1.0,0.80,0.30]], metal: [[0.18,0.12,0.10],[0.14,0.10,0.09],[0.22,0.16,0.12]], beam: 0xff6a2a, ground: [0.62,0.50,0.46] },
-    goldmine:    { facade: [[0.19,0.15,0.09],[0.24,0.19,0.11],[0.15,0.12,0.08],[0.28,0.22,0.13]], neon: [[1.0,0.80,0.25],[1.0,0.62,0.20],[0.95,0.92,0.55],[1.0,0.45,0.15]], metal: [[0.30,0.24,0.12],[0.24,0.19,0.10],[0.36,0.30,0.16]], beam: 0xffd24a, ground: [0.82,0.74,0.56] },
-    crystalcave: { facade: [[0.10,0.07,0.17],[0.13,0.09,0.21],[0.08,0.06,0.14],[0.16,0.11,0.24]], neon: [[0.70,0.40,1.0],[0.45,0.80,1.0],[1.0,0.50,0.90],[0.55,0.30,1.0]], metal: [[0.16,0.14,0.22],[0.12,0.11,0.18],[0.20,0.17,0.26]], beam: 0xb07aff, ground: [0.66,0.60,0.82] },
-    snow:        { facade: [[0.16,0.18,0.22],[0.20,0.22,0.27],[0.13,0.15,0.19],[0.24,0.26,0.30]], neon: [[0.60,0.90,1.0],[0.90,0.97,1.0],[0.40,0.70,1.0],[0.75,0.85,1.0]], metal: [[0.22,0.24,0.28],[0.17,0.19,0.23],[0.27,0.28,0.31]], beam: 0xbfe8ff, ground: [0.90,0.93,0.98] },
-    rocky:       { facade: [[0.13,0.12,0.11],[0.17,0.16,0.14],[0.10,0.10,0.09],[0.20,0.18,0.15]], neon: [[0.40,1.0,0.60],[0.90,0.90,0.70],[0.30,0.80,1.0],[1.0,0.70,0.35]], metal: [[0.18,0.17,0.15],[0.14,0.13,0.12],[0.22,0.20,0.17]], beam: 0x7dffb0, ground: [0.70,0.66,0.60] },
-    brokensim:   { facade: [[0.05,0.08,0.06],[0.07,0.10,0.08],[0.04,0.06,0.05],[0.09,0.12,0.09]], neon: [[0.20,1.0,0.40],[1.0,0.10,0.60],[0.20,0.90,1.0],[0.60,1.0,0.20]], metal: [[0.08,0.11,0.09],[0.06,0.09,0.07],[0.11,0.14,0.11]], beam: 0x33ff88, ground: [0.40,0.52,0.44] },
+    volcanic:    { facade: [[0.16,0.07,0.06],[0.20,0.09,0.07],[0.12,0.06,0.06],[0.22,0.12,0.09]], neon: [[1.0,0.36,0.10],[1.0,0.62,0.16],[1.0,0.22,0.18],[1.0,0.80,0.30]], metal: [[0.18,0.12,0.10],[0.14,0.10,0.09],[0.22,0.16,0.12]], beam: 0xff6a2a, ground: [0.62,0.50,0.46],
+                   ai: [0.06, 0.985, 1, 1] },     // (v52.01) EMBER REACH: lava orange + ember red
+    goldmine:    { facade: [[0.19,0.15,0.09],[0.24,0.19,0.11],[0.15,0.12,0.08],[0.28,0.22,0.13]], neon: [[1.0,0.80,0.25],[1.0,0.62,0.20],[0.95,0.92,0.55],[1.0,0.45,0.15]], metal: [[0.30,0.24,0.12],[0.24,0.19,0.10],[0.36,0.30,0.16]], beam: 0xffd24a, ground: [0.82,0.74,0.56],
+                   ai: [0.125, 0.64, 1, 1] },     // GILT HOLLOW: gold + royal blue
+    crystalcave: { facade: [[0.10,0.07,0.17],[0.13,0.09,0.21],[0.08,0.06,0.14],[0.16,0.11,0.24]], neon: [[0.70,0.40,1.0],[0.45,0.80,1.0],[1.0,0.50,0.90],[0.55,0.30,1.0]], metal: [[0.16,0.14,0.22],[0.12,0.11,0.18],[0.20,0.17,0.26]], beam: 0xb07aff, ground: [0.66,0.60,0.82],
+                   ai: [0.52, 0.87, 1, 1] },      // PRISM VAULT: cyan + magenta (the boards' own pair)
+    snow:        { facade: [[0.16,0.18,0.22],[0.20,0.22,0.27],[0.13,0.15,0.19],[0.24,0.26,0.30]], neon: [[0.60,0.90,1.0],[0.90,0.97,1.0],[0.40,0.70,1.0],[0.75,0.85,1.0]], metal: [[0.22,0.24,0.28],[0.17,0.19,0.23],[0.27,0.28,0.31]], beam: 0xbfe8ff, ground: [0.90,0.93,0.98],
+                   ai: [0.57, 0.57, 1, 0.12] },   // FROSTMARCH: ice blue + frost white (the second band desaturated)
+    rocky:       { facade: [[0.13,0.12,0.11],[0.17,0.16,0.14],[0.10,0.10,0.09],[0.20,0.18,0.15]], neon: [[0.40,1.0,0.60],[0.90,0.90,0.70],[0.30,0.80,1.0],[1.0,0.70,0.35]], metal: [[0.18,0.17,0.15],[0.14,0.13,0.12],[0.22,0.20,0.17]], beam: 0x7dffb0, ground: [0.70,0.66,0.60],
+                   ai: [0.44, 0.09, 1, 1] },      // CAIRN DEEP: jade + amber
+    brokensim:   { facade: [[0.05,0.08,0.06],[0.07,0.10,0.08],[0.04,0.06,0.05],[0.09,0.12,0.09]], neon: [[0.20,1.0,0.40],[1.0,0.10,0.60],[0.20,0.90,1.0],[0.60,1.0,0.20]], metal: [[0.08,0.11,0.09],[0.06,0.09,0.07],[0.11,0.14,0.11]], beam: 0x33ff88, ground: [0.40,0.52,0.44],
+                   ai: [0.22, 0.93, 1, 1] },      // NULL SECTOR: acid lime + hot pink
   },
   cities: null, orphans: [], dying: [], boss: null, bossDone: false, _sunV: null,
   _auth: null, _sendT: 0, _lastPkt: 0, _fieldUI: -1,
@@ -39093,6 +39909,7 @@ function _owBuild(c) {
   if (c.built) return;
   const t0 = performance.now();
   const city = _hubCityBuild(c.site.genome, c.site);
+  c.site.name = c.name;   // (v52.01) so its AI colour pair is named in window.__aiTheme
   const made = _hcMakeMeshes(city, c.site);
   try {
     const gnd = made.group.children.find(o => o.isMesh && o.geometry && o.geometry.type === 'CircleGeometry');
@@ -39108,7 +39925,7 @@ function _owBuild(c) {
     made.group.add(skirt);
   } catch (_) {}
   scene.add(made.group);
-  c.built = { city, group: made.group, lights: made.lights, twrMat: made.twrMat };
+  c.built = { city, group: made.group, lights: made.lights, twrMat: made.twrMat, aiNet: made.aiNet };
   try { console.log('[cities] built ' + c.name + ' in ' + Math.round(performance.now() - t0) + ' ms', JSON.stringify(city.stats || {})); } catch (_) {}
 }
 function _owDrop(c) {
@@ -39125,7 +39942,7 @@ function _owDrop(c) {
             const _keep = (typeof _lssRetainMat === 'function');
             const _one = (x) => {
               if (!x) return;
-              try { if (x.map) x.map.dispose(); if (x.emissiveMap) x.emissiveMap.dispose(); } catch (_) {}
+              try { if (x.map) x.map.dispose(); if (x.emissiveMap) x.emissiveMap.dispose(); if (x.userData && x.userData._aiMask) x.userData._aiMask.dispose(); } catch (_) {}
               if (_keep) _lssRetainMat(x); else if (x.dispose) x.dispose();
             };
             if (Array.isArray(m)) m.forEach(_one); else _one(m);
@@ -102306,6 +103123,7 @@ function _gameLoopBody(timestamp) {
       try { _carrierFrame(dt); } catch (_) {}   // (v37.72) no-op until a carrier is spawned
       try { _owFrame(dt); } catch (e) { if (!window._owErr) { window._owErr = String((e && e.stack) || e); console.warn('[cities] frame threw:', e); } }   // (v38.78) overworld cities
       try { _owRaceFrame(dt); } catch (e) { if (!window._owRaceErr) { window._owRaceErr = String((e && e.stack) || e); console.warn('[race] city frame threw:', e); } }   // (v46.82) the OVERWORLD CIRCUIT's cities
+      try { _aiNetFrame(dt); } catch (e) { if (!window._aiNetErr) { window._aiNetErr = String((e && e.stack) || e); console.warn('[ai-city] network frame threw:', e); } }   // (v51.95) every city's thinking network
       try { _wildFrame(dt); } catch (e) { if (!window._wildErr) { window._wildErr = String((e && e.stack) || e); console.warn('[wild] frame threw:', e); } }   // (v42.74) wild leviathan families
       try { _cyberFrame(dt); } catch (_) {}     // (v37.76) no-op unless CYBERPUNK CITY is running
       __pmark('hub:city');
