@@ -66,7 +66,7 @@
     <div class="hint" style="margin:0 0 6px">Every cell reads morphogens from the whole it belongs to: how tall its stack is and where it sits in it, how long its row runs, whether air is beneath it and whether that gap is held up at both ends. The role it finds switches genes on. Genes only add "air" or reshape the distance to air, so the eml carve still does the texture.</div>
     <div id="genes"></div>
     <div class="row"><label>show roles</label><input id="showRoles" type="checkbox"><span class="v" style="flex:1;text-align:left;font-size:10px">
-      <span style="color:#fc3">column</span> <span style="color:#3fe">wall</span> <span style="color:#f5e">arch</span> <span style="color:#69f">overhang</span> <span style="color:#8f5">sky-top</span></span></div>
+      <span style="color:#fc3">column</span> <span style="color:#3fe">wall</span> <span style="color:#f5e">arch</span> <span style="color:#69f">overhang</span> <span style="color:#8f5">sky-top</span> · <span style="color:#f72">big column</span> <span style="color:#29b">thick wall</span></span></div>
   </div>
 
   <div class="grp"><div class="t">world</div>
@@ -90,6 +90,8 @@
 const W = 96, H = 48, D = 96;
 const N26 = (1 << 26) - 1;
 const mat = new Uint8Array(W * H * D);
+const vox2 = new Uint32Array(W * H * D);              // R32UI: level-2 (whole of blocks) class + place in its stack
+const cls2 = new Int8Array(W * H * D);
 const vox = new Uint32Array(W * H * D * 4);           // RGBA32UI: r = material, g = 26-bit "skin" neighbour mask, b/a = morphogens
 const idx = (x, y, z) => x + W * (y + H * z);
 const inb = (x, y, z) => x >= 0 && y >= 0 && z >= 0 && x < W && y < H && z < D;
@@ -99,18 +101,18 @@ let skinMode = 0;                                      // 0 fused, 1 per type, 2
 // c0 / c1 = surface / crevice colour, kind = noise kind, em = emission, gloss
 const MATS = [
   null,
-  { name: 'grass',     k: 1.8, g: .16, L: .22, iso: .06, fill: 1, R: .30, sc: 2.6, vr: 0, kind: 0, c0: [.29,.47,.16], c1: [.45,.32,.20], em: 0,   gloss: 0, pl: 0.3 },
-  { name: 'dirt',      k: 1.6, g: .14, L: .22, iso: .06, fill: 1, R: .30, sc: 2.5, vr: 0, kind: 0, c0: [.47,.33,.21], c1: [.30,.21,.14], em: 0,   gloss: 0, pl: 0.3 },
-  { name: 'stone',     k: 2.0, g: .16, L: .20, iso: .05, fill: 1, R: .35, sc: 1.6, vr: 0, kind: 1, c0: [.55,.55,.53], c1: [.30,.30,.32], em: 0,   gloss: .1, pl: 1 },
-  { name: 'sand',      k: 1.2, g: .10, L: .30, iso: .05, fill: 1, R: .35, sc: 1.2, vr: 0, kind: 6, c0: [.88,.77,.53], c1: [.70,.55,.34], em: 0,   gloss: 0, pl: 0.6 },
-  { name: 'wood',      k: 1.8, g: .15, L: .20, iso: .05, fill: 1, R: .30, sc: 1.5, vr: 0, kind: 3, c0: [.58,.40,.21], c1: [.30,.19,.10], em: 0,   gloss: .05, pl: 0.45 },
-  { name: 'leaves',    k: 2.6, g: .30, L: .18, iso: .12, fill: 1, R: .45, sc: 2.8, vr: 0, kind: 5, c0: [.22,.48,.16], c1: [.10,.27,.08], em: 0,   gloss: 0, pl: 0.2 },
-  { name: 'brick',     k: 3.0, g: .18, L: .15, iso: .04, fill: 1, R: .30, sc: 1.0, vr: 0, kind: 4, c0: [.64,.26,.18], c1: [.78,.75,.68], em: 0,   gloss: 0, pl: 1 },
-  { name: 'crystal',   k: 2.2, g: .25, L: .15, iso: .05, fill: 1, R: .45, sc: 2.2, vr: 0, kind: 2, c0: [.40,.88,1.0], c1: [.10,.35,.90], em: .35, gloss: .8, pl: 0.5 },
-  { name: 'obsidian',  k: 2.4, g: .20, L: .18, iso: .04, fill: 1, R: .35, sc: 1.8, vr: 0, kind: 1, c0: [.11,.09,.15], c1: [.32,.20,.48], em: 0,   gloss: .9, pl: 0.9 },
-  { name: 'coral',     k: 3.0, g: .45, L: .20, iso: .10, fill: 1, R: .50, sc: 3.0, vr: 0, kind: 5, c0: [.96,.47,.52], c1: [.99,.82,.62], em: 0,   gloss: .1, pl: 0.4 },
-  { name: 'ice',       k: 1.2, g: .06, L: .25, iso: .04, fill: 1, R: .30, sc: 1.0, vr: 0, kind: 0, c0: [.78,.92,1.0], c1: [.50,.72,.92], em: 0,   gloss: .9, pl: 0.9 },
-  { name: 'lava rock', k: 2.0, g: .25, L: .20, iso: .05, fill: 1, R: .40, sc: 1.8, vr: 0, kind: 2, c0: [.13,.11,.11], c1: [1.0,.36,.05], em: 1.6, gloss: .1, pl: 0.8 },
+  { name: 'grass',     k: 1.8, g: .16, L: .22, iso: .06, fill: 1, R: .30, sc: 2.6, vr: 0, kind: 0, c0: [.29,.47,.16], c1: [.45,.32,.20], em: 0,   gloss: 0, pl: 0.3, fl: 1 },
+  { name: 'dirt',      k: 1.6, g: .14, L: .22, iso: .06, fill: 1, R: .30, sc: 2.5, vr: 0, kind: 0, c0: [.47,.33,.21], c1: [.30,.21,.14], em: 0,   gloss: 0, pl: 0.3, fl: 1 },
+  { name: 'stone',     k: 2.0, g: .16, L: .20, iso: .05, fill: 1, R: .35, sc: 1.6, vr: 0, kind: 1, c0: [.55,.55,.53], c1: [.30,.30,.32], em: 0,   gloss: .1, pl: 1, fl: 0 },
+  { name: 'sand',      k: 1.2, g: .10, L: .30, iso: .05, fill: 1, R: .35, sc: 1.2, vr: 0, kind: 6, c0: [.88,.77,.53], c1: [.70,.55,.34], em: 0,   gloss: 0, pl: 0.6, fl: 1 },
+  { name: 'wood',      k: 1.8, g: .15, L: .20, iso: .05, fill: 1, R: .30, sc: 1.5, vr: 0, kind: 3, c0: [.58,.40,.21], c1: [.30,.19,.10], em: 0,   gloss: .05, pl: 0.45, fl: 0 },
+  { name: 'leaves',    k: 2.6, g: .30, L: .18, iso: .12, fill: 1, R: .45, sc: 2.8, vr: 0, kind: 5, c0: [.22,.48,.16], c1: [.10,.27,.08], em: 0,   gloss: 0, pl: 0.2, fl: 0 },
+  { name: 'brick',     k: 3.0, g: .18, L: .15, iso: .04, fill: 1, R: .30, sc: 1.0, vr: 0, kind: 4, c0: [.64,.26,.18], c1: [.78,.75,.68], em: 0,   gloss: 0, pl: 1, fl: 0 },
+  { name: 'crystal',   k: 2.2, g: .25, L: .15, iso: .05, fill: 1, R: .45, sc: 2.2, vr: 0, kind: 2, c0: [.40,.88,1.0], c1: [.10,.35,.90], em: .35, gloss: .8, pl: 0.5, fl: 0 },
+  { name: 'obsidian',  k: 2.4, g: .20, L: .18, iso: .04, fill: 1, R: .35, sc: 1.8, vr: 0, kind: 1, c0: [.11,.09,.15], c1: [.32,.20,.48], em: 0,   gloss: .9, pl: 0.9, fl: 0 },
+  { name: 'coral',     k: 3.0, g: .45, L: .20, iso: .10, fill: 1, R: .50, sc: 3.0, vr: 0, kind: 5, c0: [.96,.47,.52], c1: [.99,.82,.62], em: 0,   gloss: .1, pl: 0.4, fl: 0 },
+  { name: 'ice',       k: 1.2, g: .06, L: .25, iso: .04, fill: 1, R: .30, sc: 1.0, vr: 0, kind: 0, c0: [.78,.92,1.0], c1: [.50,.72,.92], em: 0,   gloss: .9, pl: 0.9, fl: 0.5 },
+  { name: 'lava rock', k: 2.0, g: .25, L: .20, iso: .05, fill: 1, R: .40, sc: 1.8, vr: 0, kind: 2, c0: [.13,.11,.11], c1: [1.0,.36,.05], em: 1.6, gloss: .1, pl: 0.8, fl: 0 },
 ];
 const DEFAULTS = JSON.parse(JSON.stringify(MATS));
 const NM = MATS.length - 1;
@@ -160,11 +162,51 @@ function morphAt(x, y, z) {
   }
   return [b, a];
 }
+// FLOW: a top-surface cell (air above, rock below) reads its 8 neighbour columns' surface heights
+// relative to its own top (-1, 0, +1) — 18 bits in a[12..29]. Shader and neighbours all evaluate the
+// same quadratic B-spline through them, so the surface is one smooth whole across cells.
+const isFlowTop = (x, y, z) => solid(x, y, z) && !solid(x, y + 1, z) && solid(x, y - 1, z);
+function flowHeights(x, y, z) {
+  let bits = 0, up = false;
+  for (let k = 0; k < 9; k++) {
+    const nx = x + (k % 3) - 1, nz = z + ((k / 3) | 0) - 1;
+    const h = solid(nx, y + 1, nz) ? 1 : solid(nx, y, nz) ? 0 : -1;
+    if (h > 0) up = true;
+    bits |= (h + 1) << (2 * k);
+  }
+  return { bits, up };
+}
+// LEVEL 2: the same plan rules at three times the scale. A run of 2-3 blocks is "thin" for a whole:
+// 1 = big column (2-3 wide both ways), 2/3 = thick wall along x / z, 0 = no level-2 role.
+function runLen(x, y, z, dx, dz) { let k = 0; while (k < 15 && solid(x + dx * (k + 1), y, z + dz * (k + 1))) k++; return k; }
+function calcCls2(x, y, z) {
+  if (!mat[idx(x, y, z)]) return -1;
+  const Lx = runLen(x, y, z, -1, 0) + runLen(x, y, z, 1, 0) + 1, Lz = runLen(x, y, z, 0, -1) + runLen(x, y, z, 0, 1) + 1;
+  const tx = Lx >= 2 && Lx <= 3, tz = Lz >= 2 && Lz <= 3;
+  return tx && tz ? 1 : tz && Lx >= 4 ? 2 : tx && Lz >= 4 ? 3 : 0;
+}
+function cls2Box(x0, y0, z0, x1, y1, z1) {
+  x0 = Math.max(0, x0); y0 = Math.max(0, y0); z0 = Math.max(0, z0); x1 = Math.min(W - 1, x1); y1 = Math.min(H - 1, y1); z1 = Math.min(D - 1, z1);
+  for (let z = z0; z <= z1; z++) for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) cls2[idx(x, y, z)] = calcCls2(x, y, z);
+}
+const c2At = (x, y, z) => inb(x, y, z) ? cls2[idx(x, y, z)] : -1;
 function writeCell(x, y, z) {
-  const i = idx(x, y, z), o = i * 4, [b, a] = morphAt(x, y, z);
+  const i = idx(x, y, z), o = i * 4;
+  vox2[i] = 0;
+  if (mat[i]) { const k2 = cls2[i];
+    if (k2 > 0) { let d2 = 0; while (d2 < 15 && c2At(x, y - d2 - 1, z) === k2) d2++; let u2 = 0; while (u2 < 15 && c2At(x, y + u2 + 1, z) === k2) u2++;
+      vox2[i] = (k2 | d2 << 2 | u2 << 6) >>> 0; } }
+  if (!mat[i]) {                                       // air — unless it is a GHOST: room above a surface that rises toward a higher neighbour
+    if (y > 0 && isFlowTop(x, y - 1, z)) { const f = flowHeights(x, y - 1, z);
+      if (f.up) { vox[o] = mat[idx(x, y - 1, z)]; vox[o + 1] = N26; vox[o + 2] = 0; vox[o + 3] = ((f.bits << 12) | (1 << 30) | (1 << 31)) >>> 0; return; } }
+    vox[o] = vox[o + 1] = vox[o + 2] = vox[o + 3] = 0; return;
+  }
+  let [b, a] = morphAt(x, y, z);
+  if (isFlowTop(x, y, z)) a = (a | (flowHeights(x, y, z).bits << 12) | (1 << 30)) >>> 0;
   vox[o] = mat[i]; vox[o + 1] = maskAt(x, y, z); vox[o + 2] = b; vox[o + 3] = a;
 }
 function rebuildMasks() {
+  cls2Box(0, 0, 0, W - 1, H - 1, D - 1);
   for (let z = 0; z < D; z++) for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) writeCell(x, y, z);
 }
 
@@ -214,6 +256,10 @@ function genWorld() {
   for (let x = CX - 7; x <= CX + 7; x++) set(x, flat + 5, CZ + 5, 3);
   // a long brick wall -> windows spaced along it
   for (let x = CX - 27; x <= CX - 15; x++) { const g = top(x, CZ + 8); if (g < flat + 4) for (let y = g + 1; y <= flat + 7; y++) set(x, y, CZ + 8, 7); }
+  // level 2: two 3x3 stone shafts and a 2-thick stone wall — wholes made of blocks
+  for (const [bx, bz] of [[CX - 9, CZ + 13], [CX + 3, CZ + 13]])
+    for (let a = 0; a < 3; a++) for (let b = 0; b < 3; b++) for (let y = top(bx + a, bz + b) + 1; y <= flat + 11; y++) set(bx + a, y, bz + b, 3);
+  for (let z = CZ - 8; z <= CZ + 6; z++) for (let a = 0; a < 2; a++) { const g = top(CX + 20 + a, z); if (g < flat + 5) for (let y = g + 1; y <= flat + 10; y++) set(CX + 20 + a, y, z, 3); }
   // ice pillar and a coral reef lump
   for (let y = flat + 1; y <= flat + 7; y++) for (let a = 0; a < 2; a++) for (let b = 0; b < 2; b++) set(CX + 1 + a, y, CZ + 10 + b, 11);
   for (let i = 0; i < 70; i++) { const a = (hash2(i, 7) - .5) * 7, b = (hash2(i, 9) - .5) * 7, c = hash2(i, 11) * 4; if (a * a + b * b + c * c * 2 < 14) set(Math.round(CX - 22 + a), Math.round(flat + 1 + c), Math.round(CZ + 2 + b), 10); }
@@ -252,6 +298,8 @@ void main(){ vec2 p = vec2((gl_VertexID<<1)&2, gl_VertexID&2); gl_Position = vec
 const FS = `#version 300 es
 precision highp float; precision highp int; precision highp usampler3D;
 uniform usampler3D uVox;
+uniform usampler3D uVox2;   // level-2 morphogens
+uniform vec4 uG3;           // level 2 wholes, level 0 parts
 uniform ivec3 uDim;
 uniform vec2 uRes;
 uniform vec3 uCam; uniform mat3 uBasis; uniform float uTanF;
@@ -268,7 +316,8 @@ uniform vec4 uE[16];  // gloss, emit-in-crevice
 out vec4 outC;
 uniform int uL26, uL27, uL4, uL3, uL2, uL96;   // loop bounds as uniforms so fxc cannot unroll them
 uniform vec4 uG;   // genes: round, column, arch, window
-uniform vec4 uG2;  // weather, differentiation, show roles
+uniform vec4 uG2;  // weather, differentiation, show roles, flow
+uniform vec4 uF[16]; // flow
 
 uint hsh(uint x){ x ^= x>>16; x *= 0x7feb352du; x ^= x>>15; x *= 0x846ca68bu; x ^= x>>16; return x; }
 float h3(ivec3 c){ return float(hsh(uint(c.x)*1597334677u ^ uint(c.y)*3812015801u ^ uint(c.z)*2798796415u)) * (1./4294967295.); }
@@ -327,7 +376,24 @@ float sdBox2(vec2 p, vec2 b){ vec2 q = abs(p) - b; return length(max(q,0.)) + mi
 // neighbours (mask bits). Morphogens (v.b, v.a) tell the cell its role in the whole, and the role's
 // genes either reshape that distance (round, column) or declare more air (window, arch, overhang).
 // The eml then carves against it exactly as before.
-float airDist(vec3 local, uvec4 v){
+// a wall's windows, at any scale: per = spacing along the run, stor = storey height, w = half width
+float windowSD(float along, float L, float wy, float Lv, float per, float stor, float w, float y0, float top){
+  float nW = floor((L - 1.) / per);
+  float nS = max(1., floor((Lv - .5) / stor)), sh = Lv / nS;
+  wy -= clamp(floor(wy / sh), 0., nS - 1.) * sh;
+  float y1 = sh - top, ym = y1 - w;
+  float sp = L / max(nW, 1.), cx = (clamp(floor(along / sp), 0., max(nW, 1.) - 1.) + .5)*sp, u = along - cx;
+  float win = min(sdBox2(vec2(u, wy - .5*(y0 + ym)), vec2(w, .5*(ym - y0))), length(vec2(u, wy - ym)) - w);
+  return (nW >= 1. && w > .02 && y1 - y0 > .9) ? win : 9.;
+}
+// a joint between two parts: dd = distance to the designed surface, g = distance to the joint plane.
+// The parts round off where the joint meets the surface; deep inside the joint closes (no cracks through).
+float jointRound(float dd, float g, float r){
+  float ge = g + max(dd - r, 0.)*4.;
+  float lr = length(max(vec2(r) - vec2(dd, ge), 0.));
+  return (r > 1e-4 && lr > 0.) ? r - lr : dd;
+}
+float airDist(vec3 wp, vec3 local, uvec4 v, uint v2, out float def){
   int m = int(v.r); uint mask = v.g, mb = v.b, ma = v.a;
   float dEdge = 9.; vec3 q = vec3(9.);
   for(int b=0; b<uL26; b++){
@@ -345,35 +411,55 @@ float airDist(vec3 local, uvec4 v){
   int cls = int((mb >> 28u) & 3u);
   float Lx = xN + xP + 1., Lz = zN + zP + 1., Lv = hDn + hUp + 1.;
   float ex = uG2.y * uE[m].z;                        // how far this cell differentiates
+  float sk = uE[m].w;                                // this material's skin sink: designed shapes are offset by it
+  def = 0.;                                          // how specialised: damps the random eml carve below
 
   // gene ROUND: convex edges soften, more on bigger masses
   float size = cls == 0 ? min(min(Lx, Lz), Lv) : 1.;
   float r = uG.x * ex * clamp(.12*size, .08, .5);
   vec3 vq = max(vec3(r) - q, 0.); float lq = length(vq);
   float dist = min(lq > 0. ? r - lq : min(q.x, min(q.y, q.z)), dEdge);
+  def = .35*clamp(uG.x*ex, 0., 1.)*clamp((size - 1.)*.5, 0., 1.);   // big masses settle a little
 
   // gene COLUMN: a lone stack turns, its radius set by where the cell sits in the whole stack
   if(cls == 1 && Lv >= 2.){
     float yb = hDn + local.y + .5, yt = Lv - yb;
-    float rad = .29 + .18*exp(-yb*5.) + .18*exp(-yt*5.);            // base flare, capital flare
+    float rad = .32 + .16*exp(-yb*5.) + .16*exp(-yt*5.);            // base flare, capital flare
     float fl = .028*(.5 + .5*cos(atan(local.z, local.x)*10.)) * smoothstep(.35, .9, min(yb, yt));
     float colD = min(yb, yt) < .14 ? .48 - max(abs(local.x), abs(local.z))   // square plinth / abacus
                                    : rad - fl - length(local.xz);
-    dist = mix(dist, min(colD, q.y), clamp(uG.y*ex, 0., 1.));
+    dist = mix(dist, min(colD + sk, q.y), clamp(uG.y*ex, 0., 1.));
+    def = max(def, clamp(uG.y*ex, 0., 1.));
   }
 
   // gene WINDOW: a thin wall opens windows, spaced along its run and stacked by storey
   if((cls == 2 || cls == 3) && Lv >= 3.){
     float along = cls == 2 ? xN + local.x + .5 : zN + local.z + .5, L = cls == 2 ? Lx : Lz;
-    float nW = floor((L - 1.) / 3.), w = .36*clamp(uG.w*ex, 0., 1.);
-    float nS = max(1., floor((Lv - .5) / 3.5)), sh = Lv / nS, wy = hDn + local.y + .5;
-    wy -= clamp(floor(wy / sh), 0., nS - 1.) * sh;
-    float y0 = .9, y1 = sh - .7;
-    if(nW >= 1. && w > .02 && y1 - y0 > .9){
-      float sp = L / nW, cx = (clamp(floor(along / sp), 0., nW - 1.) + .5)*sp, u = along - cx, ym = y1 - w;
-      float win = min(sdBox2(vec2(u, wy - .5*(y0 + ym)), vec2(w, .5*(ym - y0))), length(vec2(u, wy - ym)) - w);
-      dist = min(dist, win);
-    }
+    float win = windowSD(along, L, hDn + local.y + .5, Lv, 3., 3.5, .36*clamp(uG.w*ex, 0., 1.), .9, .7);
+    dist = min(dist, win + sk);
+    if(win < 9.) def = max(def, .6*clamp(uG.w*ex, 0., 1.));
+  }
+
+  // ===== LEVEL 2: the whole this block belongs to — the same rules at three times the scale =====
+  int cls2 = int(v2 & 3u);
+  float hDn2 = float((v2 >> 2u) & 15u), Lv2 = hDn2 + float((v2 >> 6u) & 15u) + 1.;
+  float e2 = clamp(uG3.x*ex, 0., 1.);
+  bool big = e2 > 0. && ((cls2 == 1 && Lv2 >= 3.) || (cls2 >= 2 && Lv2 >= 4.));
+  if(big && cls2 == 1){                               // a big column: every block computes its slice of one shaft
+    float sc = min(Lx, Lz);
+    vec2 pg = vec2(local.x - (xP - xN)*.5, local.z - (zP - zN)*.5);   // position in the whole, from its runs
+    float yb = hDn2 + local.y + .5, yt = Lv2 - yb;
+    float rad = sc*(.32 + .16*exp(-yb/sc*5.) + .16*exp(-yt/sc*5.));
+    float fl = .028*sc*(.5 + .5*cos(atan(pg.y, pg.x)*16.)) * smoothstep(.35*sc, .9*sc, min(yb, yt));
+    float colD = min(yb, yt) < .14*sc ? .48*sc - max(abs(pg.x), abs(pg.y)) : rad - fl - length(pg);
+    dist = mix(dist, min(colD + sk, q.y), e2);
+    def = max(def, e2);
+  }
+  if(big && cls2 >= 2){                               // a thick wall: windows sized to the whole
+    float along = cls2 == 2 ? xN + local.x + .5 : zN + local.z + .5, L = cls2 == 2 ? Lx : Lz;
+    float win = windowSD(along, L, hDn2 + local.y + .5, Lv2, 4.5, 5., .75*clamp(uG.w*ex, 0., 1.)*e2, 1.3, 1.1);
+    dist = min(dist, win + sk);
+    def = max(def, .75*e2);
   }
 
   // genes ARCH / WEATHER (overhang): air beneath the cell
@@ -382,32 +468,75 @@ float airDist(vec3 local, uvec4 v){
     if((ma & 1024u) != 0u){                           // held at both ends: the span's underside vaults
       float aN = float(ma & 15u), aP = float((ma >> 4u) & 15u), lx = (ma & 256u) != 0u ? local.z : local.x;
       float S = aN + aP + 1., u = (aN + lx + .5) / S;
-      float rise = min(.72, .26*S) * clamp(uG.z*ex, 0., 1.);
-      dist = min(dist, (yb - rise*sqrt(max(1. - (2.*u - 1.)*(2.*u - 1.), 0.)))*.7);
+      float rise = min(.5, .2*S) * clamp(uG.z*ex, 0., 1.);
+      dist = min(dist, (yb - rise*sqrt(max(1. - (2.*u - 1.)*(2.*u - 1.), 0.)))*.7 + sk);
+      def = max(def, clamp(uG.z*ex, 0., 1.));
     } else {                                          // hanging free: the underside drips into teeth
       float teeth = (.5 + .5*sin(local.x*21. + 1.3)) * (.5 + .5*sin(local.z*19. + 2.1));
       dist = min(dist, (yb - .45*teeth*clamp(uG2.x*ex, 0., 1.))*.7);
     }
   }
+  // ===== LEVEL 0: the parts a block is made of — joints laid out by the role it has =====
+  bool flowCell = (ma & 1073741824u) != 0u && uF[m].x > 0.;
+  float sub = clamp(uG3.y*ex, 0., 1.);
+  if(!flowCell && int(uC0[m].w) != 4){                // bricks already carry their own courses in the noise
+    if(big){                                          // coarse joints: the blocks are the stones of their whole
+      float g = .5 - abs(fract(wp.y) - .5);
+      if(cls2 >= 2){ float a2 = ((cls2 == 2 ? wp.x : wp.z) + mod(floor(wp.y), 2.))*.5; g = min(g, (.5 - abs(fract(a2) - .5))*2.); }
+      dist = jointRound(dist - sk, g, .09*e2) + sk;
+    }
+    float g;                                          // fine joints: the stones inside the block
+    if(cls == 1 && Lv >= 2. && !big) g = (.5 - abs(fract((hDn + local.y + .5)*2.) - .5))*.5;          // column drums
+    else if(cls >= 2 && !big){                                                                      // small coursed stones
+      float cy = wp.y*3., ah = (cls == 2 ? wp.x : wp.z)*1.5 + mod(floor(cy), 2.)*.5;
+      g = min((.5 - abs(fract(cy) - .5))/3., (.5 - abs(fract(ah) - .5))/1.5);
+    } else if((ma & 1024u) != 0u){                                                                  // voussoirs fan round the arch
+      float aN = float(ma & 15u), aP = float((ma >> 4u) & 15u), S = aN + aP + 1.;
+      float X = aN + ((ma & 256u) != 0u ? local.z : local.x) + .5 - .5*S, Y = local.y + .5;
+      float dth = 3.14159 / (2.*S + 1.), th = atan(Y, X);
+      g = (.5 - abs(fract(th / dth) - .5)) * dth * length(vec2(X, Y));
+    } else {                                                                                        // cobbles, staggered
+      float cy = wp.y*2., sh = mod(floor(cy), 2.)*.5;
+      g = min((.5 - abs(fract(cy) - .5))*.5, min((.5 - abs(fract(wp.x*2. + sh) - .5))*.5, (.5 - abs(fract(wp.z*2. + sh) - .5))*.5));
+    }
+    dist = jointRound(dist - sk, g, .04*sub) + sk;
+  }
+
+  // gene FLOW: top cells (and the ghost room above them) carry one shared smooth surface
+  if((ma & 1073741824u) != 0u){
+    bool ghost = (ma & 2147483648u) != 0u;
+    float fw = clamp(uG2.w * uF[m].x * uG2.y, 0., 1.);
+    vec2 t = local.xz + .5;
+    vec3 wx = vec3(.5*(1. - t.x)*(1. - t.x), .5 + t.x*(1. - t.x), .5*t.x*t.x);
+    vec3 wz = vec3(.5*(1. - t.y)*(1. - t.y), .5 + t.y*(1. - t.y), .5*t.y*t.y);
+    float S = 0.;
+    for(int k=0; k<9; k++){
+      float h = float((ma >> uint(12 + 2*k)) & 3u) - 1.;
+      S += wx[k - (k/3)*3] * wz[k/3] * h;
+    }
+    float flowD = (ghost ? 0. : 1.) + S - (local.y + .5) + sk;   // lands exactly on S after the skin sink
+    dist = mix(ghost ? -.3 : dist, flowD, fw);
+    def = max(def, .5*fw);
+  }
   return dist;
 }
 // the noise-free half of the eml: fill·d + L·ln(d) − iso. An upper bound on the full density.
-float skinDens(vec3 local, uvec4 v){
+float skinDens(vec3 wp, vec3 local, uvec4 v, uint v2, out float def){
   int m = int(v.r);
-  float d = clamp(airDist(local, v) / uB[m].y, 1e-3, 1.);
+  float d = clamp(airDist(wp, local, v, v2, def) / uB[m].y, 1e-3, 1.);
   return uB[m].x*d + uA[m].z*log(d) - uA[m].w;
 }
 // eml solid: density > 0 is rock
-float cellDens(vec3 wp, ivec3 c, uvec4 v, out float nOut){
+float cellDens(vec3 wp, ivec3 c, uvec4 v, uint v2, out float nOut){
   int m = int(v.r);
   vec3 local = wp - vec3(c) - .5;
-  float bound = skinDens(local, v);
+  float def; float bound = skinDens(wp, local, v, v2, def);
   nOut = 0.;
   if(bound >= -.02){                                 // below that the ln(d) bite alone keeps it air
     nOut = matNoise(m, wp, local, c);
     // gene WEATHER: faces open to the sky erode harder toward the top
-    float wth = ((v.g >> 15u) & 1u) == 1u ? 1. + 2.*uG2.x*uG2.y*uE[m].z*smoothstep(-.1, .5, local.y) : 1.;
-    bound -= uA[m].y*wth*(exp(uA[m].x*nOut) - 1.);
+    float wth = ((v.g >> 15u) & 1u) == 1u ? 1. + uG2.x*uG2.y*uE[m].z*smoothstep(-.1, .5, local.y) : 1.;
+    bound -= uA[m].y*wth*(1. - .8*def)*(exp(uA[m].x*nOut) - 1.);
   }
   return bound;
 }
@@ -416,24 +545,25 @@ bool boxRange(vec3 ro, vec3 rd, vec3 bmin, vec3 bmax, out float t0, out float t1
   t0 = max(max(lo.x,lo.y),lo.z); t1 = min(min(hi.x,hi.y),hi.z); return t1 > max(t0, 0.);
 }
 // one cellDens call site: march, then bisect, in the same loop (D3D inlines every call site)
-bool marchCell(vec3 ro, vec3 rd, float t0, float t1, ivec3 c, uvec4 cv, float smin, float smax, out float th){
+bool marchCell(vec3 ro, vec3 rd, float t0, float t1, ivec3 c, uvec4 cv, uint cv2, float smin, float smax, out float th){
   float t = t0, a = t0, b = t0, n; int rs = -1;
   for(int s=0; s<uL96; s++){
     float x = rs >= 0 ? .5*(a+b) : t;
-    float dn = cellDens(ro + rd*x, c, cv, n);
+    float dn = cellDens(ro + rd*x, c, cv, cv2, n);
     if(rs >= 0){ if(dn > 0.) b = x; else a = x; if(s >= rs) break; }
     else if(dn > 0.){ b = t; rs = s + 5; }
     else { a = t; t += clamp(-dn*.12, smin, smax); if(t > t1) return false; }
   }
   th = b; return rs >= 0;
 }
+uint fetchV2(ivec3 c){ return uMode == 1 ? 0u : texelFetch(uVox2, c, 0).r; }
 uvec4 fetchV(ivec3 c){
   if(uMode == 1) return uvec4(uint(uPrevMat), 0x3FFFFFFu, 0u, 0u);   // preview: one isolated, undifferentiated block at (0,0,0)
   return texelFetch(uVox, c, 0);
 }
 bool trace(vec3 ro, vec3 rd, float tMax, int steps, float smin, float smax,
-           out float tHit, out ivec3 hc, out ivec3 pc, out uvec4 hv){
-  pc = ivec3(-1); tHit = 0.; hc = ivec3(0); hv = uvec4(0u);
+           out float tHit, out ivec3 hc, out ivec3 pc, out uvec4 hv, out uint hv2){
+  pc = ivec3(-1); tHit = 0.; hc = ivec3(0); hv = uvec4(0u); hv2 = 0u;
   float tA, tB; if(!boxRange(ro, rd, vec3(0), vec3(uDim), tA, tB)) return false;
   tA = max(tA, 0.); tB = min(tB, tMax);
   vec3 p = ro + rd*(tA + 1e-4);
@@ -446,8 +576,8 @@ bool trace(vec3 ro, vec3 rd, float tMax, int steps, float smin, float smax,
     uvec4 v = fetchV(c);
     if(v.r != 0u){
       if(v.g == 0u){ tHit = tc; hc = c; hv = v; return true; }
-      float th;
-      if(marchCell(ro, rd, tc, min(tn, tB), c, v, smin, smax, th)){ tHit = th; hc = c; hv = v; return true; }
+      float th; uint v2 = fetchV2(c);
+      if(marchCell(ro, rd, tc, min(tn, tB), c, v, v2, smin, smax, th)){ tHit = th; hc = c; hv = v; hv2 = v2; return true; }
     } else pc = c;
     if(tn > tB) break;
     tc = tn;
@@ -458,7 +588,7 @@ bool trace(vec3 ro, vec3 rd, float tMax, int steps, float smin, float smax,
   }
   return false;
 }
-vec3 normalAt(vec3 p, ivec3 c, uvec4 v, out float nv){
+vec3 normalAt(vec3 p, ivec3 c, uvec4 v, uint v2, out float nv){
   uint mask = v.g;
   // no early return here: D3D's fxc rejected the shader with one
   vec3 l = p - vec3(c) - .5, a = abs(l);
@@ -467,7 +597,7 @@ vec3 normalAt(vec3 p, ivec3 c, uvec4 v, out float nv){
   if(mask != 0u){
     for(int i=0; i<uL4; i++){
       vec3 k = vec3(i == 0 || i == 3 ? 1. : -1., i >= 2 ? 1. : -1., i == 1 || i == 3 ? 1. : -1.);
-      float n; g += k * cellDens(p + k*.003, c, v, n); ns += n;
+      float n; g += k * cellDens(p + k*.003, c, v, v2, n); ns += n;
     }
   }
   nv = mask != 0u ? ns * .25 : .2;
@@ -478,10 +608,10 @@ float aoAt(vec3 p, vec3 nrm){
   for(int i=0; i<uL3; i++){
     float h = i == 0 ? .10 : i == 1 ? .28 : .6, w = i == 0 ? .40 : i == 1 ? .30 : .25;
     vec3 wp = p + nrm*h; ivec3 c = ivec3(floor(wp));
-    float o = 0.;
+    float o = 0., dm;
     if(any(lessThan(c, ivec3(0))) || any(greaterThanEqual(c, uDim))) o = c.y < 0 ? 1. : 0.;
     else { uvec4 v = texelFetch(uVox, c, 0);
-      if(v.r != 0u) o = v.g == 0u ? 1. : smoothstep(-.15, .25, skinDens(wp - vec3(c) - .5, v)); }
+      if(v.r != 0u) o = v.g == 0u ? 1. : smoothstep(-.15, .25, skinDens(wp, wp - vec3(c) - .5, v, texelFetch(uVox2, c, 0).r, dm)); }
     ao -= w*o;
   }
   return clamp(ao, .15, 1.);
@@ -498,7 +628,7 @@ vec3 shadeHit(vec3 p, vec3 rd, vec3 nrm, float nv, ivec3 c, int m, float sh, flo
   float crev = smoothstep(.35, .85, nv);
   vec3 c0 = pow(uC0[m].rgb, vec3(2.2)), c1 = pow(uC1[m].rgb, vec3(2.2));
   vec3 alb = mix(c0, c1, crev);
-  if(m == 1) alb = (nrm.y > .55) ? mix(c0, c0*.6, crev) : mix(c1, c1*.7, crev);   // grass top, dirt sides
+  if(m == 1) alb = mix(mix(c1, c1*.7, crev), mix(c0, c0*.6, crev), smoothstep(.3, .6, nrm.y));   // grass top, dirt sides
   if(m == 7) alb = mix(c0*(.85 + .3*h3(ivec3(floor(p*vec3(2,4,2) + vec3(0,.5,0))))), c1, crev);
   float dif = max(dot(nrm, uSun), 0.) * sh;
   vec3 sunC = vec3(1.,.93,.82) * 2.6 * smoothstep(-.05, .15, uSun.y);
@@ -515,7 +645,9 @@ vec3 shadeHit(vec3 p, vec3 rd, vec3 nrm, float nv, ivec3 c, int m, float sh, flo
   if(em > 0.) col += (uE[m].y > .5 ? c1*crev*crev : c0*(.4 + .6*crev)) * em;
   return col;
 }
-vec3 roleTint(uvec4 v){
+vec3 roleTint(uvec4 v, uint v2){
+  if((v2 & 3u) == 1u && ((v2 >> 2u) & 15u) + ((v2 >> 6u) & 15u) >= 2u) return vec3(1., .45, .1);
+  if((v2 & 3u) >= 2u && ((v2 >> 2u) & 15u) + ((v2 >> 6u) & 15u) >= 3u) return vec3(.1, .55, .7);
   int cls = int((v.b >> 28u) & 3u); float Lv = float(v.b & 15u) + float((v.b >> 4u) & 15u) + 1.;
   if((v.a & 1024u) != 0u) return vec3(1., .3, .9);
   if((v.a & 512u) != 0u) return vec3(.4, .55, 1.);
@@ -542,16 +674,16 @@ void main(){
   rd = mix(rd, rd + 1e-5, vec3(lessThan(abs(rd), vec3(1e-6))));
 
   // pass 0 = view ray, pass 1 = sun shadow ray; one trace() call site
-  bool hit = false; float th0 = 0., sh = 1., nv = .2; ivec3 hc0 = ivec3(0), pc0 = ivec3(-1); uvec4 hv0 = uvec4(0u);
+  bool hit = false; float th0 = 0., sh = 1., nv = .2; ivec3 hc0 = ivec3(0), pc0 = ivec3(-1); uvec4 hv0 = uvec4(0u); uint hw0 = 0u;
   vec3 nrm = vec3(0,1,0), sro = ro, srd = rd;
   for(int pass=0; pass<uL2; pass++){
-    float th; ivec3 hc, pc; uvec4 hv;
-    bool h = trace(sro, srd, pass == 0 ? tMax : 70., pass == 0 ? steps : 96, pass == 0 ? .025 : .05, pass == 0 ? .07 : .14, th, hc, pc, hv);
+    float th; ivec3 hc, pc; uvec4 hv; uint hw;
+    bool h = trace(sro, srd, pass == 0 ? tMax : 70., pass == 0 ? steps : 96, pass == 0 ? .025 : .05, pass == 0 ? .07 : .14, th, hc, pc, hv, hw);
     if(pass == 0){
-      hit = h; th0 = th; hc0 = hc; pc0 = pc; hv0 = hv;
+      hit = h; th0 = th; hc0 = hc; pc0 = pc; hv0 = hv; hw0 = hw;
       if(!h || uMode == 2) break;
       vec3 p = ro + rd*th;
-      nrm = normalAt(p, hc, hv, nv);
+      nrm = normalAt(p, hc, hv, hw, nv);
       if(dot(nrm, rd) > 0. && hv.g == 0u) nrm = -nrm;
       if(uMode != 0 || uShadows == 0 || uSun.y <= 0.) break;
       sro = p + nrm*.012; srd = uSun;
@@ -560,7 +692,8 @@ void main(){
 
   if(uMode == 2){
     if(!hit){ outC = vec4(0); return; }
-    ivec3 cc = gl_FragCoord.x < 1. ? hc0 : pc0;
+    bool gh = (hv0.a & 2147483648u) != 0u;
+    ivec3 cc = gl_FragCoord.x < 1. ? (gh ? hc0 - ivec3(0,1,0) : hc0) : (gh ? hc0 : pc0);
     outC = cc.x < 0 ? vec4(0) : vec4(vec3(cc)/255., 1.); return;
   }
   if(uMode == 1){
@@ -571,12 +704,12 @@ void main(){
   if(hit){
     vec3 p = ro + rd*th0;
     col = shadeHit(p, rd, nrm, nv, hc0, int(hv0.r), sh, aoAt(p, nrm));
-    if(uG2.z > .5) col = mix(col, roleTint(hv0) * (.25 + .75*max(dot(nrm, uSun), 0.)*sh + .25), .55);
+    if(uG2.z > .5) col = mix(col, roleTint(hv0, hw0) * (.25 + .75*max(dot(nrm, uSun), 0.)*sh + .25), .55);
     col = mix(col, sky(rd)*.95, 1. - exp(-max(th0 - 20., 0.)*.012));
   } else col = sky(rd);
   if(uSelOn == 1){
     float t0, t1;
-    if(boxRange(ro, rd, vec3(uSel) - .003, vec3(uSel) + 1.003, t0, t1) && (!hit || t0 < th0 + .02)){
+    if(boxRange(ro, rd, vec3(uSel) - .003, vec3(uSel) + 1.003, t0, t1) && (!hit || t0 < th0 + .02 || (hv0.a & 2147483648u) != 0u)){
       vec3 l = abs(ro + rd*max(t0,0.) - vec3(uSel) - .5);
       vec3 s = step(vec3(.482), l);
       if(s.x + s.y + s.z >= 2.) col = mix(col, vec3(1.), .75);
@@ -591,7 +724,7 @@ const prog = gl.createProgram();
 gl.attachShader(prog, mk(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, mk(gl.FRAGMENT_SHADER, FS)); gl.linkProgram(prog);
 if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
 gl.useProgram(prog);
-const U = {}; ['uVox','uDim','uRes','uCam','uBasis','uTanF','uSun','uTime','uMode','uPrevMat','uPrevRect','uSel','uSelOn','uShadows','uA','uB','uC0','uC1','uE','uL26','uL27','uL4','uL3','uL2','uL96','uG','uG2']
+const U = {}; ['uVox','uVox2','uG3','uDim','uRes','uCam','uBasis','uTanF','uSun','uTime','uMode','uPrevMat','uPrevRect','uSel','uSelOn','uShadows','uA','uB','uC0','uC1','uE','uL26','uL27','uL4','uL3','uL2','uL96','uG','uG2','uF']
   .forEach(n => U[n] = gl.getUniformLocation(prog, n));
 gl.bindVertexArray(gl.createVertexArray());
 
@@ -599,20 +732,37 @@ const vtex = gl.createTexture();
 gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_3D, vtex);
 gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
 gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-function uploadAll() { gl.bindTexture(gl.TEXTURE_3D, vtex); gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGBA32UI, W, H, D, 0, gl.RGBA_INTEGER, gl.UNSIGNED_INT, vox); }
-gl.uniform1i(U.uVox, 0); gl.uniform3i(U.uDim, W, H, D);
+const vtex2 = gl.createTexture();
+gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_3D, vtex2);
+gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+gl.activeTexture(gl.TEXTURE0);
+function uploadAll() {
+  gl.bindTexture(gl.TEXTURE_3D, vtex); gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGBA32UI, W, H, D, 0, gl.RGBA_INTEGER, gl.UNSIGNED_INT, vox);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_3D, vtex2);
+  gl.texImage3D(gl.TEXTURE_3D, 0, gl.R32UI, W, H, D, 0, gl.RED_INTEGER, gl.UNSIGNED_INT, vox2);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_3D, vtex);
+}
+gl.uniform1i(U.uVox, 0); gl.uniform1i(U.uVox2, 1); gl.uniform3i(U.uDim, W, H, D);
 [['uL26', 26], ['uL27', 27], ['uL4', 4], ['uL3', 3], ['uL2', 2], ['uL96', 96]].forEach(([n, v]) => gl.uniform1i(U[n], v));
 
+function skinSink(q) {                               // how far the noise-free eml surface sits inside the skin
+  const f = d => q.fill * d + q.L * Math.log(d) - q.iso;
+  if (f(1) <= 0) return q.R;
+  let a = 1e-3, b = 1; for (let i = 0; i < 30; i++) { const c = (a + b) / 2; if (f(c) > 0) b = c; else a = c; }
+  return b * q.R;
+}
 function uploadDNA() {
   const A = new Float32Array(64), B = new Float32Array(64), C0 = new Float32Array(64), C1 = new Float32Array(64), E = new Float32Array(64);
   for (let m = 1; m <= NM; m++) { const q = MATS[m], o = m * 4;
     A.set([q.k, q.g, q.L, q.iso], o); B.set([q.fill, q.R, q.sc, q.vr], o);
-    C0.set([...q.c0, q.kind], o); C1.set([...q.c1, q.em], o); E.set([q.gloss, EMIT_CREVICE[m] ? 1 : 0, q.pl, 0], o); }
+    C0.set([...q.c0, q.kind], o); C1.set([...q.c1, q.em], o); E.set([q.gloss, EMIT_CREVICE[m] ? 1 : 0, q.pl, skinSink(q)], o); }
   gl.uniform4fv(U.uA, A); gl.uniform4fv(U.uB, B); gl.uniform4fv(U.uC0, C0); gl.uniform4fv(U.uC1, C1); gl.uniform4fv(U.uE, E);
   gl.uniform4f(U.uG, GENES.round, GENES.column, GENES.arch, GENES.window);
-  gl.uniform4f(U.uG2, GENES.weather, GENES.diff, showRoles ? 1 : 0, 0);
+  gl.uniform4f(U.uG2, GENES.weather, GENES.diff, showRoles ? 1 : 0, GENES.flow);
+  gl.uniform4f(U.uG3, GENES.whole, GENES.parts, 0, 0);
+  const F = new Float32Array(64); for (let m = 1; m <= NM; m++) F[m * 4] = MATS[m].fl; gl.uniform4fv(U.uF, F);
 }
-const GENES = { diff: 1, round: 1, column: 1, arch: 1, window: 1, weather: .6 };
+const GENES = { diff: 1, round: 1, column: 1, arch: 1, window: 1, weather: .6, flow: 1, whole: 1, parts: 1 };
 let showRoles = false;
 
 // pick target: 2x1 RGBA8, px0 = hit cell, px1 = last air cell before it
@@ -652,20 +802,23 @@ function pick() {
 }
 function refreshBox(x0, y0, z0, x1, y1, z1) {
   x0 = Math.max(0, x0); y0 = Math.max(0, y0); z0 = Math.max(0, z0); x1 = Math.min(W - 1, x1); y1 = Math.min(H - 1, y1); z1 = Math.min(D - 1, z1);
-  const w = x1 - x0 + 1, h = y1 - y0 + 1, d = z1 - z0 + 1, sub = new Uint32Array(w * h * d * 4);
-  let k = 0;
+  const w = x1 - x0 + 1, h = y1 - y0 + 1, d = z1 - z0 + 1, sub = new Uint32Array(w * h * d * 4), sub2 = new Uint32Array(w * h * d);
+  let k = 0, k2 = 0;
   for (let zz = z0; zz <= z1; zz++) for (let yy = y0; yy <= y1; yy++) for (let xx = x0; xx <= x1; xx++) {
-    writeCell(xx, yy, zz); const o = idx(xx, yy, zz) * 4; sub[k++] = vox[o]; sub[k++] = vox[o + 1]; sub[k++] = vox[o + 2]; sub[k++] = vox[o + 3];
+    writeCell(xx, yy, zz); const i = idx(xx, yy, zz), o = i * 4; sub[k++] = vox[o]; sub[k++] = vox[o + 1]; sub[k++] = vox[o + 2]; sub[k++] = vox[o + 3]; sub2[k2++] = vox2[i];
   }
   gl.bindTexture(gl.TEXTURE_3D, vtex);
   gl.texSubImage3D(gl.TEXTURE_3D, 0, x0, y0, z0, w, h, d, gl.RGBA_INTEGER, gl.UNSIGNED_INT, sub);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_3D, vtex2);
+  gl.texSubImage3D(gl.TEXTURE_3D, 0, x0, y0, z0, w, h, d, gl.RED_INTEGER, gl.UNSIGNED_INT, sub2);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_3D, vtex);
 }
 function editAt(x, y, z, m) {
   if (!inb(x, y, z)) return false;
   mat[idx(x, y, z)] = m;
-  // a change is felt along its rows (runs, arches: layers y-1..y+1) and up/down its neighbouring stacks
-  refreshBox(x - 16, y - 1, z - 16, x + 16, y + 1, z + 16);
-  refreshBox(x - 1, y - 16, z - 1, x + 1, y + 16, z + 1);
+  // a change is felt along its rows (runs, arches, level-2 class: its own layer) and up/down every stack those touch
+  cls2Box(x - 16, y, z - 16, x + 16, y, z + 16);
+  refreshBox(x - 16, y - 16, z - 16, x + 16, y + 16, z + 16);
   return true;
 }
 function doBreak() { const p = pick(); if (p) editAt(...p.hit, 0); }
@@ -722,7 +875,7 @@ for (let m = 1; m <= NM; m++) {
   s.innerHTML = `<b>${HOTKEYS[m - 1]}</b>`; s.onclick = () => setSel(m); hot.appendChild(s);
 }
 const SL = [['k', 'k (noise→exp)', 0, 4, .01], ['g', 'exp gain g', 0, 1.2, .005], ['L', 'L (ln gain)', 0, 1, .005], ['iso', 'iso', -.3, .6, .005],
-  ['fill', 'fill', .2, 2, .01], ['R', 'skin depth R', .1, 1, .01], ['sc', 'noise scale', .3, 5, .01], ['vr', 'per-block seed', 0, 1, .01], ['pl', 'plasticity', 0, 1, .01]];
+  ['fill', 'fill', .2, 2, .01], ['R', 'skin depth R', .1, 1, .01], ['sc', 'noise scale', .3, 5, .01], ['vr', 'per-block seed', 0, 1, .01], ['pl', 'plasticity', 0, 1, .01], ['fl', 'flow', 0, 1, .01]];
 const slBox = document.getElementById('sliders');
 SL.forEach(([key, lab, lo, hi, st]) => {
   const r = document.createElement('div'); r.className = 'row';
@@ -731,7 +884,7 @@ SL.forEach(([key, lab, lo, hi, st]) => {
   slBox.appendChild(r);
 });
 document.getElementById('kind').onchange = e => { MATS[sel].kind = +e.target.value; uploadDNA(); };
-const GL_ = [['diff', 'differentiate'], ['round', 'gene: round'], ['column', 'gene: column'], ['arch', 'gene: arch'], ['window', 'gene: window'], ['weather', 'gene: weather']];
+const GL_ = [['diff', 'differentiate'], ['round', 'gene: round'], ['column', 'gene: column'], ['arch', 'gene: arch'], ['window', 'gene: window'], ['weather', 'gene: weather'], ['flow', 'gene: flow'], ['whole', 'level 2: wholes'], ['parts', 'level 0: parts']];
 const gBox = document.getElementById('genes');
 GL_.forEach(([key, lab]) => {
   const r = document.createElement('div'); r.className = 'row';
@@ -754,7 +907,7 @@ function setSel(m) { sel = m; syncPanel(); }
 function setMode(m) { skinMode = m; rebuildMasks(); uploadAll(); document.querySelectorAll('#modes button').forEach(b => b.classList.toggle('on', +b.dataset.m === m)); }
 document.querySelectorAll('#modes button').forEach(b => b.onclick = () => setMode(+b.dataset.m));
 document.getElementById('resetDna').onclick = () => { Object.assign(MATS[sel], JSON.parse(JSON.stringify(DEFAULTS[sel]))); uploadDNA(); syncPanel(); };
-document.getElementById('copyDna').onclick = () => { const q = MATS[sel]; const s = JSON.stringify({ name: q.name, k: q.k, g: q.g, L: q.L, iso: q.iso, fill: q.fill, R: q.R, sc: q.sc, vr: q.vr, kind: q.kind, pl: q.pl });
+document.getElementById('copyDna').onclick = () => { const q = MATS[sel]; const s = JSON.stringify({ name: q.name, k: q.k, g: q.g, L: q.L, iso: q.iso, fill: q.fill, R: q.R, sc: q.sc, vr: q.vr, kind: q.kind, pl: q.pl, fl: q.fl });
   try { navigator.clipboard.writeText(s); } catch (e) {} console.log(s); };
 const bindR = (id, fn) => { const el = document.getElementById(id), v = document.getElementById(id + '_v'); const f = () => { if (v) v.textContent = el.value; fn(+el.value); }; el.oninput = f; f(); };
 let sunEl = 38, sunAz = 35, rscale = .7, shadows = 1;
@@ -814,7 +967,7 @@ genWorld(); uploadAll(); uploadDNA(); resize(); setSel(7); setMode(0);
 requestAnimationFrame(loop);
 
 // test hooks
-window.EB = { cam, MATS, GENES, uploadDNA, setRoles, vox, morphAt, editAt, pick, setSel, setMode, genWorld: () => { genWorld(); uploadAll(); }, get fps() { return fpsE; }, mat, idx };
+window.EB = { cam, vox2, cls2, MATS, GENES, uploadDNA, setRoles, vox, morphAt, editAt, pick, setSel, setMode, genWorld: () => { genWorld(); uploadAll(); }, get fps() { return fpsE; }, mat, idx };
 </script>
 </body>
 </html>
