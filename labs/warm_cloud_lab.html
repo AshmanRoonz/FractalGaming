@@ -3,13 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>warm CLOUD lab — thermodynamic cumulus (BOMEX)</title>
+<title>warm CLOUD lab — heat, air, cloud, rain</title>
 <!--
-  Milestone 1 of docs/warm_cloud_brief.md. Grown from labs/fluid_cloud_lab.html (left untouched):
-  same 64^3-in-512^2 packing, MacCormack advection, red-black SOR projection, vorticity confinement.
-  New: physical units (50 m cells, seconds, K, kg/kg), potential-temperature perturbation + vapor +
-  cloud water, saturation adjustment with latent heat, buoyancy from theta' + vapor - liquid loading,
-  BOMEX sounding, surface heat/moisture fluxes, periodic sides, sponge lid, q_c raymarch.
+  labs/warm_cloud_brief.md Milestones 1 + 3, a ground that closes the water cycle, and (v3) the air itself:
+  uneven heating -> uneven temperature -> uneven pressure -> wind, made visible (tracer particles, pressure, arrows)
+  and fed back into the clouds; plus Earth's rotation, a background wind, surface drag, and an island sea breeze.
+  Grown from labs/fluid_cloud_lab.html (left untouched): 64^3-in-512^2 packing, red-black SOR projection.
+  Velocity is staggered (MAC); scalars move in conservative flux form; momentum by MacCormack.
   The visible cloud (q_c) is a passenger: it never drives buoyancy except as a weight.
 -->
 <style>
@@ -17,20 +17,30 @@
   #c{position:fixed;inset:0;width:100%;height:100%;display:block;cursor:grab}
   #panel{position:fixed;top:10px;left:10px;width:290px;max-height:calc(100vh - 20px);overflow-y:auto;overflow-x:hidden;background:rgba(8,14,22,.86);border:1px solid #1d2b3a;border-radius:10px;padding:11px;backdrop-filter:blur(6px);box-sizing:border-box}
   #panel h1{font-size:13px;margin:0 0 2px;color:#8fd}
+  #panel h1 .ver{color:#5a8;font-weight:normal;font-size:11px}
   #panel h2{font-size:11px;margin:10px 0 3px;color:#7ab;text-transform:uppercase;letter-spacing:.06em;border-top:1px solid #1d2b3a;padding-top:7px}
   #panel .sub{color:#6a8;font-size:11px;margin:0 0 8px}
   .row{display:flex;align-items:center;gap:8px;margin:4px 0}
   .row label{flex:0 0 104px;color:#9bd;white-space:nowrap}
   .row input[type=range]{flex:1;min-width:0;accent-color:#3fd8b0}
   .row .v{flex:0 0 40px;text-align:right;color:#bdf}
-  .row.chk label{flex:1}
-  .row select{flex:1;background:#0d1a26;color:#cfe;border:1px solid #2a5366;border-radius:4px;font:inherit}
+  .row.chk label{flex:1;white-space:normal}
+  .row select{flex:1;min-width:0;background:#0d1a26;color:#cfe;border:1px solid #2a5366;border-radius:4px;font:inherit}
   .hint{color:#69859a;font-size:10.5px;margin-top:6px}
   button{background:#16384a;color:#bff;border:1px solid #2a5366;border-radius:6px;padding:4px 9px;cursor:pointer;font:inherit}
   #stats{white-space:pre;font-size:11px;color:#bde;line-height:1.45}
   #stats b{color:#fd8;font-weight:normal}
   #prof{display:block;margin-top:6px;background:#06101a;border:1px solid #1d2b3a;border-radius:4px}
+  #chainbox{position:fixed;top:10px;right:10px;max-width:340px;background:rgba(8,14,22,.8);border:1px solid #1d2b3a;border-radius:10px;padding:7px 10px;font-size:11px;line-height:1.5;pointer-events:none;backdrop-filter:blur(4px)}
+  #chainbox .ct{color:#8fd;margin-bottom:3px}
+  #chain{display:grid;grid-template-columns:auto 1fr;gap:0 9px}
+  #chain .k{color:#9bd;white-space:nowrap}
+  #chain .v{color:#fd8}
   .fps{position:fixed;bottom:8px;right:10px;color:#577;font-size:11px}
+  #owinfo{white-space:pre;font-size:10.5px;color:#bde;line-height:1.45;margin-top:6px;overflow-x:auto}
+  #owinfo b{color:#fd8;font-weight:normal}
+  #owhud{position:fixed;bottom:8px;left:50%;transform:translateX(-50%);color:#cfe;font-size:11.5px;background:rgba(6,12,20,.62);padding:3px 10px;border-radius:6px;pointer-events:none;white-space:nowrap;display:none}
+  #owhud b{color:#fd8;font-weight:normal}
   #slabel{position:fixed;color:#bde;font-size:11px;background:rgba(6,12,20,.75);padding:2px 6px;border-radius:4px;pointer-events:none}
   .err{position:fixed;top:0;left:0;right:0;padding:14px;background:#3a1015;color:#fbb;font-size:12px;white-space:pre-wrap;display:none;z-index:9}
 </style>
@@ -39,52 +49,114 @@
 <canvas id="c"></canvas>
 <div id="err" class="err"></div>
 <div id="slabel"></div>
+<div id="chainbox"><div class="ct">uneven energy → uneven temperature → pressure → wind</div><div id="chain">waiting for first readback…</div></div>
 <div id="panel">
-  <h1>warm CLOUD lab</h1>
-  <p class="sub">cumulus from thermodynamics · BOMEX sounding · 3.2 km cube</p>
-  <div class="hint">Nobody paints these clouds. The ground warms and wets the lowest air; thermals rise, cool, and where the vapor reaches saturation it condenses into cloud water, releasing latent heat that lifts it further. The visible cloud is a passenger: it only ever counts as a weight.</div>
+  <h1>warm CLOUD lab <span class="ver" id="ver"></span></h1>
+  <p class="sub" id="scsub"></p>
+  <div class="hint">Nothing here is painted. The sun heats the ground, the ground heats the air above it, and warm air is light: it rises, the surface pressure under it falls, and the air around flows in to replace it. Rising air cools until its vapour condenses into cloud; the cloud shades the ground and rains; rain evaporating into dry air chills it, and that cold, dense air sinks and spreads out along the ground as a gust front that lifts new towers. The streaks are the air itself.</div>
+
+  <h2>scenario</h2>
+  <div class="row"><label>sounding</label><select id="scen"></select></div>
+  <div class="hint" id="scdesc"></div>
+
+  <h2>air &amp; heat</h2>
+  <div class="row chk"><label for="tracers">show the air (tracer streaks, T key)</label><input type="checkbox" id="tracers" checked></div>
+  <div class="row"><label>colour air by</label><select id="tcolor">
+    <option value="0">temperature: warm red, cold blue</option>
+    <option value="1">vertical wind: up red, down blue</option>
+    <option value="2">wind speed</option>
+  </select></div>
+  <div class="row"><label>tracers x1000</label><input id="tcount" type="range" min="2" max="16" step="1" value="10"><span class="v" id="tcount_v"></span></div>
+  <div class="row"><label>background wind</label><input id="wind" type="range" min="0" max="15" step="0.5" value="0"><span class="v" id="wind_v"></span></div>
+  <div class="row"><label>wind from (°)</label><input id="wdir" type="range" min="0" max="355" step="5" value="90"><span class="v" id="wdir_v"></span></div>
+  <div class="row chk"><label for="coriolis">Earth's rotation (Coriolis)</label><input type="checkbox" id="coriolis" checked></div>
+  <div class="row chk"><label for="drag">surface friction</label><input type="checkbox" id="drag" checked></div>
+  <div class="row chk"><label for="showchain">show the chain (top right)</label><input type="checkbox" id="showchain" checked></div>
+  <div class="hint">Air accelerates from high pressure toward low; temperature differences are what make the pressure differences. The background wind is the large-scale flow (0° = from the north). Rotation turns moving air to the right in the northern hemisphere; in a box this size it acts over hours, so watch a sea breeze swing round through the afternoon.</div>
 
   <h2>simulation</h2>
   <div class="row"><label>substeps/frame</label><input id="subs" type="range" min="1" max="8" step="1" value="3"><span class="v" id="subs_v"></span></div>
   <div class="row"><label>dt (s)</label><input id="dt" type="range" min="0.5" max="3" step="0.25" value="2"><span class="v" id="dt_v"></span></div>
   <div class="row"><label>surface flux x</label><input id="flux" type="range" min="0" max="5" step="0.05" value="2"><span class="v" id="flux_v"></span></div>
   <div class="row"><label>patchiness</label><input id="patch" type="range" min="0" max="1" step="0.01" value="0.6"><span class="v" id="patch_v"></span></div>
-  <div class="row"><label>eddy K m²/s</label><input id="kdiff" type="range" min="0" max="80" step="1" value="20"><span class="v" id="kdiff_v"></span></div>
+  <div class="row"><label>eddy mixing Cs</label><input id="kdiff" type="range" min="0" max="0.6" step="0.01" value="0.3"><span class="v" id="kdiff_v"></span></div>
+  <div class="row"><label>grid noise damp</label><input id="hyper" type="range" min="0" max="3" step="0.1" value="0"><span class="v" id="hyper_v"></span></div>
   <div class="row"><label>condense tau s</label><input id="tau" type="range" min="0" max="10" step="0.5" value="0"><span class="v" id="tau_v"></span></div>
   <div class="row"><label>vorticity</label><input id="vort" type="range" min="0" max="0.02" step="0.0005" value="0.003"><span class="v" id="vort_v"></span></div>
   <div class="row"><label>pressure iters</label><input id="iters" type="range" min="4" max="40" step="1" value="16"><span class="v" id="iters_v"></span></div>
   <div class="row chk"><label for="latent">latent heating (L key)</label><input type="checkbox" id="latent" checked></div>
-  <div class="row" style="gap:6px"><button id="pause">pause</button><button id="reset">reset</button><button id="kick">+30 min</button></div>
+  <div class="row" style="gap:6px"><button id="pause">pause</button><button id="reset">reset</button><button id="kick">+30 min</button><button id="defaults" title="forget your tweaks for this scenario">defaults</button></div>
+  <div class="hint">Your tweaks (sliders, switches, camera) are remembered per scenario in this browser; "defaults" forgets them.</div>
+
+  <h2>rain &amp; sun</h2>
+  <div class="row"><label>rain threshold</label><input id="thr" type="range" min="0.1" max="3" step="0.05" value="1"><span class="v" id="thr_v"></span></div>
+  <div class="row"><label>rain evap x</label><input id="revap" type="range" min="0" max="2" step="0.05" value="1"><span class="v" id="revap_v"></span></div>
+  <div class="row"><label>rad cooling K/d</label><input id="rad" type="range" min="0" max="5" step="0.1" value="2"><span class="v" id="rad_v"></span></div>
+  <div class="row chk"><label for="sunk">sun drives the ground (cloud shadows + sun height set the surface fluxes; land cools at night)</label><input type="checkbox" id="sunk" checked></div>
+  <div class="row chk"><label for="daynight">day/night: the sun follows the sim clock (nights run 3x faster)</label><input type="checkbox" id="daynight"></div>
+  <div class="hint">threshold = cloud water (g/kg) a cloud must hold before its droplets collide into rain: low = clean maritime air (few, big drops), high = polluted air (many small drops that won't rain). rain evap 0 = rain never cools the air, so no cold pools.</div>
 
   <h2>render</h2>
   <div class="row"><label>sun azimuth</label><input id="sunaz" type="range" min="0" max="6.28" step="0.01" value="0.6"><span class="v" id="sunaz_v"></span></div>
   <div class="row"><label>sun elevation</label><input id="sunel" type="range" min="0.05" max="1.5" step="0.01" value="0.75"><span class="v" id="sunel_v"></span></div>
   <div class="row"><label>extinction x</label><input id="ext" type="range" min="0.1" max="3" step="0.05" value="1"><span class="v" id="ext_v"></span></div>
+  <div class="row"><label>smoothing</label><input id="smooth" type="range" min="0" max="1.5" step="0.05" value="0.35"><span class="v" id="smooth_v"></span></div>
+  <div class="row"><label>fractal detail</label><input id="fdet" type="range" min="0" max="2" step="0.05" value="0.6"><span class="v" id="fdet_v"></span></div>
   <div class="row"><label>exposure</label><input id="expo" type="range" min="0.3" max="3" step="0.05" value="1.1"><span class="v" id="expo_v"></span></div>
   <div class="row"><label>tiles</label><input id="tiles" type="range" min="1" max="5" step="2" value="3"><span class="v" id="tiles_v"></span></div>
-  <div class="row"><label>render scale</label><input id="rscale" type="range" min="0.3" max="1" step="0.05" value="0.7"><span class="v" id="rscale_v"></span></div>
+  <div class="row"><label>render scale</label><input id="rscale" type="range" min="0.3" max="1.5" step="0.05" value="0.7"><span class="v" id="rscale_v"></span></div>
+  <div class="row chk"><label for="taa">temporal smoothing (averages frames while paused and still)</label><input type="checkbox" id="taa" checked></div>
+  <div class="row chk"><label for="cold">tint cold pools blue on the ground</label><input type="checkbox" id="cold" checked></div>
   <div class="row chk"><label for="spin">auto-orbit camera</label><input type="checkbox" id="spin"></div>
+  <div class="hint">With the sun behind you: sunlit rain shows a rainbow 42° from your shadow's direction, and sunlit cloud tops show a glory around it.</div>
+
+  <h2>LSS overworld view</h2>
+  <div class="row chk"><label for="ow">fly through this weather as a ship in the Last Ship Sailing overworld (O key)</label><input type="checkbox" id="ow"></div>
+  <div class="row"><label>game u per metre</label><input id="owscale" type="range" min="1" max="12.8" step="0.1" value="12.8"><span class="v" id="owscale_v"></span></div>
+  <div class="row" style="gap:6px"><button id="owreal" title="12.8 u/m: the game's real scale (LSS_UNITS_PER_METRE, a 14 m ship)">real scale</button><button id="owdeck" title="the scale that puts this sky's cloud base in the middle of the game's billboard deck (2,700-4,400 u)">today's deck height</button></div>
+  <div class="row"><label>FOV° (game's)</label><input id="owfov" type="range" min="60" max="120" step="1" value="120"><span class="v" id="owfov_v"></span></div>
+  <div class="row"><label>clouds drawn to</label><input id="owdist" type="range" min="-0.3" max="2" step="0.01" value="1.48"><span class="v" id="owdist_v"></span></div>
+  <div class="row" style="gap:6px"><button id="owcutfog" title="cut the clouds where the game's terrain fog is 90%">at the fog wall</button><button id="owcutfar" title="cut the clouds at the game's camera far plane">at the far plane</button><button id="owcutneed" title="as far as this sky needs">needed</button></div>
+  <div class="row"><label>haze visibility</label><input id="owvis" type="range" min="0.7" max="2.3" step="0.01" value="1.6"><span class="v" id="owvis_v"></span></div>
+  <div class="row"><label>fly speed</label><input id="owspeed" type="range" min="0" max="3" step="0.05" value="0"><span class="v" id="owspeed_v"></span></div>
+  <div class="row"><label>far-field sims</label><input id="owsims" type="range" min="1" max="4" step="1" value="3"><span class="v" id="owsims_v"></span></div>
+  <div class="row chk"><label for="owfog">the game's terrain fog on the ground (90% by 10,800 u)</label><input type="checkbox" id="owfog" checked></div>
+  <div class="row chk"><label for="owcfog">fog the clouds with it too (the game's billboard clouds are exempt from it)</label><input type="checkbox" id="owcfog"></div>
+  <div class="row chk"><label for="owlines">mark the game's fog wall (amber) and far plane (red) on the ground</label><input type="checkbox" id="owlines" checked></div>
+  <div class="row chk"><label for="owregdbg">tint the ground by far-field sim (main white, others red / green / blue; borders darker)</label><input type="checkbox" id="owregdbg"></div>
+  <div id="owinfo"></div>
+  <div class="hint">The ship's eye at the game's scale and lens: the camera's FOV is VERTICAL (120° = 144° across a 16:9 screen). The ground fogs like the overworld's terrain; the clouds fade into their own haze, out to the distance set above. Around the start (the home region) is the real sim; beyond it the world is cut into ~4.6 km regions with soft wiggly borders, each showing one of the "far-field sims" (same scenario and settings, each with its own seed and ground) at its own offset, half of them mirrored along the wind, so the weather neither repeats on a grid nor in step. 1 = the one sim, scrambled (cheapest); each extra sim costs ~1.5-2 ms a frame (one step + repack) and only runs in this view. They take one step per frame, so above 1 substep/frame (and at night) the far field evolves slower than the near. Fly: WASD, E/Q up/down, Shift x10, drag to look, right-drag to slide, wheel for altitude. Pad: left stick fly, right stick look, RT/LT up/down, RB x10.</div>
 
   <h2>debug slice</h2>
+  <div class="row"><label>view (X)</label><select id="sview">
+    <option value="0">side: x by height</option>
+    <option value="1">top: x by z at a level</option>
+  </select></div>
   <div class="row"><label>field (Y)</label><select id="field">
     <option value="0">cloud water q_c</option>
-    <option value="1">theta' (K)</option>
+    <option value="1">theta' vs level mean</option>
     <option value="2">supersaturation</option>
-    <option value="3">vertical wind w</option>
-    <option value="4">vapor anomaly q_v'</option>
+    <option value="3" selected>vertical wind w</option>
+    <option value="4">vapor q_v' vs level mean</option>
+    <option value="5">rain water q_r</option>
+    <option value="6">pressure p' vs level mean</option>
+    <option value="7">horizontal wind speed</option>
   </select></div>
-  <div class="row"><label>slice z</label><input id="slz" type="range" min="0" max="63" step="1" value="32"><span class="v" id="slz_v"></span></div>
+  <div class="row"><label>slice index</label><input id="slz" type="range" min="0" max="63" step="1" value="32"><span class="v" id="slz_v"></span></div>
+  <div class="row chk"><label for="arrows">wind arrows</label><input type="checkbox" id="arrows" checked></div>
   <div class="row chk"><label for="showslice">show slice</label><input type="checkbox" id="showslice" checked></div>
 
   <h2>checks</h2>
   <div id="stats">waiting for first readback…</div>
-  <canvas id="prof" width="248" height="150"></canvas>
-  <div class="hint">profile: cloud fraction by height (cyan), mean w inside cloud (orange). Yellow dash = parcel LCL of the surface air; grey band = BOMEX inversion. Slice outline = cloud edge.<br>Drag = orbit, wheel = zoom. Space pause, R reset. Pad: L-stick orbit, triggers zoom, A pause, Y slice field, B latent.</div>
+  <canvas id="prof" width="266" height="160"></canvas>
+  <div class="hint">water budget, as mm over the whole ground: what the ground and sea evaporated, minus what rained out, minus what the large-scale flow carried away (subsidence + the free troposphere relaxing to its sounding), equals the change in the air's water. "budget err" is what the numerics lost or made: it should read 0.000%.<br>profile: cloud fraction by height (cyan), rain water (blue), mean w inside cloud (orange). Yellow dash = parcel LCL of the surface air; grey band = inversion. Slice outline = cloud edge; the top view at index 0 shows the surface: theta' for cold pools and the land-sea contrast, pressure for the thermal low and the mesohigh.<br>Drag = orbit, right/shift-drag = pan, wheel = zoom. Space pause, R reset, L latent, T tracers. Pad: L-stick orbit, R-stick pan, triggers zoom, A pause, X slice view, Y slice field, B latent.</div>
 </div>
 <div class="fps" id="fps"></div>
+<div id="owhud"></div>
 
 <script>
 'use strict';
+const WCL_BUILD = 'v5 · fractal detail';
 const cv = document.getElementById('c'), errEl = document.getElementById('err');
 const gl = cv.getContext('webgl2', { antialias:false, alpha:false });
 function fail(m){ errEl.style.display='block'; errEl.textContent = m; throw new Error(m); }
@@ -92,46 +164,92 @@ if (!gl) fail('WebGL2 not available.');
 if (!gl.getExtension('EXT_color_buffer_float')) fail('EXT_color_buffer_float not supported (need float render targets).');
 
 // ---------- physical setup ----------
-const N = 64, RES2 = 512;            // 64^3 grid packed into a 512^2 texture: idx = x | y<<6 | z<<12, texel = (idx&511, idx>>9)
-const DX = 50;                       // m per cell -> 3.2 km cube; y is up
-const H = N*DX;
-const G = 9.81, CP = 1005, RD = 287, RV = 461.5, LV = 2.5e6, P0 = 1.0e5;
-const PSURF = 101500;                // BOMEX surface pressure. With 1000 hPa at z=0 the 520 m level starts supersaturated.
-const F_TH = 8e-3, F_Q = 5.2e-5;     // BOMEX surface sensible (K m/s) and moisture ((kg/kg) m/s) fluxes
-// BOMEX-like sounding (Siebesma et al. 2003, approx): z m, theta K, total water g/kg
-const SOUNDING = [[0,298.7,17.0],[520,298.7,16.3],[1480,302.4,10.7],[2000,308.2,4.2],[3000,311.85,3.0],[3200,312.58,2.76]];
+const N = 64, RES2 = 512;            // 64^3 grid packed into a 512^2 texture: idx = x | y<<6 | z<<12, texel = (idx&511, idx>>9); y is up
+const G = 9.81, CP = 1005, RD = 287, RV = 461.5, LV = 2.5e6, P0 = 1.0e5, OMEGA = 7.292e-5;
+// soundings: rows of [z m, theta K, total water g/kg], linear between rows, flat above the last.
+// x = east, z = north. map: 'patchy' (prescribed fluxes on mottled land with lakes) or 'island' (land in a sea with
+// its own temperature). nightCool: land loses this fraction of its daytime sensible heat flux when the sun is down.
+const SCENARIOS = {
+  bomex: { label:'BOMEX trade cumulus', short:'BOMEX, Siebesma et al. 2003',
+    desc:'Shallow cumulus over a warm sea under a strong inversion at 1.5-2 km: the classic NON-precipitating case. Only the tallest towers ever drizzle; lower the rain threshold to make them rain. Try a 10 m/s background wind from the east (the real BOMEX trades).',
+    dx:50, psurf:101500,                 // with 1000 hPa at z=0 the 520 m level would start supersaturated
+    snd:[[0,298.7,17.0],[520,298.7,16.3],[1480,302.4,10.7],[2000,308.2,4.2],[3000,311.85,3.0],[3200,312.58,2.76]],
+    fth:8e-3, fq:5.2e-5, flux:2, K:0.3, dt:2, thr:1.0, rad:2.0, radZ:[1500,2500], pert:1000, inv:[1480,2000],
+    wls:[[0,0],[1500,-0.0065],[2100,0]], day:{ on:false, start:10 },   // BOMEX large-scale subsidence (m/s)
+    nudge:[2200,2700,2],                                    // free troposphere relaxes to the sounding: from z0 to full at z1, tau hours
+    lat:15, map:'patchy', sea:false, sst:300, nightCool:0, wind:{ S:0, from:90 } },
+  rico: { label:'RICO raining cumulus', short:'RICO, van Zanten et al. 2011',
+    desc:'Caribbean trade cumulus in clean maritime air: a deeper moist layer and no sharp lid, so towers climb to 2-3 km and shower. Rain shafts, small cold pools.',
+    dx:75, psurf:101540,
+    snd:[[0,297.9,16.0],[740,297.9,13.8],[3260,312.67,2.4],[4000,317.0,1.8],[4800,321.7,1.6]],
+    fth:4.3e-3, fq:5.5e-5, flux:2, K:0.3, dt:2, thr:0.5, rad:2.5, radZ:[4000,4400], pert:740, inv:null,
+    wls:[[0,0],[2260,-0.005],[4000,-0.005],[4400,0]], day:{ on:false, start:10 },   // RICO subsidence, tapered off under the sponge
+    nudge:[3200,4000,3], lat:18, map:'patchy', sea:false, sst:300, nightCool:0, wind:{ S:0, from:90 } },
+  showers: { label:'Summer showers (congestus)', short:'humid afternoon, deep unstable layer',
+    desc:'Strong sun on moist ground under a deep, conditionally unstable layer (RH 85% at 2 km, 58% at 5 km): towers punch to 5+ km and shower; rain evaporating under them chills the air into cold pools that spread along the ground. Warm rain only (no ice), so it is a congestus world.',
+    dx:100, psurf:100000,
+    snd:[[0,300.5,17.5],[500,300.5,17.0],[2000,305.75,9.7],[3500,311.0,5.1],[5000,316.25,2.5],[6400,328.85,1.9]],
+    fth:0.10, fq:1.2e-4, flux:1, K:0.3, dt:3, thr:0.6, rad:1.5, radZ:[5000,5800], pert:500, inv:[5000,6400],
+    wls:[[0,0],[2000,-0.002],[5000,-0.002],[6000,0]], day:{ on:true, start:9 },   // gentle subsidence
+    nudge:[3500,4800,3], lat:35, map:'patchy', sea:false, sst:300, nightCool:0.2, wind:{ S:0, from:90 } },
+  island: { label:'Island sea breeze', short:'a sun-baked island in a cooler sea',
+    desc:'Through the morning the island heats its air while the sea stays cool; the surface pressure over the land falls, and sea air flows in from every side. Where the sea breezes meet, the air is forced up and a cloud builds over the island; it can grow into a shower whose rain-cooled outflow pushes back out to sea. At night the land cools below the sea and the breeze reverses. (Periodic box: the neighbours are copies.)',
+    dx:100, psurf:101000,
+    snd:[[0,300.5,17.0],[500,300.5,16.5],[2000,305.75,9.7],[3500,311.0,5.1],[5000,316.25,2.5],[6400,328.85,1.9]],
+    fth:0.22, fq:1.0e-4, flux:1, K:0.3, dt:3, thr:0.6, rad:1.5, radZ:[5000,5800], pert:500, inv:[5000,6400],
+    wls:[[0,0],[2000,-0.002],[5000,-0.002],[6000,0]], day:{ on:true, start:7 },
+    nudge:[3500,4800,3], lat:20, map:'island', sea:true, sst:300.0, nightCool:0.3, wind:{ S:0, from:90 },
+    islandR:0.32, marineTau:1, marineZ:800 },              // the open ocean beyond the box holds the lowest 800 m near sea temperature
+};
+// the owner's own tuning of the showers case, found 2026-10-05: almost no subgrid mixing (Cs 0.03 -- the advection's own
+// numerical dissipation does the job, so the clouds keep their fine structure), a short 0.5 s step at one substep a frame
+// (close to real time), slow condensation (tau 10 s), stingy rain (threshold 1.9 g/kg) that evaporates hard (x2), strong
+// radiative cooling (5 K/day), full patchiness, a 2 m/s easterly, and a camera standing on the ground looking up.
+// `ui` holds the panel settings and the camera that the scenario fields don't cover.
+SCENARIOS.tuned = Object.assign({}, SCENARIOS.showers, { label:'Summer showers · your tuning', short:'the owner\'s settings, found 2026-10-05',
+  desc:'The Summer showers sounding with the settings you found: barely any eddy mixing so the clouds keep their cauliflower detail, near-real-time motion, rain that is rare but evaporates hard into strong cold pools and gust fronts, and the view from the ground looking up.',
+  K:0.03, dt:0.5, thr:1.9, rad:5, wind:{ S:2, from:90 },
+  ui:{ subs:1, tau:10, vort:0.0045, iters:14, revap:2, patch:1, ext:1.55, smooth:0.15, rscale:1, tcount:4, tracers:false, tcolor:1,
+       cam:{ az:5.06, elv:-0.195, dist:2.19, tgt:[0,-0.45,0] } } });
+let SC = SCENARIOS.island, DX = SC.dx, H = N*DX, PSURF = SC.psurf;
 function sound(z){
-  for (let k=0;k<SOUNDING.length-1;k++){ const a=SOUNDING[k], b=SOUNDING[k+1];
+  const S=SC.snd;
+  for (let k=0;k<S.length-1;k++){ const a=S[k], b=S[k+1];
     if (z<=b[0]){ const t=(z-a[0])/(b[0]-a[0]); return [a[1]+(b[1]-a[1])*t, (a[2]+(b[2]-a[2])*t)*1e-3]; } }
-  const l=SOUNDING[SOUNDING.length-1]; return [l[1], l[2]*1e-3];
+  const l=S[S.length-1]; return [l[1], l[2]*1e-3];
 }
 const pbarAt = z => PSURF*Math.exp(-z/8400);
 const exnerAt = z => Math.pow(pbarAt(z)/P0, RD/CP);
 const qsatAt = (T,p) => { const Tc=T-273.15; return (380.2/p)*Math.exp(17.67*Tc/(Tc+243.5)); };
-const BASE = { thb:new Float32Array(N), qvb:new Float32Array(N), pb:new Float32Array(N), pi:new Float32Array(N), dth:new Float32Array(N) };
-for (let j=0;j<N;j++){ const z=(j+0.5)*DX, s=sound(z);
-  BASE.thb[j]=s[0]; BASE.qvb[j]=s[1]; BASE.pb[j]=pbarAt(z); BASE.pi[j]=exnerAt(z); }
-for (let j=0;j<N;j++){ const a=BASE.thb[Math.max(0,j-1)], b=BASE.thb[Math.min(N-1,j+1)];
-  BASE.dth[j]=(b-a)/(DX*((j>0&&j<N-1)?2:1)); }
+const BASE = { thb:new Float32Array(N), qvb:new Float32Array(N), pb:new Float32Array(N), pi:new Float32Array(N), dth:new Float32Array(N), rho:new Float32Array(N), wls:new Float32Array(N) };
+function computeBase(){
+  for (let j=0;j<N;j++){ const z=(j+0.5)*DX, s=sound(z);
+    BASE.thb[j]=s[0]; BASE.qvb[j]=s[1]; BASE.pb[j]=pbarAt(z); BASE.pi[j]=exnerAt(z); BASE.rho[j]=BASE.pb[j]/(RD*BASE.thb[j]*BASE.pi[j]);
+    let w=0; const W=SC.wls; for (let k=0;k<W.length-1;k++) if (z>=W[k][0] && z<=W[k+1][0]){ w=W[k][1]+(W[k+1][1]-W[k][1])*(z-W[k][0])/(W[k+1][0]-W[k][0]); break; }
+    BASE.wls[j]=w; }
+  for (let j=0;j<N;j++){ const a=BASE.thb[Math.max(0,j-1)], b=BASE.thb[Math.min(N-1,j+1)];
+    BASE.dth[j]=(b-a)/(DX*((j>0&&j<N-1)?2:1)); }
+}
 
 // ---------- GLSL ----------
 const VERT = `#version 300 es
 in vec2 aPos; void main(){ gl_Position = vec4(aPos,0.,1.); }`;
 
-const HEAD = `#version 300 es
+// shared by every shader stage (the tracer vertex shader reads the same fields)
+const COMMON = `
 precision highp float; precision highp int; precision highp sampler2D; precision highp sampler3D;
 const int MASK3=63, MASK2=511;
 const float GG=${G.toFixed(2)}, CP=${CP.toFixed(1)}, RV=${RV.toFixed(1)}, LV=${LV.toFixed(1)};
 uniform float uDt, uDx;
-uniform sampler2D tBase;                 // row0 (thbar, qvbar, pbar, exner), row1 (dthbar/dz, -, -, -) per level
-out vec4 o;
-ivec3 g_i;
-void baseInit(){ ivec2 f=ivec2(gl_FragCoord.xy); int idx=f.x|(f.y<<9); g_i=ivec3(idx&MASK3,(idx>>6)&MASK3,(idx>>12)&MASK3); }
+uniform sampler2D tBase;   // per level: row0 (thbar, qvbar, pbar, exner), row1 (dthbar/dz, rho, w_subsidence, -),
+                           // row2 (CPU level means: theta', q_v, q_r), row3 (background wind u east, v north)
 // x,z periodic; y clamped (free-slip lid and floor)
 ivec2 to2D(ivec3 i){ i=ivec3(i.x&MASK3, clamp(i.y,0,MASK3), i.z&MASK3); int idx=i.x|(i.y<<6)|(i.z<<12); return ivec2(idx&MASK2, idx>>9); }
 vec4 F(sampler2D t, ivec3 i){ return texelFetch(t, to2D(i), 0); }
 vec4 base0(int j){ return texelFetch(tBase, ivec2(j,0), 0); }
 vec4 base1(int j){ return texelFetch(tBase, ivec2(j,1), 0); }
+vec4 base2(int j){ return texelFetch(tBase, ivec2(j,2), 0); }
+vec4 base3(int j){ return texelFetch(tBase, ivec2(j,3), 0); }
 // trilinear in cell coords (centers at i+0.5); also returns the min/max of the 8 corners (MacCormack limiter)
 vec4 tri(sampler2D t, vec3 c, out vec4 mn, out vec4 mx){
   vec3 f=c-0.5; vec3 fl=floor(f); vec3 fr=f-fl; ivec3 a=ivec3(fl);
@@ -153,34 +271,89 @@ vec3 velC(sampler2D t, ivec3 i){ vec4 a=F(t,i); return 0.5*vec3(a.x+F(t,i+DXI).x
 vec3 velU(sampler2D t, ivec3 i){ return vec3(F(t,i).x, 0.25*(wF(t,i)+wF(t,i+DYI)+wF(t,i-DXI)+wF(t,i-DXI+DYI)), 0.25*(F(t,i).z+F(t,i+DZI).z+F(t,i-DXI).z+F(t,i-DXI+DZI).z)); }
 vec3 velW(sampler2D t, ivec3 i){ return vec3(0.25*(F(t,i).x+F(t,i+DXI).x+F(t,i-DYI).x+F(t,i-DYI+DXI).x), wF(t,i), 0.25*(F(t,i).z+F(t,i+DZI).z+F(t,i-DYI).z+F(t,i-DYI+DZI).z)); }
 vec3 velV(sampler2D t, ivec3 i){ return vec3(0.25*(F(t,i).x+F(t,i+DXI).x+F(t,i-DZI).x+F(t,i-DZI+DXI).x), 0.25*(wF(t,i)+wF(t,i+DYI)+wF(t,i-DZI)+wF(t,i-DZI+DYI)), F(t,i).z); }
+// rain fall speed (Klemp & Wilhelmson 1978: ~5.6 m/s at 1 g/kg, faster in thin air) and the rain that leaves a cell
+// through its floor face this substep. One expression for both sides of every face, so falling rain is conserved.
+float vt(float qr, float rho, float rho0){ return qr>1e-10 ? 36.34*pow(0.001*rho*qr,0.1364)*sqrt(rho0/rho) : 0.0; }
+float rainOut(float qr, float rho, float rho0){ return min(qr*vt(qr,rho,rho0)*uDt/uDx, qr); }
+uniform vec3 uNudge;   // free-troposphere relaxation: ramps in from z0 (x) to full at z1 (y), timescale z (s)
+float nudgeRate(float z){ return clamp((z-uNudge.x)/max(uNudge.y-uNudge.x,1.0),0.0,1.0)/uNudge.z; }
+`;
+const HEAD = `#version 300 es
+` + COMMON + `
+out vec4 o;
+ivec3 g_i;
+void baseInit(){ ivec2 f=ivec2(gl_FragCoord.xy); int idx=f.x|(f.y<<9); g_i=ivec3(idx&MASK3,(idx>>6)&MASK3,(idx>>12)&MASK3); }
 `;
 
-// textures: A = (u, w(up), v, theta')   B = (q_v, q_c, q_r, spare)   [kg/kg]
-const F_INIT = HEAD + `uniform int uOut; uniform uint uSeed;
+// surface energy + water exchange of one ground column; shared by the physics, ground, ledger and readout passes
+const SURF_GLSL = `
+uniform sampler2D tFlux, tSurf, tShade, tA, tB;
+uniform float uFth, uFq, uSunK, uSeaBulk, uSST, uExSfc, uPsfc, uNightCool, uSunUp;
+// returns (F_theta K m/s, F_q (kg/kg) m/s, puddle evaporation mm/s)
+vec3 surfaceFlux(ivec2 c){
+  vec4 fm=texelFetch(tFlux,c,0);
+  float e=mix(1.0, texelFetch(tShade,c,0).r, uSunK);             // sunlight on this patch (sun height x cloud shadow), 1 = reference
+  float fth=uFth*fm.r*e, fq=uFq*fm.g*e;
+  fth-=uNightCool*uFth*fm.r*(1.0-uSunUp)*uSunK;                   // land radiates its heat to space at night and chills the air
+  float sea=uSeaBulk*fm.b;                                        // island scenario: fm.b = sea, which keeps its own temperature
+  if (sea>0.0){                                                   // bulk exchange, flux = C |U| (sea - air)
+    ivec3 i0=ivec3(c.x,0,c.y);
+    float ch=1.2e-3*(length(velC(tA,i0).xz)+1.0);                 // + 1 m/s of gusts the grid can't hold
+    fth=mix(fth, ch*(uSST/uExSfc-(base0(0).x+F(tA,i0).w)), sea);
+    fq =mix(fq,  ch*max(0.98*qsat(uSST,uPsfc)-F(tB,i0).x, 0.0), sea);
+  }
+  float wet=texelFetch(tSurf,c,0).r, phi=wet/(wet+0.5)*(1.0-fm.b);  // puddle mm -> wetness (water is wet already)
+  float sh=0.8*phi*max(fth,0.0);                                  // wet ground spends its sensible heat evaporating the puddle
+  float fqx=sh*CP/LV;
+  return vec3(fth-sh, fq+fqx, fqx*base1(0).y);
+}`;
+
+// textures: A = (u, w(up), v, theta')   B = (q_v, q_c, q_r, spare)   [kg/kg]   S (64x64 ground) = (puddle mm, rain mm/h, sum rain out, sum evap in)
+const F_INIT = HEAD + `uniform int uOut; uniform uint uSeed; uniform float uPertTop;
 uint hsh(uint v){ v=v*747796405u+2891336453u; uint w=((v>>((v>>28u)+4u))^v)*277803737u; return (w>>22u)^w; }
 float rnd(uint k){ return float(hsh(uint(g_i.x)+64u*uint(g_i.y)+4096u*uint(g_i.z)+262144u*k+uSeed*1048576u))/4294967295.0; }
 void main(){ baseInit();
   float z=(float(g_i.y)+0.5)*uDx;
-  float lo = z<1000.0 ? 1.0 : 0.0;                         // perturb the lower layers only
+  float lo = z<uPertTop ? 1.0 : 0.0;                       // perturb the lower layers only
   float thp = lo*(rnd(1u)-0.5)*0.2;                        // +/-0.1 K
   float qv  = base0(g_i.y).y + lo*(rnd(2u)-0.5)*0.05e-3;   // +/-0.025 g/kg
-  o = uOut==0 ? vec4(0,0,0,thp) : vec4(qv,0,0,0);
+  vec2 gw=base3(g_i.y).xy;                                 // start in the background wind
+  o = uOut==0 ? vec4(gw.x,0,gw.y,thp) : vec4(qv,0,0,0);
 }`;
 
-// MacCormack step 1: semi-Lagrangian forward prediction
-// Each channel lives on its own lattice (u/w/v faces, scalars at centres). In index space every lattice point of
-// index i sits at i+0.5, so a channel back-traces from i+0.5 by the velocity AT ITS OWN location.
-const F_ADV_P = HEAD + `uniform sampler2D tVel, tSrc; uniform int uStag;
+// SCALARS (theta', q_v, q_c, q_r): conservative flux-form advection, one axis per pass (order alternates each substep).
+// Lax-Wendroff fluxes with a monotonized-central limiter (monotone, never negative, no division) through the MAC
+// faces, whose velocities are exactly divergence-free, so water and heat are conserved to round-off. (v2's
+// semi-Lagrangian scalars created ~1.5%/h of the domain's water under deep convection: linear interpolation of a
+// curved q(z) profile is biased high. A van Leer limiter's 2ab/(a+b) went NaN on this GPU for tiny velocities.)
+const F_SCAL = HEAD + `uniform sampler2D tVel, tSrc; uniform int uAxis; uniform vec4 uMask;
+vec4 mc(vec4 a, vec4 b){ return step(0.0,a*b)*sign(a)*min(min(2.0*abs(a),2.0*abs(b)),0.5*abs(a+b)); }
+float faceU(ivec3 i){ return uAxis==0 ? F(tVel,i).x : (uAxis==1 ? wF(tVel,i) : F(tVel,i).z); }
+vec4 flux(ivec3 i, ivec3 d){                                   // through the low face of cell i (between i-d and i)
+  float u=faceU(i), c=u*uDt/uDx;
+  vec4 qm2=F(tSrc,i-2*d), qm1=F(tSrc,i-d), q0=F(tSrc,i), qp1=F(tSrc,i+d);
+  vec4 qf = u>=0.0 ? qm1 + 0.5*(1.0-c)*mc(qm1-qm2, q0-qm1)
+                   : q0  - 0.5*(1.0+c)*mc(q0-qm1, qp1-q0);
+  return u*qf;
+}
+void main(){ baseInit();
+  ivec3 d = uAxis==0 ? DXI : (uAxis==1 ? DYI : DZI);
+  vec4 q=F(tSrc,g_i);
+  vec4 r=q - uDt/uDx*(flux(g_i+d,d)-flux(g_i,d));              // floor and lid faces carry w = 0, so nothing leaks
+  o=vec4(uMask.x>0.5?r.x:q.x, uMask.y>0.5?r.y:q.y, uMask.z>0.5?r.z:q.z, uMask.w>0.5?r.w:q.w);
+}`;
+// MOMENTUM: MacCormack. Step 1, semi-Lagrangian forward prediction. Each velocity component lives on its own face
+// lattice; in index space every lattice point of index i sits at i+0.5, so a component back-traces from i+0.5 by the
+// velocity AT ITS OWN location. (.w = theta' was already advected by F_SCAL and passes through.)
+const F_ADV_P = HEAD + `uniform sampler2D tVel, tSrc;
 void main(){ baseInit();
   vec3 c0=vec3(g_i)+0.5; float k=uDt/uDx; vec4 mn,mx;
-  vec3 vc=velC(tVel,g_i);
-  if (uStag==0){ o=tri(tSrc, c0-vc*k, mn, mx); return; }
   o = vec4(tri(tSrc, c0-velU(tVel,g_i)*k, mn, mx).x, tri(tSrc, c0-velW(tVel,g_i)*k, mn, mx).y,
-           tri(tSrc, c0-velV(tVel,g_i)*k, mn, mx).z, tri(tSrc, c0-vc*k, mn, mx).w);
+           tri(tSrc, c0-velV(tVel,g_i)*k, mn, mx).z, F(tSrc,g_i).w);
 }`;
 // MacCormack step 2: back-trace the prediction, correct by half the round-trip error EVERYWHERE, clamp to the
 // source neighbourhood (the original lab corrected only the density channel and only in wall cells)
-const F_ADV_C = HEAD + `uniform sampler2D tVel, tSrc, tPred; uniform int uStag;
+const F_ADV_C = HEAD + `uniform sampler2D tVel, tSrc, tPred;
 float corr(vec3 v, int ch){
   vec3 c0=vec3(g_i)+0.5; float k=uDt/uDx; vec4 mn,mx,d0,d1;
   float back=tri(tPred, c0+v*k, d0, d1)[ch];
@@ -188,47 +361,115 @@ float corr(vec3 v, int ch){
   return clamp(F(tPred,g_i)[ch] + 0.5*(F(tSrc,g_i)[ch]-back), mn[ch], mx[ch]);
 }
 void main(){ baseInit();
-  vec3 vc=velC(tVel,g_i);
-  if (uStag==0){
-    vec3 c0=vec3(g_i)+0.5; float k=uDt/uDx; vec4 mn,mx,d0,d1;
-    vec4 back=tri(tPred, c0+vc*k, d0, d1); tri(tSrc, c0-vc*k, mn, mx);
-    o=clamp(F(tPred,g_i) + 0.5*(F(tSrc,g_i)-back), mn, mx); return; }
-  o = vec4(corr(velU(tVel,g_i),0), corr(velW(tVel,g_i),1), corr(velV(tVel,g_i),2), corr(vc,3));
+  o = vec4(corr(velU(tVel,g_i),0), corr(velW(tVel,g_i),1), corr(velV(tVel,g_i),2), F(tSrc,g_i).w);
   if (g_i.y==0) o.y=0.0;
 }`;
 
-// subgrid eddy diffusion (constant K, conservative 7-point, no flux through floor/lid). Without it the surface
-// moisture piles up in the lowest cell and cloud cores rise undiluted (no entrainment) -> 25+ m/s runaway updrafts.
-const F_DIFF = HEAD + `uniform sampler2D tSrc; uniform float uK; uniform int uStag;
+// subgrid eddy mixing. Without any, surface moisture piles up in the lowest cell and cloud cores rise undiluted
+// (no entrainment) -> 25+ m/s runaway updrafts. A CONSTANT K (v1) also mixed the calm stable air above the clouds,
+// smearing the sounding (it moistened 6 km by 1 g/kg in 4 h and drained the boundary layer). So K is
+// Smagorinsky-Lilly: K = (Cs dx)^2 |S| sqrt(1 - Ri/Pr) -- strong in thermals and at cloud edges, zero in calm stable air.
+// Written into the spare z channel of the pressure texture, then applied as conservative face fluxes.
+const F_KEDDY = HEAD + `uniform sampler2D tA, tB, tP; uniform float uCs, uKsfc;
 void main(){ baseInit();
-  ivec3 i=g_i; vec4 c=F(tSrc,i);
-  vec4 s=F(tSrc,i+DXI)+F(tSrc,i-DXI)+F(tSrc,i+DZI)+F(tSrc,i-DZI)-4.0*c;
-  if (i.y>0)  s+=F(tSrc,i-DYI)-c;
-  if (i.y<63) s+=F(tSrc,i+DYI)-c;
-  vec4 r=c+uK*uDt/(uDx*uDx)*s;
+  ivec3 i=g_i; int j=i.y; vec4 pr=F(tP,i);
+  vec3 c=velC(tA,i);
+  vec3 yp = j<63 ? velC(tA,i+DYI) : c, ym = j>0 ? velC(tA,i-DYI) : c;
+  float hy = (j>0 && j<63) ? 0.5 : 1.0;                        // one-sided at the floor and the lid
+  vec3 gx=(velC(tA,i+DXI)-velC(tA,i-DXI))*(0.5/uDx), gy=(yp-ym)*(hy/uDx), gz=(velC(tA,i+DZI)-velC(tA,i-DZI))*(0.5/uDx);
+  // |S|^2 = 2 S_ab S_ab ; velocity components are (u, w, v) along (x, y=up, z)
+  float S2 = 2.0*(gx.x*gx.x + gy.y*gy.y + gz.z*gz.z) + (gy.x+gx.y)*(gy.x+gx.y) + (gz.x+gx.z)*(gz.x+gx.z) + (gz.y+gy.z)*(gz.y+gy.z);
+  float tp = j<63 ? F(tA,i+DYI).w : F(tA,i).w, tm = j>0 ? F(tA,i-DYI).w : F(tA,i).w;
+  float N2 = GG/base0(j).x*(base1(j).x + (tp-tm)*(hy/uDx));
+  if (F(tB,i).y>1e-5) N2*=0.3;                                // in cloud, latent heat makes the air far less stable than dry theta says
+  float K = (uCs*uDx)*(uCs*uDx)*sqrt(S2)*sqrt(max(0.0, 1.0-3.0*N2/max(S2,1e-10)));
+  if (j<=1) K=max(K,uKsfc);                                    // surface layer: unresolved eddies carry the ground's heat and vapour up
+  o=vec4(pr.x, pr.y, min(K, 0.15*uDx*uDx/uDt), pr.w);         // cap keeps the explicit step stable (6 K dt/dx^2 < 1)
+}`;
+const F_DIFF = HEAD + `uniform sampler2D tSrc, tP; uniform int uStag;
+void main(){ baseInit();
+  ivec3 i=g_i; vec4 c=F(tSrc,i); float k=F(tP,i).z;
+  vec4 s = 0.5*(k+F(tP,i+DXI).z)*(F(tSrc,i+DXI)-c) + 0.5*(k+F(tP,i-DXI).z)*(F(tSrc,i-DXI)-c)
+         + 0.5*(k+F(tP,i+DZI).z)*(F(tSrc,i+DZI)-c) + 0.5*(k+F(tP,i-DZI).z)*(F(tSrc,i-DZI)-c);
+  if (i.y>0)  s += 0.5*(k+F(tP,i-DYI).z)*(F(tSrc,i-DYI)-c);    // no flux through the floor or the lid
+  if (i.y<63) s += 0.5*(k+F(tP,i+DYI).z)*(F(tSrc,i+DYI)-c);
+  vec4 r=c+uDt/(uDx*uDx)*s;
   if (uStag==1 && i.y==0) r.y=0.0;
   o=r;
 }`;
 
-// stratification, surface fluxes, saturation adjustment + latent heat, buoyancy, sponge.
-// Run twice per substep (uOut 0 -> A, 1 -> B); the arithmetic is identical so both halves agree.
-const F_PHYS = HEAD + `uniform sampler2D tA, tB, tFlux; uniform int uOut;
-uniform float uFth, uFq, uLatent, uRelax, uSpongeZ, uSpongeRate;
-// cell-centred thermodynamics for cell i: returns (theta', q_v, q_c, buoyancy) after this substep's sources
+// level means on the GPU, every substep: (u, v, theta', pressure) averaged over each horizontal level, in two
+// reductions of 64. The physics needs the mean wind; the render and slice take anomalies against these.
+const F_MEAN1 = HEAD + `uniform sampler2D tA, tP;
+void main(){ ivec2 c=ivec2(gl_FragCoord.xy); vec4 s=vec4(0);                  // c = (z, level)
+  for (int x=0;x<64;x++){ ivec3 i=ivec3(x,c.y,c.x); vec4 a=F(tA,i); s+=vec4(a.x, a.z, a.w, F(tP,i).y); }
+  o=s/64.0; }`;
+const F_MEAN2 = HEAD + `uniform sampler2D tM1;
+void main(){ int j=int(gl_FragCoord.x); vec4 s=vec4(0);
+  for (int z=0;z<64;z++) s+=texelFetch(tM1, ivec2(z,j), 0);
+  o=s/64.0; }`;
+// the most cloud and rain water on each level (the same two-stage shape): a far-field sim's height band, read back as
+// 64 numbers instead of its whole field, so the raymarch's slab can hug every sim's clouds and rain
+const F_QMAX1 = HEAD + `uniform sampler2D tB;
+void main(){ ivec2 c=ivec2(gl_FragCoord.xy); vec2 m=vec2(0);                  // c = (z, level)
+  for (int x=0;x<64;x++) m=max(m, F(tB, ivec3(x,c.y,c.x)).yz);
+  o=vec4(m,0,1); }`;
+const F_QMAX2 = HEAD + `uniform sampler2D tM1;
+void main(){ int j=int(gl_FragCoord.x); vec2 m=vec2(0);
+  for (int z=0;z<64;z++) m=max(m, texelFetch(tM1, ivec2(z,j), 0).xy);
+  o=vec4(m,0,1); }`;
+
+// stratification, radiative cooling, large-scale forcing, surface fluxes, rain fall, saturation adjustment + latent
+// heat, warm rain, rain evaporation, buoyancy, rotation, drag, sponge. Run twice per substep (uOut 0 -> A, 1 -> B);
+// identical arithmetic, so the two halves agree.
+const F_PHYS = HEAD + SURF_GLSL + `uniform int uOut; uniform sampler2D tMeans;
+uniform float uLatent, uRelax, uSpongeZ, uSpongeRate, uAutoThr, uRainEvap, uRad, uRadZ1, uRadZ2, uF, uCd, uWindRelax, uMarine, uMarineZ;
+// cell-centred physics for cell i: returns (theta', q_v, q_c, buoyancy), and q_r, after this substep's sources
 vec4 cellState(ivec3 i, out float qr){
-  vec4 a=F(tA,i), b=F(tB,i); int j=i.y; qr=b.z;
-  vec4 bs=base0(j); float thb=bs.x, qvb=bs.y, p=bs.z, ex=bs.w;
-  float th=a.w - velC(tA,i).y*base1(j).x*uDt;                 // theta' sees the base-state gradient as air moves vertically
-  float qv=b.x, qc=b.y;
-  if (j==0){ vec2 fm=texelFetch(tFlux, i.xz, 0).rg;           // surface fluxes into the lowest cell
-    th += uFth*fm.x/uDx*uDt; qv += uFq*fm.y/uDx*uDt; }
-  float T=(thb+th)*ex;
-  float qs=qsat(T,p);
-  float dq=(qv-qs)/(1.0+(LV*LV*qs)/(CP*RV*T*T));              // linearised saturation adjustment
-  dq=max(dq,-qc)*uRelax;                                      // only evaporate liquid that exists
+  vec4 a=F(tA,i), b=F(tB,i); int j=i.y;
+  vec4 bs=base0(j), b1=base1(j); float thb=bs.x, qvb=bs.y, p=bs.z, ex=bs.w, rho=b1.y, rho0=base1(0).y;
+  float z=(float(j)+0.5)*uDx;
+  float th=a.w - velC(tA,i).y*b1.x*uDt;                       // theta' sees the base-state gradient as air moves vertically
+  th -= uRad*uDt*clamp((uRadZ2-z)/max(uRadZ2-uRadZ1,1.0), 0.0, 1.0);   // radiative cooling: what balances the surface heating
+  float qv=b.x, qc=b.y; qr=b.z;
+  // large-scale subsidence (the world outside the box): sinking air warms and dries the layers above the clouds and
+  // carries the surplus vapour away; with the radiative cooling it holds a steady state (BOMEX/RICO forcing).
+  // Upwind (from above); F_COLX books exactly this vapour as exported.
+  float wl=b1.z;
+  if (wl<0.0 && j<63){ vec4 au=F(tA,i+DYI), bu=F(tB,i+DYI);
+    th -= wl*(b1.x + (au.w-a.w)/uDx)*uDt;
+    qv -= wl*(bu.x-b.x)/uDx*uDt; }
+  // above the cloud layer the free troposphere relaxes back to the sounding over hours: the large-scale flow sweeping
+  // away the towers' debris (warm rain can't), which otherwise piles up under the lid as a deck. F_COLX books it too.
+  float nr=nudgeRate(z);
+  if (nr>0.0){ th -= a.w*nr*uDt; qv -= (b.x-qvb)*nr*uDt; qc -= b.y*nr*uDt; }
+  // island scenario: the open ocean beyond the box keeps the marine layer near the sea temperature. In a periodic box
+  // the "sea" is only a strait between copies of the island, and its air would otherwise be island air. Heat only.
+  if (uSeaBulk>0.5 && z<uMarineZ){
+    float r=texelFetch(tFlux,i.xz,0).b*uMarine*(1.0-z/uMarineZ)*uDt;
+    th -= (th-(uSST/uExSfc-thb))*r; }
+  if (j==0){ vec3 fl=surfaceFlux(i.xz); th+=fl.x/uDx*uDt; qv+=fl.y/uDx*uDt; }   // the ground breathes into the lowest cell
+  // rain falls: in through the ceiling face from the cell above, out through the floor face (into the ground at j=0)
+  qr += (j<63 ? rainOut(F(tB,i+DYI).z, base1(j+1).y, rho0) : 0.0) - rainOut(qr, rho, rho0);
+  // saturation adjustment + latent heat
+  float T=(thb+th)*ex, qs=qsat(T,p), gam=1.0+(LV*LV*qs)/(CP*RV*T*T);
+  float dq=max((qv-qs)/gam, -qc)*uRelax;                      // linearised; only evaporate liquid that exists
   qv-=dq; qc+=dq;
   th += uLatent*(LV/(CP*ex))*dq;                              // ~ +2.5 K per g/kg condensed
-  float buoy=GG*(th/thb + 0.608*(qv-qvb) - qc - qr);          // warm + light vapour - liquid loading
+  // Kessler warm rain: droplets collide into rain once the cloud holds more than the threshold (autoconversion),
+  // and falling rain sweeps up cloud droplets on the way (accretion). Implicit form, as in WRF's kessler.F
+  float qc2=(qc - uDt*max(1e-3*(qc-uAutoThr),0.0))/(1.0+uDt*2.2*pow(max(qr,0.0),0.875));
+  float prod=clamp(qc-qc2, 0.0, qc); qc-=prod; qr+=prod;
+  // rain evaporating in unsaturated air chills it (Klemp & Wilhelmson 1978): the cold-pool engine
+  T=(thb+th)*ex; qs=qsat(T,p);
+  if (qr>1e-9 && qv<qs){
+    float rq=0.001*rho*qr;
+    float ern=uDt*(1.6+124.9*pow(rq,0.2046))*pow(rq,0.525)/(2.55e8/(p*qs)+5.4e5)*(qs-qv)/(0.001*rho*qs);
+    ern=min(min(ern*uRainEvap, (qs-qv)/gam), qr);
+    qr-=ern; qv+=ern;
+    th -= uLatent*(LV/(CP*ex))*ern;
+  }
+  float buoy=GG*(th/thb + 0.608*(qv-qvb) - qc - qr);          // warm + light vapour - water loading (cloud AND rain)
   return vec4(th, qv, qc, buoy);
 }
 void main(){ baseInit();
@@ -238,9 +479,68 @@ void main(){ baseInit();
   vec4 a=F(tA,g_i); a.w=s.x;
   if (j==0) a.y=0.0;
   else a.y += 0.5*(s.w + cellState(g_i-DYI, qr2).w)*uDt;     // buoyancy on the floor face, from the two cells it separates
+  vec2 gw=base3(j).xy;                                        // background (large-scale) wind at this height
+  vec3 vu=velU(tA,g_i), vv=velV(tA,g_i);                      // all three components at the u face and at the v face
+  // Earth's rotation turns moving air to the right (northern hemisphere). The background wind is in balance with the
+  // large-scale pressure gradient, so only departures from it get turned: du/dt = f (v - vg), dv/dt = -f (u - ug)
+  a.x += uF*(vu.z-gw.y)*uDt;
+  a.z -= uF*(vv.x-gw.x)*uDt;
+  // the domain-mean wind relaxes toward the background wind (a periodic box can't hold the large-scale pressure
+  // gradient by itself); departures from the mean -- breezes, gusts, outflows -- are left alone
+  vec4 mn=texelFetch(tMeans, ivec2(j,0), 0);
+  a.x -= (mn.x-gw.x)*uWindRelax*uDt; a.z -= (mn.y-gw.y)*uWindRelax*uDt;
+  // the ground drags on the lowest air: bulk law, stress = rho C_D |U| U, implicit so it can only slow it
+  if (j==0){ a.x/=1.0+uCd*(length(vu.xz)+0.5)*uDt/uDx; a.z/=1.0+uCd*(length(vv.xz)+0.5)*uDt/uDx; }
   float z=float(j)*uDx, H=64.0*uDx;
-  if (z>uSpongeZ){ float sp=(z-uSpongeZ)/(H-uSpongeZ); float r=min(1.0,uSpongeRate*sp*sp*uDt); a*=1.0-r; }
+  float rn=nudgeRate(z)*uDt;                                  // the nudged free troposphere also damps the towers' leftover gravity
+  a.x-=(a.x-gw.x)*rn; a.z-=(a.z-gw.y)*rn; a.y-=a.y*rn;        // waves (in a periodic box they can't radiate away; they pump vapour up)
+  if (z>uSpongeZ){ float sp=(z-uSpongeZ)/(H-uSpongeZ); float r=min(1.0,uSpongeRate*sp*sp*uDt);
+    a.x=mix(a.x,gw.x,r); a.z=mix(a.z,gw.y,r); a.y*=1.0-r; a.w*=1.0-r; }
   o=a;
+}`;
+
+// the ground, one texel per column: catches the rain that F_PHYS let out of the lowest cell, keeps puddles,
+// and counts the water budget (rain out, evaporation in) in sum-of-q units
+const F_SURF = HEAD + SURF_GLSL + `uniform float uDrain;
+void main(){ ivec2 c=ivec2(gl_FragCoord.xy);
+  vec4 s=texelFetch(tSurf,c,0);
+  float rho0=base1(0).y;
+  float rq=rainOut(F(tB,ivec3(c.x,0,c.y)).z, rho0, rho0);     // exactly what left the lowest cell in F_PHYS
+  vec3 fl=surfaceFlux(c);
+  float mm=rq*rho0*uDx;                                        // kg/m^2 = mm of rain
+  float lake=texelFetch(tFlux,c,0).b;
+  s.r=max(0.0, s.r + mm*(1.0-lake) - fl.z*uDt - s.r*uDrain*uDt);   // puddles: rain in, evaporation + soak-away out
+  s.g=mm/uDt*3600.0;                                           // rain rate, mm/h
+  s.b+=rq; s.a+=fl.y*uDt/uDx;
+  o=s;
+}`;
+
+// what the ground is doing right now, per column, for the readout: (sensible W/m2, latent W/m2, sunlight, surface pressure)
+// (one 64x64 readback instead of pulling the whole 4 MB pressure field)
+const F_FLUXNOW = HEAD + SURF_GLSL + `uniform sampler2D tP;
+void main(){ ivec2 c=ivec2(gl_FragCoord.xy); vec3 fl=surfaceFlux(c); float rho0=base1(0).y;
+  o=vec4(rho0*CP*fl.x, rho0*LV*fl.y, texelFetch(tShade,c,0).r, F(tP,ivec3(c.x,0,c.y)).y); }`;
+
+// per column: the vapour the large-scale subsidence carried out of the box this substep (same expression as F_PHYS),
+// accumulated in X.r so the water budget stays exact: d(sum q) = evaporation - rain - export
+const F_COLX = HEAD + `uniform sampler2D tB, tX;
+void main(){ ivec2 c=ivec2(gl_FragCoord.xy); vec4 x=texelFetch(tX,c,0);
+  float ex=0.0;
+  for (int j=0;j<64;j++){ vec4 b=F(tB,ivec3(c.x,j,c.y)); float wl=base1(j).z;
+    if (wl<0.0 && j<63) ex+=wl*(F(tB,ivec3(c.x,j+1,c.y)).x-b.x)/uDx*uDt;      // subsidence
+    ex+=((b.x-base0(j).y)+b.y)*nudgeRate((float(j)+0.5)*uDx)*uDt; }          // relaxation of vapour + cloud debris
+  x.r+=ex; o=x;
+}`;
+
+// sunlight reaching each ground column: march the cloud water toward the sun (periodic in x,z)
+const F_SHADE = HEAD + `uniform sampler2D tB; uniform vec3 uSunDir; uniform float uElev;
+void main(){ ivec2 c=ivec2(gl_FragCoord.xy);
+  vec3 d=uSunDir/max(uSunDir.y,0.08);                          // one level up per step
+  vec3 p=vec3(float(c.x)+0.5, 0.5, float(c.y)+0.5);
+  float q=0.0;
+  for (int k=0;k<64;k++){ q+=F(tB,ivec3(floor(p))).y; p+=d; }
+  float T=exp(-q*1000.0*0.165*uDx*length(d));
+  o=vec4(uElev*(0.25+0.75*T), T, 0, 1);                        // diffuse skylight still gets through thick cloud
 }`;
 
 const F_VORT = HEAD + `uniform sampler2D tA; uniform float uEps;
@@ -263,7 +563,24 @@ void main(){ baseInit();
   o=a;
 }`;
 
+// 4th-order vertical filter on the velocity. theta' sits at cell centres and w on the faces between them (a Lorenz
+// grid), so an up-down-up-down w pattern averages to zero where theta' lives, raises no restoring buoyancy and can
+// grow from numerical noise: by night 2 it filled the calm stable air with +-2 m/s and kept pumping vapour upward.
+// The filter removes 2-cell wiggles in a few steps ((1-16 eps) per step) and barely touches anything taller.
+// The same filter runs SIDEWAYS too: with little eddy mixing (Cs 0.03) nothing else damps one-cell side-to-side
+// wiggles, 45% of the w variance sat at the grid scale, and updrafts split into 100 m columns that rendered as vertical
+// lines and blocky pixels. 4th order is scale-selective: 2-cell 16x, 4-cell 4x, 8-cell 0.34x the base rate.
+const F_VFILT = HEAD + `uniform sampler2D tA; uniform float uEps4, uEps4h;
+vec3 d4(ivec3 i, ivec3 d, vec3 c){ return F(tA,i+2*d).xyz-4.0*F(tA,i+d).xyz+6.0*c-4.0*F(tA,i-d).xyz+F(tA,i-2*d).xyz; }
+void main(){ baseInit(); ivec3 i=g_i; vec4 a=F(tA,i);
+  vec3 c=a.xyz, s=uEps4h*(d4(i,DXI,c)+d4(i,DZI,c));
+  if (i.y>=2 && i.y<=61) s+=uEps4*d4(i,DYI,c);
+  a.xyz-=s;
+  if (i.y==0) a.y=0.0;
+  o=a; }`;
+
 // projection on the MAC grid: P = (divergence, pressure). Exact discrete projection; floor and lid faces are w = 0.
+// The pressure it solves for is the real perturbation pressure: p' (Pa) = P.y * rho0 * dx / dt.
 const F_DIV = HEAD + `uniform sampler2D tA, tP;
 void main(){ baseInit();
   ivec3 i=g_i; vec4 a=F(tA,i);
@@ -294,56 +611,372 @@ void main(){ baseInit();
 // copy one z-layer of (q_c, q_r) in g/kg into a real 3D texture so the raymarch gets hardware trilinear + wrap
 const F_PACK = HEAD + `uniform sampler2D tB; uniform int uLayer;
 void main(){ ivec3 i=ivec3(int(gl_FragCoord.x), int(gl_FragCoord.y), uLayer); vec4 b=F(tB,i); o=vec4(b.y*1000.0, b.z*1000.0, 0, 1); }`;
+// a far-field sim starts as a copy of the main one shifted by whole cells (periodic, so any shift is a valid state;
+// staggered faces move with their cells); uFlat = the 64x64 ground textures
+const F_SHIFT = HEAD + `uniform sampler2D tSrc; uniform int uSx, uSz, uFlat;
+void main(){ ivec2 q=ivec2(gl_FragCoord.xy);
+  if (uFlat==1){ o=texelFetch(tSrc, ivec2(q.x-uSx, q.y-uSz)&63, 0); return; }
+  int idx=q.x+(q.y<<9); o=F(tSrc, ivec3((idx&63)-uSx, (idx>>6)&63, (idx>>12)-uSz)); }`;
+// what the overworld view draws on the ground, per sim, in one bilinear-filterable 64x64: land heat (albedo), water,
+// puddles (mm), and how much colder the surface air is than the domain mean (cold pools). The lab view reads the same
+// four from their own textures; packing them lets the far field blend several sims' ground in one fetch each.
+const F_GPACK = HEAD + `uniform sampler2D tFlux, tSurf, tA, tMeans;
+void main(){ ivec2 c=ivec2(gl_FragCoord.xy); vec4 fm=texelFetch(tFlux,c,0);
+  o=vec4(fm.r, fm.b, texelFetch(tSurf,c,0).r, texelFetch(tMeans,ivec2(0,0),0).z-F(tA,ivec3(c.x,0,c.y)).w); }`;
 
-const F_RENDER = HEAD + `uniform sampler3D tCloud; uniform sampler2D tFlux;
-uniform vec3 uCamPos,uCamFwd,uCamRight,uCamUp,uSunDir; uniform vec2 uRes, uYBand; uniform float uTiles,uExt,uExpo;
-const vec3 SUNC=vec3(1.0,0.95,0.87)*2.6, SKYA=vec3(0.32,0.46,0.75)*0.55;
+// ---------- Milestone 2: fractal detail below the grid (brief section 6) ----------
+// A 64^3 tile of periodic gradient noise (lattice period 16, 4 texels a lattice cell), made once on the GPU. Every
+// octave of the sub-grid detail samples it, each at twice the last one's frequency and turned off its lattice.
+const F_NOISE3 = `#version 300 es
+precision highp float; precision highp int; uniform int uLayer; out vec4 o;
+uint hh(uint v){ v=v*747796405u+2891336453u; uint w=((v>>((v>>28u)+4u))^v)*277803737u; return (w>>22u)^w; }
+vec3 grad(ivec3 c){ c=c&15; uint h=hh(uint(c.x)+uint(c.y)*73u+uint(c.z)*5743u+977u);
+  float th=float(h&1023u)/1023.0*6.2831853, z=float((h>>10)&1023u)/1023.0*2.0-1.0, r=sqrt(max(0.0,1.0-z*z));
+  return vec3(r*cos(th), z, r*sin(th)); }
+float gnoise(vec3 p){ vec3 i=floor(p), f=p-i, u=f*f*f*(f*(f*6.0-15.0)+10.0); ivec3 c=ivec3(i);
+  float n000=dot(grad(c),f), n100=dot(grad(c+ivec3(1,0,0)),f-vec3(1,0,0)), n010=dot(grad(c+ivec3(0,1,0)),f-vec3(0,1,0)), n110=dot(grad(c+ivec3(1,1,0)),f-vec3(1,1,0));
+  float n001=dot(grad(c+ivec3(0,0,1)),f-vec3(0,0,1)), n101=dot(grad(c+ivec3(1,0,1)),f-vec3(1,0,1)), n011=dot(grad(c+ivec3(0,1,1)),f-vec3(0,1,1)), n111=dot(grad(c+ivec3(1,1,1)),f-vec3(1,1,1));
+  return mix(mix(mix(n000,n100,u.x),mix(n010,n110,u.x),u.y), mix(mix(n001,n101,u.x),mix(n011,n111,u.x),u.y), u.z); }
+void main(){ vec3 p=vec3(gl_FragCoord.xy, float(uLayer)+0.5)/4.0; o=vec4(clamp(0.5+0.75*gnoise(p), 0.0, 1.0), 0, 0, 1); }`;
+// the pack, now into TWO 3D textures in one draw: (q_c, q_r) g/kg for the clouds and (wind m/s, |vorticity| 1/s) for
+// the detail, which drifts with the resolved wind and grows with the resolved turbulence
+const HEAD2 = HEAD.replace('out vec4 o;', 'layout(location=0) out vec4 o; layout(location=1) out vec4 o2;');
+const F_PACK2 = HEAD2 + `uniform sampler2D tB, tA; uniform int uLayer;
+vec3 curlP(ivec3 i){ ivec2 d=ivec2(1,0);
+  vec3 x1=velC(tA,i-d.xyy), x2=velC(tA,i+d.xyy), y1=velC(tA,i-d.yxy), y2=velC(tA,i+d.yxy), z1=velC(tA,i-d.yyx), z2=velC(tA,i+d.yyx);
+  return 0.5*vec3((y2.z-y1.z)-(z2.y-z1.y),(z2.x-z1.x)-(x2.z-x1.z),(x2.y-x1.y)-(y2.x-y1.x)); }
+void main(){ ivec3 i=ivec3(int(gl_FragCoord.x), int(gl_FragCoord.y), uLayer); vec4 b=F(tB,i);
+  o=vec4(b.y*1000.0, b.z*1000.0, 0, 1);
+  o2=vec4(velC(tA,i), length(curlP(i))/uDx); }`;
+// The detail itself. Kolmogorov scaling (H = 1/3): each octave's amplitude 2^(-1/3) = 0.794 of the last, wavelength half;
+// five octaves from the grid cell down to 1/16 of it. It drifts with the resolved wind in two staggered phases, each reset
+// while its weight is zero (a flow map: detail moves with the air without over-stretching in shear), is scaled by the
+// resolved vorticity, and only ERODES - edges (q_c under uDetQref) break up, cores stay solid, clear air stays clear (so
+// the empty-space skip, decided on the smooth field, stays valid). Octaves finer than 2 pixels fade out: far clouds pay nothing.
+const DETAIL_GLSL = `
+uniform sampler3D tNoise;
+uniform float uDetAmp, uDetTime, uDetPer, uDetQref, uDetDx, uDetVref;   // strength (0 = off); sim s; flow-map period (s); q_c g/kg;
+                                                               // cell m; the eddy speed (m/s) that counts as turbulence 1
+const mat3 DET_ROT=mat3(0.00,0.80,0.60, -0.80,0.36,-0.48, -0.60,-0.48,0.64);
+float fbmDet(vec3 c, float kmax){                              // c in grid cells; ~unit standard deviation with all 5 octaves
+  float s=0.0, a=1.0;
+  for (int k=0;k<5;k++){ float fk=float(k), fade=clamp(kmax-fk+1.0, 0.0, 1.0); if (fade<=0.0) break;
+    s+=a*fade*(textureLod(tNoise, c/16.0, 0.0).r-0.5)/0.75;
+    c=DET_ROT*c*2.0+vec3(3.1,1.7,5.9); a*=0.7937; }
+  return s/0.31; }
+float detailNoise(vec3 c, vec3 vc, float kmax){                // c: cells; vc: resolved wind, cells per second
+  float ph=uDetTime/uDetPer, f1=fract(ph), f2=fract(ph+0.5);
+  float o1=fract(floor(ph)*0.618034)*61.0, o2=fract(floor(ph+0.5)*0.618034+0.31)*61.0;   // a fresh pattern every cycle
+  float n1=fbmDet(c-vc*(f1*uDetPer)+o1, kmax), n2=fbmDet(c-vc*(f2*uDetPer)+o2, kmax);
+  float w=1.0-abs(2.0*f1-1.0);                                  // phase 1 vanishes at its own reset, phase 2 at its
+  return (w*n1+(1.0-w)*n2)/sqrt(w*w+(1.0-w)*(1.0-w)); }         // the same contrast through the blend
+float detailQ(float q, vec3 pm, vec4 vw, float fpm){           // q_c with sub-grid detail. pm metres, vw = (wind m/s, |vort| 1/s),
+  if (uDetAmp<=0.0 || q<=0.0) return q;                         // fpm = metres per pixel there
+  float kmax=log2(uDetDx/(2.0*fpm)); if (kmax<=-1.0) return q;
+  float edge=1.0-smoothstep(0.0, uDetQref, q); if (edge<=0.0) return q;
+  float turb=clamp(vw.w*uDetDx/uDetVref, 0.5, 2.0);             // |vorticity| x dx against uDetVref m/s of resolved eddy
+  return q*max(0.0, 1.0+uDetAmp*turb*edge*detailNoise(pm/uDetDx, vw.xyz/uDetDx, kmax)); }
+`;
+// the fractal check's slice (brief: "threshold a horizontal slice of the rendered cloud"): 1 where the cloud, with its
+// detail, passes the threshold
+const F_FSLICE = HEAD + `uniform sampler3D tCloud, tVel; uniform vec2 uRes; uniform float uSliceY, uThr, uFpm, uM, uSmooth;
+` + DETAIL_GLSL + `
+void main(){ vec2 uv=gl_FragCoord.xy/uRes; vec3 w=vec3(uv.x*2.0-1.0, uSliceY, uv.y*2.0-1.0);
+  float q=detailQ(textureLod(tCloud, w*0.5+0.5, uSmooth).r, w*uM, textureLod(tVel, w*0.5+0.5, 0.0), uFpm);
+  o=vec4(q>uThr ? 1.0 : 0.0, 0, 0, 1); }`;
+
+// TRACERS: 128x128 particles (x, y, z in cells, age in sim seconds) carried by the 3D wind with a midpoint (RK2) step.
+// Respawned when old or out of range, mostly low down, where the breezes and gust fronts live.
+const F_PUPD = HEAD + `uniform sampler2D tA, tPt; uniform float uStep, uLife; uniform uint uFrame; uniform int uAll;
+uint hsh(uint v){ v=v*747796405u+2891336453u; uint w=((v>>((v>>28u)+4u))^v)*277803737u; return (w>>22u)^w; }
+float r01(uint id, uint k){ return float(hsh(id*9781u+k*6271u+uFrame*26699u))/4294967295.0; }
+vec3 velAt(vec3 p){ vec4 m0,m1; return vec3(tri(tA,p+vec3(0.5,0,0),m0,m1).x, tri(tA,p+vec3(0,0.5,0),m0,m1).y, tri(tA,p+vec3(0,0,0.5),m0,m1).z); }
+void main(){ ivec2 f=ivec2(gl_FragCoord.xy); uint id=uint(f.x+f.y*128);
+  vec4 s=texelFetch(tPt,f,0); vec3 p=s.xyz; float age=s.w+uStep;
+  float life=uLife*(0.5+float(hsh(id*31u+7u))/4294967295.0);
+  if (uAll==1 || age>life || p.y<0.02 || p.y>62.0){
+    float ry=r01(id,2u);
+    p=vec3(r01(id,1u)*64.0, 0.15+60.0*ry*ry*ry, r01(id,3u)*64.0);
+    age = uAll==1 ? life*r01(id,4u) : 0.0;                    // stagger the first generation so they don't all respawn together
+  } else {
+    vec3 v1=velAt(p), pm=p+v1*(0.5*uStep/uDx), v2=velAt(pm);
+    p+=v2*(uStep/uDx); p.x=mod(p.x,64.0); p.z=mod(p.z,64.0); p.y=max(p.y,0.02);
+  }
+  o=vec4(p,age); }`;
+// The overworld's far field is cut into regions (see satWant in the JS): a rotated, domain-warped square lattice whose
+// home cell (0,0) holds the world origin. Shared by the raymarch and the tracers (which show only in the home region).
+const REG_GLSL = `
+uniform sampler2D tWarp; uniform float uRegR, uWarpAmp, uWarpK; uniform vec2 uRegRot, uRegOff;
+uint rhash(ivec2 c){ uint v=(uint(c.x)*1973u)^(uint(c.y)*9277u)^0x5bd1e995u; v=v*747796405u+2891336453u; v=((v>>((v>>28u)+4u))^v)*277803737u; return (v>>22u)^v; }
+vec2 regP(vec2 xz){ vec2 p=xz+(textureLod(tWarp, xz*uWarpK, 0.0).rg*2.0-1.0)*uWarpAmp;
+  return mat2(uRegRot.x, uRegRot.y, -uRegRot.y, uRegRot.x)*p/uRegR + uRegOff; }
+`;
+// each tracer is drawn as a short streak (where its air was a minute ago -> where it is), coloured by its temperature
+// anomaly, vertical wind or speed, and dimmed by the cloud and rain between it and the eye
+const V_PART = `#version 300 es
+` + COMMON + REG_GLSL + `
+uniform sampler2D tPt, tA, tMeans; uniform sampler3D tCloud;
+uniform vec3 uCamPos, uCamFwd, uCamRight, uCamUp;
+uniform float uAspect, uM, uTiles, uExt, uStreak, uMode, uSmooth, uDay, uFocal, uOw; uniform int uTilesN; uniform vec2 uTileOff;
+out vec4 vCol;
+vec3 velAt(vec3 p){ vec4 m0,m1; return vec3(tri(tA,p+vec3(0.5,0,0),m0,m1).x, tri(tA,p+vec3(0,0.5,0),m0,m1).y, tri(tA,p+vec3(0,0,0.5),m0,m1).z); }
+float transTo(vec3 P){
+  vec3 d=P-uCamPos; float L=length(d); vec3 dir=d/max(L,1e-6);
+  float t0=0.0, t1=L;
+  if (abs(dir.y)>1e-4){ float ta=(-1.0-uCamPos.y)/dir.y, tb=(1.0-uCamPos.y)/dir.y; t0=max(t0,min(ta,tb)); t1=min(t1,max(ta,tb)); }
+  if (t1<=t0) return 1.0;
+  float ds=(t1-t0)/16.0, tau=0.0;
+  for (int k=0;k<16;k++){ vec3 q=uCamPos+dir*(t0+(float(k)+0.5)*ds);
+    if (abs(q.x)>uTiles||abs(q.z)>uTiles) continue;
+    vec2 qq=textureLod(tCloud,q*0.5+0.5,uSmooth).rg; tau+=(0.165*qq.x+0.00345*qq.y)*ds; }
+  return exp(-tau*uM*uExt); }
+vec3 ramp(float t){ t=clamp(t,-1.0,1.0); vec3 n=vec3(0.82,0.84,0.86);
+  return t>0.0 ? mix(n, vec3(1.0,0.3,0.08), t) : mix(n, vec3(0.12,0.45,1.0), -t); }
+void main(){
+  int pid=gl_VertexID/2; bool head=(gl_VertexID%2)==0;
+  vec4 s=texelFetch(tPt, ivec2(pid%128, pid/128), 0);
+  vec3 p=s.xyz, v=velAt(p);
+  vec2 toff=(vec2(float(gl_InstanceID%uTilesN), float(gl_InstanceID/uTilesN))-float(uTilesN-1)*0.5)*2.0+uTileOff;   // tiles around the eye's
+  vec3 w=vec3(p.x/32.0-1.0+toff.x, p.y/32.0-1.0, p.z/32.0-1.0+toff.y);
+  vec3 P=head ? w : w-v*(uStreak/uM);
+  vec3 d=P-uCamPos; float zc=dot(d,uCamFwd);
+  if (zc<0.02){ gl_Position=vec4(2.0,2.0,2.0,1.0); vCol=vec4(0.0); return; }
+  gl_Position=vec4(dot(d,uCamRight)/zc*uFocal/uAspect, dot(d,uCamUp)/zc*uFocal, 0.0, 1.0);
+  // ordinary air stays faint; only the air that differs from its surroundings glows (thermals, outflows, gusts)
+  ivec3 ic=ivec3(floor(p)); vec4 mn=texelFetch(tMeans,ivec2(ic.y,0),0); vec3 col; float k;
+  if (uMode<0.5){ float an=F(tA,ic).w-mn.z; col=ramp(an/0.8); k=abs(an)/0.8; }
+  else if (uMode<1.5){ col=ramp(v.y/2.5); k=abs(v.y)/2.5; }
+  else { float sp=length(v.xz), dev=length(v.xz-mn.xy);               // speed, and how far it departs from the box's mean wind
+    col=mix(vec3(0.25,0.55,1.0), vec3(1.0,0.92,0.35), clamp(sp/10.0,0.0,1.0)); k=dev/4.0; }
+  float a = head ? (0.1+0.65*clamp(k,0.0,1.0))*smoothstep(0.0,90.0,s.w)*transTo(P) : 0.0;
+  if (uOw>0.5 && floor(regP(w.xz))!=vec2(0)) a=0.0;              // overworld: this air is the main sim's, so only in its home region
+  vCol=vec4(col*(0.35+0.65*uDay), a);
+}`;
+const F_PARTF = `#version 300 es
+precision highp float; in vec4 vCol; out vec4 o; void main(){ o=vCol; }`;
+
+const F_RENDER = HEAD + REG_GLSL + DETAIL_GLSL + `uniform sampler3D tCloud, tVel; uniform sampler2D tFlux, tSurf, tA, tMeans;
+uniform sampler3D tC1, tC2, tC3; uniform sampler2D tG0, tG1, tG2, tG3;   // the far-field sims' clouds; every sim's ground pack
+uniform int uK; uniform float uBand, uRegDbg;                   // sims in play (1 = the main only); region blend half-width (cells); tint regions
+uniform vec2 uFlipN;                                            // unit normal to the background wind: half the regions mirror across it
+uniform vec3 uCamPos,uCamFwd,uCamRight,uCamUp,uSunDir; uniform vec2 uRes, uYBand, uJit;
+uniform float uTiles,uExt,uExpo,uM,uTime,uCold,uSmooth;
+uniform vec3 SUNC, SKYA, uSkyHor, uSkyZen;                      // sunlight, skylight, sky colours (they follow the sun)
+// overworld view (LSS): the game's lens (uFocal = 1/tan(vertical half-FOV)), clouds out to uMaxT, the haze they fade
+// into (uHaze, per world unit), the game's ground fog (FogExp2 density per GAME unit, 0 = off), game units per world
+// unit, whether the clouds sit in that fog too, and the view depths of the game's fog wall and far plane (0 = hidden)
+uniform float uOw, uFocal, uMaxT, uHaze, uFogK, uUpw, uCFog; uniform vec2 uLines;
+const float CELL=2.0/64.0;                                      // one grid cell, in world units
+// march step: fine near the eye, coarser far away; capped at a cell in the lab, but in the overworld view the far
+// field (tens of km) steps with the distance, a few pixels' footprint per step, sampled from a matching mip
+float stepAt(float t){ return clamp(0.008*t, 0.3*CELL, uOw>0.5 ? max(1.2*CELL, 0.01*t) : 1.2*CELL); }
 float hg(float mu,float g){ float g2=g*g; return (1.0-g2)/pow(1.0+g2-2.0*g*mu,1.5); }   // 4pi-normalised
-float qcAt(vec3 w){ if (abs(w.x)>uTiles||abs(w.z)>uTiles) return 0.0; return texture(tCloud, w*0.5+0.5).r; }  // g/kg
-const float M = ${(H/2).toFixed(1)};                                    // metres per world unit
-// sun optical depth: physical extinction sigma = 1.5 rho_air q_c / (rho_w r_e) ~ 0.165 per m per g/kg (r_e 10 um)
-float sunTau(vec3 w, int n, float seg){ float tau=0.0, d=0.0;
-  for (int i=0;i<24;i++){ if (i>=n) break; vec3 q=w+uSunDir*(d+seg*0.5); if (q.y>1.0) break; tau+=qcAt(q)*seg; d+=seg; seg*=1.45; }
-  return tau*0.165*uExt*M; }
+// (q_c, q_r) in g/kg. The 3D texture is mip-mapped every frame: a small LOD rounds the voxel corners of the
+// 64^3 field, a larger one gives shadows the soft edges that the sun's penumbra and diffuse light give real ones.
+vec2 qAtL(vec3 w, float lod){ if (abs(w.x)>uTiles||abs(w.z)>uTiles) return vec2(0); return textureLod(tCloud, w*0.5+0.5, lod).rg; }
+vec2 qAt(vec3 w){ return qAtL(w, uSmooth); }
+// sun optical depth through cloud: sigma = 1.5 rho_air q_c / (rho_w r_e) ~ 0.165 per m per g/kg (r_e 10 um)
+float sunTau(vec3 w, int n, float seg, float lod){ float tau=0.0, d=0.0;
+  for (int i=0;i<24;i++){ if (i>=n) break; vec3 q=w+uSunDir*(d+seg*0.5); if (q.y>1.0) break; tau+=qAtL(q,lod).x*seg; d+=seg; seg*=1.45; }
+  return tau*0.165*uExt*uM; }
+// ---- overworld far field: each region shows one sim (k) at its own offset (o, world units), half of them mirrored
+// across the background wind's line (fl: a mirror image doesn't read as a copy, and a mirror ALONG the wind keeps the
+// drift and the rain shafts' lean; any other rotation would send that region's clouds sailing the wrong way). Near a
+// region's edge the field blends toward the neighbour across it, 50/50 on the edge, bilinearly at the corners: continuous
+// everywhere, 1 fetch in a region's core, 2 in an edge band, 4 where two bands cross. The home region is the main sim as is.
+struct Reg { vec4 w; ivec4 k; vec4 ox, oz, fl; };
+Reg regAt(vec2 xz){
+  vec2 p=regP(xz), c=floor(p), f=p-c-0.5, s=vec2(f.x<0.0?-1.0:1.0, f.y<0.0?-1.0:1.0);
+  vec2 a=0.5*(1.0-smoothstep(0.0, uBand, 0.5-abs(f)));          // weight toward the neighbour across the near edge
+  Reg r;
+  for (int j=0;j<4;j++){
+    ivec2 d=ivec2(j&1, j>>1), cc=ivec2(c)+d*ivec2(s);
+    float wj=(d.x==1?a.x:1.0-a.x)*(d.y==1?a.y:1.0-a.y);
+    int kk=0; vec2 oo=vec2(0); float ff=0.0;
+    if (wj>0.0 && cc!=ivec2(0)){ uint h=rhash(cc), h2=rhash(cc+ivec2(7919,4513));
+      kk=int(h%uint(uK)); oo=vec2(float(h2&1023u), float((h2>>10)&1023u))/512.0; ff=float((h2>>20)&1u); }
+    r.w[j]=wj; r.k[j]=kk; r.ox[j]=oo.x; r.oz[j]=oo.y; r.fl[j]=ff;
+  }
+  return r; }
+vec2 regM(Reg r, int j, vec2 v){ return r.fl[j]>0.5 ? v-2.0*dot(v,uFlipN)*uFlipN : v; }   // the region's mirror (a linear map)
+vec3 regX(Reg r, int j, vec3 w){ vec2 m=regM(r,j,w.xz); return vec3(m.x+r.ox[j], w.y, m.y+r.oz[j]); }   // world -> its sim
+// the resolved wind (m/s, world frame) and |vorticity| at p, for the sub-grid detail. The lab binds the MAIN sim's wind for
+// every region (a fragment shader gets 16 samplers and this one is at 15); the game binds each sim's own.
+vec4 velFor(Reg rg, vec3 p){
+  if (uOw<0.5) return textureLod(tVel, p*0.5+0.5, 0.0);
+  int j=0; float m=rg.w[0]; for (int i=1;i<4;i++) if (rg.w[i]>m){ m=rg.w[i]; j=i; }
+  vec4 v=textureLod(tVel, regX(rg,j,p)*0.5+0.5, 0.0); vec2 h=regM(rg,j,v.xz); return vec4(h.x, v.y, h.y, v.w); }
+vec2 simQ(int k, vec3 w, float lod){ vec3 t=w*0.5+0.5;
+  if (k==0) return textureLod(tCloud,t,lod).rg; if (k==1) return textureLod(tC1,t,lod).rg;
+  if (k==2) return textureLod(tC2,t,lod).rg; return textureLod(tC3,t,lod).rg; }
+vec2 owQ(Reg r, vec3 w, float lod){ vec2 q=vec2(0);
+  for (int j=0;j<4;j++) if (r.w[j]>0.0) q+=r.w[j]*simQ(r.k[j], regX(r,j,w), lod);
+  return q; }
+// sunlight through the region's sims, weighted like the field itself. (Through the dominant sim alone, the light flipped
+// at the 50/50 line: cloud shadows on the ground were cut along straight seams.) Continuous across every border;
+// near one, shadows are a blend of both sims' - the composite world's true shadow would need the weights per step.
+float sunTauK(int k, vec3 w, vec3 sd, int n, float seg, float lod){ float tau=0.0, d=0.0;   // w, sd already in the sim's frame
+  for (int i=0;i<24;i++){ if (i>=n) break; vec3 q=w+sd*(d+seg*0.5); if (q.y>1.0) break; tau+=simQ(k,q,lod).x*seg; d+=seg; seg*=1.45; }
+  return tau; }
+float sunTauR(Reg r, vec3 w, int n, float seg, float lod){ float tau=0.0;
+  for (int j=0;j<4;j++) if (r.w[j]>0.0){ vec2 sm=regM(r,j,uSunDir.xz);
+    tau+=r.w[j]*sunTauK(r.k[j], regX(r,j,w), vec3(sm.x,uSunDir.y,sm.y), n, seg, lod); }
+  return tau*0.165*uExt*uM; }
+vec4 gpackK(int k, vec2 uv){ if (k==0) return textureLod(tG0,uv,0.0); if (k==1) return textureLod(tG1,uv,0.0);
+  if (k==2) return textureLod(tG2,uv,0.0); return textureLod(tG3,uv,0.0); }
+vec4 owGround(Reg r, vec2 xz){ vec4 g=vec4(0);
+  for (int j=0;j<4;j++) if (r.w[j]>0.0) g+=r.w[j]*gpackK(r.k[j], regX(r,j,vec3(xz.x,0.0,xz.y)).xz*0.5+0.5);
+  return g; }
+float h3(vec3 p){ p=fract(p*0.3183099+0.1); p*=17.0; return fract(p.x*p.y*p.z*(p.x+p.y+p.z)); }
+float vnoise(vec3 x){ vec3 i=floor(x), f=fract(x); f=f*f*(3.0-2.0*f);
+  return mix(mix(mix(h3(i),h3(i+vec3(1,0,0)),f.x), mix(h3(i+vec3(0,1,0)),h3(i+vec3(1,1,0)),f.x), f.y),
+             mix(mix(h3(i+vec3(0,0,1)),h3(i+vec3(1,0,1)),f.x), mix(h3(i+vec3(0,1,1)),h3(i+vec3(1,1,1)),f.x), f.y), f.z); }
+// rain curtains: noise stretched vertically, drifting down. Texture only; how much rain there is comes from q_r.
+// Only where a shaft is real and resolvable: the 22 m streaks fade to their mean when they'd be under ~3 px (from km
+// away they aliased into line patterns), in light rain, and inside cloud (rain mixed in cloud doesn't look streaky).
+float curtain(vec3 w, float t, float qr, float qc){
+  float fp=t*uM*(2.0/uFocal)/uRes.y;                           // metres per pixel at this distance
+  float k=smoothstep(2.0,6.0,22.0/fp)*smoothstep(0.05,0.5,qr)*(1.0-smoothstep(0.0,0.1,qc));
+  if (k<=0.0) return 0.625;                                    // the texture's mean
+  vec3 m=w*uM; vec3 q=vec3(m.x/22.0, (m.y+uTime*140.0)/260.0, m.z/22.0);
+  return mix(0.625, 0.25+1.5*vnoise(q)*vnoise(q*vec3(2.7,1.9,2.7)+5.3), k); }
+vec3 spectral(float t){                                         // 0 violet .. 1 red
+  return vec3(smoothstep(0.45,0.85,t)+0.35*smoothstep(0.15,0.0,t), smoothstep(0.15,0.45,t)*smoothstep(0.95,0.6,t), smoothstep(0.55,0.25,t)); }
+// rainbow: sunlight reflected inside raindrops leaves 40.4-42.5 deg (primary) and 50.3-53.6 deg (secondary, colours
+// reversed) from the antisolar point, the direction of your own shadow
+vec3 rainbow(float mu){ float a=degrees(acos(clamp(-mu,-1.0,1.0)));
+  vec3 c=vec3(0);
+  float t1=(a-40.4)/2.1; if (t1>0.0 && t1<1.0) c+=spectral(t1)*sin(3.1416*t1);
+  float t2=(53.6-a)/3.3; if (t2>0.0 && t2<1.0) c+=0.45*spectral(t2)*sin(3.1416*t2);
+  if (a<40.4) c+=vec3(0.1*smoothstep(20.0,40.4,a));             // the brighter sky inside the bow
+  return c; }
+// glory: coloured rings a few degrees around the antisolar point, backscattered by ~10 um cloud droplets
+vec3 glory(float mu){ float a=degrees(acos(clamp(-mu,-1.0,1.0)));
+  if (a>9.0) return vec3(0);
+  vec3 r=0.5+0.5*cos(6.2832*a/(2.3*vec3(0.65,0.55,0.45)/0.55)); // red rings sit wider than blue ones
+  return r*r*exp(-a/2.6)*smoothstep(9.0,6.0,a); }
+// 64x64 ground fields, bilinear with wrap
+vec4 surfAt(vec2 xz){ vec2 c=(xz*0.5+0.5)*64.0-0.5; vec2 f=fract(c); ivec2 i=ivec2(floor(c));
+  vec4 a=texelFetch(tSurf,i&63,0), b=texelFetch(tSurf,(i+ivec2(1,0))&63,0), d=texelFetch(tSurf,(i+ivec2(0,1))&63,0), e=texelFetch(tSurf,(i+1)&63,0);
+  return mix(mix(a,b,f.x), mix(d,e,f.x), f.y); }
+float th0At(vec2 xz){ vec2 c=(xz*0.5+0.5)*64.0-0.5; vec2 f=fract(c); ivec2 i=ivec2(floor(c));
+  float a=F(tA,ivec3(i.x,0,i.y)).w, b=F(tA,ivec3(i.x+1,0,i.y)).w, d=F(tA,ivec3(i.x,0,i.y+1)).w, e=F(tA,ivec3(i.x+1,0,i.y+1)).w;
+  return mix(mix(a,b,f.x), mix(d,e,f.x), f.y); }
 vec3 skyCol(vec3 rd){
-  vec3 c=mix(vec3(0.62,0.74,0.9), vec3(0.13,0.3,0.62), pow(clamp(rd.y,0.0,1.0),0.6));
+  vec3 c=mix(uSkyHor, uSkyZen, pow(clamp(rd.y,0.0,1.0),0.6));
   float s=max(dot(rd,uSunDir),0.0); c+=SUNC*(pow(s,1200.0)*8.0 + pow(s,24.0)*0.06);
-  return rd.y<0.0 ? vec3(0.55,0.62,0.7) : c; }
+  return rd.y<0.0 ? uSkyHor*0.85 : c; }
 void main(){
   vec2 ndc=gl_FragCoord.xy/uRes*2.0-1.0;
-  vec3 ro=uCamPos, rd=normalize(uCamFwd*1.6 + uCamRight*ndc.x*(uRes.x/uRes.y) + uCamUp*ndc.y);
+  vec3 ro=uCamPos, rd=normalize(uCamFwd*uFocal + uCamRight*ndc.x*(uRes.x/uRes.y) + uCamUp*ndc.y);
+  float vz=dot(rd,uCamFwd);                                     // view depth per unit of ray: three.js fogs and clips by DEPTH, not range
+  // the ground point's view depth, worked out before any branch: the game's lines need its screen derivative
+  float gdep=(rd.y<-1e-6 ? (-1.0-ro.y)/rd.y : 1e7)*vz, gw=fwidth(gdep);
   vec3 bg=skyCol(rd); float gT=1e9;
   if (rd.y<0.0 && ro.y>-1.0){                                   // ground at the domain floor
-    gT=(-1.0-ro.y)/rd.y; vec3 gp=ro+rd*gT; vec4 fm=texture(tFlux, gp.xz*0.5+0.5);
+    gT=(-1.0-ro.y)/rd.y; vec3 gp=ro+rd*gT;
+    // land heat (.r) and water (.b), puddles (mm), cold-pool anomaly (K), cloud shadow: the lab reads the main sim's own
+    // textures; the overworld view blends the region's sims' ground packs (and shades with the dominant one's clouds)
+    vec4 fm; float pud, coldA, sh;
+    vec3 dbg=vec3(-1);
+    if (uOw>0.5){ Reg rg=regAt(gp.xz); vec4 g=owGround(rg, gp.xz); fm=vec4(g.r,0.0,g.g,1.0); pud=g.b; coldA=g.a;
+      sh=exp(-sunTauR(rg, gp+vec3(0,0.001,0), 20, 0.03, 1.4));
+      if (uRegDbg>0.5){                                         // debug: each sim its own colour (main = white), blend bands darker
+        dbg=vec3(0);
+        for (int j=0;j<4;j++){ int kk=rg.k[j]; dbg+=rg.w[j]*(kk==0?vec3(0.9):kk==1?vec3(0.9,0.3,0.2):kk==2?vec3(0.2,0.8,0.3):vec3(0.3,0.4,1.0)); }
+        dbg*=1.0-0.45*smoothstep(0.0,0.2,1.0-max(max(rg.w.x,rg.w.y),max(rg.w.z,rg.w.w))); } }
+    else { fm=texture(tFlux, gp.xz*0.5+0.5); pud=surfAt(gp.xz).r; coldA=texelFetch(tMeans,ivec2(0,0),0).z-th0At(gp.xz);
+      sh=exp(-sunTau(gp+vec3(0,0.001,0), 20, 0.03, 1.4)); }      // soft-edged cloud shadows
     vec3 alb=mix(vec3(0.07,0.12,0.045), vec3(0.2,0.16,0.09), clamp(fm.r-0.5,0.0,1.0));
+    if (uOw>0.5){                                               // a ship flies low over 100 m ground texels: field-scale variation gives
+      float fpm=gT*uM*(2.0/uFocal)/uRes.y/max(-rd.y,0.05);      // speed and height something to read (faded out before it can alias)
+      vec2 gm=gp.xz*uM;
+      alb*=mix(1.0, 0.72+0.56*vnoise(vec3(gm/60.0,0.5)), smoothstep(120.0,30.0,fpm))*mix(1.0, 0.82+0.36*vnoise(vec3(gm/11.0,2.5)), smoothstep(22.0,5.0,fpm));
+    }
+    alb=mix(alb, vec3(0.34,0.31,0.22), smoothstep(0.08,0.45,fm.b)*smoothstep(0.92,0.55,fm.b));   // a sandy rim between land and water
+    float wet=(1.0-exp(-pud/1.5))*(1.0-fm.b);                   // puddles (mm) -> wetness
+    alb*=1.0-0.5*wet;                                           // wet ground is darker
     alb=mix(alb, vec3(0.025,0.06,0.1), fm.b);
-    float sh=exp(-sunTau(gp+vec3(0,0.001,0), 20, 0.03));
+    if (dbg.x>=0.0) alb=dbg*0.3;
     vec3 gc=alb*(SUNC*max(uSunDir.y,0.0)*sh + SKYA*0.7);
-    bg=mix(gc, vec3(0.55,0.64,0.76), 1.0-exp(-gT*0.06));
+    float fres=0.03+0.97*pow(1.0-max(-rd.y,0.0),5.0);
+    float mirror=max(clamp(wet*1.4-0.4,0.0,1.0), fm.b);         // puddles and open water mirror the sky
+    gc=mix(gc, skyCol(reflect(rd,vec3(0,1,0)))*mix(0.35,1.0,sh), mirror*fres*0.8);
+    float cold=smoothstep(0.2,1.2,coldA)*uCold;                 // air at the ground colder than the domain mean
+    gc=mix(gc, vec3(0.07,0.2,0.55)*(0.5+0.5*sh), cold*0.6);
+    if (uOw>0.5){
+      // the overworld's ground the way the game fogs it: FogExp2 on view depth in game units, fog colour = the sky's
+      // (the game sets scene.background to the same colour). Unticked, the ground fades with the clouds' own haze.
+      float du=gT*vz*uUpw;
+      bg=mix(gc, uSkyHor, uFogK>0.0 ? 1.0-exp(-(uFogK*du)*(uFogK*du)) : 1.0-exp(-gT*uHaze));
+      // the game's fog wall (90% fog, where the terrain stops streaming) and far plane, as depth lines ~1.5 px wide;
+      // skipped where the depth jumps (the horizon row), or the line would smear along it
+      if (uLines.x>0.0 && gw<0.25*uLines.x) bg=mix(bg, vec3(1.0,0.72,0.22), 0.9*(1.0-smoothstep(0.75*gw, 1.5*gw, abs(gdep-uLines.x))));
+      if (uLines.y>0.0 && gw<0.25*uLines.y) bg=mix(bg, vec3(1.0,0.28,0.22), 0.9*(1.0-smoothstep(0.75*gw, 1.5*gw, abs(gdep-uLines.y))));
+    } else bg=mix(gc, uSkyHor*0.88, 1.0-exp(-gT*0.06));
   }
-  vec3 bmin=vec3(-uTiles,uYBand.x,-uTiles), bmax=vec3(uTiles,uYBand.y,uTiles), inv=1.0/rd;   // only the heights that hold cloud
+  // the cloud layer: a box in the lab; in the overworld view uTiles is huge, so it's an endless slab (the periodic
+  // field tiled to the horizon) cut at the draw distance
+  vec3 bmin=vec3(-uTiles,uYBand.x,-uTiles), bmax=vec3(uTiles,uYBand.y,uTiles), inv=1.0/rd;   // only the heights that hold cloud or rain
   vec3 t0=(bmin-ro)*inv, t1=(bmax-ro)*inv, tmn=min(t0,t1), tmx=max(t0,t1);
   float tn=max(max(max(tmn.x,tmn.y),tmn.z),0.0), tf=min(min(min(tmx.x,tmx.y),tmx.z),gT);
+  if (uOw>0.5) tf=min(tf,uMaxT);
   vec3 col=vec3(0); float T=1.0;
   if (tf>tn){
-    float ds=max((tf-tn)/220.0, 0.012);
-    float t=tn+ds*fract(sin(dot(gl_FragCoord.xy,vec2(12.9898,78.233)))*43758.5453);
-    float mu=dot(rd,uSunDir); int empty=0;
-    for (int k=0;k<400;k++){
+    float mu=dot(rd,uSunDir);
+    vec3 bow=rainbow(mu), glo=glory(mu);
+    // steps are fine near the eye and coarser far away (stepAt). The start is jittered with an integer
+    // hash, fresh every frame (uJit), and the frames are averaged while the view is still. (The old fract(sin(dot(...)))
+    // hash degenerated into stripes at large pixel coords on ANGLE; interleaved gradient noise held still showed lines.)
+    uvec2 pq=uvec2(gl_FragCoord.xy);
+    uint hv=pq.x*1973u+pq.y*9277u+uint(uJit.x)*26699u; hv=hv*747796405u+2891336453u; hv=((hv>>((hv>>28u)+4u))^hv)*277803737u; hv=(hv>>22u)^hv;
+    float jit=float(hv)/4294967295.0;
+    float t=tn+jit*stepAt(tn);
+    for (int k=0;k<500;k++){
       if (t>tf || T<0.01) break;
-      vec3 p=ro+rd*t; float q=qcAt(p);
-      if (q<=0.002){ t+=ds*(empty>3?3.0:1.0); empty++; continue; }   // stride through clear air
-      if (empty>3){ t-=ds*2.0; empty=0; continue; }                   // overshot into cloud: back up, resume fine steps
-      empty=0;
-      {
-        float sig=0.165*q*uExt;                                 // 1/m
-        float tau=sunTau(p, 7, 0.02);
-        float L=0.0, ea=1.0, eb=1.0, ec=1.0;                    // multiple-scattering octaves
-        for (int oc=0;oc<3;oc++){ L+=eb*mix(hg(mu,0.8*ec), hg(mu,-0.25*ec), 0.3)*exp(-tau*ea); ea*=0.25; eb*=0.5; ec*=0.5; }
-        float powder=1.0-0.6*exp(-sig*250.0)*(0.5-0.5*mu);      // thin sunward-facing edges read darker
-        vec3 amb=SKYA*(0.3+0.7*clamp(p.y*0.5+0.5,0.0,1.0));
-        vec3 lum=SUNC*L*powder*0.55 + amb;
-        float tr=exp(-sig*ds*M);
+      vec3 p=ro+rd*t;
+      // overworld: tens of km of open sky between the clouds. Where a ~1.6 km blur (mip 4) holds nothing, nothing is
+      // within a texel of here, so 600 m at a stride is safe (a single 3-cell wisp still reads ~1e-5 there)
+      // (every overworld sample reads its region's sims: rg)
+      Reg rg; if (uOw>0.5){ rg=regAt(p.xz); vec2 qf=owQ(rg, p, 4.0); if (qf.x<1e-6 && qf.y<2e-6){ t+=6.0*CELL; continue; } }
+      // empty-space skip decided on a BLURRED copy of the field (mip ~2.5, about 5 cells): smooth and conservative, so a
+      // thin wisp is never stepped over by one pixel and caught by its neighbour (the old hard-threshold stride speckled)
+      vec2 qb = uOw>0.5 ? owQ(rg, p, 2.5) : qAtL(p, 2.5);
+      if (qb.x<1e-5 && qb.y<2e-5){ t+=1.5*CELL; continue; }
+      float ds=stepAt(t);                                       // lab: ~the old density (0.18 cell near the eye cost ~2x)
+      vec2 q = uOw>0.5 ? owQ(rg, p, max(uSmooth, log2(max(ds/CELL,1.0)))) : qAt(p);   // long far steps read a matching mip
+      // Milestone 2, on the view ray only (the lighting reads the smooth field, plus the detail's own self-shadow below)
+      float q0=q.x, fpm=t*uM*(2.0/uFocal)/uRes.y; vec4 vw=vec4(0);
+      bool det=uDetAmp>0.0 && q.x>0.0 && q.x<uDetQref && fpm<uDetDx;
+      if (det){ vw=velFor(rg, p); q.x=detailQ(q.x, p*uM, vw, fpm); }
+      float sigC=0.165*q.x*uExt;                                // cloud droplets (1/m)
+      float sigR=0.00345*q.y*uExt;                              // raindrops, r_e ~0.5 mm: ~50x less extinction per gram
+      if (uOw>0.5){ float fd=1.0-smoothstep(0.85*uMaxT, uMaxT, t); sigC*=fd; sigR*=fd; }   // feather the draw-distance edge
+      if (sigC+sigR>1e-6){                                      // below this a step adds nothing visible
+        sigR*=curtain(p, t, q.y, q.x);
+        float sig=sigC+sigR;
+        float tau = uOw>0.5 ? sunTauR(rg, p, 7, 0.02, uSmooth+0.5) : sunTau(p, 7, 0.02, uSmooth+0.5);
+        // the detail's self-shadow: the sunlight also crosses the sub-grid lumps between here and half a cell sunward. A
+        // lump on the sun side shades this sample, a gap lets more through, so billows read as lit faces and shadowed
+        // folds instead of evenly lit wisps (without this, 1.2 changed 8.5% of the frame's pixels, all by low contrast)
+        if (det){ vec3 ps=p+uSunDir*(0.5*CELL); float qs=uOw>0.5 ? owQ(rg, ps, uSmooth).x : qAt(ps).x;
+          tau=max(0.0, tau+(detailQ(qs, ps*uM, vw, fpm)-qs)*0.165*uExt*(0.5*CELL*uM)); }
+        float sun=exp(-tau);
+        vec3 lum=vec3(0);
+        if (sigC>0.0){
+          float L=0.0, ea=1.0, eb=1.0, ec=1.0;                  // multiple-scattering octaves
+          for (int oc=0;oc<3;oc++){ L+=eb*mix(hg(mu,0.8*ec), hg(mu,-0.25*ec), 0.3)*exp(-tau*ea); ea*=0.25; eb*=0.5; ec*=0.5; }
+          float powder=1.0-0.6*exp(-sigC*250.0)*(0.5-0.5*mu);   // thin sunward-facing edges read darker
+          vec3 amb=SKYA*(0.3+0.7*clamp(p.y*0.5+0.5,0.0,1.0));
+          lum+=sigC*(SUNC*(L*powder*0.55 + glo*sun*0.5) + amb);
+        }
+        if (sigR>0.0) lum+=sigR*(SUNC*sun*(hg(mu,0.6)*0.25 + bow*0.9) + SKYA*0.85);   // rain: mostly skylight in the cloud's shadow
+        lum/=max(sig,1e-9);
+        // overworld: the air between the ship and a cloud km away veils it toward the horizon colour (Koschmieder:
+        // contrast falls as exp(-3.912 d / visibility)). Or, ticked, the game's own terrain fog, which leaves nothing
+        // past ~1 km at real scale; that's why the game's billboard clouds are exempt from it.
+        if (uOw>0.5){ float du=t*vz*uUpw; lum=mix(uSkyHor, lum, (uCFog>0.5 && uFogK>0.0) ? exp(-(uFogK*du)*(uFogK*du)) : exp(-uHaze*t)); }
+        float tr=exp(-sig*ds*uM);
         col+=T*lum*(1.0-tr); T*=tr;
       }
       t+=ds;
@@ -354,26 +987,49 @@ void main(){
   o=vec4(pow(c,vec3(1.0/2.2)),1.0);
 }`;
 
-// debug slice: an x-y (horizontal x, height y) cross-section at z = uSlz, drawn into a corner rectangle
-const F_SLICE = HEAD + `uniform sampler2D tA, tB; uniform vec4 uRect; uniform int uField, uSlz; uniform float uLcl;
+// temporal smoothing: average the jittered frames while the view holds still (the raymarch's per-pixel randomness
+// converges away); the blit shows the average
+const F_ACCUM = HEAD + `uniform sampler2D tCur, tPrev; uniform float uAlpha;
+void main(){ ivec2 p=ivec2(gl_FragCoord.xy); o=mix(texelFetch(tPrev,p,0), texelFetch(tCur,p,0), uAlpha); }`;
+const F_BLIT = HEAD + `uniform sampler2D tSrc;
+void main(){ o=texelFetch(tSrc, ivec2(gl_FragCoord.xy), 0); }`;
+
+// debug slice drawn into a corner rectangle: side view (x by height at z = index) or top view (x by z at level = index),
+// with optional wind arrows (they thicken toward the head)
+const F_SLICE = HEAD + `uniform sampler2D tA, tB, tP, tMeans; uniform vec4 uRect; uniform int uField, uSlz, uView, uArrows; uniform float uLcl, uPa;
 vec3 div3(float v){ v=clamp(v,-1.0,1.0); return v>0.0 ? mix(vec3(0.04,0.05,0.07), vec3(1.0,0.32,0.18), v) : mix(vec3(0.04,0.05,0.07), vec3(0.25,0.55,1.0), -v); }
 bool cloudy(ivec3 i){ return F(tB,i).y>1e-5; }
 void main(){
   vec2 uv=(gl_FragCoord.xy-uRect.xy)/uRect.zw;
-  vec2 cc=uv*64.0; ivec3 i=ivec3(int(cc.x), int(cc.y), uSlz);
-  vec4 a=F(tA,i), b=F(tB,i); vec4 bs=base0(i.y);
+  vec2 cc=uv*64.0;
+  ivec3 i = uView==0 ? ivec3(int(cc.x), int(cc.y), uSlz) : ivec3(int(cc.x), uSlz, int(cc.y));
+  ivec3 dv = uView==0 ? DYI : DZI;
+  vec4 a=F(tA,i), b=F(tB,i), bs=base0(i.y), mn=texelFetch(tMeans,ivec2(i.y,0),0);
   vec3 c;
   if (uField==0)      c=mix(vec3(0.04,0.07,0.12), vec3(1.0), 1.0-exp(-b.y*1000.0*3.0));
-  else if (uField==1) c=div3(a.w/1.0);
+  else if (uField==1) c=div3(a.w-mn.z);
   else if (uField==2){ float T=(bs.x+a.w)*bs.w; c=div3((b.x/qsat(T,bs.z)-1.0)/0.02); }
   else if (uField==3) c=div3(velC(tA,i).y/3.0);
-  else                c=div3((b.x-bs.y)*1000.0/2.0);
-  bool cl=cloudy(i);
-  vec2 fr=fract(cc);
-  if (fr.x<0.22 && cloudy(i-ivec3(1,0,0))!=cl) c=vec3(1);
-  if (fr.y<0.22 && cloudy(i-ivec3(0,1,0))!=cl) c=vec3(1);
-  float zl=uv.y*64.0*uDx;
-  if (uLcl>0.0 && abs(zl-uLcl)<12.0 && fract(uv.x*16.0)<0.6) c=vec3(1.0,0.86,0.2);
+  else if (uField==4) c=div3((b.x-base2(i.y).y)*1000.0/2.0);
+  else if (uField==5) c=mix(vec3(0.04,0.06,0.1), vec3(0.4,0.7,1.0), 1.0-exp(-b.z*1000.0*2.5));
+  else if (uField==6) c=div3((F(tP,i).y-mn.w)*uPa/6.0);
+  else { vec3 v=velC(tA,i); c=mix(vec3(0.03,0.05,0.09), vec3(0.95,0.85,0.35), clamp(length(v.xz)/10.0,0.0,1.0)); }
+  bool cl=cloudy(i); vec2 fr=fract(cc);
+  if (fr.x<0.22 && cloudy(i-DXI)!=cl) c=vec3(1);
+  if (fr.y<0.22 && cloudy(i-dv)!=cl) c=vec3(1);
+  if (uView==0){ float zl=uv.y*64.0*uDx; if (uLcl>0.0 && abs(zl-uLcl)<uDx*0.25 && fract(uv.x*16.0)<0.6) c=vec3(1.0,0.86,0.2); }
+  if (uArrows==1){                                             // one arrow per 4x4 cells, full length at 5 m/s
+    vec2 cell=floor(cc/4.0)*4.0+2.0;
+    ivec3 ic = uView==0 ? ivec3(int(cell.x), int(cell.y), uSlz) : ivec3(int(cell.x), uSlz, int(cell.y));
+    vec3 v=velC(tA,ic); vec2 a2 = uView==0 ? v.xy : v.xz;
+    float sp=length(a2);
+    if (sp>0.05){
+      vec2 dir=a2/sp; float len=min(sp/5.0,1.0)*3.6;
+      vec2 q=cc-cell; float t=clamp(dot(q,dir)+len*0.5, 0.0, len);
+      float dd=length(q-dir*(t-len*0.5));
+      if (dd<mix(0.06,0.34,t/max(len,1e-3))) c=mix(c, vec3(1.0,1.0,0.9), 0.85);
+    }
+  }
   if (min(min(uv.x,uv.y),min(1.0-uv.x,1.0-uv.y))<0.004) c=vec3(0.3,0.45,0.55);
   o=vec4(c,1);
 }`;
@@ -381,44 +1037,90 @@ void main(){
 // ---------- GL plumbing ----------
 function compile(type, src){ const s=gl.createShader(type); gl.shaderSource(s, src.trim()); gl.compileShader(s);
   if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)) fail(gl.getShaderInfoLog(s)+'\n\n'+src.split('\n').map((l,i)=>(i+1)+': '+l).join('\n')); return s; }
-function program(fsrc){ const p=gl.createProgram(); gl.attachShader(p,compile(gl.VERTEX_SHADER,VERT)); gl.attachShader(p,compile(gl.FRAGMENT_SHADER,fsrc)); gl.bindAttribLocation(p,0,'aPos'); gl.linkProgram(p);
+function program(fsrc, vsrc=VERT){ const p=gl.createProgram(); gl.attachShader(p,compile(gl.VERTEX_SHADER,vsrc)); gl.attachShader(p,compile(gl.FRAGMENT_SHADER,fsrc)); gl.bindAttribLocation(p,0,'aPos'); gl.linkProgram(p);
   if(!gl.getProgramParameter(p,gl.LINK_STATUS)) fail(gl.getProgramInfoLog(p)); return { p, loc:{} }; }
-const PR = { init:program(F_INIT), adP:program(F_ADV_P), adC:program(F_ADV_C), phys:program(F_PHYS), vort:program(F_VORT),
-  diff:program(F_DIFF), div:program(F_DIV), pois:program(F_POIS), prs:program(F_PRS), pack:program(F_PACK), render:program(F_RENDER), slice:program(F_SLICE) };
+const PR = { init:program(F_INIT), scal:program(F_SCAL), adP:program(F_ADV_P), adC:program(F_ADV_C), phys:program(F_PHYS), surf:program(F_SURF), colx:program(F_COLX), shade:program(F_SHADE),
+  vort:program(F_VORT), vfilt:program(F_VFILT), keddy:program(F_KEDDY), diff:program(F_DIFF), div:program(F_DIV), pois:program(F_POIS), prs:program(F_PRS), pack:program(F_PACK),
+  mean1:program(F_MEAN1), mean2:program(F_MEAN2), fluxnow:program(F_FLUXNOW), pupd:program(F_PUPD), part:program(F_PARTF, V_PART),
+  render:program(F_RENDER), slice:program(F_SLICE), accum:program(F_ACCUM), blit:program(F_BLIT), shift:program(F_SHIFT), gpack:program(F_GPACK), qmax1:program(F_QMAX1), qmax2:program(F_QMAX2),
+  noise3:program(F_NOISE3), pack2:program(F_PACK2), fslice:program(F_FSLICE) };
 
 const vbo=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,vbo);
 gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);
 gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
 
-function makeTex(){ const t=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,t);
-  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,RES2,RES2,0,gl.RGBA,gl.FLOAT,null);
+function makeTex(w=RES2, h=RES2){ const t=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,t);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,w,h,0,gl.RGBA,gl.FLOAT,null);
   gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
   const f=gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER,f);
   gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,t,0);
   return { tex:t, fbo:f }; }
-function pingpong(){ return { a:makeTex(), b:makeTex(), swap(){ const x=this.a; this.a=this.b; this.b=x; } }; }
-const A=pingpong(), B=pingpong(), P=pingpong(), TA=makeTex(), TB=makeTex();
+function pingpong(w, h){ return { a:makeTex(w,h), b:makeTex(w,h), swap(){ const x=this.a; this.a=this.b; this.b=x; } }; }
+// a 64x64 half-float target that samples bilinear + wrapping (the overworld's per-sim ground pack)
+function makeTexL(w, h){ const t=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,t);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA16F,w,h,0,gl.RGBA,gl.HALF_FLOAT,null);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.REPEAT); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.REPEAT);
+  const f=gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER,f); gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,t,0);
+  return { tex:t, fbo:f }; }
+// ONE SIM's state. The passes read these module-level names; bindSim() points them at another sim's textures, which is
+// how the overworld's far-field sims (same scenario, own seed and ground) reuse every pass unchanged.
+let A=pingpong(), B=pingpong(), P=pingpong(), TA=makeTex();
+let S=pingpong(N,N), X=pingpong(N,N), shadeTex=makeTex(N,N), M1=makeTex(N,N), MEANS=makeTex(N,1), gpack=makeTexL(N,N);
+const FN=makeTex(N,N);                                          // readback scratch: the main sim's only
+const PT=pingpong(128,128), PART_N=128*128;
 
-// base-state texture: 64 x 2
+// base-state texture: 64 x 4 (row 2 = CPU level means refreshed by every readback, row 3 = background wind)
 const baseTex={ tex:gl.createTexture() };
-{ const d=new Float32Array(N*2*4);
-  for (let j=0;j<N;j++){ d.set([BASE.thb[j],BASE.qvb[j],BASE.pb[j],BASE.pi[j]], j*4); d.set([BASE.dth[j],0,0,0], (N+j)*4); }
-  gl.bindTexture(gl.TEXTURE_2D,baseTex.tex); gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,N,2,0,gl.RGBA,gl.FLOAT,d);
-  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST); }
+function windVec(){ const S=+el.wind.value, f=+el.wdir.value*Math.PI/180; return [-S*Math.sin(f), -S*Math.cos(f)]; }   // from-direction -> (east, north)
+function uploadBase(){
+  const d=new Float32Array(N*4*4), w=windVec();
+  for (let j=0;j<N;j++){ d.set([BASE.thb[j],BASE.qvb[j],BASE.pb[j],BASE.pi[j]], j*4); d.set([BASE.dth[j],BASE.rho[j],BASE.wls[j],0], (N+j)*4);
+    d.set([0,BASE.qvb[j],0,0], (2*N+j)*4); d.set([w[0],w[1],0,0], (3*N+j)*4); }
+  gl.bindTexture(gl.TEXTURE_2D,baseTex.tex); gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,N,4,0,gl.RGBA,gl.FLOAT,d);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
+  baseTex.ready=true;
+}
+function uploadWind(){ if (!baseTex.ready) return; const d=new Float32Array(N*4), w=windVec(); for (let j=0;j<N;j++) d.set([w[0],w[1],0,0], j*4);
+  gl.bindTexture(gl.TEXTURE_2D,baseTex.tex); gl.texSubImage2D(gl.TEXTURE_2D,0,0,3,N,1,gl.RGBA,gl.FLOAT,d); }
 
 // 3D cloud texture for rendering: x,z repeat (periodic field), y clamp
-const cloud3={ tex:gl.createTexture(), target:gl.TEXTURE_3D };
-gl.bindTexture(gl.TEXTURE_3D,cloud3.tex);
-gl.texImage3D(gl.TEXTURE_3D,0,gl.RG16F,N,N,N,0,gl.RG,gl.HALF_FLOAT,null);
-gl.texParameteri(gl.TEXTURE_3D,gl.TEXTURE_MIN_FILTER,gl.LINEAR); gl.texParameteri(gl.TEXTURE_3D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
-gl.texParameteri(gl.TEXTURE_3D,gl.TEXTURE_WRAP_S,gl.REPEAT); gl.texParameteri(gl.TEXTURE_3D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_3D,gl.TEXTURE_WRAP_R,gl.REPEAT);
+function make3D(){ const t={ tex:gl.createTexture(), target:gl.TEXTURE_3D };
+  gl.bindTexture(gl.TEXTURE_3D,t.tex);
+  gl.texImage3D(gl.TEXTURE_3D,0,gl.RG16F,N,N,N,0,gl.RG,gl.HALF_FLOAT,null);
+  gl.generateMipmap(gl.TEXTURE_3D);                               // allocate the mip chain; refreshed after every pack
+  gl.texParameteri(gl.TEXTURE_3D,gl.TEXTURE_MIN_FILTER,gl.LINEAR_MIPMAP_LINEAR); gl.texParameteri(gl.TEXTURE_3D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_3D,gl.TEXTURE_WRAP_S,gl.REPEAT); gl.texParameteri(gl.TEXTURE_3D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_3D,gl.TEXTURE_WRAP_R,gl.REPEAT);
+  return t; }
+let cloud3=make3D();
 const packFbo=gl.createFramebuffer();
+// the resolved wind + |vorticity| per sim, for the sub-grid detail (no mips: read at its own resolution)
+function make3V(){ const t={ tex:gl.createTexture(), target:gl.TEXTURE_3D };
+  gl.bindTexture(gl.TEXTURE_3D,t.tex); gl.texImage3D(gl.TEXTURE_3D,0,gl.RGBA16F,N,N,N,0,gl.RGBA,gl.HALF_FLOAT,null);
+  gl.texParameteri(gl.TEXTURE_3D,gl.TEXTURE_MIN_FILTER,gl.LINEAR); gl.texParameteri(gl.TEXTURE_3D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_3D,gl.TEXTURE_WRAP_S,gl.REPEAT); gl.texParameteri(gl.TEXTURE_3D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_3D,gl.TEXTURE_WRAP_R,gl.REPEAT);
+  return t; }
+let vel3=make3V();
+// the 64^3 noise tile, drawn once
+const noise3={ tex:gl.createTexture(), target:gl.TEXTURE_3D };
+{ gl.bindTexture(gl.TEXTURE_3D,noise3.tex); gl.texImage3D(gl.TEXTURE_3D,0,gl.R8,64,64,64,0,gl.RED,gl.UNSIGNED_BYTE,null);
+  gl.texParameteri(gl.TEXTURE_3D,gl.TEXTURE_MIN_FILTER,gl.LINEAR); gl.texParameteri(gl.TEXTURE_3D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+  for (const w of [gl.TEXTURE_WRAP_S,gl.TEXTURE_WRAP_T,gl.TEXTURE_WRAP_R]) gl.texParameteri(gl.TEXTURE_3D,w,gl.REPEAT);
+  const fb=gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER,fb); gl.useProgram(PR.noise3.p); gl.viewport(0,0,64,64);
+  for (let z=0;z<64;z++){ gl.framebufferTextureLayer(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,noise3.tex,0,z); gl.uniform1i(U(PR.noise3,'uLayer'),z); gl.drawArrays(gl.TRIANGLES,0,3); }
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null); gl.deleteFramebuffer(fb); }
 
-// surface flux map: R = heat multiplier, G = moisture multiplier (both mean 1), B = lake mask (render only)
-const fluxTex={ tex:gl.createTexture() };
-let fluxSumG=N*N;
+// surface map: R = heat multiplier, G = moisture multiplier, B = water (lakes; or the sea in the island scenario)
+let fluxTex={ tex:gl.createTexture() };
 function rngFrom(seed){ let s=seed>>>0; return ()=>{ s=(s*1664525+1013904223)>>>0; return s/4294967296; }; }
 let seed=(Math.random()*1e9)|0;
+let landMask=new Float32Array(N*N).fill(1);
+// SIMS[0] is the main sim (bound by default; everything the panel measures); 1..3 are the overworld's far-field sims
+const SIMS=[{ A, B, P, TA, S, X, shadeTex, M1, MEANS, gpack, cloud3, vel3, fluxTex, landMask, seed, stepN:0, live:true }];
+function bindSim(s){ A=s.A; B=s.B; P=s.P; TA=s.TA; S=s.S; X=s.X; shadeTex=s.shadeTex; M1=s.M1; MEANS=s.MEANS; gpack=s.gpack;
+  cloud3=s.cloud3; vel3=s.vel3; fluxTex=s.fluxTex; landMask=s.landMask; seed=s.seed; stepN=s.stepN; }
+function keepSim(s){ s.seed=seed; s.stepN=stepN; }               // the scalars the passes change (textures swap inside their objects)
+function withSim(s, fn){ const m=SIMS[0]; keepSim(m); bindSim(s); try { fn(); } finally { keepSim(s); bindSim(m); } }
 function buildFlux(){
   const rnd=rngFrom(seed^0x5bd1e995), patch=+el.patch.value;
   const field=()=>{ const m=[]; for(let k=0;k<7;k++){ const kx=Math.floor(rnd()*4)-1, kz=1+Math.floor(rnd()*3);
@@ -427,19 +1129,27 @@ function buildFlux(){
     for(let z=0;z<N;z++) for(let x=0;x<N;x++){ let s=0; for(const [a,b,ph,amp] of m) s+=amp*Math.cos(6.2832*(a*x+b*z)/N+ph); f[x+N*z]=s; mx=Math.max(mx,Math.abs(s)); }
     for(let i=0;i<f.length;i++) f[i]/=mx; return f; };
   const n1=field(), n2=field();
-  const heat=new Float32Array(N*N), moist=new Float32Array(N*N), lake=new Float32Array(N*N);
-  let sh=0, sm=0;
-  for(let i=0;i<N*N;i++){ const lk=Math.min(1,Math.max(0,(n2[i]-0.45)/0.25)); lake[i]=lk*patch;
-    heat[i]=Math.max(0.05, 1+patch*(0.9*n1[i]-0.6*lk)); moist[i]=Math.max(0.05, 1+patch*(0.4*n1[i]+1.2*lk)); sh+=heat[i]; sm+=moist[i]; }
-  const d=new Float32Array(N*N*4); fluxSumG=0;
-  for(let i=0;i<N*N;i++){ const h=heat[i]*N*N/sh, m=moist[i]*N*N/sm; d[i*4]=h; d[i*4+1]=m; d[i*4+2]=lake[i]; d[i*4+3]=1; fluxSumG+=m; }
+  const d=new Float32Array(N*N*4);
+  if (SC.map==='island'){                                        // one island with a wobbly coast
+    const R=N*(SC.islandR||0.22);
+    for (let z=0;z<N;z++) for (let x=0;x<N;x++){ const i=x+N*z;
+      const ax=Math.abs(x+0.5-N/2), az2=Math.abs(z+0.5-N/2), r=Math.hypot(Math.min(ax,N-ax), Math.min(az2,N-az2))+2.2*n1[i];
+      const land=Math.min(1,Math.max(0,(R+1.2-r)/2.4));
+      d[i*4]=land*Math.max(0.1,1+0.35*patch*n2[i]); d[i*4+1]=land*Math.max(0.1,1-0.25*patch*n2[i]); d[i*4+2]=1-land; d[i*4+3]=1; landMask[i]=land; }
+  } else {
+    const heat=new Float32Array(N*N), moist=new Float32Array(N*N), lake=new Float32Array(N*N);
+    let sh=0, sm=0;
+    for(let i=0;i<N*N;i++){ const lk=Math.min(1,Math.max(0,(n2[i]-0.45)/0.25)); lake[i]=lk*patch;
+      heat[i]=Math.max(0.05, 1+patch*(0.9*n1[i]-0.6*lk)); moist[i]=Math.max(0.05, 1+patch*(0.4*n1[i]+1.2*lk)); sh+=heat[i]; sm+=moist[i]; }
+    for(let i=0;i<N*N;i++){ d[i*4]=heat[i]*N*N/sh; d[i*4+1]=moist[i]*N*N/sm; d[i*4+2]=lake[i]; d[i*4+3]=1; landMask[i]=1-lake[i]; }
+  }
   gl.bindTexture(gl.TEXTURE_2D,fluxTex.tex); gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA16F,N,N,0,gl.RGBA,gl.FLOAT,d);
   gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.REPEAT); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.REPEAT);
 }
 
 function U(pr,n){ let l=pr.loc[n]; if(l===undefined) l=pr.loc[n]=gl.getUniformLocation(pr.p,n); return l; }
-function run(pr, fbo, w, h, tex, uni){
+function bindProg(pr, tex, uni){
   gl.useProgram(pr.p); let unit=0;
   const all=Object.assign({ tBase:baseTex }, tex);
   for (const k in all){ const t=all[k]; gl.activeTexture(gl.TEXTURE0+unit); gl.bindTexture(t.target||gl.TEXTURE_2D, t.tex); gl.uniform1i(U(pr,k),unit); unit++; }
@@ -449,99 +1159,272 @@ function run(pr, fbo, w, h, tex, uni){
     else if (v.i!==undefined) gl.uniform1i(l,v.i);
     else if (v.u!==undefined) gl.uniform1ui(l,v.u);
     else if (v.length===2) gl.uniform2fv(l,v); else if (v.length===3) gl.uniform3fv(l,v); else gl.uniform4fv(l,v); }
-  gl.bindFramebuffer(gl.FRAMEBUFFER,fbo); gl.viewport(0,0,w,h); gl.drawArrays(gl.TRIANGLES,0,3);
 }
+function run(pr, fbo, w, h, tex, uni){ bindProg(pr, tex, uni); gl.bindFramebuffer(gl.FRAMEBUFFER,fbo); gl.viewport(0,0,w,h); gl.drawArrays(gl.TRIANGLES,0,3); }
 
 // ---------- controls ----------
-const ids=['subs','dt','flux','patch','kdiff','tau','vort','iters','sunaz','sunel','ext','expo','tiles','rscale','slz'];
+document.getElementById('ver').textContent=WCL_BUILD;
+const ids=['tcount','wind','wdir','subs','dt','flux','patch','kdiff','hyper','tau','vort','iters','thr','revap','rad','sunaz','sunel','ext','smooth','fdet','expo','tiles','rscale','slz'];
 const el={}; ids.forEach(id=>{ el[id]=document.getElementById(id); const vv=document.getElementById(id+'_v');
   const upd=()=>{ const v=+el[id].value; vv.textContent = Math.abs(v)<0.1&&v!==0 ? v.toFixed(4) : (Number.isInteger(v)?v:v.toFixed(2)); };
   el[id].addEventListener('input',upd); upd(); });
-el.patch.addEventListener('change',buildFlux);
+const chk={}; ['tracers','coriolis','drag','showchain','latent','sunk','daynight','taa','cold','spin','arrows','showslice'].forEach(id=>chk[id]=document.getElementById(id));
+const fieldEl=document.getElementById('field'), sviewEl=document.getElementById('sview'), scenEl=document.getElementById('scen'), tcolorEl=document.getElementById('tcolor');
+const chainBox=document.getElementById('chainbox'), chainEl=document.getElementById('chain');
+el.patch.addEventListener('change',()=>buildFluxAll());
 el.rscale.addEventListener('input',resize);
-const latentEl=document.getElementById('latent'), spinEl=document.getElementById('spin'), fieldEl=document.getElementById('field'), showSliceEl=document.getElementById('showslice');
+el.wind.addEventListener('input',uploadWind); el.wdir.addEventListener('input',uploadWind);
+chk.showchain.addEventListener('change',()=>{ chainBox.style.display=chk.showchain.checked?'block':'none'; });
 const pauseBtn=document.getElementById('pause');
 let paused=false, simDt=2;
 function setPaused(p){ paused=p; pauseBtn.textContent=paused?'resume':'pause'; }
 pauseBtn.onclick=()=>setPaused(!paused);
 document.getElementById('reset').onclick=()=>reset();
 document.getElementById('kick').onclick=()=>simulate(Math.round(1800/(+el.dt.value)));
+for (const k in SCENARIOS){ const op=document.createElement('option'); op.value=k; op.textContent=SCENARIOS[k].label; scenEl.appendChild(op); }
+scenEl.addEventListener('change',()=>applyScenario(scenEl.value));
+chk.daynight.addEventListener('change',()=>{ if (!chk.daynight.checked && +el.sunel.value<0.2){ setSlider('sunaz',0.6); setSlider('sunel',0.75); } });
+function setSlider(id,v){ el[id].value=v; el[id].dispatchEvent(new Event('input')); }
+// ---------- remembered settings: per scenario, in this browser. A load stacks page defaults -> the scenario's own
+// values -> a preset's `ui` -> the viewer's saved tweaks. Only real user input saves (scripted dispatches don't bubble).
+let restoring=false, saveTimer=0, DEFAULT_UI=null;
+const UI_KEY=k=>'wcl_ui3:'+k;
+function uiState(){ const s={ sliders:{}, checks:{}, selects:{ tcolor:tcolorEl.value, field:fieldEl.value, sview:sviewEl.value }, cam:{ az, elv, dist, tgt:[...tgt] } };
+  for (const id of ids) s.sliders[id]=+el[id].value; for (const id in chk) s.checks[id]=chk[id].checked; return s; }
+function applyUi(u){                                              // a saved uiState(), or a preset's flat { id: value, cam: {...} }
+  if (!u) return;
+  const flat = u.sliders ? Object.assign({}, u.sliders, u.checks, u.selects, { cam:u.cam }) : u;
+  for (const id in flat){ const v=flat[id];
+    if (el[id]) setSlider(id, v); else if (chk[id]) chk[id].checked=!!v;
+    else if (id==='tcolor') tcolorEl.value=String(v); else if (id==='field') fieldEl.value=String(v); else if (id==='sview') sviewEl.value=String(v);
+    else if (id==='cam' && v){ az=v.az; elv=v.elv; dist=v.dist; if (v.tgt) tgt.splice(0,3,...v.tgt); } }
+  chainBox.style.display=chk.showchain.checked?'block':'none';
+}
+function saveUi(){ if (restoring) return; clearTimeout(saveTimer);
+  saveTimer=setTimeout(()=>{ try { localStorage.setItem(UI_KEY(scenEl.value), JSON.stringify(uiState())); } catch(e) {} }, 300); }
+const panelEl=document.getElementById('panel');
+panelEl.addEventListener('input', e=>{ if (e.target.id!=='scen') saveUi(); });
+panelEl.addEventListener('change', e=>{ if (e.target.id!=='scen') saveUi(); });
+document.getElementById('defaults').onclick=()=>{ try { localStorage.removeItem(UI_KEY(scenEl.value)); } catch(e) {} applyScenario(scenEl.value); };
+function applyScenario(key, doReset=true){
+  if (!SCENARIOS[key]) key='island';
+  SC=SCENARIOS[key]; scenEl.value=key;
+  DX=SC.dx; H=N*DX; PSURF=SC.psurf;
+  restoring=true;
+  if (DEFAULT_UI) applyUi(DEFAULT_UI);                         // so one preset's extras don't leak into the next scenario
+  setSlider('flux',SC.flux); setSlider('kdiff',SC.K); setSlider('dt',SC.dt); setSlider('thr',SC.thr); setSlider('rad',SC.rad);
+  el.wind.value=SC.wind.S; el.wind.dispatchEvent(new Event('input')); el.wdir.value=SC.wind.from; el.wdir.dispatchEvent(new Event('input'));
+  chk.daynight.checked=SC.day.on;
+  if (!SC.day.on){ setSlider('sunaz',0.6); setSlider('sunel',0.75); }   // don't inherit a clock-driven dawn sun (it would starve the fluxes)
+  if (SC.ui) applyUi(SC.ui);
+  let saved=null; try { saved=JSON.parse(localStorage.getItem(UI_KEY(key))||'null'); } catch(e) {}
+  if (saved) applyUi(saved);
+  restoring=false;
+  computeBase(); uploadBase();
+  document.getElementById('scsub').textContent=`${SC.short} · ${DX} m cells · ${(H/1000).toFixed(1)} km cube`;
+  document.getElementById('scdesc').textContent=SC.desc;
+  try { localStorage.setItem('wcl_scen3', key); } catch(e) {}
+  if (doReset) reset();
+}
 
 // ---------- simulation ----------
-let simTime=0, W0=null, Wadded=0, stats=null, lastLcl=0, yBand=[0,H];
-function reset(newSeed=true){
+let simTime=0, W0=0, stats=null, lastLcl=0, yBand=[0,H], stepN=0, partReset=true;
+// ---------- sun: from the sliders, or from the sim clock (a summer day at the scenario's latitude) ----------
+const DECL=20*Math.PI/180;
+function clockHour(){ return (SC.day.start + simTime/3600) % 24; }
+function sunDir(){
+  if (chk.daynight.checked){
+    const ha=(clockHour()-12)*Math.PI/12, lat=SC.lat*Math.PI/180;   // hour angle
+    return [-Math.cos(DECL)*Math.sin(ha),                                              // x = east
+            Math.sin(DECL)*Math.sin(lat)+Math.cos(DECL)*Math.cos(ha)*Math.cos(lat),     // y = up
+            Math.sin(DECL)*Math.cos(lat)-Math.cos(DECL)*Math.cos(ha)*Math.sin(lat)];    // z = north
+  }
+  const se=+el.sunel.value, sa=+el.sunaz.value; return [Math.cos(sa)*Math.cos(se), Math.sin(se), Math.sin(sa)*Math.cos(se)];
+}
+const smooth01=(a,b,x)=>{ const t=Math.min(1,Math.max(0,(x-a)/(b-a))); return t*t*(3-2*t); };
+// sunlight, skylight and sky colours for a sun height (sin elevation y): reddens at low sun, fades through twilight
+function skyLight(y){
+  const vis=smooth01(-0.03,0.05,y), warm=1-smooth01(0.0,0.35,y), dl=smooth01(-0.18,0.12,y), mixv=(a,b,t)=>a.map((v,i)=>v+(b[i]-v)*t);
+  return { sun:[1.0, 0.95-0.5*warm, 0.87-0.62*warm].map(v=>v*2.6*vis),
+           amb:[0.32,0.46,0.75].map((v,i)=>v*0.55*(0.11+0.89*dl) + [0.10,0.05,0.02][i]*warm*vis*0.6),   // night keeps a moonlit floor
+           hor:mixv([0.03,0.04,0.08],[0.62,0.74,0.9],dl).map((v,i)=>v+[0.55,0.25,0.05][i]*warm*vis*0.7),
+           zen:mixv([0.008,0.012,0.035],[0.13,0.3,0.62],dl), day:dl };
+}
+function shade(){
+  const sd=sunDir();
+  run(PR.shade, shadeTex.fbo, N,N, { tB:B.a }, { uSunDir:sd, uElev:Math.min(1.45, Math.max(0, sd[1]/Math.sin(0.75))) });
+}
+function clearTex(t){ gl.bindFramebuffer(gl.FRAMEBUFFER,t.fbo); gl.clearColor(0,0,0,0); gl.clear(gl.COLOR_BUFFER_BIT); }
+function resetState(newSeed){                                    // the bound sim back to its sounding
   if (newSeed) seed=(Math.random()*1e9)|0;
   buildFlux();
-  run(PR.init, A.a.fbo, RES2,RES2, {}, { uOut:{i:0}, uSeed:{u:seed>>>0} });
-  run(PR.init, B.a.fbo, RES2,RES2, {}, { uOut:{i:1}, uSeed:{u:seed>>>0} });
-  gl.bindFramebuffer(gl.FRAMEBUFFER,P.a.fbo); gl.clearColor(0,0,0,0); gl.clear(gl.COLOR_BUFFER_BIT);
-  simTime=0; Wadded=0; W0=null; stats=null;
+  run(PR.init, A.a.fbo, RES2,RES2, {}, { uOut:{i:0}, uSeed:{u:seed>>>0}, uPertTop:SC.pert });
+  run(PR.init, B.a.fbo, RES2,RES2, {}, { uOut:{i:1}, uSeed:{u:seed>>>0}, uPertTop:SC.pert });
+  clearTex(P.a); clearTex(S.a); clearTex(S.b); clearTex(X.a); clearTex(X.b);
+  computeMeans(); shade();
+  stepN=0;
+}
+function reset(newSeed=true){
+  simDt=+el.dt.value;
+  resetState(newSeed);
+  for (let i=1;i<SIMS.length;i++) if (SIMS[i].live){ withSim(SIMS[i], ()=>resetState(true)); SIMS[i].dirty=true; }   // far-field sims restart with it
+  simTime=0; stats=null; yBand=[0,H]; partReset=true; acc.reset=true;
   W0=readAndAnalyze().W;
 }
-function substep(){
-  simDt=+el.dt.value;
+const coriolisF=()=>chk.coriolis.checked ? 2*OMEGA*Math.sin(SC.lat*Math.PI/180) : 0;
+function physUniforms(){
   const fmul=+el.flux.value, tau=+el.tau.value;
-  // 1. advect everything by the current (divergence-free) velocity
-  run(PR.adP, TA.fbo, RES2,RES2, { tVel:A.a, tSrc:A.a }, { uStag:{i:1} });
-  run(PR.adP, TB.fbo, RES2,RES2, { tVel:A.a, tSrc:B.a }, { uStag:{i:0} });
-  run(PR.adC, A.b.fbo, RES2,RES2, { tVel:A.a, tSrc:A.a, tPred:TA }, { uStag:{i:1} });
-  run(PR.adC, B.b.fbo, RES2,RES2, { tVel:A.a, tSrc:B.a, tPred:TB }, { uStag:{i:0} });
-  A.swap(); B.swap();
-  // 1b. subgrid eddy diffusion
-  const K=+el.kdiff.value;
-  if (K>0){
-    run(PR.diff, A.b.fbo, RES2,RES2, { tSrc:A.a }, { uK:K, uStag:{i:1} });
-    run(PR.diff, B.b.fbo, RES2,RES2, { tSrc:B.a }, { uK:K, uStag:{i:0} });
+  return { uFth:SC.fth*fmul, uFq:SC.fq*fmul, uSunK:chk.sunk.checked?1:0, uLatent:chk.latent.checked?1:0,
+    uRelax: tau>0?Math.min(1,simDt/tau):1, uSpongeZ:H*0.86, uSpongeRate:1/60,
+    uAutoThr:+el.thr.value*1e-3, uRainEvap:+el.revap.value, uRad:+el.rad.value/86400, uRadZ1:SC.radZ[0], uRadZ2:SC.radZ[1],
+    uNudge:[SC.nudge[0], SC.nudge[1], SC.nudge[2]*3600],
+    uDrain:1/(3*3600),                    // puddles also soak away over ~3 h
+    uSeaBulk:SC.sea?1:0, uSST:SC.sst, uExSfc:Math.pow(PSURF/P0,RD/CP), uPsfc:PSURF, uNightCool:SC.nightCool, uSunUp:smooth01(-0.02,0.2,sunDir()[1]),
+    uF:coriolisF(), uCd:chk.drag.checked?1.3e-3:0, uWindRelax:1/1800,     // the box's mean wind follows the background over ~30 min
+    uMarine:SC.sea?1/(SC.marineTau||1)/3600:0, uMarineZ:SC.marineZ||800 };
+}
+function computeMeans(){
+  run(PR.mean1, M1.fbo, N,N, { tA:A.a, tP:P.a });
+  run(PR.mean2, MEANS.fbo, N,1, { tM1:M1 });
+}
+function substep(clock=true){
+  simDt=+el.dt.value;
+  if (stepN++%4===0) shade();
+  // 1. advect by the current (divergence-free) velocity: scalars conservatively, axis by axis; then momentum
+  const order = (stepN&1) ? [0,1,2] : [2,1,0];
+  for (const ax of order){ run(PR.scal, B.b.fbo, RES2,RES2, { tVel:A.a, tSrc:B.a }, { uAxis:{i:ax}, uMask:[1,1,1,0] }); B.swap(); }
+  for (const ax of order){ run(PR.scal, A.b.fbo, RES2,RES2, { tVel:A.a, tSrc:A.a }, { uAxis:{i:ax}, uMask:[0,0,0,1] }); A.swap(); }
+  run(PR.adP, TA.fbo, RES2,RES2, { tVel:A.a, tSrc:A.a });
+  run(PR.adC, A.b.fbo, RES2,RES2, { tVel:A.a, tSrc:A.a, tPred:TA });
+  A.swap();
+  // 1b. subgrid eddy mixing (Smagorinsky-Lilly K into P.z, then conservative face fluxes)
+  const cs=+el.kdiff.value;
+  if (cs>0){
+    run(PR.keddy, P.b.fbo, RES2,RES2, { tA:A.a, tB:B.a, tP:P.a }, { uCs:cs, uKsfc:0.4*DX }); P.swap();   // K_sfc ~ kappa w* z, w* ~ 1 m/s
+    run(PR.diff, A.b.fbo, RES2,RES2, { tSrc:A.a, tP:P.a }, { uStag:{i:1} });
+    run(PR.diff, B.b.fbo, RES2,RES2, { tSrc:B.a, tP:P.a }, { uStag:{i:0} });
     A.swap(); B.swap();
   }
-  // 2-4. surface fluxes, microphysics, buoyancy, sponge
-  const pu={ uFth:F_TH*fmul, uFq:F_Q*fmul, uLatent:latentEl.checked?1:0, uRelax: tau>0?Math.min(1,simDt/tau):1, uSpongeZ:H*0.86, uSpongeRate:1/60 };
-  run(PR.phys, A.b.fbo, RES2,RES2, { tA:A.a, tB:B.a, tFlux:fluxTex }, Object.assign({ uOut:{i:0} }, pu));
-  run(PR.phys, B.b.fbo, RES2,RES2, { tA:A.a, tB:B.a, tFlux:fluxTex }, Object.assign({ uOut:{i:1} }, pu));
-  A.swap(); B.swap();
+  computeMeans();
+  // 2-4. ground exchange, rain fall, microphysics, buoyancy, rotation, drag, sponge; the ground catches what fell out
+  const pu=physUniforms(), ground={ tA:A.a, tB:B.a, tFlux:fluxTex, tSurf:S.a, tShade:shadeTex };
+  run(PR.phys, A.b.fbo, RES2,RES2, Object.assign({ tMeans:MEANS }, ground), Object.assign({ uOut:{i:0} }, pu));
+  run(PR.phys, B.b.fbo, RES2,RES2, Object.assign({ tMeans:MEANS }, ground), Object.assign({ uOut:{i:1} }, pu));
+  run(PR.surf, S.b.fbo, N,N, ground, pu);
+  run(PR.colx, X.b.fbo, N,N, { tB:B.a, tX:X.a }, pu);
+  A.swap(); B.swap(); S.swap(); X.swap();
   // 5. vorticity confinement (small)
   const eps=+el.vort.value;
   if (eps>0){ run(PR.vort, A.b.fbo, RES2,RES2, { tA:A.a }, { uEps:eps }); A.swap(); }
+  // damp 2-cell wiggles: vertically (the Lorenz-grid mode) and sideways (grid noise when eddy mixing is low). Per SECOND,
+  // so the damping doesn't change with dt (it was 0.02 per step: 6x stronger at dt 0.5 than at dt 3)
+  run(PR.vfilt, A.b.fbo, RES2,RES2, { tA:A.a }, { uEps4:Math.min(0.05,0.0067*simDt), uEps4h:Math.min(0.05,0.004*(+el.hyper.value)*simDt) }); A.swap();
   // 6. pressure projection
   run(PR.div, P.b.fbo, RES2,RES2, { tA:A.a, tP:P.a }); P.swap();
   const it=+el.iters.value;
   for (let k=0;k<it*2;k++){ run(PR.pois, P.b.fbo, RES2,RES2, { tP:P.a }, { uParity:{i:k&1} }); P.swap(); }
   run(PR.prs, A.b.fbo, RES2,RES2, { tA:A.a, tP:P.a }); A.swap();
-  simTime+=simDt;
-  Wadded+=F_Q*fmul/DX*simDt*fluxSumG;     // what the surface flux put in, in the same units as the grid sum
+  if (clock) simTime+=simDt;                                     // far-field sims ride the main sim's clock (and its sun)
 }
-function simulate(n){ for (let k=0;k<n;k++) substep(); }
-function packCloud(){
-  gl.bindFramebuffer(gl.FRAMEBUFFER,packFbo);
-  gl.useProgram(PR.pack.p);
-  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,B.a.tex); gl.uniform1i(U(PR.pack,'tB'),0);
-  gl.viewport(0,0,N,N);
-  for (let z=0;z<N;z++){
-    gl.framebufferTextureLayer(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,cloud3.tex,0,z);
-    gl.uniform1i(U(PR.pack,'uLayer'),z); gl.drawArrays(gl.TRIANGLES,0,3);
-  }
+// The far-field sims take satPace steps over the same span, spread through it: in step for the hooks (WC.minutes), ONE
+// per frame in the live loop. A far-field step costs ~1.9 ms (BOMEX's 3 substeps x 3 sims at full pace was +17 ms a
+// frame), so above 1 substep/frame (and through the 3x nights) the far field evolves slower than the near field.
+function simulate(n, satPace=n){
+  let done=0;
+  for (let k=0;k<n;k+=10){ const m=Math.min(10,n-k); for (let j=0;j<m;j++) substep();
+    const want=Math.round((k+m)/n*satPace); stepSats(want-done); done=want; }
 }
 
-// ---------- readback + acceptance metrics ----------
-const bufA=new Float32Array(RES2*RES2*4), bufB=new Float32Array(RES2*RES2*4);
-function parcelLCL(th, qv){ for (let z=25; z<H; z+=5){ const p=pbarAt(z), T=th*exnerAt(z); if (qv>=qsatAt(T,p)) return z; } return H; }
-function readAndAnalyze(){
+// ---------- far-field sims (overworld view) ----------
+// The overworld view sees ~23 km to the horizon, so ONE 6.4 km periodic sim put every cloud there ~50 times on a lattice,
+// all growing and raining in lockstep (owner: "the same pattern repeats over and over, at the same time in multiple
+// spaces"). No affordable box covers that view uniquely (the unique weather on screen is #sims x one box), so the far
+// field gets more independent weather (up to 3 more sims: same scenario and settings, own seed, own ground) and the
+// world is cut into ~4.6 km regions with wiggly soft borders, each showing one sim at its own random offset: no lattice,
+// and neighbouring regions grow and rain on their own clocks. The home region around the world origin is always the main
+// sim, unshifted (what the panel measures). They only run while the overworld view is on, and start as shifted copies
+// of the main sim over their own ground, which they drift away from within ~10-20 sim-minutes.
+const SAT_MAX=3;
+function satWant(){ return owOn() ? Math.max(0, Math.min(SAT_MAX, Math.round(+owEl.owsims.value)-1)) : 0; }
+function satLive(){ let n=0; for (let i=1;i<SIMS.length;i++) if (SIMS[i].live) n++; return n; }
+function makeSim(){ return { A:pingpong(), B:pingpong(), P:pingpong(), TA:makeTex(), S:pingpong(N,N), X:pingpong(N,N), shadeTex:makeTex(N,N),
+  M1:makeTex(N,N), MEANS:makeTex(N,1), gpack:makeTexL(N,N), cloud3:make3D(), vel3:make3V(), fluxTex:{ tex:gl.createTexture() },
+  landMask:new Float32Array(N*N).fill(1), seed:0, stepN:0, live:false }; }
+function cloneSat(s){
+  const m=SIMS[0], dx=(Math.random()*N)|0, dz=(Math.random()*N)|0;
+  const sh=(src,dst,flat)=>run(PR.shift, dst.fbo, flat?N:RES2, flat?N:RES2, { tSrc:src }, { uSx:{i:dx}, uSz:{i:dz}, uFlat:{i:flat?1:0} });
+  sh(m.A.a, s.A.a, 0); sh(m.B.a, s.B.a, 0); sh(m.P.a, s.P.a, 0); sh(m.S.a, s.S.a, 1);
+  withSim(s, ()=>{ seed=(Math.random()*1e9)|0; buildFlux(); clearTex(X.a); clearTex(X.b); stepN=0; computeMeans(); shade(); });
+  s.live=true; s.dirty=true; s.band=yBand.slice();               // a shifted copy of the main: its band, until measured
+}
+function syncSats(){                                             // grow / retire far-field sims to match the view and the slider
+  const want=satWant();
+  for (let i=1;i<=SAT_MAX;i++){
+    if (i<=want){ if (!SIMS[i]) SIMS[i]=makeSim(); if (!SIMS[i].live) cloneSat(SIMS[i]); }
+    else if (SIMS[i] && SIMS[i].live) SIMS[i].live=false;         // kept allocated; re-cloned when it comes back
+  }
+}
+// a far-field sim's cloud + rain height band [m, m], with readAndAnalyze's margins (its M1 is free scratch between steps)
+const QMAX=makeTex(N,1), qmaxBuf=new Float32Array(N*4);
+function satBand(s){
+  withSim(s, ()=>{ run(PR.qmax1, M1.fbo, N,N, { tB:B.a }); run(PR.qmax2, QMAX.fbo, N,1, { tM1:M1 }); gl.readPixels(0,0,N,1,gl.RGBA,gl.FLOAT,qmaxBuf); });
+  let lo=-1, hi=-1;
+  for (let j=0;j<N;j++) if (qmaxBuf[j*4]>1e-5 || qmaxBuf[j*4+1]>1e-6){ if (lo<0) lo=j; hi=j; }
+  return lo<0 ? null : [lo===0?0:Math.max(0,lo*DX-150), Math.min(H,(hi+1)*DX+700)]; }
+function stepSats(n){ if (n<=0) return;
+  for (let i=1;i<SIMS.length;i++){ const s=SIMS[i]; if (s.live){ withSim(s, ()=>{ for (let k=0;k<n;k++) substep(false); }); s.dirty=true; } } }
+function buildFluxAll(){ buildFlux(); for (let i=1;i<SIMS.length;i++) if (SIMS[i].live) withSim(SIMS[i], buildFlux); }
+function stepParticles(simSeconds){
+  run(PR.pupd, PT.b.fbo, 128,128, { tA:A.a, tPt:PT.a }, { uStep:simSeconds, uLife:1500, uFrame:{u:(frame*2654435761)>>>0}, uAll:{i:partReset?1:0} });
+  PT.swap(); partReset=false;
+}
+function packCloud(){
+  gl.bindFramebuffer(gl.FRAMEBUFFER,packFbo);
+  gl.useProgram(PR.pack2.p);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,B.a.tex); gl.uniform1i(U(PR.pack2,'tB'),0);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D,A.a.tex); gl.uniform1i(U(PR.pack2,'tA'),1);
+  gl.uniform1f(U(PR.pack2,'uDx'),DX);
+  gl.viewport(0,0,N,N);
+  gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+  for (let z=0;z<N;z++){
+    gl.framebufferTextureLayer(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,cloud3.tex,0,z);
+    gl.framebufferTextureLayer(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT1,vel3.tex,0,z);
+    gl.uniform1i(U(PR.pack2,'uLayer'),z); gl.drawArrays(gl.TRIANGLES,0,3);
+  }
+  gl.drawBuffers([gl.COLOR_ATTACHMENT0]); gl.framebufferTextureLayer(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT1,null,0,0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+  gl.bindTexture(gl.TEXTURE_3D,cloud3.tex); gl.generateMipmap(gl.TEXTURE_3D);
+}
+
+// ---------- readback + acceptance metrics + the chain ----------
+const bufA=new Float32Array(RES2*RES2*4), bufB=new Float32Array(RES2*RES2*4),
+      bufS=new Float32Array(N*N*4), bufX=new Float32Array(N*N*4), bufF=new Float32Array(N*N*4), levelRow=new Float32Array(N*4);
+function parcelLCL(th, qv){ for (let z=DX*0.5; z<H; z+=5){ const p=pbarAt(z), T=th*exnerAt(z); if (qv>=qsatAt(T,p)) return z; } return H; }
+let lastShell={ shellW:NaN, envW:NaN, divRel:NaN };
+function readAndAnalyze(full=true){                  // full = also the acceptance diagnostics (divergence, subsiding shell); the live view skips them
   gl.bindFramebuffer(gl.FRAMEBUFFER,A.a.fbo); gl.readPixels(0,0,RES2,RES2,gl.RGBA,gl.FLOAT,bufA);
   gl.bindFramebuffer(gl.FRAMEBUFFER,B.a.fbo); gl.readPixels(0,0,RES2,RES2,gl.RGBA,gl.FLOAT,bufB);
-  const cf=new Float64Array(N), wIn=new Float64Array(N), qcm=new Float64Array(N);
-  const colBase=new Int16Array(N*N).fill(-1), colTop=new Int16Array(N*N).fill(-1);
-  let W=0, wmax=0, cells=0, th0=0, qv0=0, divAbs=0, uAbs=0;
+  gl.bindFramebuffer(gl.FRAMEBUFFER,S.a.fbo); gl.readPixels(0,0,N,N,gl.RGBA,gl.FLOAT,bufS);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,X.a.fbo); gl.readPixels(0,0,N,N,gl.RGBA,gl.FLOAT,bufX);
+  run(PR.fluxnow, FN.fbo, N,N, { tA:A.a, tB:B.a, tFlux:fluxTex, tSurf:S.a, tShade:shadeTex, tP:P.a }, physUniforms());
+  gl.readPixels(0,0,N,N,gl.RGBA,gl.FLOAT,bufF);
+  const nn=N*N;
+  const cf=new Float64Array(N), wIn=new Float64Array(N), qcm=new Float64Array(N), qrm=new Float64Array(N), thm=new Float64Array(N), qvm=new Float64Array(N);
+  const colBase=new Int16Array(nn).fill(-1), colTop=new Int16Array(nn).fill(-1);
+  let W=0, wmax=0, cells=0, divAbs=0, uAbs=0, qrMax=0, qcMax=0, rainLo=-1, rainHi=-1;
   const CL=1e-5;
   const wc=new Float32Array(N*N*N);                 // cell-centre w from the staggered faces
   for (let idx=0; idx<N*N*N; idx++){ const y=(idx>>6)&63; wc[idx]=0.5*(bufA[idx*4+1]+(y<63?bufA[(idx+64)*4+1]:0)); }
   for (let idx=0; idx<N*N*N; idx++){
-    const o=idx*4, y=(idx>>6)&63, col=(idx&63)+N*(idx>>12), x=idx&63, z=idx>>12;
+    const o=idx*4, y=(idx>>6)&63, x=idx&63, z=idx>>12, col=x+N*z;
     const qv=bufB[o], qc=bufB[o+1], qr=bufB[o+2], w=wc[idx];
-    const ix=((x+1)&63)|(y<<6)|(z<<12), iz=x|(y<<6)|(((z+1)&63)<<12);
-    divAbs+=Math.abs(bufA[ix*4]-bufA[o] + (y<63?bufA[(idx+64)*4+1]:0)-(y>0?bufA[o+1]:0) + bufA[iz*4+2]-bufA[o+2]);
-    uAbs+=Math.abs(bufA[o])+Math.abs(bufA[o+1])+Math.abs(bufA[o+2]);
+    if (full){ const ix=((x+1)&63)|(y<<6)|(z<<12), iz=x|(y<<6)|(((z+1)&63)<<12);
+      divAbs+=Math.abs(bufA[ix*4]-bufA[o] + (y<63?bufA[(idx+64)*4+1]:0)-(y>0?bufA[o+1]:0) + bufA[iz*4+2]-bufA[o+2]);
+      uAbs+=Math.abs(bufA[o])+Math.abs(bufA[o+1])+Math.abs(bufA[o+2]); }
     W+=qv+qc+qr; if (w>wmax) wmax=w;
-    if (y===0){ th0+=bufA[o+3]; qv0+=qv; }
+    thm[y]+=bufA[o+3]; qvm[y]+=qv; qrm[y]+=qr;
+    if (qr>qrMax) qrMax=qr; if (qc>qcMax) qcMax=qc;
+    if (qr>1e-6){ if (rainLo<0||y<rainLo) rainLo=y; if (y>rainHi) rainHi=y; }
     if (qc>CL){ cells++; cf[y]++; wIn[y]+=w; qcm[y]+=qc; if (colBase[col]<0) colBase[col]=y; colTop[col]=y; }
   }
   // subsiding shell: clear cells with a cloudy horizontal neighbour, versus the clear air further out
@@ -549,155 +1432,531 @@ function readAndAnalyze(){
   for (let idx=0; idx<N*N*N; idx++){
     const y=(idx>>6)&63; if (cf[y]===0) continue;
     const o=idx*4; if (bufB[o+1]>CL){ inW+=wc[idx]; continue; }
+    if (!full) continue;
     const x=idx&63, z=idx>>12;
     const nb=(dx,dz)=>bufB[((((x+dx)&63)|(y<<6)|(((z+dz)&63)<<12))*4)+1]>CL;
     if (nb(1,0)||nb(-1,0)||nb(0,1)||nb(0,-1)){ shellW+=wc[idx]; shellN++; } else { envW+=wc[idx]; envN++; }
   }
-  const nn=N*N; th0/=nn; qv0/=nn;
+  if (full) lastShell={ shellW: shellN?shellW/shellN:NaN, envW: envN?envW/envN:NaN, divRel: uAbs>0 ? divAbs/uAbs*3 : 0 };
+  for (let j=0;j<N;j++){ thm[j]/=nn; qvm[j]/=nn; qrm[j]/=nn; levelRow.set([thm[j],qvm[j],qrm[j],0], j*4); }
+  gl.bindTexture(gl.TEXTURE_2D,baseTex.tex); gl.texSubImage2D(gl.TEXTURE_2D,0,0,2,N,1,gl.RGBA,gl.FLOAT,levelRow);
+  const th0=thm[0], qv0=qvm[0];
   const T0=(BASE.thb[0]+th0)*BASE.pi[0], p0=BASE.pb[0];
   const e=qv0*p0/(0.622+qv0), lg=Math.log(e/611.2), Td=273.15+243.5*lg/(17.67-lg);
-  const z0=DX*0.5, espy=z0+125*(T0-Td), lcl=parcelLCL(BASE.thb[0]+th0, qv0);
+  const espy=DX*0.5+125*(T0-Td), lcl=parcelLCL(BASE.thb[0]+th0, qv0);
+  // the ground: rain, puddles, cold pools, and the water budget
+  const rho0=BASE.rho[0];
+  let evapIn=0, rainOutQ=0, exportQ=0, rateSum=0, rateMax=0, rainCols=0, puddle=0, coldMin=0, coldN=0;
+  for (let c=0;c<nn;c++){ const s=c*4;
+    puddle+=bufS[s]; rateSum+=bufS[s+1]; if (bufS[s+1]>rateMax) rateMax=bufS[s+1]; if (bufS[s+1]>0.1) rainCols++;
+    rainOutQ+=bufS[s+2]; evapIn+=bufS[s+3]; exportQ+=bufX[s];
+    const d=bufA[((c&63)|((c>>6)<<12))*4+3]-th0; if (d<coldMin) coldMin=d; if (d<-0.5) coldN++; }
+  // the chain at the surface: sunlight, fluxes, warm air, thermal low, inflow, mesohigh, gusts
+  const pa=rho0*DX/simDt;                                          // pressure-solver units -> Pa
+  const elev=Math.max(1e-3, sunDir()[1]/Math.sin(0.75));           // sunlight = elev*(0.25+0.75*T) -> cloud transmittance T
+  let pm0=0; for (let c=0;c<nn;c++) pm0+=bufF[c*4+3]; pm0/=nn;
+  let sunE=0, shaded=0, Hs=0, LE=0, HL=0, LEL=0, landW=0, thL=0, thS=0, pL=0, pS=0, nS=0, warmMax=-9, pLow=1e9, pHigh=-1e9, gust=0, flowMax=0, onshore=0, nCoast=0, uSum=0, vSum=0;
+  for (let c=0;c<nn;c++){
+    const x=c&63, z=c>>6, o=(x|(z<<12))*4, f4=c*4, land=landMask[c];
+    const an=bufA[o+3]-th0, pp=(bufF[f4+3]-pm0)*pa;
+    const u=0.5*(bufA[o]+bufA[(((x+1)&63)|(z<<12))*4]), v=0.5*(bufA[o+2]+bufA[(x|(((z+1)&63)<<12))*4+2]), sp=Math.hypot(u,v);
+    uSum+=u; vSum+=v; sunE+=bufF[f4+2]; if (elev>0.05 && (bufF[f4+2]/elev-0.25)/0.75<0.5) shaded++;   // no shade at night
+    Hs+=bufF[f4]; LE+=bufF[f4+1]; HL+=bufF[f4]*land; LEL+=bufF[f4+1]*land;
+    thL+=an*land; pL+=pp*land; landW+=land; thS+=an*(1-land); pS+=pp*(1-land); nS+=1-land;
+    if (an>warmMax) warmMax=an;
+    if (an>0 && pp<pLow) pLow=pp;
+    if (an<-0.5){ if (pp>pHigh) pHigh=pp; if (sp>gust) gust=sp; } else if (sp>flowMax) flowMax=sp;
+    if (land>0.2 && land<0.8){ const rx=x+0.5-N/2, rz=z+0.5-N/2, rl=Math.hypot(rx,rz)||1; onshore+=-(u*rx+v*rz)/rl; nCoast++; }
+  }
+  const island=SC.map==='island', lw=Math.max(landW,1e-6), sw=Math.max(nS,1e-6);
+  let cLand=0, cSea=0; for (let c=0;c<nn;c++) if (colBase[c]>=0){ cLand+=landMask[c]; cSea+=1-landMask[c]; }
+  const chain={ island, sun:sunE/nn, shaded:shaded/nn, H:island?HL/lw:Hs/nn, LE:island?LEL/lw:LE/nn,
+    dT: island ? thL/lw-thS/sw : warmMax, dP: island ? pL/lw-pS/sw : (pLow<1e8?pLow:NaN),
+    inflow: island ? (nCoast?onshore/nCoast:NaN) : flowMax, pHigh: pHigh>-1e8?pHigh:NaN, gust: gust>0?gust:NaN,
+    umean:uSum/nn, vmean:vSum/nn, f:coriolisF(), coverLand:cLand/lw, coverSea:cSea/sw };
   let bs=0, bs2=0, bn=0, topMax=-1;
-  for (let c=0;c<N*N;c++) if (colBase[c]>=0){ const zb=colBase[c]*DX; bs+=zb; bs2+=zb*zb; bn++; topMax=Math.max(topMax,colTop[c]); }
+  for (let c=0;c<nn;c++) if (colBase[c]>=0){ const zb=colBase[c]*DX; bs+=zb; bs2+=zb*zb; bn++; topMax=Math.max(topMax,colTop[c]); }
   const baseMean=bn?bs/bn:NaN, baseStd=bn?Math.sqrt(Math.max(0,bs2/bn-baseMean*baseMean)):NaN;
   let lowest=-1, highest=-1, anyLo=-1, anyHi=-1;
   for (let j=0;j<N;j++){ if (cf[j]>=4){ if (lowest<0) lowest=j; highest=j; } if (cf[j]>0){ if (anyLo<0) anyLo=j; anyHi=j; } }
-  // render band (metres): clouds can grow between readbacks, so leave generous room above
-  yBand = anyLo<0 ? [Math.max(0,lcl-300), Math.min(H,lcl+600)] : [Math.max(0,anyLo*DX-150), Math.min(H,(anyHi+1)*DX+700)];
+  // render band (metres): everything that holds cloud or rain; clouds grow between readbacks, so leave room above
+  let lo=anyLo, hi=anyHi;
+  if (rainLo>=0){ lo = lo<0 ? rainLo : Math.min(lo,rainLo); hi=Math.max(hi,rainHi); }
+  yBand = lo<0 ? [Math.max(0,lcl-300), Math.min(H,lcl+600)] : [lo===0?0:Math.max(0,lo*DX-150), Math.min(H,(hi+1)*DX+700)];
   for (let j=0;j<N;j++){ wIn[j]=cf[j]?wIn[j]/cf[j]:0; qcm[j]=cf[j]?qcm[j]/cf[j]:0; cf[j]/=nn; }
+  if (owOn()) for (let i=1;i<SIMS.length;i++) if (SIMS[i].live) SIMS[i].band=satBand(SIMS[i]);   // the far field's bands too
   lastLcl=lcl;
-  return { t:simTime, W, cells, divRel: uAbs>0 ? divAbs/uAbs*3 : 0, cover:bn/nn, wmax, cf, wIn, qcm,
+  return { t:simTime, W, cells, divRel:lastShell.divRel, cover:bn/nn, wmax, cf, wIn, qcm, qrm, thm,
     baseMean, baseStd, baseLow: lowest<0?NaN:lowest*DX, top: highest<0?NaN:(highest+1)*DX, topMax: topMax<0?NaN:(topMax+1)*DX,
-    lclParcel:lcl, lclEspy:espy, T0, Td, th0, qv0,
-    shellW: shellN?shellW/shellN:NaN, envW: envN?envW/envN:NaN, inW: cells?inW/cells:NaN, latent:latentEl.checked };
+    lclParcel:lcl, lclEspy:espy, T0, Td, th0, qv0, qrMax, qcMax,
+    shellW:lastShell.shellW, envW:lastShell.envW, inW: cells?inW/cells:NaN, latent:chk.latent.checked,
+    rateMean:rateSum/nn, rateMax, rainFrac:rainCols/nn, rainMM:rainOutQ/nn*rho0*DX, puddle:puddle/nn,
+    coldMin, coldArea:coldN/nn, evapIn, rainOutQ, exportQ, mmPerQ:rho0*DX/nn, chain };
 }
 const statsEl=document.getElementById('stats'), prof=document.getElementById('prof'), pctx=prof.getContext('2d');
 function fmtT(s){ const m=Math.floor(s/60); return (m>=60? Math.floor(m/60)+'h'+String(m%60).padStart(2,'0') : m+'m')+String(Math.floor(s%60)).padStart(2,'0')+'s'; }
+function showChain(s){
+  const C=s.chain, f=(v,d=1)=>isNaN(v)?'—':v.toFixed(d), sg=(v,d=1)=>isNaN(v)?'—':(v>0?'+':'')+v.toFixed(d);
+  const mw=Math.hypot(C.umean,C.vmean), from=(Math.atan2(-C.umean,-C.vmean)*180/Math.PI+360)%360;
+  const rows=[
+    ['☀ sun heats the ground', `~${(C.sun*1000*Math.sin(0.75)).toFixed(0)} W/m² of sunlight · ${(C.shaded*100).toFixed(0)}% in cloud shade`],
+    ['→ ground heats the air', `${f(C.H,0)} W/m² heat, ${f(C.LE,0)} W/m² vapour${C.island?' (island)':''}`],
+    ['→ the air warms', C.island ? `island air ${sg(C.dT,2)} K vs the sea's` : `warmest surface air ${sg(C.dT,2)} K`],
+    ['→ pressure drops', C.island ? `${sg(C.dP,1)} Pa over the island` : `${sg(C.dP,1)} Pa under warm air`],
+    ['→ air flows in', C.island ? `sea breeze ${sg(C.inflow,1)} m/s onshore` : `surface wind up to ${f(C.inflow,1)} m/s`],
+    ['→ rises and cools', `updraft ${f(s.wmax,1)} m/s · condenses at ${isNaN(s.baseLow)?'—':s.baseLow.toFixed(0)+' m'}`],
+    ['→ cloud shades it', C.island ? `${(C.coverLand*100).toFixed(0)}% of the island, ${(C.coverSea*100).toFixed(0)}% of the sea` : `${(s.cover*100).toFixed(0)}% cover`],
+    ['→ rain chills the air', `${f(s.rateMax,1)} mm/h · cold pool ${f(s.coldMin,2)} K`],
+    ['→ cold air sinks', `${sg(C.pHigh,1)} Pa under it (mesohigh)`],
+    ['→ spreads as gusts', `gust front ${f(C.gust,1)} m/s`],
+    ['↻ Earth turns it', C.f>0 ? `f = ${(C.f*1e5).toFixed(1)}e-5/s · box wind ${f(mw,1)} m/s from ${mw>0.2?from.toFixed(0)+'°':'—'}` : 'rotation off'],
+  ];
+  chainEl.innerHTML=rows.map(([k,v])=>`<span class="k">${k}</span><span class="v">${v}</span>`).join('');
+}
 function showStats(s){
-  const dW=s.W-W0, f=n=>isNaN(n)?'—':n.toFixed(0);
+  showChain(s);
+  const dW=s.W-W0, f=n=>isNaN(n)?'—':n.toFixed(0), g=(n,d)=>isNaN(n)?'—':n.toFixed(d);
   statsEl.innerHTML =
-`sim time     <b>${fmtT(s.t)}</b>   cover <b>${(s.cover*100).toFixed(1)}%</b>
-cloud base   <b>${f(s.baseMean)} m</b>  ±${f(s.baseStd)} (col std)
-lowest base  <b>${f(s.baseLow)} m</b>   top <b>${f(s.top)} m</b>
-LCL parcel   <b>${f(s.lclParcel)} m</b>   Espy <b>${f(s.lclEspy)} m</b>
-surface      T ${(s.T0-273.15).toFixed(2)}C  Td ${(s.Td-273.15).toFixed(2)}C
-w max        <b>${s.wmax.toFixed(2)} m/s</b>  in-cloud ${isNaN(s.inW)?'—':s.inW.toFixed(2)}
-shell w      <b>${isNaN(s.shellW)?'—':s.shellW.toFixed(3)}</b>  env ${isNaN(s.envW)?'—':s.envW.toFixed(3)} m/s
-water ΔΣq    <b>${dW.toFixed(3)}</b> / flux ${Wadded.toFixed(3)}
-budget err   <b>${((dW-Wadded)/W0*100).toFixed(3)}%</b> of Σq0
+`sim time     <b>${fmtT(s.t)}</b>   cover <b>${(s.cover*100).toFixed(1)}%</b>${chk.daynight.checked ? `
+clock        <b>${String(Math.floor(clockHour())).padStart(2,'0')}:${String(Math.floor(clockHour()%1*60)).padStart(2,'0')}</b>   sun ${(Math.asin(sunDir()[1])*180/Math.PI).toFixed(0)}°` : ''}
+cloud base   <b>${f(s.baseLow)} m</b>   top <b>${f(s.top)} m</b>
+LCL parcel   <b>${f(s.lclParcel)} m</b>   q_c max ${g(s.qcMax*1e3,2)} g/kg
+w max        <b>${s.wmax.toFixed(1)} m/s</b>  in-cloud ${g(s.inW,2)}
+shell w      <b>${g(s.shellW,3)}</b>  env ${g(s.envW,3)} m/s
+rain now     <b>${s.rateMean.toFixed(2)} mm/h</b>  max ${s.rateMax.toFixed(1)}  ${(s.rainFrac*100).toFixed(1)}% wet
+rain total   <b>${s.rainMM.toFixed(2)} mm</b>  puddles ${s.puddle.toFixed(2)} mm
+cold pool    <b>${s.coldMin.toFixed(2)} K</b>  ${(s.coldArea*100).toFixed(1)}% of ground &lt; -0.5 K
+water mm     +evap ${(s.evapIn*s.mmPerQ).toFixed(2)} -rain ${(s.rainOutQ*s.mmPerQ).toFixed(2)} -export ${(s.exportQ*s.mmPerQ).toFixed(2)}
+             = Δair <b>${(dW*s.mmPerQ).toFixed(2)} mm</b>
+budget err   <b>${((dW-(s.evapIn-s.rainOutQ-s.exportQ))/W0*100).toFixed(3)}%</b> of the air's water
 latent heat  <b>${s.latent?'ON':'OFF'}</b>`;
-  // profile
+  // profile: cloud fraction, rain water, in-cloud w
   const w=prof.width, h=prof.height; pctx.fillStyle='#06101a'; pctx.fillRect(0,0,w,h);
   const zy=z=>h-4-(z/H)*(h-8);
-  pctx.fillStyle='rgba(120,140,160,.18)'; pctx.fillRect(0,zy(2000),w,zy(1480)-zy(2000));
-  let mx=0; for (let j=0;j<N;j++) mx=Math.max(mx,s.cf[j]); mx=Math.max(mx,0.02);
-  pctx.strokeStyle='#3fd8d0'; pctx.lineWidth=1.5; pctx.beginPath();
-  for (let j=0;j<N;j++){ const x=4+s.cf[j]/mx*(w*0.55), y=zy((j+0.5)*DX); j?pctx.lineTo(x,y):pctx.moveTo(x,y); } pctx.stroke();
-  pctx.strokeStyle='#f0a040'; pctx.beginPath(); const cx=w*0.78;
+  if (SC.inv){ pctx.fillStyle='rgba(120,140,160,.18)'; pctx.fillRect(0,zy(SC.inv[1]),w,zy(SC.inv[0])-zy(SC.inv[1])); }
+  let mx=0, mr=0; for (let j=0;j<N;j++){ mx=Math.max(mx,s.cf[j]); mr=Math.max(mr,s.qrm[j]); } mx=Math.max(mx,0.02); mr=Math.max(mr,1e-6);
+  pctx.lineWidth=1.5;
+  pctx.strokeStyle='#3fd8d0'; pctx.beginPath();
+  for (let j=0;j<N;j++){ const x=4+s.cf[j]/mx*(w*0.45), y=zy((j+0.5)*DX); j?pctx.lineTo(x,y):pctx.moveTo(x,y); } pctx.stroke();
+  pctx.strokeStyle='#5a9cff'; pctx.beginPath(); const rx=w*0.5;
+  for (let j=0;j<N;j++){ const x=rx+s.qrm[j]/mr*(w*0.22), y=zy((j+0.5)*DX); j?pctx.lineTo(x,y):pctx.moveTo(x,y); } pctx.stroke();
+  pctx.strokeStyle='#f0a040'; pctx.beginPath(); const cx=w*0.84;
   pctx.moveTo(cx,4); pctx.lineTo(cx,h-4); pctx.stroke();
   pctx.beginPath(); let first=true;
-  for (let j=0;j<N;j++){ if (!s.cf[j]) { first=true; continue; } const x=cx+s.wIn[j]/3*(w*0.2), y=zy((j+0.5)*DX); first?pctx.moveTo(x,y):pctx.lineTo(x,y); first=false; } pctx.stroke();
+  for (let j=0;j<N;j++){ if (!s.cf[j]) { first=true; continue; } const x=cx+s.wIn[j]/3*(w*0.14), y=zy((j+0.5)*DX); first?pctx.moveTo(x,y):pctx.lineTo(x,y); first=false; } pctx.stroke();
   pctx.setLineDash([4,3]); pctx.strokeStyle='#fd4'; pctx.beginPath(); pctx.moveTo(0,zy(s.lclParcel)); pctx.lineTo(w,zy(s.lclParcel)); pctx.stroke(); pctx.setLineDash([]);
   pctx.fillStyle='#6a8'; pctx.font='10px monospace';
-  pctx.fillText('cf max '+(mx*100).toFixed(1)+'%',4,11); pctx.fillText('w ±3',cx+4,11);
-  for (const z of [1000,2000,3000]){ pctx.fillText(z/1000+'km',w-26,zy(z)+3); }
+  pctx.fillText('cloud '+(mx*100).toFixed(0)+'%',4,11); pctx.fillText('rain '+(mr*1e3).toFixed(2),rx,11); pctx.fillText('w±3',cx-8,11);
+  for (let z=1000; z<H; z+=1000) pctx.fillText(z/1000+'km',w-26,zy(z)+3);
+}
+
+// ---------- overworld view (LSS): this weather from a ship's eye, at the game's scale ----------
+// Every number below is read out of LSS/index-working.html, so the view can be judged as the game would show it:
+//  - LSS_UNITS_PER_METRE = 12.8, one global scale (owner: "Real scale everywhere, accept 93 km/h")
+//  - the overworld (the mossy hub) streams terrain _swHubView() 12 chunks x _SW_CHUNK 900 u = 10,800 u out and fogs it
+//    FogExp2(sky colour, sqrt(ln 10) / 10,800): 90% by there. three.js fogs by VIEW DEPTH (-mvPosition.z), not range
+//  - the far plane is _LSS_CAM_REACH 25,000 u / cos(horizontal half-FOV) (_lssCameraDepthForFov): ~80,900 u at FOV 120, 16:9
+//  - camera.fov = input.fovDeg, which is VERTICAL; default 120 (the settings slider runs 60-120)
+//  - hulls fly 250 / 350 / 450 u/s (flightSpeed); the billboard cloud deck sits at 2,700-4,400 u and ignores the fog
+// The clouds stay in the sim's metres; the scale only places the ship, the game's fog and its far plane among them.
+const LSS_UPM=12.8, LSS_FOG_EDGE=10800, LSS_REACH=25000, LSS_FLY=450, LSS_DECK=[2700,4400];
+const owIds=['owscale','owfov','owdist','owvis','owspeed','owsims'], owChks=['ow','owfog','owcfog','owlines','owregdbg'];
+const owc={ x:0, y:1500, z:0, yaw:0.55, pitch:0.12 };          // the ship: game units over the sim's ground (0,0 = the domain centre), heading
+const owEl={}, owChk={}, owKm=v=>10**v;                         // owdist / owvis hold log10(km), owspeed log10(x)
+const owFmt={ owscale:v=>v.toFixed(1), owfov:v=>v.toFixed(0),
+  owdist:v=>{ const k=owKm(v); return (k<1?k.toFixed(2):k<10?k.toFixed(1):k.toFixed(0))+' km'; },
+  owvis:v=>owKm(v).toFixed(0)+' km', owspeed:v=>{ const m=10**v; return 'x'+(m<10?m.toFixed(1):m.toFixed(0)); }, owsims:v=>v.toFixed(0) };
+const fmtU=u=>u>=1e6?(u/1e6).toFixed(2)+'M u':u>=1e4?(u/1000).toFixed(u>=1e5?0:1)+'k u':Math.round(u).toLocaleString()+' u';
+const fmtM=m=>m<1000?m.toFixed(0)+' m':(m/1000).toFixed(m<10000?2:1)+' km';
+owIds.forEach(id=>{ owEl[id]=document.getElementById(id); const vv=document.getElementById(id+'_v');
+  const upd=()=>{ vv.textContent=owFmt[id](+owEl[id].value); }; owEl[id].addEventListener('input',()=>{ upd(); saveOw(); }); upd(); });
+owChks.forEach(id=>{ owChk[id]=document.getElementById(id); owChk[id].addEventListener('change',()=>{ owChk[id].blur(); saveOw(); owApplyMode(); }); });
+const owOn=()=>owChk.ow.checked;
+function setOw(id,v){ owEl[id].value=v; owEl[id].dispatchEvent(new Event('input')); }
+// the ship's view is global, not per scenario: one ship flying over whichever sky is loaded
+let owSaveT=0;
+function owState(){ const s={ cam:Object.assign({},owc) }; for (const id of owIds) s[id]=+owEl[id].value; for (const id of owChks) s[id]=owChk[id].checked; return s; }
+function saveOw(){ clearTimeout(owSaveT); owSaveT=setTimeout(()=>{ try { localStorage.setItem('wcl_ow1', JSON.stringify(owState())); } catch(e) {} }, 300); }
+function loadOw(){ let s=null; try { s=JSON.parse(localStorage.getItem('wcl_ow1')||'null'); } catch(e) {}
+  if (s){ for (const id of owIds) if (s[id]!==undefined) setOw(id, s[id]);
+    for (const id of owChks) if (s[id]!==undefined) owChk[id].checked=!!s[id];
+    if (s.cam) Object.assign(owc, s.cam); }
+  owApplyMode(); }
+const owHud=document.getElementById('owhud'), owInfo=document.getElementById('owinfo');
+function owApplyMode(){ const on=owOn(); owHud.style.display=on?'block':'none'; owInfo.style.display=on?'block':'none'; syncSats(); if (on) owReport(); }
+// the game's far plane (view depth, u) at this FOV and window shape
+function owFar(){ const vh=+owEl.owfov.value*Math.PI/360, hh=Math.atan(Math.tan(vh)*Math.max(0.2, cv.width/cv.height));
+  return Math.min(400000, LSS_REACH/Math.max(0.12, Math.cos(hh))); }
+// the far field's region lattice (see satWant): cells REG.R world units across (the sim box is 2). Rotated 27°, a cell
+// spans 1.45 x (cos + sin) = 1.95 < 2 along the box's axes, so no cloud shows twice inside one region. Borders are bent
+// by a smooth periodic warp (bends ~13-25 km and wiggles ~5-8 km long, +-1.1 km at 100 m cells; slope < 0.6, so
+// regions never fold), and blend over +-7% of a cell (~320 m at 100 m cells) either side: every blended sample reads 2-4
+// sims, so the band width IS the blending's cost (+-12% put ~40% of samples in a band, ~3 ms of the march).
+const REG={ R:1.45, rot:0.47, amp:0.35, period:23.7, band:0.07, off:[0,0] };
+const WARP_N=128, warpTex={ tex:gl.createTexture() };
+const warpData=(()=>{ const rnd=rngFrom(0x2545F491), d=new Uint8Array(WARP_N*WARP_N*2);
+  for (let ch=0; ch<2; ch++){
+    const waves=[]; for (let j=0;j<6;j++){ const big=j<3, k=big?3+rnd()*3:9+rnd()*5, a=rnd()*Math.PI*2;
+      let kx=Math.round(k*Math.cos(a)), kz=Math.round(k*Math.sin(a)); if (!kx && !kz) kx=3;   // whole waves per texture: it tiles
+      waves.push([kx, kz, big?1:0.3, rnd()*Math.PI*2]); }
+    const f=new Float32Array(WARP_N*WARP_N); let mx=0;
+    for (let z=0;z<WARP_N;z++) for (let x=0;x<WARP_N;x++){ let s=0; for (const [kx,kz,am,ph] of waves) s+=am*Math.cos(2*Math.PI*(kx*x+kz*z)/WARP_N+ph); f[x+WARP_N*z]=s; mx=Math.max(mx,Math.abs(s)); }
+    for (let i=0;i<f.length;i++) d[i*2+ch]=Math.round((f[i]/mx*0.5+0.5)*255);
+  }
+  return d; })();
+gl.bindTexture(gl.TEXTURE_2D,warpTex.tex); gl.texImage2D(gl.TEXTURE_2D,0,gl.RG8,WARP_N,WARP_N,0,gl.RG,gl.UNSIGNED_BYTE,warpData);
+gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.REPEAT); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.REPEAT);
+// the shader's regP() on the CPU (the same bilinear tap), to put the world origin in the MIDDLE of the home cell (0,0)
+function regPcpu(x, z){
+  const tx=x/REG.period*WARP_N-0.5, tz=z/REG.period*WARP_N-0.5, ix=Math.floor(tx), iz=Math.floor(tz), fx=tx-ix, fz=tz-iz;
+  const g=(i,j,c)=>warpData[((((i%WARP_N)+WARP_N)%WARP_N) + WARP_N*(((j%WARP_N)+WARP_N)%WARP_N))*2+c]/255;
+  const w=[0,1].map(c=>((g(ix,iz,c)*(1-fx)+g(ix+1,iz,c)*fx)*(1-fz) + (g(ix,iz+1,c)*(1-fx)+g(ix+1,iz+1,c)*fx)*fz)*2-1);
+  const px=x+w[0]*REG.amp, pz=z+w[1]*REG.amp, c=Math.cos(REG.rot), s=Math.sin(REG.rot);
+  return [(c*px - s*pz)/REG.R + REG.off[0], (s*px + c*pz)/REG.R + REG.off[1]]; }
+{ const p0=regPcpu(0,0); REG.off=[0.5-p0[0], 0.5-p0[1]]; }
+function regUniforms(){ const f=+el.wdir.value*Math.PI/180;    // the wind blows along (-sin f, -cos f) in (x east, z north)
+  return { uK:{i:1+satLive()}, uBand:REG.band, uRegDbg:owChk.owregdbg.checked?1:0, uRegR:REG.R, uWarpAmp:REG.amp, uWarpK:1/REG.period,
+  uRegRot:[Math.cos(REG.rot), Math.sin(REG.rot)], uRegOff:REG.off, uFlipN:[Math.cos(f), -Math.sin(f)] }; }
+function owTextures(){ const m=SIMS[0], s=i=>(SIMS[i] && SIMS[i].live) ? SIMS[i] : m;   // idle slots hold the main sim's (never read)
+  return { tC1:s(1).cloud3, tC2:s(2).cloud3, tC3:s(3).cloud3, tG0:m.gpack, tG1:s(1).gpack, tG2:s(2).gpack, tG3:s(3).gpack, tWarp:warpTex }; }
+function packGround(){ run(PR.gpack, gpack.fbo, N,N, { tFlux:fluxTex, tSurf:S.a, tA:A.a, tMeans:MEANS }); }
+function owUniforms(){
+  if (!owOn()) return { uOw:0, uFocal:1.6, uMaxT:1e9, uHaze:0, uFogK:0, uUpw:1, uCFog:0, uLines:[0,0] };
+  const upw=+owEl.owscale.value*H/2;                              // game units per world unit (the sim cube is 2 world units across)
+  return { uOw:1, uFocal:1/Math.tan(+owEl.owfov.value*Math.PI/360), uMaxT:owKm(+owEl.owdist.value)*1000/(H/2),
+    uHaze:3.912/(owKm(+owEl.owvis.value)*1000)*(H/2), uFogK:owChk.owfog.checked ? Math.sqrt(Math.log(10))/LSS_FOG_EDGE : 0,
+    uUpw:upw, uCFog:owChk.owcfog.checked?1:0, uLines:owChk.owlines.checked ? [LSS_FOG_EDGE/upw, owFar()/upw] : [0,0] };
+}
+// how far the clouds have to be drawn. Seen from under the layer, a cloud base `edge` above the eye cut off at distance d
+// leaves the sky empty below atan(edge/d) of elevation; past ~0.77 x the visibility the haze has taken it anyway (5%
+// contrast). "Needed" = cloud down to 1° (in the lab the last degree is what makes the sky reach the horizon haze rather
+// than stop short of it; 2° is the bare minimum), capped where the haze takes over.
+function owReport(){
+  const s=stats, upm=+owEl.owscale.value, deg=r=>r*180/Math.PI, tanD=a=>Math.tan(a*Math.PI/180);
+  const zc=owc.y/upm, base=s&&!isNaN(s.baseLow)?s.baseLow:lastLcl, top=s&&!isNaN(s.top)?s.top:base+300;
+  const D=owKm(+owEl.owdist.value)*1000, V=owKm(+owEl.owvis.value)*1000, far=owFar(), fogM=LSS_FOG_EDGE/upm, farM=far/upm;
+  const edge = zc<base ? base-zc : zc>top ? zc-top : 0, side = zc<base ? 'above' : 'below';
+  const elevAt=d=>edge>0 ? deg(Math.atan2(edge,d)) : 0, hazeLim=0.766*V;
+  const need=Math.min(edge>0 ? edge/tanD(1) : hazeLim, hazeLim), need2=Math.min(edge>0 ? edge/tanD(2) : hazeLim, hazeLim);
+  const x=(a,b)=>(a/b)<10?(a/b).toFixed(1):(a/b).toFixed(0);
+  const r={ needKm:need/1000, needU:need*upm, need2Km:need2/1000, drawnKm:D/1000, fogM, farM, farU:far, base, top, zc,
+    elevDrawn:elevAt(D), elevFog:elevAt(fogM), elevFar:elevAt(farM), hazeKm:hazeLim/1000 };
+  if (!owOn()) return r;
+  owInfo.innerHTML=                                              // lines kept under ~42 characters: the panel's width
+`scale   <b>${upm.toFixed(1)} u/m</b>${Math.abs(upm-LSS_UPM)<0.05?" · the game's real scale":` · real is ${LSS_UPM}`}
+ship    <b>${fmtU(owc.y)}</b> up = ${fmtM(zc)}
+cloud   base <b>${fmtM(base)}</b> = ${fmtU(base*upm)}
+        tops ${fmtM(top)} = ${fmtU(top*upm)}
+GAME    fog 90% by <b>${fmtU(LSS_FOG_EDGE)}</b> = ${fmtM(fogM)}
+        far plane ${fmtU(far)} = ${fmtM(farM)}
+` + (edge>0 ?
+`cut at  fog wall: cloud only ${side} ${r.elevFog.toFixed(0)}°
+        far plane: only ${side} ${r.elevFar.toFixed(1)}°
+NEEDED  <b>${fmtM(need)} = ${fmtU(need*upm)}</b> (to 1°)
+        min ${fmtM(need2)} = ${fmtU(need2*upm)} (to 2°)
+        ${x(need,fogM)}x the fog wall, ${x(need,farM)}x far plane
+drawn   ${fmtM(D)} = ${fmtU(D*upm)}: to ${r.elevDrawn.toFixed(1)}°` :
+`inside the cloud layer: cloud everywhere
+NEEDED  out to the haze: <b>${fmtM(need)}</b>
+drawn   ${fmtM(D)} = ${fmtU(D*upm)}`) + `
+haze    ${fmtM(V)}: past ${fmtM(hazeLim)} < 5% contrast
+sim box ${fmtM(H)} = ${fmtU(H*upm)}
+far     ${1+satLive()} sim${satLive()?'s':''}, scattered in ${fmtM(REG.R*H/2)} regions`;
+  return r;
+}
+function owHudUpdate(){
+  if (!owOn()) return;
+  const upm=+owEl.owscale.value, sp=LSS_FLY*10**(+owEl.owspeed.value);
+  owHud.innerHTML=`ship <b>${fmtU(owc.y)}</b> up (${fmtM(owc.y/upm)}) · ${fmtU(sp)}/s (${(sp/upm*3.6).toFixed(0)} km/h) · pitch ${(owc.pitch*180/Math.PI).toFixed(0)}°`
+    + ` · clouds to <b>${owFmt.owdist(+owEl.owdist.value)}</b> = ${fmtU(owKm(+owEl.owdist.value)*1000*upm)}`;
+}
+document.getElementById('owreal').onclick=()=>setOw('owscale', LSS_UPM);
+document.getElementById('owdeck').onclick=()=>{ const b=stats&&!isNaN(stats.baseLow)?stats.baseLow:lastLcl;
+  if (b>0) setOw('owscale', Math.min(12.8, Math.max(1, (LSS_DECK[0]+LSS_DECK[1])/2/b))); };
+document.getElementById('owcutfog').onclick=()=>setOw('owdist', Math.log10(LSS_FOG_EDGE/(+owEl.owscale.value)/1000));
+document.getElementById('owcutfar').onclick=()=>setOw('owdist', Math.log10(owFar()/(+owEl.owscale.value)/1000));
+document.getElementById('owcutneed').onclick=()=>setOw('owdist', Math.log10(owReport().needKm));
+// flying: keys and pad move the ship along where it looks (like the game), mouse looks / slides / climbs
+const keysDown=new Set(); let padFly=null;
+function owSlide(dx,dy){ const k=Math.max(owc.y,300)*0.003, s=Math.sin(owc.yaw), c=Math.cos(owc.yaw);   // grab the ground: drag right = ship left, drag down = forward
+  owc.x+=(-dx*c - dy*s)*k; owc.z+=(dx*s - dy*c)*k; }
+function flyShip(dt){
+  dt=Math.min(Math.max(dt,0),0.1);
+  const K=k=>keysDown.has(k)?1:0;
+  let fw=K('KeyW')-K('KeyS'), st=K('KeyD')-K('KeyA'), up=K('KeyE')-K('KeyQ'), yr=K('ArrowLeft')-K('ArrowRight'), pr=K('ArrowUp')-K('ArrowDown');
+  let boost=(K('ShiftLeft')||K('ShiftRight'))?10:1;
+  if (padFly){ fw+=padFly.fw; st+=padFly.st; up+=padFly.up; yr+=padFly.yaw; pr+=padFly.pitch; if (padFly.boost) boost=10; }
+  if (!dt || (!fw && !st && !up && !yr && !pr)) return;
+  owc.yaw+=yr*1.5*dt; owc.pitch=Math.min(1.5,Math.max(-1.5,owc.pitch+pr*1.1*dt));
+  const sp=LSS_FLY*10**(+owEl.owspeed.value)*boost*dt, cp=Math.cos(owc.pitch), sy=Math.sin(owc.yaw), cy=Math.cos(owc.yaw);
+  owc.x+=(-sy*cp*fw + cy*st)*sp; owc.z+=(-cy*cp*fw - sy*st)*sp;
+  owc.y=Math.min(400000, Math.max(20, owc.y+(Math.sin(owc.pitch)*fw + up)*sp));
+  saveOw();
 }
 
 // ---------- camera + input ----------
-let az=0.5, elv=0.32, dist=4.6, dragging=false, lx=0, ly=0;
-cv.addEventListener('mousedown',e=>{ dragging=true; lx=e.clientX; ly=e.clientY; cv.style.cursor='grabbing'; });
-addEventListener('mouseup',()=>{ dragging=false; cv.style.cursor='grab'; });
-addEventListener('mousemove',e=>{ if(!dragging) return; az-=(e.clientX-lx)*0.005; elv=Math.min(1.45,Math.max(-0.2,elv+(e.clientY-ly)*0.005)); lx=e.clientX; ly=e.clientY; });
-cv.addEventListener('wheel',e=>{ e.preventDefault(); dist=Math.min(14,Math.max(1.2,dist*Math.exp(e.deltaY*0.001))); },{passive:false});
+let az=0.5, elv=0.32, dist=4.6, dragging=false, panning=false, lx=0, ly=0;
+const tgt=[0,-0.45,0];                                          // orbit target; pans across the (periodic) cloud field
+function pan(dx,dy){ const s=dist*0.0016, cx=Math.cos(az), sx=Math.sin(az);   // grab-and-drag: right = (cos az, -sin az), forward = -(sin az, cos az)
+  tgt[0]+=(-dx*cx - dy*sx)*s; tgt[2]+=( dx*sx - dy*cx)*s; }
+cv.addEventListener('contextmenu',e=>e.preventDefault());
+cv.addEventListener('mousedown',e=>{
+  if (document.activeElement && document.activeElement!==document.body) document.activeElement.blur();   // so the keys fly, not nudge the last slider
+  if (e.button===2||e.shiftKey) panning=true; else dragging=true; lx=e.clientX; ly=e.clientY; cv.style.cursor='grabbing'; });
+addEventListener('mouseup',()=>{ if (dragging||panning){ if (owOn()) saveOw(); else saveUi(); } dragging=false; panning=false; cv.style.cursor='grab'; });
+addEventListener('mousemove',e=>{ const dx=e.clientX-lx, dy=e.clientY-ly; lx=e.clientX; ly=e.clientY;
+  if (owOn()){ if (dragging){ owc.yaw-=dx*0.003; owc.pitch=Math.min(1.5,Math.max(-1.5,owc.pitch-dy*0.003)); } else if (panning) owSlide(dx,dy); return; }
+  if (dragging){ az-=dx*0.005; elv=Math.min(1.45,Math.max(-0.2,elv+dy*0.005)); } else if (panning) pan(dx,dy); });
+cv.addEventListener('wheel',e=>{ e.preventDefault();
+  if (owOn()){ owc.y=Math.min(400000,Math.max(20,owc.y*Math.exp(e.deltaY*0.0012))); saveOw(); return; }   // wheel = altitude
+  dist=Math.min(14,Math.max(1.2,dist*Math.exp(e.deltaY*0.001))); saveUi(); },{passive:false});
 addEventListener('keydown',e=>{
   if (e.target.tagName==='INPUT'||e.target.tagName==='SELECT') return;
+  keysDown.add(e.code);
+  if (owOn() && /^Arrow/.test(e.code)) e.preventDefault();
   if (e.code==='Space'){ e.preventDefault(); setPaused(!paused); }
   else if (e.code==='KeyR') reset();
-  else if (e.code==='KeyL') latentEl.checked=!latentEl.checked;
+  else if (e.code==='KeyL') chk.latent.checked=!chk.latent.checked;
+  else if (e.code==='KeyT') chk.tracers.checked=!chk.tracers.checked;
+  else if (e.code==='KeyO'){ owChk.ow.checked=!owChk.ow.checked; owChk.ow.dispatchEvent(new Event('change')); }
 });
+addEventListener('keyup',e=>keysDown.delete(e.code));
+addEventListener('blur',()=>keysDown.clear());                   // a key held while the window lost focus would fly on forever
 const padPrev={};
 function pollPad(){
   const pads=navigator.getGamepads?navigator.getGamepads():[]; let gp=null; for (const p of pads) if (p&&p.connected){ gp=p; break; }
+  padFly=null;
   if (!gp) return;
   const dz=v=>Math.abs(v)<0.15?0:v;
+  if (owOn()){                                                  // the ship: left stick flies, right stick looks, triggers climb / sink, RB boosts
+    padFly={ st:dz(gp.axes[0]), fw:-dz(gp.axes[1]), yaw:-dz(gp.axes[2]||0), pitch:-dz(gp.axes[3]||0),
+      up:(gp.buttons[7]?.value||0)-(gp.buttons[6]?.value||0), boost:!!gp.buttons[5]?.pressed };
+  } else {
   az-=dz(gp.axes[0])*0.03; elv=Math.min(1.45,Math.max(-0.2,elv-dz(gp.axes[1])*0.02));
+  pan(-dz(gp.axes[2]||0)*14, -dz(gp.axes[3]||0)*14);
   const zt=(gp.buttons[7]?.value||0)-(gp.buttons[6]?.value||0); dist=Math.min(14,Math.max(1.2,dist*Math.exp(zt*0.025)));
+  if (dz(gp.axes[0])||dz(gp.axes[1])||dz(gp.axes[2]||0)||dz(gp.axes[3]||0)||Math.abs(zt)>0.05) saveUi();   // remember where the pad left the camera
+  }
   const edge=k=>{ const d=!!gp.buttons[k]?.pressed, r=d&&!padPrev[k]; padPrev[k]=d; return r; };
   if (edge(0)) setPaused(!paused);
-  if (edge(3)) fieldEl.value=String((+fieldEl.value+1)%5);
-  if (edge(1)) latentEl.checked=!latentEl.checked;
+  if (edge(3)) fieldEl.value=String((+fieldEl.value+1)%8);
+  if (edge(2)) sviewEl.value=String((+sviewEl.value+1)%2);
+  if (edge(1)) chk.latent.checked=!chk.latent.checked;
 }
 let cam={ pos:[0,0,4], fwd:[0,0,-1], right:[1,0,0], up:[0,1,0] };
-function updateCam(){
-  if (spinEl.checked && !dragging) az+=0.0015;
+function updateCam(dt=0){
+  if (owOn()){                                                  // the ship's eye, in world units (the sim cube spans -1..1)
+    flyShip(dt);
+    const wpu=1/(+owEl.owscale.value*H/2), cp=Math.cos(owc.pitch);
+    const f=[-Math.sin(owc.yaw)*cp, Math.sin(owc.pitch), -Math.cos(owc.yaw)*cp], r=[Math.cos(owc.yaw),0,-Math.sin(owc.yaw)];
+    cam={ pos:[owc.x*wpu, -1+owc.y*wpu, owc.z*wpu], fwd:f, right:r, up:[r[1]*f[2]-r[2]*f[1], r[2]*f[0]-r[0]*f[2], r[0]*f[1]-r[1]*f[0]] };
+    return;
+  }
+  if (chk.spin.checked && !dragging) az+=0.0015;
   const cy=Math.cos(elv), sy=Math.sin(elv);
-  const tgt=[0,-0.45,0], pos=[Math.sin(az)*cy*dist, tgt[1]+sy*dist, Math.cos(az)*cy*dist];
+  const pos=[tgt[0]+Math.sin(az)*cy*dist, tgt[1]+sy*dist, tgt[2]+Math.cos(az)*cy*dist];
   let f=[tgt[0]-pos[0],tgt[1]-pos[1],tgt[2]-pos[2]]; const fl=Math.hypot(...f); f=f.map(v=>v/fl);
   let r=[-f[2],0,f[0]]; const rl=Math.hypot(...r)||1; r=r.map(v=>v/rl);
   const u=[r[1]*f[2]-r[2]*f[1], r[2]*f[0]-r[0]*f[2], r[0]*f[1]-r[1]*f[0]];
   cam={ pos, fwd:f, right:r, up:u };
 }
+// render scale is relative to PAGE pixels (1 = the page's size; at 125% Windows scaling, 1.25 = the screen's native
+// pixels, at 1.56x the cost -- measured: native dropped the owner's view from 144 to 65 fps)
 function resize(){ const s=+el.rscale.value; cv.width=Math.max(2,Math.round(innerWidth*s)); cv.height=Math.max(2,Math.round(innerHeight*s)); }
 addEventListener('resize',resize); resize();
 
 // ---------- frame ----------
+// temporal smoothing targets (half-float, canvas-sized): the raymarch draws into `cur`, the running average lives in a/b
+const acc={ w:0, h:0, cur:null, a:null, b:null, reset:true, lastCam:'', n:0 };
+function colorTex(w,h){ const t=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,t);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA16F,w,h,0,gl.RGBA,gl.HALF_FLOAT,null);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
+  const f=gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER,f); gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,t,0);
+  return { tex:t, fbo:f }; }
+function freeTex(o){ if (o){ gl.deleteTexture(o.tex); gl.deleteFramebuffer(o.fbo); } }
+function ensureAcc(){ if (acc.w===cv.width && acc.h===cv.height) return;
+  freeTex(acc.cur); freeTex(acc.a); freeTex(acc.b);
+  acc.w=cv.width; acc.h=cv.height; acc.cur=colorTex(acc.w,acc.h); acc.a=colorTex(acc.w,acc.h); acc.b=colorTex(acc.w,acc.h); acc.reset=true; }
 const slabel=document.getElementById('slabel');
-const FIELD_NAMES=['cloud water q_c','theta\' ±1 K','supersaturation ±2%','w ±3 m/s (red up)','q_v\' ±2 g/kg'];
+const FIELD_NAMES=['cloud water q_c','theta\' vs level mean ±1 K','supersaturation ±2%','w ±3 m/s (red up)','q_v\' vs level mean ±2 g/kg','rain water q_r','pressure p\' ±6 Pa (red high)','wind speed 0-10 m/s'];
+function drawParticles(sd, L){
+  if (!chk.tracers.checked) return;
+  const ow=owOn(), tn=ow ? 3 : Math.min(3, +el.tiles.value);
+  bindProg(PR.part, { tPt:PT.a, tA:A.a, tMeans:MEANS, tCloud:cloud3, tWarp:warpTex },
+    Object.assign({ uCamPos:cam.pos, uCamFwd:cam.fwd, uCamRight:cam.right, uCamUp:cam.up, uAspect:cv.width/cv.height, uM:H/2, uTiles:ow?1e5:+el.tiles.value,
+      uExt:+el.ext.value, uStreak:45, uMode:+tcolorEl.value, uSmooth:+el.smooth.value, uDay:L.day, uTilesN:{i:tn},
+      uFocal:owUniforms().uFocal, uOw:ow?1:0, uTileOff: ow ? [Math.round(cam.pos[0]/2)*2, Math.round(cam.pos[2]/2)*2] : [0,0] }, regUniforms()));
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null); gl.viewport(0,0,cv.width,cv.height);
+  gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  gl.disableVertexAttribArray(0);
+  gl.drawArraysInstanced(gl.LINES, 0, 2*Math.min(PART_N, +el.tcount.value*1000), tn*tn);
+  gl.enableVertexAttribArray(0); gl.disable(gl.BLEND);
+}
+// Milestone 2's knobs: strength from the panel; the flow map cycles every 40 sim-seconds (about a grid-scale eddy's
+// turnover, dx / 2 m/s). The defaults are MEASURED, not picked - WC.fractal() over 7 pooled BOMEX slices, edge dimension D:
+//   smooth 1.04 (47 clouds) | band 0.3 g/kg, eddy 2 m/s: 1.23 at 1, 1.34 at 1.5, 1.39 at 2 | band 1.0, eddy 1 m/s (now):
+//   1.34 at 0.6 (249 clouds), 1.43 at 0.8, 1.47 at 1. Lovejoy (1982) measured 1.35; the brief asks 1.3-1.4.
+let detQref=1.0;                                                // q_c (g/kg) below which the detail erodes (0.3 missed the SEEN
+                                                                // surface: a view ray reaches optical depth 1 ~20 m in, where q_c ~0.2-0.4)
+let detVref=1.0;                                                // m/s of resolved eddy (|vorticity| x dx) that counts as turbulence 1
+function detUniforms(){ return { uDetAmp:+el.fdet.value, uDetTime:simTime, uDetPer:40, uDetQref:detQref, uDetDx:DX, uDetVref:detVref }; }
 function render(){
   packCloud();
-  const se=+el.sunel.value, sa=+el.sunaz.value;
-  run(PR.render, null, cv.width, cv.height, { tCloud:cloud3, tFlux:fluxTex },
-    { uCamPos:cam.pos, uCamFwd:cam.fwd, uCamRight:cam.right, uCamUp:cam.up,
-      uSunDir:[Math.cos(sa)*Math.cos(se), Math.sin(se), Math.sin(sa)*Math.cos(se)],
-      uRes:[cv.width,cv.height], uYBand:[yBand[0]/(H/2)-1, yBand[1]/(H/2)-1], uTiles:+el.tiles.value, uExt:+el.ext.value, uExpo:+el.expo.value });
-  if (showSliceEl.checked){
-    const sz=Math.round(Math.min(cv.height*0.42, cv.width*0.3)), m=Math.round(10*(+el.rscale.value));
-    const rect=[cv.width-sz-m, m+Math.round(18*(+el.rscale.value)), sz, sz];
+  if (owOn()){ packGround();                                     // far-field sims repack only after they've moved (0.5 ms each)
+    for (let i=1;i<SIMS.length;i++){ const s=SIMS[i]; if (s.live && s.dirty){ withSim(s, ()=>{ packCloud(); packGround(); }); s.dirty=false; } } }
+  const sd=sunDir(), L=skyLight(sd[1]);
+  if (chk.daynight.checked){                                     // let the sun sliders show where the clock put the sun
+    el.sunel.value=Math.max(0.05,Math.asin(Math.min(1,sd[1]))); el.sunel.dispatchEvent(new Event('input'));
+    el.sunaz.value=(Math.atan2(sd[2],sd[0])+2*Math.PI)%(2*Math.PI); el.sunaz.dispatchEvent(new Event('input'));
+  }
+  // frames are averaged only while PAUSED and still: averaging a running sim blurred the evolving clouds. Running, each
+  // frame goes straight to the screen with a fixed jitter pattern (a changing one would shimmer)
+  const camKey=cam.pos.concat(cam.fwd).map(v=>v.toFixed(5)).join(), moved=camKey!==acc.lastCam; acc.lastCam=camKey;
+  const smoothOn=chk.taa.checked && paused; if (smoothOn) ensureAcc();
+  if (!smoothOn || moved) acc.reset=true;
+  // the slab holds every live sim's cloud and rain band (a far-field sim's may sit lower, with its own rain, or higher).
+  // (Widening it to the ground "to be safe" cost ~1/3 of the march: near-horizon rays crossed km of empty sub-cloud air.)
+  const yb=[yBand[0], yBand[1]];
+  if (owOn()) for (let i=1;i<SIMS.length;i++){ const b=SIMS[i].live && SIMS[i].band; if (b){ yb[0]=Math.min(yb[0],b[0]); yb[1]=Math.max(yb[1],b[1]); } }
+  run(PR.render, smoothOn?acc.cur.fbo:null, cv.width, cv.height, Object.assign({ tCloud:cloud3, tVel:vel3, tNoise:noise3, tFlux:fluxTex, tSurf:S.a, tA:A.a, tMeans:MEANS }, owTextures()),
+    Object.assign({ uCamPos:cam.pos, uCamFwd:cam.fwd, uCamRight:cam.right, uCamUp:cam.up, uSunDir:sd, SUNC:L.sun, SKYA:L.amb, uSkyHor:L.hor, uSkyZen:L.zen,
+      uRes:[cv.width,cv.height], uYBand:[yb[0]/(H/2)-1, yb[1]/(H/2)-1], uTiles:owOn()?1e5:+el.tiles.value, uExt:+el.ext.value, uExpo:+el.expo.value,
+      uM:H/2, uTime:(performance.now()/1000)%1000, uCold:chk.cold.checked?1:0, uSmooth:+el.smooth.value, uJit:[smoothOn && !moved ? (++acc.n)%4096 : 0, 0] },
+      owUniforms(), regUniforms(), detUniforms()));              // overworld view: the game's lens, fog, lines, the far field; M2 detail
+  if (smoothOn){
+    run(PR.accum, acc.b.fbo, cv.width, cv.height, { tCur:acc.cur, tPrev:acc.a }, { uAlpha:acc.reset ? 1 : 0.12 });
+    { const t=acc.a; acc.a=acc.b; acc.b=t; }
+    run(PR.blit, null, cv.width, cv.height, { tSrc:acc.a });
+    acc.reset=false;
+  }
+  drawParticles(sd, L);
+  if (chk.showslice.checked){
+    const k=innerWidth/cv.width;                                // CSS px per canvas px
+    const sz=Math.round(Math.min(cv.height*0.42, cv.width*0.3)), m=Math.round(10/k);
+    const rect=[cv.width-sz-m, m+Math.round(18/k), sz, sz];
+    const view=+sviewEl.value, idx=+el.slz.value;
     gl.enable(gl.SCISSOR_TEST); gl.scissor(rect[0],rect[1],rect[2],rect[3]);
-    gl.useProgram(PR.slice.p);
-    run(PR.slice, null, cv.width, cv.height, { tA:A.a, tB:B.a }, { uRect:rect, uField:{i:+fieldEl.value}, uSlz:{i:+el.slz.value}, uLcl:lastLcl });
+    run(PR.slice, null, cv.width, cv.height, { tA:A.a, tB:B.a, tP:P.a, tMeans:MEANS },
+      { uRect:rect, uField:{i:+fieldEl.value}, uSlz:{i:idx}, uView:{i:view}, uArrows:{i:chk.arrows.checked?1:0}, uLcl:lastLcl, uPa:BASE.rho[0]*DX/simDt });
     gl.disable(gl.SCISSOR_TEST);
-    const k=1/(+el.rscale.value);
     slabel.style.display='block';
     slabel.style.left=(rect[0]*k)+'px'; slabel.style.top=((cv.height-rect[1]-rect[3])*k-20)+'px';
-    slabel.textContent='x-z slice · '+FIELD_NAMES[+fieldEl.value]+' · yellow = LCL';
+    slabel.textContent=(view===0 ? 'side view · ' : `top view at ${((idx+0.5)*DX).toFixed(0)} m · `)+FIELD_NAMES[+fieldEl.value]+(view===0?' · yellow = LCL':'');
   } else slabel.style.display='none';
 }
 let last=performance.now(), fc=0, fa=0, frame=0; const fpsEl=document.getElementById('fps');
 function loop(now){
   const dtw=(now-last)/1000; last=now; fa+=dtw; if (++fc>=30){ fpsEl.textContent=(fc/fa).toFixed(0)+' fps · '+(+el.subs.value*+el.dt.value).toFixed(1)+' sim s/frame'; fc=0; fa=0; }
   frame++;
-  pollPad(); updateCam();
-  if (!paused) simulate(+el.subs.value);
-  if (frame%30===0){ stats=readAndAnalyze(); showStats(stats); }
+  pollPad(); updateCam(dtw); syncSats();
+  if (owOn() && frame%6===0){ owHudUpdate(); if (frame%30===0) owReport(); }
+  if (!paused){
+    const n=+el.subs.value*(chk.daynight.checked && sunDir()[1]<-0.05 ? 3 : 1);   // nights pass 3x faster
+    simulate(n, 1); stepParticles(n*simDt);                     // far-field sims: one step a frame (see simulate)
+  }
+  if (frame%45===0){ stats=readAndAnalyze(frame%450===0); showStats(stats); }   // full diagnostics every 10th readback
   render();
   requestAnimationFrame(loop);
 }
-reset();
+let savedScen='island'; try { savedScen=localStorage.getItem('wcl_scen3')||'island'; } catch(e) {}
+DEFAULT_UI=uiState();                                           // the page's own defaults, before any scenario touches them
+applyScenario(savedScen);
+loadOw();
 requestAnimationFrame(loop);
 
 // test hooks
 window.WC = {
+  build:WCL_BUILD,
   simulate(n){ simulate(n); stats=readAndAnalyze(); showStats(stats); return this.summary(); },
   minutes(m){ return this.simulate(Math.round(m*60/(+el.dt.value))); },
   stats(){ stats=readAndAnalyze(); showStats(stats); return stats; },
-  summary(){ const s=stats; if(!s) return null; const r=v=>Math.round(v*1000)/1000;
-    return { t:s.t, divRel:r(s.divRel), cover:r(s.cover), baseMean:r(s.baseMean), baseStd:r(s.baseStd), baseLow:s.baseLow, top:s.top, topMax:s.topMax,
-      lclParcel:s.lclParcel, lclEspy:r(s.lclEspy), wmax:r(s.wmax), inW:r(s.inW), shellW:r(s.shellW), envW:r(s.envW),
-      dW:r(s.W-W0), fluxW:r(Wadded), budgetErrPct:r((s.W-W0-Wadded)/W0*100), latent:s.latent }; },
+  summary(){ const s=stats; if(!s) return null; const r=v=>Math.round(v*1000)/1000, C=s.chain;
+    return { scen:scenEl.value, t:s.t, clock:chk.daynight.checked?r(clockHour()):null, cover:r(s.cover), baseLow:s.baseLow, baseMean:r(s.baseMean), top:s.top, topMax:s.topMax, lcl:s.lclParcel,
+      wmax:r(s.wmax), inW:r(s.inW), shellW:r(s.shellW), envW:r(s.envW), qcMax:r(s.qcMax*1e3), qrMax:r(s.qrMax*1e3),
+      rainMean:r(s.rateMean), rainMax:r(s.rateMax), rainFrac:r(s.rainFrac), rainMM:r(s.rainMM), puddle:r(s.puddle),
+      coldMin:r(s.coldMin), coldArea:r(s.coldArea), th0:r(s.th0),
+      evapMM:r(s.evapIn*s.mmPerQ), rainMMout:r(s.rainOutQ*s.mmPerQ), exportMM:r(s.exportQ*s.mmPerQ), dAirMM:r((s.W-W0)*s.mmPerQ),
+      budgetErrPct:r((s.W-W0-(s.evapIn-s.rainOutQ-s.exportQ))/W0*100), latent:s.latent,
+      sun:r(C.sun), H:r(C.H), LE:r(C.LE), dT:r(C.dT), dP:r(C.dP), inflow:r(C.inflow), pHigh:r(C.pHigh), gust:r(C.gust), umean:r(C.umean), vmean:r(C.vmean),
+      coverLand:r(C.coverLand), coverSea:r(C.coverSea) }; },
+  scenario(k){ applyScenario(k); return SC.label; },
   reset(s){ if (s!==undefined){ seed=s; reset(false); } else reset(); return seed; },
-  set(id,v){ if (id==='latent') latentEl.checked=!!v; else if (el[id]){ el[id].value=v; el[id].dispatchEvent(new Event('input')); if(id==='patch') buildFlux(); } },
+  set(id,v){ if (chk[id]) chk[id].checked=!!v; else if (el[id]){ el[id].value=v; el[id].dispatchEvent(new Event('input')); if(id==='patch') buildFluxAll(); }
+    else if (id==='field') fieldEl.value=String(v); else if (id==='view') sviewEl.value=String(v); else if (id==='tcolor') tcolorEl.value=String(v); },
   pause(p=true){ setPaused(p); },
   probe(){ readAndAnalyze(); let mi=0, mv=-1e9; for (let idx=0;idx<N*N*N;idx++){ const v=bufA[idx*4+1]; if (v>mv){ mv=v; mi=idx; } }
     const x=mi&63, z=mi>>12, col=[];
-    for (let j=0;j<N;j+=2){ const o=((x)|(j<<6)|(z<<12))*4; col.push([j*DX, +bufA[o+1].toFixed(2), +bufA[o].toFixed(2), +bufA[o+2].toFixed(2), +bufA[o+3].toFixed(2), +(bufB[o]*1e3).toFixed(2), +(bufB[o+1]*1e3).toFixed(3)]); }
-    return { at:[x,(mi>>6)&63,z], wmax:mv, cols:'z, w(face), u, v, thp, qv, qc', col }; },
-  levels(step=4){ readAndAnalyze(); const out=[];   // horizontal means per level: theta', q_v, q_c (g/kg), RH
-    for (let j=0;j<N;j+=step){ let th=0,qv=0,qc=0; for (let k=0;k<N*N;k++){ const idx=(k&63)|(j<<6)|((k>>6)<<12), o=idx*4; th+=bufA[o+3]; qv+=bufB[o]; qc+=bufB[o+1]; }
-      th/=N*N; qv/=N*N; qc/=N*N; const T=(BASE.thb[j]+th)*BASE.pi[j];
-      out.push({ z:(j+0.5)*DX, thp:+th.toFixed(3), qv:+(qv*1e3).toFixed(3), qvb:+(BASE.qvb[j]*1e3).toFixed(3), qc:+(qc*1e3).toFixed(4), RH:+(qv/qsatAt(T,BASE.pb[j])).toFixed(3) }); }
+    for (let j=0;j<N;j+=2){ const o=((x)|(j<<6)|(z<<12))*4; col.push([j*DX, +bufA[o+1].toFixed(2), +bufA[o+3].toFixed(2), +(bufB[o]*1e3).toFixed(2), +(bufB[o+1]*1e3).toFixed(3), +(bufB[o+2]*1e3).toFixed(3)]); }
+    return { at:[x,(mi>>6)&63,z], wmax:mv, cols:'z, w(face), thp, qv, qc, qr', col }; },
+  levels(step=4){ readAndAnalyze(); const out=[];   // horizontal means per level: theta', q_v, q_c, q_r (g/kg), RH, u, v
+    for (let j=0;j<N;j+=step){ let th=0,qv=0,qc=0,qr=0,u=0,v=0; for (let k=0;k<N*N;k++){ const idx=(k&63)|(j<<6)|((k>>6)<<12), o=idx*4; th+=bufA[o+3]; qv+=bufB[o]; qc+=bufB[o+1]; qr+=bufB[o+2]; u+=bufA[o]; v+=bufA[o+2]; }
+      th/=N*N; qv/=N*N; qc/=N*N; qr/=N*N; u/=N*N; v/=N*N; const T=(BASE.thb[j]+th)*BASE.pi[j];
+      out.push({ z:(j+0.5)*DX, thp:+th.toFixed(3), qv:+(qv*1e3).toFixed(3), qvb:+(BASE.qvb[j]*1e3).toFixed(3), qc:+(qc*1e3).toFixed(4), qr:+(qr*1e3).toFixed(4), RH:+(qv/qsatAt(T,BASE.pb[j])).toFixed(3), u:+u.toFixed(2), v:+v.toFixed(2) }); }
     return out; },
+  kprofile(step=4){ // eddy K (m^2/s) per level: mean, max, and mean inside cloud; computed into the scratch P.b
+    run(PR.keddy, P.b.fbo, RES2,RES2, { tA:A.a, tB:B.a, tP:P.a }, { uCs:+el.kdiff.value, uKsfc:0.4*DX });
+    const buf=new Float32Array(RES2*RES2*4); gl.bindFramebuffer(gl.FRAMEBUFFER,P.b.fbo); gl.readPixels(0,0,RES2,RES2,gl.RGBA,gl.FLOAT,buf);
+    readAndAnalyze(); const out=[];
+    for (let j=0;j<N;j+=step){ let s=0,m=0,sc=0,nc=0; for (let k=0;k<N*N;k++){ const idx=(k&63)|(j<<6)|((k>>6)<<12), K=buf[idx*4+2]; s+=K; m=Math.max(m,K); if (bufB[idx*4+1]>1e-5){ sc+=K; nc++; } }
+      out.push([(j+0.5)*DX, +(s/(N*N)).toFixed(2), +m.toFixed(1), nc?+(sc/nc).toFixed(1):'-'].join(' ')); }
+    return 'z meanK maxK cloudK\n'+out.join('\n'); },
   render(){ updateCam(); render(); },
+  particles(simSeconds=9){ stepParticles(simSeconds); },
+  cam(o){ if (o){ if (o.az!==undefined) az=o.az; if (o.elv!==undefined) elv=o.elv; if (o.dist!==undefined) dist=o.dist; if (o.tgt) tgt.splice(0,3,...o.tgt); } return { az, elv, dist, tgt:[...tgt] }; },
+  rainiest(){ readAndAnalyze(); let m=-1, c=0; for (let k=0;k<N*N;k++) if (bufS[k*4+1]>m){ m=bufS[k*4+1]; c=k; }   // world xz of the heaviest rain
+    return { mmh:m, x:((c&63)+0.5)/N*2-1, z:((c>>6)+0.5)/N*2-1 }; },
+  // overworld view: { on, x, y, z (game units), yaw, pitch, scale (u/m), fov, distKm, visKm, speed (x), fog, cfog, lines };
+  // returns the ship and the distance report (needKm = how far this sky needs drawing)
+  ow(o){ if (o){
+      for (const k of ['x','y','z','yaw','pitch']) if (o[k]!==undefined) owc[k]=o[k];
+      if (o.scale!==undefined) setOw('owscale',o.scale); if (o.fov!==undefined) setOw('owfov',o.fov);
+      if (o.distKm!==undefined) setOw('owdist',Math.log10(o.distKm)); if (o.visKm!==undefined) setOw('owvis',Math.log10(o.visKm));
+      if (o.speed!==undefined) setOw('owspeed',Math.log10(o.speed)); if (o.sims!==undefined) setOw('owsims',o.sims);
+      for (const k of ['fog','cfog','lines','regdbg']) if (o[k]!==undefined) owChk['ow'+k].checked=!!o[k];
+      if (o.on!==undefined) owChk.ow.checked=!!o.on;
+      owApplyMode(); saveOw(); }
+    return Object.assign({ on:owOn() }, owc, owReport()); },
+  // brief section 6, the fractal check: threshold a horizontal slice of the RENDERED cloud (detail included) at the level
+  // holding the most cloud, label its clouds (periodic), and fit log(perimeter) against log(area) across them: the slope
+  // is D/2. Smooth trilinear edges give D ~1; Lovejoy (1982) measured 1.35 for real clouds. { res, thr g/kg, level, amp }
+  fractal(o={}){
+    packCloud();                                                // the 3D textures as of NOW (the sim may have stepped since the last frame)
+    const R=o.res||2048, thr=o.thr!=null?o.thr:0.02, s=readAndAnalyze();
+    let jb=0; for (let j=0;j<N;j++) if (s.cf[j]>s.cf[jb]) jb=j;
+    // several levels pooled (o.levels) when one slice holds too few clouds to fit; default: the cloudiest level
+    const levs=o.levels || [o.level!=null?o.level:jb], lev=levs[0];
+    const tex=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,tex); gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,R,R,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+    const fb=gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER,fb); gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0);
+    const measure=amp=>{ const pairs=[]; let cover=0;
+      for (const lv of levs){
+      run(PR.fslice, fb, R, R, { tCloud:cloud3, tVel:vel3, tNoise:noise3 }, Object.assign(detUniforms(), { uDetAmp:amp, uRes:[R,R], uSliceY:(lv+0.5)/N*2-1, uThr:thr, uFpm:H/R, uM:H/2, uSmooth:+el.smooth.value }));
+      const px=new Uint8Array(R*R*4); gl.readPixels(0,0,R,R,gl.RGBA,gl.UNSIGNED_BYTE,px);
+      const on=new Uint8Array(R*R); for (let i=0;i<R*R;i++) on[i]=px[i*4]>127?1:0;
+      // union-find over 4-neighbours, wrapping (the box is periodic, so a cloud across the edge is one cloud)
+      const par=new Int32Array(R*R).fill(-1), find=a=>{ while (par[a]!==a){ par[a]=par[par[a]]; a=par[a]; } return a; };
+      for (let i=0;i<R*R;i++) if (on[i]) par[i]=i;
+      const join=(a,b)=>{ a=find(a); b=find(b); if (a!==b) par[b]=a; };
+      for (let y=0;y<R;y++) for (let x=0;x<R;x++){ const i=x+R*y; if (!on[i]) continue;
+        const r=((x+1)%R)+R*y, u=x+R*((y+1)%R); if (on[r]) join(i,r); if (on[u]) join(i,u); }
+      const area=new Map(), per=new Map();
+      for (let y=0;y<R;y++) for (let x=0;x<R;x++){ const i=x+R*y; if (!on[i]) continue; cover++;
+        const c=find(i); area.set(c,(area.get(c)||0)+1);
+        const nb=[((x+1)%R)+R*y, ((x+R-1)%R)+R*y, x+R*((y+1)%R), x+R*((y+R-1)%R)];
+        let e=0; for (const j of nb) if (!on[j]) e++; if (e) per.set(c,(per.get(c)||0)+e); }
+      for (const [c,a] of area) pairs.push([a, per.get(c)||0]);
+      }
+      // fit log P = (D/2) log A + c over the clouds big enough to have a shape (>= 16 px)
+      let n=0, sx=0, sy=0, sxx=0, sxy=0, amin=1e9, amax=0;
+      for (const [a,pp] of pairs){ if (a<16 || pp<=0) continue; const X=Math.log(a), Y=Math.log(pp);
+        n++; sx+=X; sy+=Y; sxx+=X*X; sxy+=X*Y; amin=Math.min(amin,a); amax=Math.max(amax,a); }
+      const slope=n>2 ? (n*sxy-sx*sy)/(n*sxx-sx*sx) : NaN;
+      return { clouds:n, D:+(2*slope).toFixed(3), cover:+(cover/(R*R*levs.length)).toFixed(3), areaRangeM2:[Math.round(amin*(H/R)**2), Math.round(amax*(H/R)**2)] };
+    };
+    const out={ levels:levs, z_m:levs.map(l=>Math.round((l+0.5)*DX)), res:R, pixel_m:+(H/R).toFixed(2), thr, smooth:measure(0), detail:measure(o.amp!=null?o.amp:+el.fdet.value) };
+    gl.bindFramebuffer(gl.FRAMEBUFFER,null); gl.deleteFramebuffer(fb); gl.deleteTexture(tex);
+    return out;
+  },
   get el(){ return el; }, BASE
 };
 </script>
