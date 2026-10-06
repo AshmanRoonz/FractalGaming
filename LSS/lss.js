@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "51.73";
+const LSS_BUILD = "51.82";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -41468,6 +41468,13 @@ const _WX2 = (function () {
     spinPasses: 160,    // per frame while the sky spins up from the bare sounding
     spinMin: 35,        // sim minutes of spin-up before the sky is shown as grown and the far field is cloned
     simSunEl: 43,       // the sun the GROUND feels, in degrees (the lab's reference; the hub's 25-degree sun only lights)
+    storm: 1,           // (51.77) the city thunderstorm: a second sim (the lab's v6) anchored on the hub city. 0 hides it
+    stormR: 3, stormFade: 3,   // km from the city centre: the storm at full strength inside stormR, gone by stormR + stormFade
+    stormDusk: 1,       // 1 = it shows as the city dusk sets in (the dusk weight, DUSK._cw); 0 = always there
+    stormSpinMin: 30,   // sim minutes it grows behind the loading curtain (a first cell from WK82's warm bubble)
+    lightning: 1,       // (51.79) x the storm's flash rate (Price & Rind 1992 for its top, gated on charging-zone graupel). 0 = none
+    thunder: 1,         // thunder through the SFX bus, distance / 343 m/s after each flash
+    boltW: 1,           // the channel's width x
   };
   function KN(k) { let w = null; try { w = window.__wx2; } catch (_) {} return (w && w[k] != null) ? w[k] : DEF[k]; }
   function optedIn() {
@@ -41502,6 +41509,23 @@ const _WX2 = (function () {
   };
   SCENARIOS.tuned = Object.assign({}, SCENARIOS.showers, { label:'Summer showers - the owner\'s tuning', K:0.03, dt:3, thr:1.9, rad:5,
     ui:{ tau:10, vort:0.0045, iters:14, revap:2, patch:1 }, wind:{ S:2, from:90 } });
+  const qsatAt = (T, p) => { const Tc = T - 273.15; return (380.2 / p) * Math.exp(17.67 * Tc / (Tc + 243.5)); };
+  function wk82(o) {                                               // Weisman & Klemp (1982), troposphere scaled to 10 km (lab v6)
+    const rows = [], pz = []; let pi = Math.pow(o.psurf / P0, RD / CP), thPrev = o.th0;
+    for (let z = 0; z <= o.top; z += 100) {
+      const th = z <= o.ztr ? o.th0 + (o.thtr - o.th0) * Math.pow(z / o.ztr, 1.25) : o.thtr * Math.exp(G * (z - o.ztr) / (CP * o.Ttr));
+      if (z > 0) pi -= G / CP * 100 * 0.5 * (1 / thPrev + 1 / th);
+      const p = P0 * Math.pow(pi, CP / RD), rh = z <= o.ztr ? 1 - 0.75 * Math.pow(z / o.ztr, 1.25) : 0.25;
+      rows.push([z, th, Math.min(o.qv0, rh * qsatAt(th * pi, p) * 1e3)]); pz.push([z, p]); thPrev = th;
+    }
+    return { rows, pz };
+  }
+  SCENARIOS.storm = (() => { const s = wk82({ ztr: 10000, th0: 300, thtr: 330, Ttr: 227, qv0: 14, psurf: 100000, top: 13000 });
+    return { label: 'City thunderstorm (WK82, ice, lightning)', dx: 200, psurf: 100000, snd: s.rows, pz: s.pz,
+      fth: 0.10, fq: 1.2e-4, flux: 1, K: 0.2, dt: 2, thr: 1.0, rad: 1.5, radZ: [9000, 10000], pert: 1000, inv: null,
+      wls: [[0, 0], [13000, 0]], nudge: [11500, 12600, 2], lat: 35, map: 'city', sea: false, sst: 300, nightCool: 0,
+      shear: 12, ice: true, anel: true, sponge: 0.9, rech: [1500, 2], heat: { k: 2.5, r: 0.1 },
+      bubble: { dT: 2.5, rh: 3000, zc: 1400, rv: 1400 }, ui: { iters: 24 } }; })();
   const CFG_DEF = { flux:2, K:0.3, dt:2, thr:1, rad:2, tau:0, vort:0.003, iters:16, revap:1, patch:0.6, hyper:0 };   // the lab panel's defaults
   let SC = SCENARIOS.rico, DX = SC.dx, H = N * DX, PSURF = SC.psurf, CFG = null;
   function PK(k) { let w = null; try { w = window.__wx2; } catch (_) {} return (w && w[k] != null) ? +w[k] : CFG[k]; }   // physics knob
@@ -41511,9 +41535,18 @@ const _WX2 = (function () {
       if (z <= b[0]) { const t = (z - a[0]) / (b[0] - a[0]); return [a[1] + (b[1] - a[1]) * t, (a[2] + (b[2] - a[2]) * t) * 1e-3]; } }
     const l = S_[S_.length - 1]; return [l[1], l[2] * 1e-3];
   }
-  const pbarAt = z => PSURF * Math.exp(-z / 8400);
+  const pbarAt = z => { const T = SC.pz; if (!T) return PSURF * Math.exp(-z / 8400);
+    const f = Math.min(T.length - 1.001, Math.max(0, z / 100)), i = Math.floor(f), a = T[i][1], b = T[i + 1][1]; return a * Math.pow(b / a, f - i); };
   const exnerAt = z => Math.pow(pbarAt(z) / P0, RD / CP);
-  const BASE = { thb:new Float32Array(N), qvb:new Float32Array(N), pb:new Float32Array(N), pi:new Float32Array(N), dth:new Float32Array(N), rho:new Float32Array(N), wls:new Float32Array(N) };
+  let BASE = { thb:new Float32Array(N), qvb:new Float32Array(N), pb:new Float32Array(N), pi:new Float32Array(N), dth:new Float32Array(N), rho:new Float32Array(N), wls:new Float32Array(N) };
+  let CX = null;
+  function makeCtx(key) {
+    const sc = SCENARIOS[key] || SCENARIOS.rico, cfg = Object.assign({}, CFG_DEF, { flux: sc.flux, K: sc.K, dt: sc.dt, thr: sc.thr, rad: sc.rad }, sc.ui || {});
+    return { key, SC: sc, DX: sc.dx, H: N * sc.dx, PSURF: sc.psurf, CFG: cfg, dt: cfg.dt, windKey: null, zT: [0, 0, 0],
+      BASE: { thb: new Float32Array(N), qvb: new Float32Array(N), pb: new Float32Array(N), pi: new Float32Array(N), dth: new Float32Array(N), rho: new Float32Array(N), wls: new Float32Array(N) },
+      baseTex: { tex: gl.createTexture() } };
+  }
+  function useCtx(cx) { CX = cx; SC = cx.SC; DX = cx.DX; H = cx.H; PSURF = cx.PSURF; CFG = cx.CFG; BASE = cx.BASE; }
   function computeBase() {
     for (let j = 0; j < N; j++) { const z = (j + 0.5) * DX, s = sound(z);
       BASE.thb[j] = s[0]; BASE.qvb[j] = s[1]; BASE.pb[j] = pbarAt(z); BASE.pi[j] = exnerAt(z); BASE.rho[j] = BASE.pb[j] / (RD * BASE.thb[j] * BASE.pi[j]);
@@ -41521,6 +41554,7 @@ const _WX2 = (function () {
       BASE.wls[j] = w; }
     for (let j = 0; j < N; j++) { const a = BASE.thb[Math.max(0, j - 1)], b = BASE.thb[Math.min(N - 1, j + 1)];
       BASE.dth[j] = (b - a) / (DX * ((j > 0 && j < N - 1) ? 2 : 1)); }
+    if (CX) CX.zT = [0, -15, -38].map(tc => { for (let j = 0; j < N; j++) if (BASE.thb[j] * BASE.pi[j] - 273.15 <= tc) return (j + 0.5) * DX; return H; });
   }
 
 const VERT = `#version 300 es
@@ -41553,6 +41587,18 @@ vec4 tri(sampler2D t, vec3 c, out vec4 mn, out vec4 mx){
   return mix(mix(x00,x10,fr.y), mix(x01,x11,fr.y), fr.z);
 }
 float qsat(float T, float p){ float Tc=T-273.15; return (380.2/p)*exp(17.67*Tc/(Tc+243.5)); }
+// (51.76) STORMS, from the lab's v6. uAnel: the anelastic approximation (Ogura & Phillips / Lipps & Hemler) - the air thins
+// with height, so the flow conserves MASS, div(rho0 u) = 0; a 10 km tower's top air is ~1/3 as dense as its base's.
+// uIce: Grabowski (1998) - cloud condensate is liquid at 0 C and ice at -38 C (linear between), with the saturation and
+// latent heat of that blend - plus precipitating ice (graupel / snow) in B.w. Both off = exactly the old arithmetic
+// (__wx2Dbg('selftest') hashes RICO bit-identical through this port).
+uniform float uAnel, uIce;
+float rhoL(int j){ return uAnel>0.5 ? base1(clamp(j,0,63)).y : 1.0; }                                     // base density at level j
+float rhoF(int j){ return uAnel>0.5 ? 0.5*(base1(clamp(j-1,0,63)).y+base1(clamp(j,0,63)).y) : 1.0; }      // on the face under it
+const float LF=334000.0;
+float liqFrac(float T){ return uIce>0.5 ? clamp((T-235.15)/38.0, 0.0, 1.0) : 1.0; }
+float qsatI(float T, float p){ float Tc=T-273.15; return (380.2/p)*exp(22.46*Tc/(Tc+272.62)); }
+float qsatM(float T, float p){ float a=liqFrac(T); return a>=1.0 ? qsat(T,p) : mix(qsatI(T,p), qsat(T,p), a); }
 // STAGGERED (MAC) velocity: at index i, A.x = u on the -x face, A.y = w on the floor face, A.z = v on the -z face.
 // (The collocated layout of the original lab let checkerboard buoyancy grow unopposed and created water.)
 const ivec3 DXI=ivec3(1,0,0), DYI=ivec3(0,1,0), DZI=ivec3(0,0,1);
@@ -41565,6 +41611,11 @@ vec3 velV(sampler2D t, ivec3 i){ return vec3(0.25*(F(t,i).x+F(t,i+DXI).x+F(t,i-D
 // through its floor face this substep. One expression for both sides of every face, so falling rain is conserved.
 float vt(float qr, float rho, float rho0){ return qr>1e-10 ? 36.34*pow(0.001*rho*qr,0.1364)*sqrt(rho0/rho) : 0.0; }
 float rainOut(float qr, float rho, float rho0){ return min(qr*vt(qr,rho,rho0)*uDt/uDx, qr); }
+// (51.76) graupel / snow, mass-weighted fall speed rising with how much there is: ~2 m/s for an anvil's thin snow, 4 m/s at
+// 1 g/m3, 6+ m/s for a storm core's dense graupel (Locatelli & Hobbs 1974), faster in thin air. (Lab: a flat 2.5 m/s let a
+// 40 m/s updraft loft nearly all of it into the anvil.)
+float vtS(float qs, float rho, float rho0){ return qs>1e-10 ? 4.0*pow(max(1000.0*rho*qs,0.01),0.2)*sqrt(rho0/rho) : 0.0; }
+float snowOut(float qs, float rho, float rho0){ return min(qs*vtS(qs,rho,rho0)*uDt/uDx, qs); }
 uniform vec3 uNudge;   // free-troposphere relaxation: ramps in from z0 (x) to full at z1 (y), timescale z (s)
 float nudgeRate(float z){ return clamp((z-uNudge.x)/max(uNudge.y-uNudge.x,1.0),0.0,1.0)/uNudge.z; }
 `;
@@ -41622,7 +41673,10 @@ vec4 flux(ivec3 i, ivec3 d){                                   // through the lo
 void main(){ baseInit();
   ivec3 d = uAxis==0 ? DXI : (uAxis==1 ? DYI : DZI);
   vec4 q=F(tSrc,g_i);
-  vec4 r=q - uDt/uDx*(flux(g_i+d,d)-flux(g_i,d));              // floor and lid faces carry w = 0, so nothing leaks
+  float wu=1.0, wd=1.0;                                        // (51.76) anelastic: a vertical face carries MASS (rho_face / rho_cell)
+  if (uAxis==1 && uAnel>0.5){ float rc=rhoL(g_i.y); wu=rhoF(g_i.y+1)/rc; wd=rhoF(g_i.y)/rc; }
+  vec4 r = (uAxis==1 && uAnel>0.5) ? q - uDt/uDx*(wu*flux(g_i+d,d)-wd*flux(g_i,d))
+                                   : q - uDt/uDx*(flux(g_i+d,d)-flux(g_i,d));   // floor and lid faces carry w = 0, so nothing leaks
   o=vec4(uMask.x>0.5?r.x:q.x, uMask.y>0.5?r.y:q.y, uMask.z>0.5?r.z:q.z, uMask.w>0.5?r.w:q.w);
 }`;
 const F_ADV_P = HEAD + `uniform sampler2D tVel, tSrc;
@@ -41664,8 +41718,9 @@ void main(){ baseInit();
   ivec3 i=g_i; vec4 c=F(tSrc,i); float k=F(tP,i).z;
   vec4 s = 0.5*(k+F(tP,i+DXI).z)*(F(tSrc,i+DXI)-c) + 0.5*(k+F(tP,i-DXI).z)*(F(tSrc,i-DXI)-c)
          + 0.5*(k+F(tP,i+DZI).z)*(F(tSrc,i+DZI)-c) + 0.5*(k+F(tP,i-DZI).z)*(F(tSrc,i-DZI)-c);
-  if (i.y>0)  s += 0.5*(k+F(tP,i-DYI).z)*(F(tSrc,i-DYI)-c);    // no flux through the floor or the lid
-  if (i.y<63) s += 0.5*(k+F(tP,i+DYI).z)*(F(tSrc,i+DYI)-c);
+  float wd=1.0, wu=1.0; if (uAnel>0.5){ float rc=rhoL(i.y); wd=rhoF(i.y)/rc; wu=rhoF(i.y+1)/rc; }   // (51.76) (1/rho) d/dz(rho K dq/dz)
+  if (i.y>0)  s += wd*0.5*(k+F(tP,i-DYI).z)*(F(tSrc,i-DYI)-c);    // no flux through the floor or the lid
+  if (i.y<63) s += wu*0.5*(k+F(tP,i+DYI).z)*(F(tSrc,i+DYI)-c);
   vec4 r=c+uDt/(uDx*uDx)*s;
   if (uStag==1 && i.y==0) r.y=0.0;
   o=r;
@@ -41690,14 +41745,15 @@ void main(){ int j=int(gl_FragCoord.x); vec2 m=vec2(0);
 
 const F_PHYS = HEAD + SURF_GLSL + `uniform int uOut; uniform sampler2D tMeans;
 uniform float uLatent, uRelax, uSpongeZ, uSpongeRate, uAutoThr, uRainEvap, uRad, uRadZ1, uRadZ2, uF, uCd, uWindRelax, uMarine, uMarineZ;
+uniform vec2 uRech;   // (51.77) the storm's large-scale recharge: (top of the boundary layer it acts on, m; rate 1/s), 0 = off
 // cell-centred physics for cell i: returns (theta', q_v, q_c, buoyancy), and q_r, after this substep's sources
-vec4 cellState(ivec3 i, out float qr){
+vec4 cellState(ivec3 i, out float qr, out float qsn){
   vec4 a=F(tA,i), b=F(tB,i); int j=i.y;
   vec4 bs=base0(j), b1=base1(j); float thb=bs.x, qvb=bs.y, p=bs.z, ex=bs.w, rho=b1.y, rho0=base1(0).y;
   float z=(float(j)+0.5)*uDx;
   float th=a.w - velC(tA,i).y*b1.x*uDt;                       // theta' sees the base-state gradient as air moves vertically
   th -= uRad*uDt*clamp((uRadZ2-z)/max(uRadZ2-uRadZ1,1.0), 0.0, 1.0);   // radiative cooling: what balances the surface heating
-  float qv=b.x, qc=b.y; qr=b.z;
+  float qv=b.x, qc=b.y; qr=b.z; qsn=b.w;
   // large-scale subsidence (the world outside the box): sinking air warms and dries the layers above the clouds and
   // carries the surplus vapour away; with the radiative cooling it holds a steady state (BOMEX/RICO forcing).
   // Upwind (from above); F_COLX books exactly this vapour as exported.
@@ -41715,17 +41771,40 @@ vec4 cellState(ivec3 i, out float qr){
     float r=texelFetch(tFlux,i.xz,0).b*uMarine*(1.0-z/uMarineZ)*uDt;
     th -= (th-(uSST/uExSfc-thb))*r; }
   if (j==0){ vec3 fl=surfaceFlux(i.xz); th+=fl.x/uDx*uDt; qv+=fl.y/uDx*uDt; }   // the ground breathes into the lowest cell
+  // (51.77) the city storm's recharge: the large-scale flow keeps bringing the warm, moist sounding back into the boundary
+  // layer (hours), so the CAPE a storm spends comes back and the heat island keeps setting off new cells. Off elsewhere.
+  if (uRech.y>0.0 && z<uRech.x){ float rr=uRech.y*uDt*(1.0-z/uRech.x); th-=th*rr; qv-=(qv-qvb)*rr; }
   // rain falls: in through the ceiling face from the cell above, out through the floor face (into the ground at j=0)
-  qr += (j<63 ? rainOut(F(tB,i+DYI).z, base1(j+1).y, rho0) : 0.0) - rainOut(qr, rho, rho0);
+  float mu = (uAnel>0.5 && j<63) ? base1(j+1).y/rho : 1.0;     // (51.76) anelastic: the MASS from above, spread over this level's density
+  qr += (j<63 ? mu*rainOut(F(tB,i+DYI).z, base1(j+1).y, rho0) : 0.0) - rainOut(qr, rho, rho0);
+  if (uIce>0.5) qsn += (j<63 ? mu*snowOut(F(tB,i+DYI).w, base1(j+1).y, rho0) : 0.0) - snowOut(qsn, rho, rho0);   // graupel falls too
   // saturation adjustment + latent heat
-  float T=(thb+th)*ex, qs=qsat(T,p), gam=1.0+(LV*LV*qs)/(CP*RV*T*T);
+  float T=(thb+th)*ex, al=liqFrac(T), L=LV+(1.0-al)*LF;       // (51.76) ice: the blend's saturation and latent heat (exactly LV without)
+  float qs=qsatM(T,p), gam=1.0+(L*L*qs)/(CP*RV*T*T);
   float dq=max((qv-qs)/gam, -qc)*uRelax;                      // linearised; only evaporate liquid that exists
   qv-=dq; qc+=dq;
-  th += uLatent*(LV/(CP*ex))*dq;                              // ~ +2.5 K per g/kg condensed
+  th += uLatent*(L/(CP*ex))*dq;                               // ~ +2.5 K per g/kg condensed (+2.8 as ice)
+  if (uIce>0.5) al=liqFrac((thb+th)*ex);
   // Kessler warm rain: droplets collide into rain once the cloud holds more than the threshold (autoconversion),
   // and falling rain sweeps up cloud droplets on the way (accretion). Implicit form, as in WRF's kessler.F
-  float qc2=(qc - uDt*max(1e-3*(qc-uAutoThr),0.0))/(1.0+uDt*2.2*pow(max(qr,0.0),0.875));
-  float prod=clamp(qc-qc2, 0.0, qc); qc-=prod; qr+=prod;
+  float ql=al*qc;                                             // (51.76) only the LIQUID share makes rain (all of it without ice)
+  float qc2=(ql - uDt*max(1e-3*(ql-uAutoThr),0.0))/(1.0+uDt*2.2*pow(max(qr,0.0),0.875));
+  float prod=clamp(ql-qc2, 0.0, ql); qc-=prod; qr+=prod;
+  if (uIce>0.5){                                              // (51.76) the ice processes (Lin et al. 1983's forms, simplified)
+    float Tc=(thb+th)*ex-273.15, a2=liqFrac(Tc+273.15), qi=(1.0-a2)*qc, qw=a2*qc;   // cloud ice, cloud water
+    float col=uDt*2.2*pow(max(qsn,0.0),0.875);               // what falling graupel sweeps up per step (Kessler's accretion form)
+    float agg=min(qi, uDt*1e-3*exp(0.025*min(Tc,0.0))*max(qi-3e-4,0.0));   // aggregation: crowded crystals clump into snow
+    float rime= Tc<0.0 ? min(qw, qw*col) : 0.0;               // riming: supercooled droplets freeze onto graupel (+L_f)
+    float acci=min(qi-agg, 0.1*qi*col);                       // crystals mostly bounce off graupel (collection efficiency ~0.1)
+    float frz = Tc<0.0 ? min(qr, qr*uDt*1e-3*(exp(0.66*min(-Tc,25.0))-1.0)) : 0.0;   // lofted rain freezes (Bigg 1953) (+L_f)
+    float mlt = Tc>0.0 ? min(qsn, qsn*uDt*3e-3*Tc) : 0.0;     // graupel melts under the 0 C level (-L_f: what chills the downdraft)
+    qc-=agg+rime+acci; qsn+=agg+rime+acci+frz-mlt; qr+=mlt-frz;
+    th+=uLatent*(LF/(CP*ex))*(rime+frz-mlt);
+    float qsi=qsatI(Tc+273.15,p);                             // graupel sublimating below ice saturation: rain's KW78 form, a third as fast
+    if (Tc<0.0 && qsn>1e-9 && qv<qsi){ float rq=0.001*rho*qsn;
+      float sub=uDt*(1.6+124.9*pow(rq,0.2046))*pow(rq,0.525)/(2.55e8/(p*qsi)+5.4e5)*(qsi-qv)/(0.001*rho*qsi)*0.33;
+      sub=min(sub, min(qsn, (qsi-qv)/gam)); qsn-=sub; qv+=sub; th-=uLatent*((LV+LF)/(CP*ex))*sub; }
+  }
   // rain evaporating in unsaturated air chills it (Klemp & Wilhelmson 1978): the cold-pool engine
   T=(thb+th)*ex; qs=qsat(T,p);
   if (qr>1e-9 && qv<qs){
@@ -41735,16 +41814,16 @@ vec4 cellState(ivec3 i, out float qr){
     qr-=ern; qv+=ern;
     th -= uLatent*(LV/(CP*ex))*ern;
   }
-  float buoy=GG*(th/thb + 0.608*(qv-qvb) - qc - qr);          // warm + light vapour - water loading (cloud AND rain)
+  float buoy=GG*(th/thb + 0.608*(qv-qvb) - qc - qr - qsn);    // warm + light vapour - water loading (cloud, rain, graupel)
   return vec4(th, qv, qc, buoy);
 }
 void main(){ baseInit();
-  float qr, qr2; vec4 s=cellState(g_i, qr);
+  float qr, qr2, qs1, qs2; vec4 s=cellState(g_i, qr, qs1);
   int j=g_i.y;
-  if (uOut==1){ o=vec4(s.y, s.z, qr, 0.0); return; }
+  if (uOut==1){ o=vec4(s.y, s.z, qr, qs1); return; }
   vec4 a=F(tA,g_i); a.w=s.x;
   if (j==0) a.y=0.0;
-  else a.y += 0.5*(s.w + cellState(g_i-DYI, qr2).w)*uDt;     // buoyancy on the floor face, from the two cells it separates
+  else a.y += 0.5*(s.w + cellState(g_i-DYI, qr2, qs2).w)*uDt;   // buoyancy on the floor face, from the two cells it separates
   vec2 gw=base3(j).xy;                                        // background (large-scale) wind at this height
   vec3 vu=velU(tA,g_i), vv=velV(tA,g_i);                      // all three components at the u face and at the v face
   // Earth's rotation turns moving air to the right (northern hemisphere). The background wind is in balance with the
@@ -41769,7 +41848,7 @@ const F_SURF = HEAD + SURF_GLSL + `uniform float uDrain;
 void main(){ ivec2 c=ivec2(gl_FragCoord.xy);
   vec4 s=texelFetch(tSurf,c,0);
   float rho0=base1(0).y;
-  float rq=rainOut(F(tB,ivec3(c.x,0,c.y)).z, rho0, rho0);     // exactly what left the lowest cell in F_PHYS
+  float rq=rainOut(F(tB,ivec3(c.x,0,c.y)).z, rho0, rho0) + (uIce>0.5 ? snowOut(F(tB,ivec3(c.x,0,c.y)).w, rho0, rho0) : 0.0);   // exactly what left the lowest cell in F_PHYS (51.76: graupel too)
   vec3 fl=surfaceFlux(c);
   float mm=rq*rho0*uDx;                                        // kg/m^2 = mm of rain
   float lake=texelFetch(tFlux,c,0).b;
@@ -41821,7 +41900,8 @@ void main(){ baseInit(); ivec3 i=g_i; vec4 a=F(tA,i);
 const F_DIV = HEAD + `uniform sampler2D tA, tP;
 void main(){ baseInit();
   ivec3 i=g_i; vec4 a=F(tA,i);
-  float div = (F(tA,i+DXI).x-a.x) + (wF(tA,i+DYI)-wF(tA,i)) + (F(tA,i+DZI).z-a.z);
+  float dw = uAnel>0.5 ? (rhoF(i.y+1)*wF(tA,i+DYI)-rhoF(i.y)*wF(tA,i))/rhoL(i.y) : (wF(tA,i+DYI)-wF(tA,i));   // (51.76) div(rho0 u) / rho0
+  float div = (F(tA,i+DXI).x-a.x) + dw + (F(tA,i+DZI).z-a.z);
   o = vec4(div, F(tP,i).y, 0, 0);            // warm start from the last pressure
 }`;
 const F_POIS = HEAD + `uniform sampler2D tP; uniform int uParity;
@@ -41830,8 +41910,13 @@ void main(){ baseInit();
   if (((i.x^i.y^i.z^uParity)&1)==0){ o=r; return; }
   ivec2 d=ivec2(1,0);
   float s=F(tP,i-d.xyy).y+F(tP,i+d.xyy).y+F(tP,i-d.yyx).y+F(tP,i+d.yyx).y; float n=4.0;
+  if (uAnel>0.5){ float rc=rhoL(i.y);                         // (51.76) div(rho0 grad p) = div(rho0 u*): vertical neighbours weighted
+    if (i.y>0) { float w=rhoF(i.y)/rc; s+=w*F(tP,i-d.yxy).y; n+=w; }
+    if (i.y<63){ float w=rhoF(i.y+1)/rc; s+=w*F(tP,i+d.yxy).y; n+=w; }
+  } else {
   if (i.y>0) { s+=F(tP,i-d.yxy).y; n+=1.0; }                 // Neumann at floor and lid
   if (i.y<63){ s+=F(tP,i+d.yxy).y; n+=1.0; }
+  }
   r.y += ((s-r.x)/n - r.y)*1.6;                               // red-black SOR
   o=r;
 }`;
@@ -41846,7 +41931,7 @@ void main(){ baseInit();
 }`;
 
 const F_PACK = HEAD + `uniform sampler2D tB; uniform int uLayer;
-void main(){ ivec3 i=ivec3(int(gl_FragCoord.x), int(gl_FragCoord.y), uLayer); vec4 b=F(tB,i); o=vec4(b.y*1000.0, b.z*1000.0, 0, 1); }`;
+void main(){ ivec3 i=ivec3(int(gl_FragCoord.x), int(gl_FragCoord.y), uLayer); vec4 b=F(tB,i); o=vec4(b.y*1000.0, (b.z+2.2*b.w)*1000.0, 0, 1); }`;
 const F_SHIFT = HEAD + `uniform sampler2D tSrc; uniform int uSx, uSz, uFlat;
 void main(){ ivec2 q=ivec2(gl_FragCoord.xy);
   if (uFlat==1){ o=texelFetch(tSrc, ivec2(q.x-uSx, q.y-uSz)&63, 0); return; }
@@ -41879,7 +41964,7 @@ vec3 curlP(ivec3 i){ ivec2 d=ivec2(1,0);
   vec3 x1=velC(tA,i-d.xyy), x2=velC(tA,i+d.xyy), y1=velC(tA,i-d.yxy), y2=velC(tA,i+d.yxy), z1=velC(tA,i-d.yyx), z2=velC(tA,i+d.yyx);
   return 0.5*vec3((y2.z-y1.z)-(z2.y-z1.y),(z2.x-z1.x)-(x2.z-x1.z),(x2.y-x1.y)-(y2.x-y1.x)); }
 void main(){ ivec3 i=ivec3(int(gl_FragCoord.x), int(gl_FragCoord.y), uLayer); vec4 b=F(tB,i);
-  o=vec4(b.y*1000.0, b.z*1000.0, 0, 1);
+  o=vec4(b.y*1000.0, (b.z+2.2*b.w)*1000.0, 0, 1);
   o2=vec4(velC(tA,i), length(curlP(i))/uDx); }`;
 const DETAIL_GLSL = `
 uniform sampler3D tNoise;
@@ -41928,6 +42013,13 @@ uniform float uMaxT, uHaze, uExt, uSmooth, uM, uTime, uBright, uShadow, uDbg;
 uniform int uK; uniform float uBand; uniform vec2 uFlipN;
 uniform float uObl, uDomeR; uniform vec4 uZRow; uniform vec3 uDomeO;   // (51.71) the water's mirror only: see the depth below
 uniform float uStepK;                                          // (51.73) step length x this: 1 in the main view, __wx2.mirrorStep in the mirror
+// (51.77) the city storm (slot 3): uStorm = (centre x, full radius, centre z, fade width) in fair-sim units, w 0 = none;
+// uStormP its presence (the city dusk); uStormK = (fair units -> storm units, its band top in fair units, -); the storm's 0 C
+// and -38 C levels (fair y), and skylight occlusion on (1) or off
+uniform vec4 uStorm; uniform float uStormP; uniform vec3 uStormK; uniform vec2 uIceZ; uniform float uAO;
+// (51.79) the city at dusk lights its clouds from below (uCityGlow: the dusk's violet horizon colour x the dusk weight), and
+// lightning: up to 4 glows along the live channel (fair-sim xyz, brightness), their colour, their reach; the scene's flash
+uniform vec3 uCityGlow; uniform vec4 uFl[4]; uniform vec3 uFlC; uniform float uFlL, uFlashS, uBowK;   // (51.80) uBowK: the bow fades with the dusk's sun
 ` + REG_GLSL + DETAIL_GLSL + `
 out vec4 o;
 const float CELL=2.0/64.0;
@@ -41976,6 +42068,29 @@ float groundSun(vec3 gp){ Reg r=regAt(gp.xz); float s=0.0;
     vec3 q0=q-sd*((q.y+1.0)/max(sd.y,0.08));
     s+=r.w[j]*sunMapK(r.k[j], q0.xz*0.5+0.5, r.fl[j]); }
   return s; }
+// ---- (51.77) THE CITY STORM: its own sim on its own grid, centred on the hub city, blended in by stormW ----
+float stormW(vec2 xz){ return uStorm.w>0.0 ? uStormP*(1.0-smoothstep(uStorm.y, uStorm.y+uStorm.w, length(xz-uStorm.xz))) : 0.0; }
+vec3 toStorm(vec3 w){ return vec3((w.x-uStorm.x)*uStormK.x, (w.y+1.0)*uStormK.x-1.0, (w.z-uStorm.z)*uStormK.x); }
+vec2 stormQ(vec3 w, float lod){ vec3 s=toStorm(w); if (s.y>1.0) return vec2(0); return textureLod(tC3, s*0.5+0.5, lod).rg; }
+// ice crystals (r_e ~30 um) scatter ~0.36x as much per gram as 10 um droplets: the anvil is thin and fibrous. Only liquid
+// makes rainbows, glories, falling-rain streaks and cauliflower edges (lab v6: on ice they speckled the anvil)
+float iceK(float y){ return uIceZ.y>uIceZ.x ? mix(1.0, 0.36, clamp((y-uIceZ.x)/(uIceZ.y-uIceZ.x), 0.0, 1.0)) : 1.0; }
+float liqR(float y){ return uIceZ.y>uIceZ.x ? 1.0-smoothstep(uIceZ.x-0.02, uIceZ.x+0.02, y) : 1.0; }
+float liqC(float y){ return uIceZ.y>uIceZ.x ? clamp((uIceZ.y-y)/(uIceZ.y-uIceZ.x), 0.0, 1.0) : 1.0; }
+float stormSunTau(vec3 w, int n, float seg, float lod){ float tau=0.0, d=0.0;   // 11 samples reach ~9 km: through the anvil
+  for (int i=0;i<24;i++){ if (i>=n) break; vec3 q=w+uSunDir*(d+seg*0.5); if (toStorm(q).y>1.0) break; tau+=stormQ(q,lod).x*iceK(q.y)*seg; d+=seg; seg*=1.7; }
+  return tau*0.165*uExt*uM; }
+// skylight under the storm: its sky IS the cloud (optical depth straight up, to ~4.5 km, as diffuse light; floored at 0.3
+// because a rain shaft is still lit from the horizon all round it - lab v6: 0.08 rendered it black)
+float stormAO(vec3 p){ float tau=0.0, h=0.0, seg=0.09;   // (51.82) 4 samples to the same ~4.5 km
+  for (int k=0;k<4;k++){ vec3 q=p+vec3(0.0, h+seg*0.5, 0.0); if (toStorm(q).y>1.0) break; tau+=stormQ(q,2.5).x*iceK(q.y)*seg; h+=seg; seg*=2.3; }
+  return mix(0.3, 1.0, exp(-tau*0.165*uExt*uM*0.25)); }
+// lightning in the cloud: the channel lights the whole tower around it (light diffuses km through cloud before it gets out)
+float flashAt(vec3 p){ float s=0.0;
+  for (int k=0;k<4;k++){ if (uFl[k].w<=0.0) continue; float d=length(p-uFl[k].xyz);
+    s+=uFl[k].w*exp(-d/uFlL)/(1.0+4.0*d*d/(uFlL*uFlL)); }   // (51.81) km-wide: real lightning lights the whole cloud (25x was a ~300 m spot)
+  return s; }
+float stormGroundSun(vec3 gp){ vec3 q=toStorm(gp); vec3 q0=q-uSunDir*((q.y+1.0)/max(uSunDir.y,0.08)); return textureLod(tS3, q0.xz*0.5+0.5, 0.0).r; }
 float h3(vec3 p){ p=fract(p*0.3183099+0.1); p*=17.0; return fract(p.x*p.y*p.z*(p.x+p.y+p.z)); }
 float vnoise(vec3 x){ vec3 i=floor(x), f=fract(x); f=f*f*(3.0-2.0*f);
   return mix(mix(mix(h3(i),h3(i+vec3(1,0,0)),f.x), mix(h3(i+vec3(0,1,0)),h3(i+vec3(1,1,0)),f.x), f.y),
@@ -42013,42 +42128,78 @@ void main(){
   vec3 bmin=vec3(-1e5,uYBand.x,-1e5), bmax=vec3(1e5,uYBand.y,1e5), inv=1.0/rd;
   vec3 t0=(bmin-ro)*inv, t1=(bmax-ro)*inv, tmn=min(t0,t1), tmx=max(t0,t1);
   float tn=max(max(max(tmn.x,tmn.y),tmn.z),0.0), tf=min(min(min(min(tmx.x,tmx.y),tmx.z),tGeo),uMaxT);
+  // (51.77) the storm's own segment: the cylinder it shows in (around the city), from the ground to its band top. The far
+  // field's slab stays as low as its clouds; only rays that reach the city's cylinder march the tall storm layer
+  float sa=1e9, sb=-1e9;
+  if (uStorm.w>0.0 && uStormP>0.0){
+    vec2 oc=ro.xz-uStorm.xz; float R=uStorm.y+uStorm.w, A2=dot(rd.xz,rd.xz), B2=dot(oc,rd.xz), C2=dot(oc,oc)-R*R;
+    float c0=-1e9, c1=1e9; bool hit=true;
+    if (A2>1e-12){ float dsc=B2*B2-A2*C2; if (dsc>0.0){ float sq=sqrt(dsc); c0=(-B2-sq)/A2; c1=(-B2+sq)/A2; } else hit=false; }
+    else if (C2>0.0) hit=false;
+    float ya=-1e9, yb=1e9;
+    if (abs(rd.y)>1e-6){ float y0=(-1.0-ro.y)/rd.y, y1=(uStormK.y-ro.y)/rd.y; ya=min(y0,y1); yb=max(y0,y1); }
+    else if (ro.y<-1.0 || ro.y>uStormK.y) hit=false;
+    if (hit){ sa=max(max(c0,ya),0.0); sb=min(min(c1,yb),min(tGeo,uMaxT)); }
+  }
+  bool fairOn=tf>tn, stormOn=sb>sa;
+  float tA0=min(fairOn?tn:1e9, stormOn?sa:1e9), tA1=max(fairOn?tf:-1e9, stormOn?sb:-1e9);
   vec3 col=vec3(0); float T=1.0;
-  if (tf>tn){
+  if (tA1>tA0){
     float mu=dot(rd,uSunDir); vec3 bow=rainbow(mu), glo=glory(mu);
     uvec2 pq=uvec2(gl_FragCoord.xy);
     uint hv=pq.x*1973u+pq.y*9277u; hv=hv*747796405u+2891336453u; hv=((hv>>((hv>>28u)+4u))^hv)*277803737u; hv=(hv>>22u)^hv;
-    float t=tn+(float(hv)/4294967295.0)*stepAt(tn);
+    float t=tA0+(float(hv)/4294967295.0)*stepAt(tA0);
     for (int k=0;k<400;k++){
-      if (t>tf || T<0.01) break;
+      if (t>tA1 || T<0.01) break;
+      bool inF=fairOn && t>=tn && t<=tf, inS=stormOn && t>=sa && t<=sb;
+      if (!inF && !inS){ float nx=1e9; if (fairOn && tn>t) nx=min(nx,tn); if (stormOn && sa>t) nx=min(nx,sa); if (nx>1e8) break; t=nx; continue; }
       vec3 p=ro+rd*t;
       Reg rg=regAt(p.xz);
-      vec2 qf=owQ(rg,p,4.0); if (qf.x<1e-6 && qf.y<2e-6){ t+=6.0*CELL; continue; }
-      vec2 qb=owQ(rg,p,2.5); if (qb.x<1e-5 && qb.y<2e-5){ t+=1.5*CELL; continue; }
-      float ds=stepAt(t);
-      vec2 q=owQ(rg,p,max(uSmooth, log2(max(ds/CELL,1.0))));
-      // Milestone 2 on the view ray (lighting reads the smooth field, plus the detail's own self-shadow below)
+      float m = inS ? stormW(p.xz) : 0.0;                      // (51.77) how much of the city storm is here
+      // (51.82) where the storm covers the sky the far field isn't read at all, and the march steps at the STORM's grid
+      // (200 m cells, 2.7x the far field's): measured 14.1 ms for the cloud pass under it at 51.81 vs 2.8 ms at spawn
+      bool fw = inF && m<0.99; float kS = m>0.5 ? max(1.0, 1.0/uStormK.x) : 1.0;
+      vec2 qf=(fw ? (1.0-m)*owQ(rg,p,4.0) : vec2(0)) + (m>0.0 ? m*stormQ(p,4.0) : vec2(0)); if (qf.x<1e-6 && qf.y<2e-6){ t+=6.0*CELL*kS; continue; }
+      vec2 qb=(fw ? (1.0-m)*owQ(rg,p,2.5) : vec2(0)) + (m>0.0 ? m*stormQ(p,2.5) : vec2(0)); if (qb.x<1e-5 && qb.y<2e-5){ t+=1.5*CELL*kS; continue; }
+      float ds=stepAt(t)*kS;
+      vec2 qF = fw ? owQ(rg,p,max(uSmooth, log2(max(ds/CELL,1.0)))) : vec2(0);
+      vec2 qS = m>0.0 ? stormQ(p, max(uSmooth, log2(max(ds*uStormK.x/CELL,1.0)))) : vec2(0);
+      // Milestone 2 on the view ray (lighting reads the smooth field, plus the detail's own self-shadow below) - the far
+      // field's liquid cumulus only, not the storm (an anvil is smooth ice)
       float fpm=t*uM*uPixAng; vec4 vw=vec4(0);
-      bool det=uDetAmp>0.0 && q.x>0.0 && q.x<uDetQref && fpm<uDetDx;
-      if (det){ vw=velFor(rg, p); q.x=detailQ(q.x, p*uM, vw, fpm); }
+      bool det=uDetAmp>0.0 && qF.x>0.0 && qF.x<uDetQref && fpm<uDetDx && m<0.99;
+      if (det){ vw=velFor(rg, p); qF.x=detailQ(qF.x, p*uM, vw, fpm); }
+      vec2 q=(1.0-m)*qF + m*qS;
       float fd=1.0-smoothstep(0.85*uMaxT, uMaxT, t);
-      float sigC=0.165*q.x*uExt*fd, sigR=0.00345*q.y*uExt*fd;
+      float sigC=0.165*((1.0-m)*qF.x + m*qS.x*iceK(p.y))*uExt*fd, sigR=0.00345*q.y*uExt*fd;
       if (sigC+sigR>1e-6){
-        sigR*=curtain(p, t, q.y, q.x);
+        float lq = m>0.0 ? mix(1.0, liqR(p.y), m) : 1.0;        // falling streaks and the bow are rain's, not graupel's
+        sigR*=mix(0.625, curtain(p, t, q.y, q.x), lq);
         float sig=sigC+sigR;
-        float tau=sunTauR(rg, p, 7, 0.02, uSmooth+0.5);
+        float tau=(fw ? (1.0-m)*sunTauR(rg, p, 7, 0.02, uSmooth+0.5) : 0.0) + (m>0.0 ? m*stormSunTau(p, 9, 0.03, uSmooth+0.5) : 0.0);
         // the detail's self-shadow: lumps between here and half a cell sunward shade this sample, gaps let light through,
         // so billows read as lit faces and shaded folds (lab: without it the detail only changed 8.5% of pixels, faintly)
         if (det){ vec3 ps=p+uSunDir*(0.5*CELL); float qs=owQ(rg, ps, uSmooth).x;
           tau=max(0.0, tau+(detailQ(qs, ps*uM, vw, fpm)-qs)*0.165*uExt*(0.5*CELL*uM)); }
         float sun=exp(-tau);
+        float ao = m>0.0 ? mix(1.0, stormAO(p), m) : 1.0;      // (51.77) skylight under the storm
         vec3 lum=vec3(0);
         if (sigC>0.0){ float L=0.0, ea=1.0, eb=1.0, ec=1.0;
           for (int oc=0;oc<3;oc++){ L+=eb*mix(hg(mu,0.8*ec), hg(mu,-0.25*ec), 0.3)*exp(-tau*ea); ea*=0.25; eb*=0.5; ec*=0.5; }
+          // (51.77, lab v6) cloud absorbs almost nothing, so sunlight DIFFUSES through even a thick anvil: two-stream transmission
+          // ~1 / (1 + 0.11 tau) at g 0.85, ~15% through tau 50 where the octaves give ~nothing (the tower went black). A floor.
+          if (m>0.0) L=max(L, m*0.35/(1.0+0.11*tau));
           float powder=1.0-0.6*exp(-sigC*250.0)*(0.5-0.5*mu);
-          vec3 amb=SKYA*(0.3+0.7*clamp(p.y*0.5+0.5,0.0,1.0));
-          lum+=sigC*(SUNC*(L*powder*0.55 + glo*sun*0.5) + amb); }
-        if (sigR>0.0) lum+=sigR*(SUNC*sun*(hg(mu,0.6)*0.25 + bow*0.9) + SKYA*0.85);
+          vec3 amb=SKYA*(0.3+0.7*clamp(p.y*0.5+0.5,0.0,1.0))*ao;
+          float lc = m>0.0 ? mix(1.0, liqC(p.y), m) : 1.0;
+          lum+=sigC*(SUNC*(L*powder*0.55 + glo*sun*0.5*lc) + amb); }
+        float sunR = m>0.0 ? max(sun, m*0.35/(1.0+0.11*tau)) : sun;
+        if (sigR>0.0) lum+=sigR*(SUNC*(sunR*hg(mu,0.6)*0.25 + sun*bow*0.9*lq*uBowK) + SKYA*0.85*ao);
+        // (51.79) the city's neon from below (light pollution on low cloud), strongest over it and near the base
+        if (uCityGlow.x+uCityGlow.y+uCityGlow.z>0.0 && uStorm.w>0.0){
+          float gw=1.0-smoothstep(0.5*uStorm.y, uStorm.y+uStorm.w, length(p.xz-uStorm.xz));
+          lum+=sig*uCityGlow*gw*exp(-max(p.y+1.0,0.0)*uM/900.0); }   // (51.80) the bases, not the whole tower (0.55 washed the view violet)
+        if (uFl[0].w+uFl[1].w+uFl[2].w+uFl[3].w>0.0) lum+=sig*uFlC*flashAt(p);   // (51.79) lightning inside it
         lum=mix(uHazeC, lum/max(sig,1e-9)*uBright, exp(-uHaze*t));   // the air between the eye and the cloud (Koschmieder)
         float tr=exp(-sig*ds*uM);
         col+=T*lum*(1.0-tr); T*=tr;
@@ -42060,16 +42211,62 @@ void main(){
   float shf=1.0, dbS=-1.0, dbF=-1.0, dbT=-1.0;
   if (tGeo<1e8 && uShadow>0.0){
     vec3 gp=ro+rd*tGeo;
-    float sh=groundSun(gp), tauS=0.0;
+    float mg=stormW(gp.xz);                                     // (51.77) under the city storm: its shadow, and its dim
+    float sh=mix(groundSun(gp), stormGroundSun(gp), mg), tauS=0.0;
     float du=tGeo*uUpw*(-vd.z), fog=1.0-exp(-(uFogD*du)*(uFogD*du));
     shf=1.0-uShadow*(1.0-sh)*(1.0-fog);
+    if (mg>0.0) shf*=mix(1.0, 0.6+0.4*stormAO(gp+vec3(0.0,0.001,0.0)), mg*(1.0-fog));
     dbS=sh; dbF=fog; dbT=tauS;
   }
-  o=vec4(col, T*shf);                                          // premultiplied: dst = dst * a + rgb
+  // (51.81) a flash lights the scene: ADDED light (the scene target is RGBA8 - measured rtType 1009 - so 51.79's alpha > 1 was
+  // clamped to nothing), dimmed by the cloud between the eye and whatever it lit
+  o=vec4(col + uFlashS*vec3(0.30,0.33,0.42)*(0.35+0.65*T), T*shf);   // premultiplied: dst = dst * a + rgb
   if (uDbg>0.5) o=vec4(dz, min(tGeo, 9.0), T, shf);           // __wx2.dbg = 1: the raw terms, read by __wx2Dbg() (no composite)
   if (uDbg>1.5) o=vec4(dbS, dbF, dbT, rd.y);                  // __wx2.dbg = 2: the ground shadow's own terms
 }`;
-  const F_COMP = `#version 300 es
+const F_BUB = HEAD + `uniform sampler2D tA; uniform vec4 uBub; uniform vec2 uBubC;   // (dT K, horizontal radius m, centre height m, vertical radius m); centre (x, z) in cells
+void main(){ baseInit(); vec4 a=F(tA,g_i);
+  vec2 d=vec2(float(g_i.x)+0.5, float(g_i.z)+0.5)-uBubC; d-=64.0*floor(d/64.0+0.5);
+  float r=length(vec3(d*uDx/uBub.y, ((float(g_i.y)+0.5)*uDx-uBub.z)/uBub.w));
+  if (r<1.0){ float k=cos(1.5707963*r); a.w+=uBub.x*k*k; }
+  o=a; }`;
+const F_ELEC = HEAD + `uniform sampler2D tA, tB; uniform vec2 uZone;
+void main(){ ivec2 c=ivec2(gl_FragCoord.xy); float g=0.0, wm=0.0, top=-1.0;
+  for (int j=0;j<64;j++){ ivec3 i=ivec3(c.x,j,c.y); vec4 b=F(tB,i);
+    wm=max(wm, wF(tA,i));
+    if (float(j)>=uZone.x && float(j)<=uZone.y && b.y>1e-5) g+=base1(j).y*b.w*uDx;
+    if (b.y+b.w>1e-4) top=float(j); }
+  o=vec4(g, wm, top, F(tB,ivec3(c.x,0,c.y)).z); }`;
+const V_BOLT = `#version 300 es
+precision highp float; precision highp sampler2D; precision highp sampler3D;
+uniform sampler2D tBoltV; uniform sampler3D tC3;
+uniform mat4 uVP; uniform vec2 uRes; uniform float uW, uUpw, uY0, uExt, uM;
+uniform vec3 uCamU; uniform vec4 uStorm; uniform vec3 uStormK;
+out float vS; out float vB; out float vZ;
+vec3 toW(vec3 g){ return vec3(g.x/uUpw, (g.y-uY0)/uUpw-1.0, g.z/uUpw); }
+vec3 toStorm(vec3 w){ return vec3((w.x-uStorm.x)*uStormK.x, (w.y+1.0)*uStormK.x-1.0, (w.z-uStorm.z)*uStormK.x); }
+float transTo(vec3 g){ vec3 a=toW(uCamU), b=toW(g); float L=length(b-a), ds=L/20.0, tau=0.0;
+  for (int k=0;k<20;k++){ vec3 s=toStorm(mix(a,b,(float(k)+0.5)/20.0)); if (s.y>1.0 || s.y<-1.0) continue; tau+=textureLod(tC3, s*0.5+0.5, 1.5).r*ds; }
+  return exp(-tau*0.165*0.6*uExt*uM); }
+void main(){
+  vec4 P=texelFetch(tBoltV, ivec2(gl_VertexID,0), 0), D=texelFetch(tBoltV, ivec2(gl_VertexID,1), 0);
+  vec4 c0=uVP*vec4(P.xyz,1.0), c1=uVP*vec4(P.xyz+D.xyz*0.02,1.0);
+  if (c0.w<=1.0){ gl_Position=vec4(2.0,2.0,2.0,1.0); vS=0.0; vB=0.0; vZ=0.0; return; }
+  vec2 s0=c0.xy/c0.w, s1=c1.xy/max(c1.w,1e-6), dir=(s1-s0)*uRes; float l=length(dir); dir = l>1e-6 ? dir/l : vec2(1.0,0.0);
+  gl_Position=vec4(s0+vec2(-dir.y, dir.x)*D.w*uW*2.0/uRes, 0.0, 1.0);
+  vS=D.w; vB=P.w*transTo(P.xyz); vZ=c0.w;
+}`;
+const F_BOLT = `#version 300 es
+precision highp float; precision highp sampler2D;
+uniform sampler2D tDepth; uniform vec3 uBoltC; uniform float uI, uNear, uFar, uSkyT; uniform vec2 uTanHV, uRes;
+in float vS; in float vB; in float vZ; out vec4 o;
+void main(){
+  float dz=texelFetch(tDepth, ivec2(gl_FragCoord.xy), 0).r;
+  if (dz<1.0){ float vz=2.0*uNear*uFar/(uFar+uNear-(dz*2.0-1.0)*(uFar-uNear));
+    vec2 nd=gl_FragCoord.xy/uRes*2.0-1.0; float tu=vz*sqrt(1.0+dot(nd*uTanHV, nd*uTanHV));
+    if (tu<uSkyT && vz<vZ) discard; }                          // a building or hill in front of the channel
+  float s=abs(vS); o=vec4(uBoltC*(uI*vB*(exp(-s*s*30.0)+0.22*exp(-s*s*3.5))), 1.0); }`;
+const F_COMP = `#version 300 es
 precision highp float; uniform sampler2D tCld; uniform vec2 uInv; out vec4 o;
 void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
 
@@ -42102,8 +42299,8 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
   }
   function run(pr, fbo, w, h, tex, uni) {
     gl.useProgram(pr.p);
-    bindTex(pr, Object.assign({ tBase: S.baseTex }, tex), 0);
-    setU(pr, Object.assign({ uDt: S.dt, uDx: DX }, uni));
+    bindTex(pr, Object.assign({ tBase: CX.baseTex }, tex), 0);
+    setU(pr, Object.assign({ uDt: CX.dt, uDx: DX, uAnel: SC.anel ? 1 : 0, uIce: SC.ice ? 1 : 0 }, uni));   // (51.77) the bound sim's scenario
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.viewport(0, 0, w, h); gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
   function makeTex(w = RES2, h = RES2) { const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
@@ -42139,7 +42336,7 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
   function makeSim() { return { A: pingpong(), B: pingpong(), P: pingpong(), TA: makeTex(), S: pingpong(N, N), shadeTex: makeTex(N, N),
     M1: makeTex(N, N), MEANS: makeTex(N, 1), cloud3: make3D(), vel3: make3V(), sunMap: makeTexL(N, N), fluxTex: { tex: gl.createTexture() }, seed: 0, stepN: 0, live: false,
     band: null, pbo: null, fence: null, dirty: false }; }
-  function bindSim(s) { A = s.A; B = s.B; P = s.P; TA = s.TA; Ss = s.S; shadeTex = s.shadeTex; M1 = s.M1; MEANS = s.MEANS; cloud3 = s.cloud3; vel3 = s.vel3; fluxTex = s.fluxTex; sunMap = s.sunMap; seed = s.seed; stepN = s.stepN; }
+  function bindSim(s) { if (s.cx) useCtx(s.cx); A = s.A; B = s.B; P = s.P; TA = s.TA; Ss = s.S; shadeTex = s.shadeTex; M1 = s.M1; MEANS = s.MEANS; cloud3 = s.cloud3; vel3 = s.vel3; fluxTex = s.fluxTex; sunMap = s.sunMap; seed = s.seed; stepN = s.stepN; }
   function keepSim(s) { s.seed = seed; s.stepN = stepN; }
   function freeSim(s) {
     const ft = o => { if (o) { gl.deleteTexture(o.tex); if (o.fbo) gl.deleteFramebuffer(o.fbo); } };
@@ -42149,13 +42346,16 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
   }
 
   function windVec() { const Sp = +KN('wind'), f = +KN('windFrom') * Math.PI / 180; return [-Sp * Math.sin(f), -Sp * Math.cos(f)]; }   // from-direction -> (east, north)
+  function windAt(j) { const w = windVec(), U_ = SC.shear || 0; if (!U_) return w;
+    const f = +KN('windFrom') * Math.PI / 180, s = U_ * (Math.tanh((j + 0.5) * DX / 3000) - 0.5); return [w[0] - s * Math.sin(f), w[1] - s * Math.cos(f)]; }
+  function windKey() { return windVec().join(',') + '|' + (+KN('windFrom')); }
   function uploadBase() {
-    const d = new Float32Array(N * 4 * 4), w = windVec();
-    for (let j = 0; j < N; j++) { d.set([BASE.thb[j], BASE.qvb[j], BASE.pb[j], BASE.pi[j]], j * 4); d.set([BASE.dth[j], BASE.rho[j], BASE.wls[j], 0], (N + j) * 4);
+    const d = new Float32Array(N * 4 * 4);
+    for (let j = 0; j < N; j++) { const w = windAt(j); d.set([BASE.thb[j], BASE.qvb[j], BASE.pb[j], BASE.pi[j]], j * 4); d.set([BASE.dth[j], BASE.rho[j], BASE.wls[j], 0], (N + j) * 4);
       d.set([0, BASE.qvb[j], 0, 0], (2 * N + j) * 4); d.set([w[0], w[1], 0, 0], (3 * N + j) * 4); }
-    gl.bindTexture(gl.TEXTURE_2D, S.baseTex.tex); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, N, 4, 0, gl.RGBA, gl.FLOAT, d);
+    gl.bindTexture(gl.TEXTURE_2D, CX.baseTex.tex); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, N, 4, 0, gl.RGBA, gl.FLOAT, d);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    S.windKey = w.join(',');
+    CX.windKey = windKey();
   }
   function rngFrom(sd) { let s = sd >>> 0; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
   function buildFlux() {
@@ -42167,7 +42367,12 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
       for (let i = 0; i < f.length; i++) f[i] /= mx; return f; };
     const n1 = field(), n2 = field();
     const d = new Float32Array(N * N * 4);
-    if (SC.map === 'island') {
+    if (SC.map === 'city') {                                       // (51.77) the city storm's ground: a heat island on the box centre
+      const hk = (SC.heat && SC.heat.k) || 2, hr = N * ((SC.heat && SC.heat.r) || 0.1); let sm = 0;   // (where the city is), drier
+      for (let z = 0; z < N; z++) for (let x = 0; x < N; x++) { const i = x + N * z, ux = x + 0.5 - N / 2, uz = z + 0.5 - N / 2, u = Math.exp(-(ux * ux + uz * uz) / (hr * hr));
+        d[i * 4] = Math.max(0.1, 1 + 0.3 * n1[i]) + hk * u; d[i * 4 + 1] = Math.max(0.1, 1 + 0.3 * n2[i]) * (1 - 0.5 * u); sm += d[i * 4 + 1]; d[i * 4 + 2] = 0; d[i * 4 + 3] = 1; }
+      for (let i = 0; i < N * N; i++) d[i * 4 + 1] *= N * N / sm;
+    } else if (SC.map === 'island') {
       const R = N * (SC.islandR || 0.22);
       for (let z = 0; z < N; z++) for (let x = 0; x < N; x++) { const i = x + N * z;
         const ax = Math.abs(x + 0.5 - N / 2), az2 = Math.abs(z + 0.5 - N / 2), r = Math.hypot(Math.min(ax, N - ax), Math.min(az2, N - az2)) + 2.2 * n1[i];
@@ -42193,7 +42398,8 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
   function physUniforms() {
     const tau = PK('tau');
     return { uFth: SC.fth * PK('flux'), uFq: SC.fq * PK('flux'), uSunK: 1, uLatent: 1,
-      uRelax: tau > 0 ? Math.min(1, S.dt / tau) : 1, uSpongeZ: H * 0.86, uSpongeRate: 1 / 60,
+      uRelax: tau > 0 ? Math.min(1, CX.dt / tau) : 1, uSpongeZ: H * (SC.sponge || 0.86), uSpongeRate: 1 / 60,
+      uRech: SC.rech ? [SC.rech[0], 1 / (SC.rech[1] * 3600)] : [0, 0],
       uAutoThr: PK('thr') * 1e-3, uRainEvap: PK('revap'), uRad: PK('rad') / 86400, uRadZ1: SC.radZ[0], uRadZ2: SC.radZ[1],
       uNudge: [SC.nudge[0], SC.nudge[1], SC.nudge[2] * 3600], uDrain: 1 / (3 * 3600),
       uSeaBulk: SC.sea ? 1 : 0, uSST: SC.sst, uExSfc: Math.pow(PSURF / P0, RD / CP), uPsfc: PSURF, uNightCool: SC.nightCool, uSunUp: 1,
@@ -42202,8 +42408,8 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
   }
   function computeMeans() { run(PR.mean1, M1.fbo, N, N, { tA: A.a, tP: P.a }); run(PR.mean2, MEANS.fbo, N, 1, { tM1: M1 }); }
   function shade() { const sd = simSun(); run(PR.shade, shadeTex.fbo, N, N, { tB: B.a }, { uSunDir: sd, uElev: Math.min(1.45, Math.max(0, sd[1] / Math.sin(0.75))) }); }
-  function resetSim() {                                            // the bound sim back to its sounding, with a fresh seed
-    seed = (Math.random() * 1e9) | 0;
+  function resetSim(fixed) {                                       // the bound sim back to its sounding, with a fresh seed
+    seed = fixed != null ? (fixed >>> 0) : ((Math.random() * 1e9) | 0);   // (51.74) a fixed one for the self-test
     buildFlux();
     run(PR.init, A.a.fbo, RES2, RES2, {}, { uOut: { i: 0 }, uSeed: { u: seed >>> 0 }, uPertTop: SC.pert });
     run(PR.init, B.a.fbo, RES2, RES2, {}, { uOut: { i: 1 }, uSeed: { u: seed >>> 0 }, uPertTop: SC.pert });
@@ -42211,10 +42417,10 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
     computeMeans(); shade(); stepN = 0;
   }
   function* stepG() {
-    const dt = S.dt;
+    const dt = CX.dt;
     if (stepN++ % 4 === 0) { shade(); yield 1; }
     const order = (stepN & 1) ? [0, 1, 2] : [2, 1, 0];
-    for (const ax of order) { run(PR.scal, B.b.fbo, RES2, RES2, { tVel: A.a, tSrc: B.a }, { uAxis: { i: ax }, uMask: [1, 1, 1, 0] }); B.swap(); yield 1; }
+    for (const ax of order) { run(PR.scal, B.b.fbo, RES2, RES2, { tVel: A.a, tSrc: B.a }, { uAxis: { i: ax }, uMask: [1, 1, 1, SC.ice ? 1 : 0] }); B.swap(); yield 1; }   // (51.76) graupel rides the wind
     for (const ax of order) { run(PR.scal, A.b.fbo, RES2, RES2, { tVel: A.a, tSrc: A.a }, { uAxis: { i: ax }, uMask: [0, 0, 0, 1] }); A.swap(); yield 1; }
     run(PR.adP, TA.fbo, RES2, RES2, { tVel: A.a, tSrc: A.a }); yield 1;
     run(PR.adC, A.b.fbo, RES2, RES2, { tVel: A.a, tSrc: A.a, tPred: TA }); A.swap(); yield 1;
@@ -42269,14 +42475,15 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
   const bandBuf = new Float32Array(N * 4);
   function pollBands() {
     for (const s of S.sims) {
-      if (!s.fence) continue;
+      if (!s || !s.fence) continue;   // (51.77) the list has holes: the city storm sits in slot 3 before 1-2 exist
       const r = gl.clientWaitSync(s.fence, 0, 0);
       if (r === gl.TIMEOUT_EXPIRED || r === gl.WAIT_FAILED) continue;
       gl.deleteSync(s.fence); s.fence = null;
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, s.pbo); gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, bandBuf); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
       let lo = -1, hi = -1;
       for (let j = 0; j < N; j++) if (bandBuf[j * 4] > 1e-5 || bandBuf[j * 4 + 1] > 1e-6) { if (lo < 0) lo = j; hi = j; }
-      s.band = lo < 0 ? null : [lo === 0 ? 0 : Math.max(0, lo * DX - 150), Math.min(H, (hi + 1) * DX + 700)];
+      const sdx = s.cx ? s.cx.DX : DX, sh = s.cx ? s.cx.H : H;   // (51.77) in ITS units (the storm's grid differs)
+      s.band = lo < 0 ? null : [lo === 0 ? 0 : Math.max(0, lo * sdx - 150), Math.min(sh, (hi + 1) * sdx + 700)];
     }
   }
   function* cloneG(s) {
@@ -42287,6 +42494,7 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
     packCloud(); s.band = m.band ? m.band.slice() : null; s.live = true; yield 8;
   }
   function* packG(s) { packCloud(); yield 8; }
+  function addBubble(b, c) { run(PR.bub, A.b.fbo, RES2, RES2, { tA: A.a }, { uBub: [b.dT, b.rh, b.zc, b.rv], uBubC: c }); A.swap(); }
   function* stepJob(s) { yield* stepG(); if (s === S.sims[0]) S.simTime += S.dt; }
 
   const REG = { R: 1.45, rot: 0.47, amp: 0.35, period: 23.7, band: 0.07, off: [0, 0] };
@@ -42310,7 +42518,7 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
     return [(c * px - s * pz) / REG.R + REG.off[0], (s * px + c * pz) / REG.R + REG.off[1]]; }
   function ensureWarp() { if (warpData) return; warpData = makeWarp(); REG.off = [0, 0];
     const p0 = regPcpu(0, 0); REG.off = [0.5 - p0[0], 0.5 - p0[1]]; }   // the world origin sits mid home cell
-  function satLive() { let n = 0; for (let i = 1; i < S.sims.length; i++) if (S.sims[i].live) n++; return n; }
+  function satLive() { let n = 0; for (let i = 1; i < S.sims.length; i++) if (S.sims[i] && S.sims[i].live && !S.sims[i].storm) n++; return n; }   // (51.77) far field only
 
   function smooth01(a, b, x) { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); }
   function skyLight(y) {
@@ -42405,7 +42613,7 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
       bindTex(PR.comp, { tCld: V.cld }, S.unit0);
       setU(PR.comp, { uInv: [1 / aw, 1 / ah] });
       gl.drawArrays(gl.TRIANGLES, 0, 3);
-      if (eye) S.drawnM++; else S.drawn++;
+      if (eye) S.drawnM++; else { S.drawn++; drawBolt(cam, aw, ah, V); }   // (51.79) the lightning channel, main view
     } finally {
       if (tq) tqEnd(tq, eye ? 'mirror' : 'main');
       for (let u = 0; u < _hookUnits; u++) { gl.activeTexture(gl.TEXTURE0 + S.unit0 + u);
@@ -42457,6 +42665,7 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
     V.cld = { tex: t, fbo: f }; V.cldW = w; V.cldH = h;
   }
   function cloudUniforms(cam, aw, ah, lw, lh, eye) {
+    if (S.cxFair) useCtx(S.cxFair);                               // (51.77) the render's frame is the far field's (whichever sim stepped last)
     const e = cam.matrixWorld.elements, U_ = upm() * H / 2, Y0 = S.Y0;
     const P = eye || cam, pz = cam.projectionMatrix.elements;
     const sd = (typeof _WX !== 'undefined' && _WX && _WX.sunDir) ? _WX.sunDir : { x: 0.5, y: 0.42, z: 0.75 };
@@ -42464,8 +42673,15 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
     const fog = (typeof scene !== 'undefined' && scene && scene.fog) ? scene.fog : null;
     const hz = fog && fog.color ? [fog.color.r, fog.color.g, fog.color.b] : [0.35, 0.58, 0.81];
     let lo = 1e9, hi = -1e9;
-    for (const s of S.sims) { if (!s.live) continue; const b = s.band || [0, H * 0.86]; lo = Math.min(lo, b[0]); hi = Math.max(hi, b[1]); }
+    for (const s of S.sims) { if (!s || !s.live || s.storm) continue; const b = s.band || [0, H * 0.86]; lo = Math.min(lo, b[0]); hi = Math.max(hi, b[1]); }
     if (hi < lo) { lo = 0; hi = H * 0.86; }
+    const st = S.sims[3], sOn = !!(S.storm && st && st.live && st.storm && +KN('storm')), cxS = S.cxStorm;
+    let pres = 1; if (+KN('stormDusk')) { let cw = 0; try { cw = (typeof _HUB_ZONES !== 'undefined' && _HUB_ZONES.DUSK) ? (_HUB_ZONES.DUSK._cw || 0) : 0; } catch (_) {} pres = Math.min(1, Math.max(0, (cw - 0.02) / 0.6)); pres = pres * pres * (3 - 2 * pres); }
+    const sk = sOn ? H / cxS.H : 1, sbt = sOn ? (st.band ? st.band[1] : cxS.H) / (H / 2) - 1 : 0, kmU = 1000 * upm() / U_;
+    let dk = 0, dKey = 0.14, dHor = 0x5b3a86;
+    try { const D = _HUB_ZONES.DUSK; if (D && D.ON !== false) { dk = D._cw || 0; if (D.key != null) dKey = D.key; if (D.hor != null) dHor = D.hor; } } catch (_) {}
+    const sunK = 1 + (dKey - 1) * dk, ambD = [0.05, 0.07, 0.18], gH = [((dHor >> 16) & 255) / 255, ((dHor >> 8) & 255) / 255, (dHor & 255) / 255];
+    const fu = flashUniforms(sOn, pres); if (!eye) { S.flI = fu.I; S.flS = fu.scene; }   // (51.80) what the shader got, for __wx2Info
     const f = +KN('windFrom') * Math.PI / 180, dm = (typeof _WX !== 'undefined' && _WX && _WX.distMul > 0) ? _WX.distMul : 1;
     let dO = [0, 0, 0];                                             // the mirror: this eye from the sky dome's centre (u)
     if (eye) { const dp = (typeof _WX !== 'undefined' && _WX && _WX.dome) ? _WX.dome.position : eye.position; dO = [e[12] - dp.x, e[13] - dp.y, e[14] - dp.z]; }
@@ -42473,7 +42689,7 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
       uInvProj: { m4: P.projectionMatrixInverse.elements }, uCamWorld: { m4: e },
       uRes: [lw, lh], uDepthSize: [aw, ah], uNear: cam.near, uFar: cam.far, uSkyT: 20500 * dm * 0.96,
       uFogD: (fog && fog.density) ? fog.density : 0, uUpw: U_, uPixAng: 2 * Math.tan(P.fov * Math.PI / 360) / lh,
-      uCamW: [e[12] / U_, (e[13] - Y0) / U_ - 1, e[14] / U_], uSunDir: [sd.x, sd.y, sd.z], SUNC: L.sun, SKYA: L.amb, uHazeC: hz,
+      uCamW: [e[12] / U_, (e[13] - Y0) / U_ - 1, e[14] / U_], uSunDir: [sd.x, sd.y, sd.z], SUNC: L.sun.map(v => v * sunK), SKYA: L.amb.map((v, i) => v + (ambD[i] - v) * dk), uHazeC: hz,
       uYBand: [lo / (H / 2) - 1, hi / (H / 2) - 1],
       uMaxT: +KN('distKm') * 1000 / (H / 2), uHaze: 3.912 / (+KN('visKm') * 1000) * (H / 2), uExt: +KN('ext'), uSmooth: +KN('smooth'),
       uM: H / 2, uTime: (performance.now() / 1000) % 1000, uBright: +KN('bright'), uShadow: +KN('shadow'), uDbg: +KN('dbg') || 0,
@@ -42481,8 +42697,166 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
       uDetAmp: eye ? 0 : +KN('detail'), uDetTime: S.tDet || 0, uDetPer: 40, uDetQref: +KN('detQref'), uDetDx: DX, uDetVref: +KN('detVref'),
       uK: { i: 1 + satLive() }, uBand: REG.band, uRegR: REG.R, uWarpAmp: REG.amp, uWarpK: 1 / REG.period,
       uRegRot: [Math.cos(REG.rot), Math.sin(REG.rot)], uRegOff: REG.off, uFlipN: [Math.cos(f), -Math.sin(f)],
+      uStorm: sOn ? [HUB_CITY.x / U_, +KN('stormR') * kmU, HUB_CITY.z / U_, Math.max(1e-3, +KN('stormFade') * kmU)] : [0, 0, 0, 0], uStormP: sOn ? pres : 0,
+      uStormK: [sk, sbt, 0], uIceZ: sOn ? [cxS.zT[0] / (H / 2) - 1, cxS.zT[2] / (H / 2) - 1] : [0, 0], uAO: sOn ? 1 : 0,
+      uCityGlow: sOn ? gH.map(v => v * 0.2 * dk) : [0, 0, 0], uFl: fu.fl, uFlC: fu.c, uFlL: fu.L, uFlashS: fu.scene, uBowK: (1 - dk) * (1 - dk),
       uObl: eye ? 1 : 0, uZRow: [pz[2], pz[6], pz[10], pz[14]], uDomeO: dO, uDomeR: 20500 * dm,
     };
+  }
+
+  const LT = { rate: 0, pr: 0, gate: 0, gMax: 0, hCore: NaN, count: 0, cg: 0, cur: null, last: null, at: 0, pbo: null, fence: null,
+    colG: new Float32Array(N * N), colR: new Float32Array(N * N), colT: new Float32Array(N * N), buf: new Float32Array(N * N * 4), ready: false };
+  const BOLT_W = 4096;
+  function levelOfT(tc) { for (let j = 0; j < N; j++) if (BASE.thb[j] * BASE.pi[j] - 273.15 <= tc) return j; return N - 1; }
+  function* elecG(s) {                                             // the bound sim is the storm: its columns into a PBO, behind a fence
+    if (!S.elecTex) S.elecTex = makeTex(N, N);
+    run(PR.elec, S.elecTex.fbo, N, N, { tA: A.a, tB: B.a }, { uZone: [levelOfT(-5), levelOfT(-38)] });
+    if (!LT.pbo) { LT.pbo = gl.createBuffer(); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, LT.pbo); gl.bufferData(gl.PIXEL_PACK_BUFFER, N * N * 16, gl.STREAM_READ); }
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, LT.pbo); gl.readPixels(0, 0, N, N, gl.RGBA, gl.FLOAT, 0); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    if (LT.fence) gl.deleteSync(LT.fence);
+    LT.fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+    yield 2;
+  }
+  function pollElec() {
+    if (!LT.fence) return;
+    const r = gl.clientWaitSync(LT.fence, 0, 0); if (r === gl.TIMEOUT_EXPIRED || r === gl.WAIT_FAILED) return;
+    gl.deleteSync(LT.fence); LT.fence = null;
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, LT.pbo); gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, LT.buf); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    const B_ = LT.buf, dxs = S.cxStorm.DX; let gMax = 0, top = -1;
+    for (let c = 0; c < N * N; c++) { const g = B_[c * 4]; LT.colG[c] = g; LT.colR[c] = B_[c * 4 + 3]; LT.colT[c] = Math.max(0, B_[c * 4 + 2] + 1);
+      if (g > gMax) gMax = g; if (B_[c * 4 + 1] > 5 && B_[c * 4 + 2] > top) top = B_[c * 4 + 2]; }
+    LT.gMax = gMax; LT.hCore = top < 0 ? NaN : (top + 1) * dxs;
+    LT.pr = top < 0 ? 0 : 3.44e-5 * Math.pow(LT.hCore / 1000, 4.9);
+    const sm = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+    LT.gate = sm(0.1, 0.6, gMax);
+    LT.ready = true;
+  }
+  function stormToGame(cx, cz, zm) { const U = upm() * S.cxStorm.H / 2;
+    return [HUB_CITY.x + ((cx + 0.5) / N * 2 - 1) * U, S.Y0 + zm * upm(), HUB_CITY.z + ((cz + 0.5) / N * 2 - 1) * U]; }
+  function stormMaskAt(x, z) { const k = 1000 * upm(), r = Math.hypot(x - HUB_CITY.x, z - HUB_CITY.z), R = +KN('stormR') * k, F_ = Math.max(1, +KN('stormFade') * k);
+    const t = Math.min(1, Math.max(0, (r - R) / F_)); return 1 - t * t * (3 - 2 * t); }
+  function groundAt(x, z) { let y = S.Y0; try { if (typeof _stGroundYCarved === 'function') y = Math.max(y, _stGroundYCarved(x, z, (game && game.sandwichTerrain) || null)); } catch (_) {} return y; }
+  function rndPath(a, b, n, rough) {                               // a tortuous channel from a to b: aimed steps, sideways kicks
+    const pts = [a.slice()]; let p = a.slice();
+    for (let k = 1; k <= n; k++) { const rem = n - k + 1, d = [(b[0] - p[0]) / rem, (b[1] - p[1]) / rem, (b[2] - p[2]) / rem], L = Math.hypot(d[0], d[1], d[2]);
+      if (k < n) { d[0] += (Math.random() - 0.5) * 2 * rough * L; d[1] += (Math.random() - 0.5) * 0.8 * rough * L; d[2] += (Math.random() - 0.5) * 2 * rough * L; }
+      p = [p[0] + d[0], p[1] + d[1], p[2] + d[2]]; pts.push(p.slice()); }
+    return pts; }
+  function spawnFlash(type) {
+    if (!S || !S.cxStorm || !LT.ready) return null;
+    const w = new Float32Array(N * N); let tot = 0;
+    for (let c = 0; c < N * N; c++) { const g = LT.colG[c] > 0 ? LT.colG[c] : (type ? LT.colT[c] * 0.01 : 0), P_ = stormToGame(c & 63, c >> 6, 0); w[c] = g * g * stormMaskAt(P_[0], P_[2]); tot += w[c]; }
+    if (!(tot > 0)) return null;
+    let r = Math.random() * tot, c = 0; for (; c < N * N - 1; c++) { r -= w[c]; if (r <= 0) break; }
+    const cx = c & 63, cz = c >> 6, zT = S.cxStorm.zT, U = upm(), J = () => (Math.random() - 0.5) * S.cxStorm.DX * U;
+    const cg = type ? type === 'cg' : Math.random() < 0.3;
+    const top = Math.max(S.cxStorm.DX, LT.colT[c] * S.cxStorm.DX - 500);
+    const z15 = Math.min(zT[1], top), z35 = Math.min((levelOfTc(-35) + 0.5) * S.cxStorm.DX, top);
+    const segs = [], add = (pts, b) => { for (let k = 0; k < pts.length - 1; k++) segs.push([...pts[k], ...pts[k + 1], b]); };
+    let glow, main;
+    if (cg) {
+      let best = c, bv = -1; const R = Math.round(2000 / S.cxStorm.DX);   // the heaviest rain within ~2 km
+      for (let dz = -R; dz <= R; dz++) for (let dx = -R; dx <= R; dx++) { const k = ((cx + dx) & 63) + N * ((cz + dz) & 63); if (LT.colR[k] > bv) { bv = LT.colR[k]; best = k; } }
+      let lx = best & 63, lz = best >> 6; if (lx - cx > 32) lx -= 64; if (cx - lx > 32) lx += 64; if (lz - cz > 32) lz -= 64; if (cz - lz > 32) lz += 64;
+      const t0 = stormToGame(cx, cz, z15 + (Math.random() - 0.3) * 900); t0[0] += J(); t0[2] += J();
+      const g0 = stormToGame(lx, lz, 0); g0[0] += J(); g0[2] += J(); g0[1] = groundAt(g0[0], g0[2]);
+      main = rndPath(t0, g0, 56, 0.55); add(main, 1.0);
+      const ang = Math.random() * 6.283, lead = (1500 + Math.random() * 2500) * U;   // the in-cloud leader it came down from
+      add(rndPath(t0, [t0[0] + Math.cos(ang) * lead, t0[1] + (Math.random() - 0.5) * 800 * U, t0[2] + Math.sin(ang) * lead], 18, 0.6), 0.6);
+      const nb = 3 + Math.floor(Math.random() * 4);
+      for (let k = 0; k < nb; k++) { const p = main[Math.floor(main.length * (0.1 + 0.6 * Math.random()))], len = (400 + Math.random() * 1200) * U, a = Math.random() * 6.283;
+        add(rndPath(p, [p[0] + Math.cos(a) * len * 0.8, p[1] - len * 0.7, p[2] + Math.sin(a) * len * 0.8], 10 + Math.floor(Math.random() * 8), 0.7), 0.25 + 0.3 * Math.random()); }
+      glow = [t0, main[Math.floor(main.length * 0.3)], main[Math.floor(main.length * 0.6)], g0];
+    } else {
+      const a0 = stormToGame(cx, cz, z15 + Math.random() * 800); a0[0] += J(); a0[2] += J();
+      const ang = Math.random() * 6.283, L = (2000 + Math.random() * 5000) * U;
+      const b0 = [a0[0] + Math.cos(ang) * L, S.Y0 + (z35 - Math.random() * 1200) * U, a0[2] + Math.sin(ang) * L];
+      main = rndPath(a0, b0, 40, 0.6); add(main, 0.8);
+      const nb = 2 + Math.floor(Math.random() * 4);
+      for (let k = 0; k < nb; k++) { const p = main[Math.floor(main.length * Math.random())], len = (500 + Math.random() * 1500) * U, q = Math.random() * 6.283;
+        add(rndPath(p, [p[0] + Math.cos(q) * len, p[1] + (Math.random() - 0.5) * len * 0.4, p[2] + Math.sin(q) * len], 10, 0.7), 0.3 + 0.3 * Math.random()); }
+      glow = [a0, main[Math.floor(main.length * 0.33)], main[Math.floor(main.length * 0.66)], b0];
+    }
+    const strokes = [], ns = cg ? 1 + Math.floor(Math.random() * 4) : 2 + Math.floor(Math.random() * 4); let t = 0;
+    for (let k = 0; k < ns; k++) { strokes.push([t, k === 0 ? 1.0 : 0.5 + 0.4 * Math.random()]); t += cg ? 0.04 + Math.random() * 0.08 : 0.06 + Math.random() * 0.15; }
+    const f = { cg, segs, glow, strokes, t0: performance.now() / 1000, end: t + 0.5, nv: 0 };
+    let dm = 1e12; const E = camera.position; for (const s of segs) dm = Math.min(dm, Math.hypot((s[0] + s[3]) / 2 - E.x, (s[1] + s[4]) / 2 - E.y, (s[2] + s[5]) / 2 - E.z));
+    LT.cur = f; LT.count++; if (cg) LT.cg++; LT.last = { type: cg ? 'ground' : 'cloud', km: +(dm / U / 1000).toFixed(2) };
+    uploadBolt(f); thunder(f);
+    return f;
+  }
+  function levelOfTc(tc) { const B_ = S.cxStorm.BASE; for (let j = 0; j < N; j++) if (B_.thb[j] * B_.pi[j] - 273.15 <= tc) return j; return N - 1; }
+  function flashI(f, t) { const u = t - f.t0; if (u < 0 || u > f.end) return 0;   // each stroke a ~45 ms flash, then a dimmer continuing current
+    let I = 0; for (const [ts, a] of f.strokes) { const d = u - ts; if (d >= 0) I += a * (Math.exp(-d / 0.045) + 0.15 * Math.exp(-d / 0.18)); }
+    return I; }
+  function uploadBolt(f) {
+    if (!S.boltTex) { S.boltTex = { tex: gl.createTexture() }; gl.bindTexture(gl.TEXTURE_2D, S.boltTex.tex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, BOLT_W, 2, 0, gl.RGBA, gl.FLOAT, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST); }
+    const n = Math.min(f.segs.length, Math.floor(BOLT_W / 6)), V = new Float32Array(BOLT_W * 4 * 2), corner = [[0, 1], [0, -1], [1, 1], [1, 1], [0, -1], [1, -1]];
+    for (let k = 0; k < n; k++) { const s = f.segs[k];
+      for (let m = 0; m < 6; m++) { const e = corner[m][0], v = k * 6 + m, o = v * 4, q = (BOLT_W + v) * 4;
+        V[o] = e ? s[3] : s[0]; V[o + 1] = e ? s[4] : s[1]; V[o + 2] = e ? s[5] : s[2]; V[o + 3] = s[6];
+        V[q] = s[3] - s[0]; V[q + 1] = s[4] - s[1]; V[q + 2] = s[5] - s[2]; V[q + 3] = corner[m][1]; } }
+    unpackDefaults(); gl.bindTexture(gl.TEXTURE_2D, S.boltTex.tex); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, BOLT_W, 2, gl.RGBA, gl.FLOAT, V);
+    f.nv = n * 6; }
+  function lightningTick(dt, pres) {
+    if (!S.storm || !LT.ready || pres < 0.25) return;
+    LT.rate = LT.pr * LT.gate * Math.max(0, +KN('lightning'));
+    if (LT.rate > 0 && Math.random() < 1 - Math.exp(-LT.rate / 60 * dt)) spawnFlash();
+  }
+  function stormPresence() { let p = 1; if (+KN('stormDusk')) { let cw = 0; try { cw = (typeof _HUB_ZONES !== 'undefined' && _HUB_ZONES.DUSK) ? (_HUB_ZONES.DUSK._cw || 0) : 0; } catch (_) {}
+    p = Math.min(1, Math.max(0, (cw - 0.02) / 0.6)); p = p * p * (3 - 2 * p); } return p; }
+  function flashUniforms(sOn, pres) {                              // the live flash's glows (fair-sim units), colour, reach, scene flash
+    const fl = new Float32Array(16), f = LT.cur, I = (f && sOn) ? flashI(f, performance.now() / 1000) : 0, U_ = upm() * H / 2;
+    let scene = 0;
+    if (I > 0.002) { for (let k = 0; k < 4; k++) { const g = f.glow[k]; fl.set([g[0] / U_, (g[1] - S.Y0) / U_ - 1, g[2] / U_, I * (k === 0 ? 1.0 : 0.8)], k * 4); }
+      const E = camera.position, g = f.glow[1], dk = Math.hypot(g[0] - E.x, g[1] - E.y, g[2] - E.z) / upm() / 1000;   // km to the flash
+      scene = Math.min(1.2, I * 0.9 / (1 + dk * dk / 9)) * pres; }
+    return { fl, c: [4.5 * pres, 4.8 * pres, 6.0 * pres], L: 2000 * upm() / U_, scene, I };
+  }
+  function drawBolt(cam, aw, ah, V) {
+    const f = LT.cur; if (!f || !f.nv || !S.boltTex || !V.depthTex) return;
+    const pres = stormPresence(), I = flashI(f, performance.now() / 1000) * pres; if (I <= 0.002) return;
+    const st = S.sims[3]; if (!st || !st.live) return;
+    const U_ = upm() * H / 2, sk = H / S.cxStorm.H, kmU = 1000 * upm() / U_;
+    const vp = new THREE.Matrix4().multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+    const pe = cam.projectionMatrix.elements, dm = (typeof _WX !== 'undefined' && _WX && _WX.distMul > 0) ? _WX.distMul : 1;
+    gl.useProgram(PR.bolt.p);
+    bindTex(PR.bolt, { tBoltV: S.boltTex, tC3: st.cloud3, tDepth: V.depthTex }, S.unit0);
+    setU(PR.bolt, { uVP: { m4: vp.elements }, uRes: [aw, ah], uW: Math.max(2.5, ah / 160) * +KN('boltW'), uUpw: U_, uY0: S.Y0, uExt: +KN('ext'), uM: H / 2,
+      uCamU: [cam.matrixWorld.elements[12], cam.matrixWorld.elements[13], cam.matrixWorld.elements[14]],
+      uStorm: [HUB_CITY.x / U_, +KN('stormR') * kmU, HUB_CITY.z / U_, Math.max(1e-3, +KN('stormFade') * kmU)], uStormK: [sk, 0, 0],
+      uBoltC: [1.7, 1.8, 2.2], uI: I, uNear: cam.near, uFar: cam.far, uSkyT: 20500 * dm * 0.96, uTanHV: [1 / pe[0], 1 / pe[5]] });
+    gl.viewport(0, 0, aw, ah);
+    gl.enable(gl.BLEND); gl.blendEquation(gl.FUNC_ADD); gl.blendFuncSeparate(gl.ONE, gl.ONE, gl.ZERO, gl.ONE);
+    gl.disableVertexAttribArray(0);
+    gl.drawArrays(gl.TRIANGLES, 0, f.nv);
+    gl.enableVertexAttribArray(0);
+    S.boltN = (S.boltN || 0) + 1;
+  }
+  function thunder(f) {
+    if (!+KN('thunder')) return null;
+    const A_ = (typeof audio !== 'undefined' && audio && audio.ctx) ? audio : null; if (!A_ || A_.ctx.state !== 'running') return null;
+    const U = upm(), E = camera.position, c = 343;
+    const segs = f.segs.map(s => [Math.hypot((s[0] + s[3]) / 2 - E.x, (s[1] + s[4]) / 2 - E.y, (s[2] + s[5]) / 2 - E.z) / U, Math.hypot(s[3] - s[0], s[4] - s[1], s[5] - s[2]) / U, s[6]]);
+    let dmin = 1e12, dmax = 0; for (const s of segs) { dmin = Math.min(dmin, s[0]); dmax = Math.max(dmax, s[0]); }
+    if (dmin > 25000) return null;                                 // thunder is rarely heard beyond ~25 km
+    const sr = A_.ctx.sampleRate, n = Math.min(Math.ceil(((dmax - dmin) / c + 1.2) * sr), sr * 6), hi = new Float32Array(n), lo = new Float32Array(n);
+    for (const [d, len, b] of segs) { const i = Math.min(n - 1, Math.floor((d - dmin) / c * sr)), a = len * b / Math.max(d, 60); hi[i] += a * Math.exp(-d / 1800); lo[i] += a; }
+    const k1 = Math.exp(-1 / (0.012 * sr)), k2 = Math.exp(-1 / (0.3 * sr)); let e1 = 0, e2 = 0;
+    for (let i = 0; i < n; i++) { e1 = e1 * k1 + hi[i]; hi[i] = e1; e2 = e2 * k2 + lo[i]; lo[i] = e2; }
+    const out = new Float32Array(n); let br = 0, mx = 1e-9;
+    const kf = Math.exp(-1 / (2.2 * sr)); let fade = 1;
+    for (let i = 0; i < n; i++) { const w = Math.random() * 2 - 1; br = 0.997 * br + 0.06 * w; out[i] = (hi[i] * w * 0.6 + lo[i] * br * 1.4) * fade; fade *= kf; mx = Math.max(mx, Math.abs(out[i])); }
+    const gain = 0.9 * Math.min(1, Math.pow(1500 / dmin, 0.8));
+    for (let i = 0; i < n; i++) out[i] *= gain / mx;
+    const buf = A_.ctx.createBuffer(1, n, sr); buf.copyToChannel(out, 0);
+    const src = A_.ctx.createBufferSource(); src.buffer = buf;
+    const lp = A_.ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 300 + 4000 * Math.exp(-dmin / 2500);
+    src.connect(lp); lp.connect(A_.sfxBus || A_.masterGain);
+    src.start(A_.ctx.currentTime + dmin / c);
+    return { delay: dmin / c, seconds: n / sr };
   }
 
   let PR = null;
@@ -42509,8 +42883,9 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
       drawn: 0, drawnM: 0, vMain: {}, vMirror: {}, passes: 0, spinLeft: 0, bandAt: 0, drawable: false, scenKey: null };
     const src = { init: F_INIT, scal: F_SCAL, adP: F_ADV_P, adC: F_ADV_C, keddy: F_KEDDY, diff: F_DIFF, mean1: F_MEAN1, mean2: F_MEAN2,
       qmax1: F_QMAX1, qmax2: F_QMAX2, phys: F_PHYS, surf: F_SURF, shade: F_SHADE, vort: F_VORT, vfilt: F_VFILT, div: F_DIV, pois: F_POIS,
-      prs: F_PRS, pack2: F_PACK2, noise3: F_NOISE3, shift: F_SHIFT, shade2: F_SHADE2, cloud: F_CLOUD, comp: F_COMP };
-    PR = {}; for (const k in src) PR[k] = mkProg(src[k]);
+      prs: F_PRS, pack2: F_PACK2, noise3: F_NOISE3, shift: F_SHIFT, shade2: F_SHADE2, cloud: F_CLOUD, comp: F_COMP,
+      bub: F_BUB, elec: F_ELEC, bolt: [F_BOLT, V_BOLT] };
+    PR = {}; for (const k in src) PR[k] = Array.isArray(src[k]) ? mkProg(src[k][0], src[k][1]) : mkProg(src[k]);
     try {
       const mg = new THREE.BufferGeometry(); mg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(9), 3));
       const mm = new THREE.ShaderMaterial({ vertexShader: 'void main(){ gl_Position = vec4(0.0, 0.0, 2.0, 1.0); }',
@@ -42522,12 +42897,11 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
   }
   function setupSims() {
     const key = String(KN('scen'));
-    SC = SCENARIOS[key] || SCENARIOS.rico; DX = SC.dx; H = N * DX; PSURF = SC.psurf;
-    CFG = Object.assign({}, CFG_DEF, { flux: SC.flux, K: SC.K, dt: SC.dt, thr: SC.thr, rad: SC.rad }, SC.ui || {});
+    if (S.cxFair) gl.deleteTexture(S.cxFair.baseTex.tex);
+    S.cxFair = makeCtx(key); useCtx(S.cxFair);                     // (51.77) the far field's scenario context
     if (SC.wind && +KN('wind') === 0) { try { window.__wx2.wind = SC.wind.S; window.__wx2.windFrom = SC.wind.from; } catch (_) {} }
-    S.dt = CFG.dt; S.scenKey = key;
+    S.dt = CX.dt; S.scenKey = key;
     computeBase();
-    if (!S.baseTex) S.baseTex = { tex: gl.createTexture() };
     uploadBase();
     if (!S.vao) {
       S.vao = gl.createVertexArray(); gl.bindVertexArray(S.vao);
@@ -42550,26 +42924,41 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
       for (let z = 0; z < 64; z++) { gl.framebufferTextureLayer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, S.noise3.tex, 0, z); gl.uniform1i(U(PR.noise3, 'uLayer'), z); gl.drawArrays(gl.TRIANGLES, 0, 3); }
       gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.deleteFramebuffer(fb);
     }
-    for (const s of S.sims) s.live = false;
+    for (const s of S.sims) if (s) s.live = false;
     if (!S.sims[0]) S.sims[0] = makeSim();
+    for (let i = 0; i < 3; i++) if (S.sims[i]) { S.sims[i].cx = S.cxFair; S.sims[i].storm = false; }
     const m = S.sims[0]; bindSim(m); resetSim(); keepSim(m); m.live = true; m.band = null; m.dirty = true;
     S.job = null; S.queue = []; S.debt = 0; S.simTime = 0; S.tDet = 0;
     S.spinLeft = Math.ceil(+KN('spinMin') * 60 / S.dt);           // steps of spin-up: the sky grows from the bare sounding
+    setupStorm(); bindSim(m);
     S.phase = 'spin'; S.drawable = true;
-    console.log('[wx2] ' + SC.label + ': ' + (H / 1000).toFixed(1) + ' km box, spinning up ' + KN('spinMin') + ' sim-min');
+    console.log('[wx2] ' + S.cxFair.SC.label + ': ' + (S.cxFair.H / 1000).toFixed(1) + ' km box, spinning up ' + KN('spinMin') + ' sim-min' + (S.storm ? ' + the city storm ' + KN('stormSpinMin') : ''));
+  }
+  function setupStorm() {
+    const want = +KN('storm') && typeof HUB_CITY !== 'undefined' && HUB_CITY && S.T && S.T.biome === 'mossy';
+    if (!want) { if (S.sims[3] && S.sims[3].storm) S.sims[3].live = false; S.storm = null; return; }
+    if (!S.cxStorm) { S.cxStorm = makeCtx('storm'); useCtx(S.cxStorm); computeBase(); uploadBase(); }
+    if (!S.sims[3]) S.sims[3] = makeSim();
+    const s = S.sims[3]; s.cx = S.cxStorm; s.storm = true; bindSim(s); resetSim();
+    addBubble(SC.bubble, [32, 32]); keepSim(s); s.live = true; s.band = null; s.dirty = true;
+    S.storm = { spinLeft: Math.ceil(+KN('stormSpinMin') * 60 / CX.dt) };
   }
   function nextJob() {
     if (S.queue.length) return S.queue.shift();
     const m = S.sims[0];
     if (S.phase === 'spin') {
-      if (S.spinLeft <= 0) return null;
+      if (S.spinLeft <= 0) {                                       // (51.77) then the city storm grows its first cell
+        const st = S.storm && S.sims[3];
+        if (st && st.live && S.storm.spinLeft > 0) { S.storm.spinLeft--; if (S.storm.spinLeft % 12 === 0) S.queue.push({ sim: st, gen: packG(st) }); return { sim: st, gen: stepJob(st) }; }
+        return null;
+      }
       S.spinLeft--;
       if (S.spinLeft % 12 === 0 || S.spinLeft === 0) S.queue.push({ sim: m, gen: packG(m) });
       return { sim: m, gen: stepJob(m) };
     }
     if (S.debt < S.dt) return null;
     S.debt -= S.dt;
-    for (let i = 1; i < S.sims.length; i++) { const s = S.sims[i]; if (s.live) { S.queue.push({ sim: s, gen: stepJob(s) }); S.queue.push({ sim: s, gen: packG(s) }); } }
+    for (let i = 1; i < S.sims.length; i++) { const s = S.sims[i]; if (s && s.live) { S.queue.push({ sim: s, gen: stepJob(s) }); S.queue.push({ sim: s, gen: packG(s) }); } }
     S.queue.unshift({ sim: m, gen: packG(m) });
     return { sim: m, gen: stepJob(m) };
   }
@@ -42588,11 +42977,12 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
     return used;
   }
   function syncSats() {                                             // grow / retire far-field sims to match the knob
-    const want = Math.max(0, Math.min(3, Math.round(+KN('sims')) - 1));
-    for (let i = 1; i <= 3; i++) {
+    const top = S.storm ? 2 : 3;                                   // (51.77) slot 3 is the city storm's while it lives
+    const want = Math.max(0, Math.min(top, Math.round(+KN('sims')) - 1));
+    for (let i = 1; i <= top; i++) {
       const s = S.sims[i];
       if (i <= want) {
-        if (!s) { S.sims[i] = makeSim(); }
+        if (!s) { S.sims[i] = makeSim(); S.sims[i].cx = S.cxFair; }
         if (!S.sims[i].live && !S.sims[i].cloning) { S.sims[i].cloning = true; const si = S.sims[i]; S.queue.push({ sim: si, gen: (function* () { yield* cloneG(si); si.cloning = false; })() }); }
       } else if (s && s.live) s.live = false;
     }
@@ -42610,21 +43000,26 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
       if (S.phase === 'dead' || document.hidden) return;
       renderer.resetState(); unpackDefaults(); gl.bindVertexArray(S.vao);
       if (String(KN('scen')) !== S.scenKey) { setupSims(); renderer.resetState(); return; }   // a new sounding: restart the sky
-      if (windVec().join(',') !== S.windKey) { uploadBase(); renderer.resetState(); }
+      for (const cx of [S.cxFair, S.cxStorm]) if (cx && windKey() !== cx.windKey) { useCtx(cx); uploadBase(); }   // (51.77) each context's wind
+      useCtx(S.cxFair);
       pollBands();
       try { tqPoll(); } catch (_) {}
+      try { pollElec(); } catch (_) {}
       let budget = +KN('passes');
       if (S.phase === 'spin') {
         budget = +KN('spinPasses');
-        if (S.spinLeft <= 0 && !S.job && !S.queue.length) { S.phase = 'run'; console.log('[wx2] sky grown at ' + Math.round(S.simTime / 60) + ' sim-min'); }
+        if (S.spinLeft <= 0 && !S.job && !S.queue.length && !(S.storm && S.storm.spinLeft > 0)) { S.phase = 'run'; console.log('[wx2] sky grown at ' + Math.round(S.simTime / 60) + ' sim-min'); }
       } else {
         S.debt = Math.min(S.debt + Math.max(0, dt) * (+KN('speed')), S.dt * 6);   // behind by more than 6 steps: run slow, never catch up in a burst
         S.tDet = Math.min(Math.max(S.tDet + Math.max(0, dt) * (+KN('speed')), S.simTime), S.simTime + 2 * S.dt);   // the detail's flow clock, smooth
         syncSats();
         if (performance.now() > S.bandAt) {                         // every sim's height band, every ~2 s
           S.bandAt = performance.now() + 2000;
-          for (const s of S.sims) if (s.live && !s.fence) S.queue.push({ sim: s, gen: bandG(s) });
+          for (const s of S.sims) if (s && s.live && !s.fence) S.queue.push({ sim: s, gen: bandG(s) });
         }
+        const pres = stormPresence(), st = S.sims[3];
+        if (S.storm && st && st.live && pres > 0.05 && !LT.fence && performance.now() > LT.at) { LT.at = performance.now() + 400; S.queue.push({ sim: st, gen: elecG(st) }); }
+        try { lightningTick(Math.max(0, dt), pres); } catch (_) {}
       }
       work(budget);
       const bill = (+KN('on') === 0) || !S.drawable;
@@ -42650,10 +43045,13 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
     try {
       for (const s of S.sims) if (s) freeSim(s);
       if (PR) for (const k in PR) { gl.deleteProgram(PR[k].p); gl.deleteShader(PR[k].v); gl.deleteShader(PR[k].f); }
-      if (S.baseTex) gl.deleteTexture(S.baseTex.tex);
+      for (const cx of [S.cxFair, S.cxStorm]) if (cx) gl.deleteTexture(cx.baseTex.tex);
       if (S.warpTex) gl.deleteTexture(S.warpTex.tex);
       if (S.qmax) { gl.deleteTexture(S.qmax.tex); gl.deleteFramebuffer(S.qmax.fbo); }
       if (S.packFbo) gl.deleteFramebuffer(S.packFbo);
+      if (S.elecTex) { gl.deleteTexture(S.elecTex.tex); gl.deleteFramebuffer(S.elecTex.fbo); }
+      if (S.boltTex) gl.deleteTexture(S.boltTex.tex);
+      if (LT.pbo) { gl.deleteBuffer(LT.pbo); LT.pbo = null; } if (LT.fence) { gl.deleteSync(LT.fence); LT.fence = null; } LT.cur = null; LT.ready = false;
       if (S.tqP) for (const p of S.tqP) gl.deleteQuery(p[0]);
       for (const V of [S.vMain, S.vMirror]) { if (!V) continue;
         if (V.cld) { gl.deleteTexture(V.cld.tex); gl.deleteFramebuffer(V.cld.fbo); }
@@ -42671,9 +43069,27 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
       bands: S.sims.map(s => s && s.live ? s.band : null), unit0: S.unit0, depthFmt: S.vMain.fmt || null, cloudPass: S.vMain.cld ? [S.vMain.cldW, S.vMain.cldH] : null,
       mirror: { drawn: S.drawnM, pass: S.vMirror.cld ? [S.vMirror.cldW, S.vMirror.cldH] : null, depthFmt: S.vMirror.fmt || null },
       gpu: S.tq ? { main: tqStat(S.tq.main), mirror: tqStat(S.tq.mirror) } : null,
+      storm: S.storm ? { live: !!(S.sims[3] && S.sims[3].live), spinLeft: S.storm.spinLeft, band: S.sims[3] && S.sims[3].band, zT: S.cxStorm && S.cxStorm.zT,
+        boxKm: S.cxStorm && S.cxStorm.H / 1000, presence: +stormPresence().toFixed(2),
+        flash: { I: +(S.flI || 0).toFixed(3), scene: +(S.flS || 0).toFixed(3), boltDraws: S.boltN || 0, cur: !!LT.cur, nv: LT.cur ? LT.cur.nv : 0, rtType: (typeof postFX !== 'undefined' && postFX && postFX.rtScene) ? postFX.rtScene.texture.type : null },
+        lightning: { rate: +LT.rate.toFixed(2), pr: +LT.pr.toFixed(2), gate: +LT.gate.toFixed(2), gMax: +LT.gMax.toFixed(2), hCore: LT.hCore, count: LT.count, cg: LT.cg, last: LT.last } } : null,
       hookErr: S.hookErr || null, knobs: Object.assign({}, DEF, window.__wx2 || {}) };
   }
+  function selftest(o) {
+    o = o || {}; const m = S.sims[0], steps = o.steps != null ? o.steps : 30;
+    renderer.resetState(); unpackDefaults(); gl.bindVertexArray(S.vao); bindSim(m);
+    S.job = null; S.queue = [];
+    resetSim(o.seed != null ? o.seed : 12345);
+    for (let k = 0; k < steps; k++) { const g = stepG(); while (!g.next().done) {} }
+    const h = [];
+    for (const t of [A.a, B.a]) { const buf = new Float32Array(RES2 * RES2 * 4), u = new Uint32Array(buf.buffer);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbo); gl.readPixels(0, 0, RES2, RES2, gl.RGBA, gl.FLOAT, buf);
+      let x = 0; for (let i = 0; i < u.length; i++) x = (Math.imul(x, 31) + u[i]) >>> 0; h.push(x.toString(16)); }
+    keepSim(m); gl.bindVertexArray(null); renderer.resetState();
+    return { scen: S.scenKey, steps, hash: h.join('/') };
+  }
   function dbg(what) {
+    if (what === 'selftest' && S && S.sims[0]) return selftest(arguments[1]);
     if (what === 'sim' && S && S.sims[0]) {                   // the main sim's fields, level by level: max |value| and NaN / Inf counts
       const out = {};
       for (const [name, tex] of [['A', S.sims[0].A.a], ['B', S.sims[0].B.a], ['P', S.sims[0].P.a]]) {
@@ -42700,7 +43116,7 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
       rows.push({ y, cols }); }
     return { w, h, rows };
   }
-  try { window.__wx2Info = info; window.__wx2Dbg = dbg; } catch (_) {}
+  try { window.__wx2Info = info; window.__wx2Dbg = dbg; window.__wx2Flash = t => { const f = S && spawnFlash(t || null); return f ? { cg: f.cg, segs: f.segs.length, strokes: f.strokes.length, last: LT.last } : null; }; } catch (_) {}
   return { init, frame, dispose, info };
 })();
 
