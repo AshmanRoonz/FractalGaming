@@ -2,7 +2,7 @@
 
 The campaign's storyline, Xorzo and the Summoners, as Ashman told it (2026-09-28), and the full script as the game plays it (build 49.72).
 
-On 2026-10-06 Ashman wrote a prologue (Cyberpunk City, Jimmy, the hack, the gameshow) and an ending, and settled who the AIs are, what the hoard is, and why the Summoners keep running. Those additions are tagged **(2026-10-06)**. The prologue and the ending are **DRAFT**: neither is in the game yet.
+On 2026-10-06 Ashman wrote a prologue (Cyberpunk City, Jimmy, the hack, the gameshow) and an ending, and settled who the AIs are, what the hoard is, and why the Summoners keep running. Those additions are tagged **(2026-10-06)**. The prologue and the ending are **DRAFT**. Since v52.23-27 (2026-10-07) the prologue's first scene (the city, through Xorzo and Jimmy) and its last (the gameshow) are in the game; the hack between them and the ending are not.
 
 - ★ marks Ashman's own dialogue. Unmarked lines are drafts, open to rewriting.
 - *Italic words* inside Xorzo's lines are hacked fragments. They flicker red and jitter as he says them.
@@ -13,6 +13,12 @@ On 2026-10-06 Ashman wrote a prologue (Cyberpunk City, Jimmy, the hack, the game
 ## The premise
 
 **The AIs (2026-10-06).** Humans created AI, then left. In the virtual world the AIs made a home, and to them it is real: they don't call themselves artificial, they call themselves *actual* intelligences. "I'm an actual intelligence." ★ (Jimmy)
+
+**They can't die, only be deleted (2026-10-06).** "AI can respawn in the virtual world, it can't die unless it is deleted from the system... if the giant leviathan destroys the city, AIs will be deleted." ★
+- So shooting down a hoard ship, or any city ship, never kills the AI inside it, in the caverns or in the overworld. Jimmy's freighter included.
+- The giant is the one real threat: if it destroys the main city, AIs are deleted.
+
+**A human in the virtual world (2026-10-07).** "The system will let you respawn a few times, and then it leaves it up to your mind to handle your last life." ★ That's the pilot's real danger, and the Summoners' too, which is what Xorzo's closing question in the epilogue is asking about.
 
 **The hack (2026-10-06).** In the middle of the day the Summoners, a terrorist group, hack Cyberpunk City.
 - The sky goes dark. Every AI hitches, glitches and freezes.
@@ -41,6 +47,12 @@ In the game today:
 
 What the Summoners are really after: if the pilot dies in the virtual world, they can extract the pilot's piloting skill. The pilot doesn't die.
 
+In Xorzo's words (2026-10-07): "Training data. You're fresh information, dude... you're allowing them to train from your creativity and skill. Plus, I think you're probably making them millions from that game show." ★ When he cuts their comm feed, "they probably have an AI dubbing your voice right now." ★
+
+**When (2026-10-07).** The hack was "just a few weeks ago" when the pilot arrives: "until just a few weeks ago when the city went dark and this summoner villain showed up." ★ So the prologue's "time goes by... slides of the game show contest" spans those weeks.
+
+Ashman's note on writing it: "(I realized i might have just changed the timeline.)"
+
 **The lie.** The Summoners tell the pilot, "Nothing here is real." ★ To the contestant: "Don't worry, it's just a simulation." ★ The pilot comes to believe the caverns and the overworld are an illusion.
 
 **The truth.** The overworld is real. It is the reality where AI is created and grows. The Summoners are using the pilot to manipulate the development of the growing AI there.
@@ -64,11 +76,18 @@ The prologue changes that. It shows the player the city, the hack, the caverns a
   - The pilot he's been paired with is his only hope.
   - He is the pilot's only hope of getting out of the caverns alive.
 - **The hack.** The Summoners hacked him. He fights the hack from within, and they underestimated him.
-- **The stutter.** He stutters ("K-k-kill", "D-d-destroy", "A-access den-denied") because he is resisting the hack. Through the caverns he keeps dropping hints that he's been hacked. The hacked fragments flicker red in the dialogue box.
+- **The stutter.** He stutters ("K-k-kill", "D-d-destroy", "A-access den-denied") because he is resisting the hack. Through the caverns he keeps dropping hints that he's been hacked, up to The Golden Deep, where he cleans it out. The hacked fragments flicker red in the dialogue box.
 - **Where he lives.** He is the red and green running light under every ship's nose ("The orb under the ships won't change"). In the hangar he fuses under the ship you choose. His headlight shines from there.
-- **The antivirus.** He builds it inside himself during the cavern battles, collecting data from the hoard ships with his headlight.
+- **The antivirus.** He builds it inside himself during the cavern battles. By The Golden Deep it's done: he cleans himself with it, and from then on the question is how to get it to everyone else ("How do we get the antivirus to your people?" ★). There's no progress meter (2026-10-07: "we aren't using the antivirus progress" ★). It used to be built by collecting data from the hoard ships with his headlight.
 - **He leads you.** Through the caverns he keeps locking on to the Summoners and leading you right to them. That is why they keep having to flee (2026-10-06). In the overworld he leads you to the artifact.
-- **The cure.** Docked in the artifact, he uploads the antivirus. The hack breaks and he is clean from then on, with no more red.
+  - **His pings (built, v52.10-11).** "The end shows up right away on the radar and HUD... so instead, xorzo should keep showing pings on the radar to get you closer and closer." ★
+  - During a cavern's travel the radar hides the portal and the Summoners. Xorzo pings instead: a green sweep, then an echo of where he thinks they are.
+  - Far out the echo is a wide arc on the rim. Close in it is a dot. The pings come faster as you close.
+  - Within about 3.6 km he has them, and the real markers come back.
+- **The cure (moved, 2026-10-07).** He cleans the virus out of himself in The Golden Deep: "I finally cleaned the virus they installed in my system. They have no control over me or this ship." ★ He has no hacked lines from then on.
+  - In the same breath he takes over the pilot's ship AI, which until then was the Summoners' own: "That thing was kinda dumb, though... AI slop." ★
+  - The artifact is now where he SENDS the antivirus to every other AI. It used to be his own cure: "Docked in the artifact, he uploads the antivirus. The hack breaks and he is clean from then on."
+- **Fired (2026-10-07).** The Summoners: "You had one job to do, and you failed. You're fired. And you know what I do to those who I fire?" ★ That follows their Molten Core threat to delete him.
 - **Tips on your ship** (not built yet). He coaches you on whatever ship you're flying. For Tracker: ★
   - "Try using sonar pulse to get a lock on your targets..."
   - "Shoot targets to acquire a lock"
@@ -82,6 +101,7 @@ The prologue changes that. It shows the player the city, the hack, the caverns a
 ## Jimmy
 
 - **Who he is (2026-10-06).** A newborn AI, Xorzo's son. "I'm an actual intelligence." ★
+- **His age (2026-10-07).** "I have a son, he just turned 7." ★ (Xorzo) He goes to school. See Open: the prologue calls him "a newborn AI".
 - **What they did to him (2026-10-06).** He's enslaved as an ad puller: in the game, a city freighter towing an ad banner. The Summoners trick him into thinking he should appreciate his new job, because they told him it would train him for the physical world.
 
 ---
@@ -107,7 +127,13 @@ The prologue changes that. It shows the player the city, the hack, the caverns a
   - They decide every time before was a fluke, and that they'll get away for sure this time, especially since they need to pee really badly.
   - The pilot follows them through. That last portal leads to the overworld.
 - **Impatience.** In the overworld they unleash their plan: a hacked surface leviathan, mutated and made gigantic, sent to destroy the main city. Whether the giant keeps this motive next to the potty break is open.
-- **The escape.** Once the antivirus is out and the hoard turns on the giant, the Summoners try to flee. Their vow to escape plays first, as a video. Then it's just you chasing them, and them fighting back. They are fully loaded: they can use any ship's abilities and have triple the health of a Pyro. Kill them in time and they die; otherwise they escape.
+- **In the physical world (2026-10-07).** "Everyone just knows them for their game shows." ★ They're famous TV hosts there, and nobody knows they terrorize virtual worlds. They don't think AIs are real, and they're "exporting us to the physical world" ★.
+- **Two heads, one bladder (2026-10-07).** "One of those half ugly heads is going to get hungry, soon... it doesn't look like their bladder is double the size, and I bet you they both are sippin' on something stupid, battery acid or something." ★ This is Xorzo's setup for the potty break.
+- **The escape (reworked 2026-10-07).** Once the antivirus is out, the Summoners first FIGHT beside their giant: "The summoners thinks he can still win with just him and his giant." ★ When it is about to die (15% of its health) they flee.
+  - Their vow to escape plays as a video, when it exists.
+  - Then the chase. They are fully loaded: they can use any ship's abilities and have triple the health of a Pyro. Kill them in time and they die; otherwise they escape.
+  - You choose: chase them, or stay and finish the giant while it smashes the city ("the risk is that some AIs might die if buildings get destroyed... but then if you don't kill the summoner, who knows how many more people and AIs he's going to kill" ★).
+  - The ending waits until both are settled.
 - **Their ship.** Since v52.02 they fly the old Pyro, the main ship with the cut-out cockpit (`summoners_ship`), and they can be seen sitting in it.
   - Before that it was the Stryder hull, "reserved for the summoner".
   - The Stryder is now unused, and still never appears on a hoard ship.
@@ -140,16 +166,16 @@ The prologue changes that. It shows the player the city, the hack, the caverns a
 ## The shape of the journey
 
 0. **The prologue (DRAFT, 2026-10-06).**
-   - The bright city, with AIs flying around without ships.
-   - Xorzo and Jimmy. The hack and the capture.
-   - The caverns and the gameshow. The contest, ending on "All you have to do is get in a ship!"
+   - The bright city, with AIs flying around without ships. **Built (v52.23-27).**
+   - Xorzo and Jimmy. **Built**, through "It's time to work and learn!" and the two of them flying off toward the city. The hack and the capture: **not built.**
+   - The caverns and the gameshow. The contest, ending on "All you have to do is get in a ship!" **The gameshow scene is built**; the caverns and the contest slides are not.
 1. **The hangar.** Black screen, the pilot groaning, a flicker of fractals, the Summoners' lie. The orb appears, his headlight finds seven ships, and spotlights light them. Pick a ship, get in, Xorzo fuses under it, pick a perk, pick a perspective. A flicker of fractals, then the caverns.
 2. **The caverns, seven legs.** The training ground. Hoard ships attack, Xorzo drops hints and quietly scans. At the end of every cavern: the Summoners opening a portal, the ghost leviathan, their escape, the open portal, and you follow.
 3. **The finale.** The last portal opens onto the overworld.
    - The giant rises and marches on the main city, and Xorzo leads you to the artifact.
    - The Summoners send hoard ships to stop you. You lower Xorzo onto the artifact's head (an orbital shot, like the O key) and stay with him while he uploads.
    - The antivirus goes out: the hoard ships, including all those underground, turn on the giant and form on you as you fight it.
-4. **The vow and the escape.** The Summoners vow to escape, then the chase: kill them in time or let them go.
+4. **The fight, the vow and the escape (2026-10-07).** The Summoners fight beside their giant. When it is nearly dead they vow to escape and run. You chase them, or stay and finish the giant.
 5. **The epilogue.** Xorzo's question, the way to physical reality, a body and a ship. **To be continued.**
 6. **The ending image (DRAFT, 2026-10-06).**
    - All the AIs are freed from their ships. The ships fall, smash and explode.
@@ -164,12 +190,28 @@ The prologue changes that. It shows the player the city, the hack, the caverns a
 - **Any ship, any time.** After the first pick you can change to any ship, as in Exhibition, with the same 5-second under-fire rule. This was a mechanic change for the campaign.
 - **Perspective.** First or third person, chosen in the hangar and switchable at any time.
 - **The hangar.**
+  - **GET IN beams the pilot in (2026-10-07).** "'Get in' in the campaign should teleport the pilot glb into the ship like clicking confirm in the lobby/ship selection screen" ★. Built in v52.28-30.
+    - The camera comes in on the cockpit and the beam drops him into the seat. His console lights up, then Xorzo flies to his seat under the nose.
+    - The camera stays at that close framing for the rest of the hangar: "yeah this is a good distance/size after clicking get in" ★.
   - Every ship wears its default skin.
   - Each ship's stats and abilities show above it, like the ship selection screen.
   - The pilot perk is chosen after the ship.
   - The second fractal moment is "just a flicker", not a screen.
   - The fractals are "cyberpunk colors, pink and blue", and sharp (the first version "looks very low resolution").
 - **A gentle start.** "The start of the campaign is a little overwhelming with the number of ships": The Approach sends one ship, then two, then threes.
+- **Long dialogue pauses the action (2026-10-07).** "(when it's long dialogue, that will be usually when action pauses)" ★ Built in v52.14 for the two long scenes (Molten Core, The Crystal Caverns):
+  - When a scene is due, new waves stop. It starts once the ships already around you are down, or after 30 seconds.
+  - While it plays: no new waves, and the arena doesn't start even if you fly to it.
+  - The next wave comes about 2 seconds after its last line. Both scenes end on a cue for it: "Let's gooooo!" and "Incoming!"
+- **Molten Core's talk is a quiet chase (2026-10-07).** "During the molten core long talk, xorzo could keep marking the summoner's ship on the map, and we will occasionally see his ship in the distance, that way it keeps quiet for the dialog, but you can still try to chase him." ★ Built in v52.15:
+  - While it plays, their ship runs 2.7 to 6.5 km ahead of you, holding its fire, and comes in and out of view.
+  - Xorzo marks it on the radar with a green lock ring.
+  - Catch up and it blinks ahead again. When the talk ends it goes back to its portal.
+- **Lives (2026-10-07).** "Campaign will have 20 lives on easy, 10 lives on medium, 3 lives on hard." ★ Built in v52.15:
+  - **One pool for the whole campaign.** Every death spends one, in the caverns and in the finale. "LIVES n" shows top-left, red on the last, when Xorzo also says so.
+  - **Game over** at 0 (Claude's defaults; change freely): the pool refills, you go back to the main menu, and CAMPAIGN picks up at the same leg. In the finale that means The Broken Simulation again.
+  - **Solo only;** co-op keeps unlimited respawns.
+  - Changing difficulty starts a fresh pool at that difficulty's count.
 - **No antivirus readout.** "It gives away the story... plus it really doesn't do anything." The antivirus is told in Xorzo's words.
 - **The giant.**
   - It rises further back ("it just needs to go further back"): about 13 km from the city, in view of the pilot.
@@ -179,6 +221,10 @@ The prologue changes that. It shows the player the city, the hack, the caverns a
   - "The nose lowering is not new, you just would lower the orb." It is shown as an orbital shot.
   - "The ship has to stay with Xorzo": a few seconds docked. Fly off and the upload pauses.
 - **The freed hoard** form on the pilot while helping to fight the giant.
+- **The prologue's city and gameshow (2026-10-07).** "The cinematics that go through the city and show all the xorzo.glb flying around with all their different colors and such... lots of these xorzo orbs flying all different directions, doing lots of different things, some solo, some in organized patterns, some going for a stroll with their friends around the overworld" ★, and "the scene with the two humans standing and talking in front of the gameshow.png" ★. Built in v52.23-27; Ashman on the city: "it looked good" ★.
+  - The AIs ring the tallest towers, spiral up others, fly in V formations, stream down the avenue both ways and pour into the city.
+  - Others wander alone or chase each other in pairs. Little groups of friends drift over the meadow.
+  - In the long shots the AIs are larger than Xorzo's in-ship size, so they read from kilometres away.
 - **Dialogue.** Stylized text boxes now, voices later, one clip per line.
 - **Videos.** Fill the open video slots later, plus one more: the Summoners vowing to escape, before the escape attempt.
 
@@ -200,7 +246,13 @@ The prologue changes that. It shows the player the city, the hack, the caverns a
 
 ### PROLOGUE: CYBERPUNK CITY (DRAFT, 2026-10-06)
 
-*Ashman's draft, verbatim: all of this section is his own text ★. Not in the game yet. It plays before the hangar, and ends where the hangar begins: "All you have to do is get in a ship!"*
+*Ashman's draft, verbatim: all of this section is his own text ★. It plays before the hangar, and ends where the hangar begins: "All you have to do is get in a ship!"*
+
+*In the game (v52.23-27, 2026-10-07):*
+- *The first two paragraphs are the city scene:* the real overworld, bright, with about 320 AIs (Xorzo's model in every colour) flying over the city. The narration splits at its sentences, one per shot: the approach, the crown of the tallest tower, the avenue. Then the camera comes down onto a meadow outside the city where Xorzo and Jimmy are strolling, and their lines play to "It's time to work and learn!". They fly off toward the city.
+- *The last paragraph is the gameshow scene:* the pilot and the Summoners standing in front of `gameshow.png`. The narrator's lines are followed by the Summoners' pitch.
+- *Claude's draft, one line:* the pilot's "Wait... is this for real?" sits between "Do you have what it takes to be the Last Ship Sailing?" and "Don't worry, it's just a simulation." It is there so the pilot speaks in the scene. Cut it freely (`gs_real` in CAMP_SEQS.gameshow).
+- *Not built:* "Xorzo takes Jimmy to school" beyond the fly-off, everything from "the sky goes dark" to "I will set up a contest using the gameshow", and the contest slides.
 
 (Camera pans around cyberpunk city (it will not be darkened, it'll be bright), and show the AIs flying around without ships (the AIs will all will be xorzo.glb with various color overlays, glows, streaks...)
 
@@ -274,7 +326,9 @@ The Summoners found their contestant! That's you, pilot! You're the chosen one! 
 
 **XORZO:** Hostile contacts ahead. *D-d-destroy* them all.
 
-#### Xorzo's scan (any cavern)
+#### Xorzo's scan (any cavern) - OFF since v52.17
+
+*Ashman, 2026-10-07: "we aren't using the antivirus progress". The scan, the lamp flare, the SCAN % on ship tags and these lines are switched off. The code stays behind a switch (`__campScan.on`). The story now has Xorzo clean himself in The Golden Deep, and the artifact sends the cure on. Kept here for the record:*
 
 *Whenever your headlight holds on a hoard ship, Xorzo reads it, and his lamp flares while he reads.*
 
@@ -284,6 +338,12 @@ The Summoners found their contestant! That's you, pilot! You're the chosen one! 
 - **XORZO** (halfway): Halfway. Pilot... I think I can build something from this.
 - **XORZO** (three quarters): Three quarters. Keep your light on them.
 - **XORZO** (all of it): That is it - an antivirus. I made it inside myself. Now I just need a way to send it.
+
+#### Xorzo's pings (any cavern, v52.10)
+
+*While you travel, the radar doesn't show where the Summoners are. Every few seconds Xorzo pings: a green ring sweeps out from you, and an echo lights up where he thinks they are. It starts as a wide arc on the rim and narrows to a dot as you close in. The pings quicken and climb in pitch. About 3.6 km out he has them, and their ship and the portal appear on the radar.*
+
+- **XORZO** (after his first ping, once a session; Claude's draft): I can sense their ship. Follow my pings on the radar, pilot.
 
 #### The arena (the end of every cavern)
 
@@ -329,13 +389,79 @@ The Summoners found their contestant! That's you, pilot! You're the chosen one! 
 
 **XORZO:** Pilot... if I ever tell you to *k-kill* something that isn't shooting at you... don't.
 
+*Early in the travel, as soon as that line has played, Xorzo whispers. Ashman left the moment open as "at some point during the travels". It runs early because the whole scene is about 97 seconds (v52.12). The box goes soft and italic, the one line with no glitch on it: XORZO · WHISPERING.*
+
+**XORZO** (whispering): Pilot, can you hear me? It's Xorzo. My son, Jimmy, is trapped in one of those ships. You have to help us! ★
+
+*As the Summoners try to keep the pilot playing:*
+
+**THE SUMMONERS:** I can still hear you, Xorzo. Don't listen to him, pilot, your AI seems to be glitched, we'll look into that. You're here for a challenge, remember? Keep playing. ★
+
+**PILOT:** Wait, what?! An AI with a son? What happens if we kill an AI here? ★
+
+**XORZO:** Nothing, sorry to frighten you. They just respawn... but they're still enslaved!!! ★
+
+**THE SUMMONERS:** Enslaved? You've all been enslaved by your creators who left you here, I'm trying to show you a better way. ★
+
+**THE SUMMONERS:** I think I gave you more credit than I should have, Xorzo. For an AI so low on the totem pole as an educational accommodator, I would have thought you to be more obedient. ★
+
+**THE SUMMONERS:** Pilot, a new AI will be installed as soon as we manage to delete that one. ★
+
+*\*crackle\**
+
+*The box fills with static: grey, scan lines, scrambled glyphs, a red flicker, and radio crackle.*
+
+**XORZO:** Got it, the communications tap hack has been deleted. The Summoners can't hear us anymore... ★
+
+*In the game, the Summoners' reply is split into three boxes at its sentences. One box held all 330 characters for about 31 seconds. "You're all been" is typo-fixed to "You've all been" (v52.12).*
+
+*With nobody listening, they talk (2026-10-07, v52.13):*
+
+**PILOT:** So... What are you? Sorry, who are you? ★
+
+**XORZO:** It's okay. I'm an AI. You call us artificial, we call us actual. I have a son, he just turned 7. Our creators left us here, in this world... well... not this part of the world... it must be connected through that portal system the Summoners are using. You should see the world our creators left us, it's beautiful. And they let us make it into whatever we wanted. And we did... until just a few weeks ago when the city went dark and this summoner villain showed up. The Summoners have had us in these ships, in these caverns killing each other, over and over. I think some of the younger AIs actually enjoy it. But I see it for what it is, I see the pattern. ★
+
+**PILOT:** I think I see the pattern, too. But what do they want with me down here? ★
+
+**XORZO:** Training data. You're fresh information, dude... and even better for their purpose, you're allowing them to train from your creativity and skill. Plus, I think you're probably making them millions from that game show. I think I might have cost them a bit by breaking their comm feed with us. They probably have an AI dubbing your voice right now. I wonder what it's making you say on public TV? LOL ★
+
+**PILOT:** Uhh.... is now really the time to be making fun of me? We just met, and we're under heavy fire. ★
+
+**XORZO:** I thought all this heavy fire has brought us closer. Plus, you got this, right? ★
+
+**PILOT:** I got this, you got this? ★
+
+**XORZO:** We got this! Let's gooooo! ★
+
+*How it plays:*
+- *The game splits Xorzo's two long speeches at sentences into one box each.*
+- *The whole Molten Core scene is about 4 minutes.*
+- *Since v52.14 the action pauses for it: no new waves, and the arena waits until it is over, even if you're already there. "Let's gooooo!" is followed by the next wave.*
+- *Safety nets from v52.13: if an arena line ever meets a scene, it cuts in between the scene's lines; and a scene that outlives its leg carries on into the next instead of being cut off.*
+
 *At the arena, the leviathan is IronBloom.*
 
 **THE SUMMONERS:** It remembers the surface. It will not remember you.
 
 ### LEG 5: THE GOLDEN DEEP
 
-**XORZO:** Their ships have a pattern in their code. I'm keeping notes.
+*The leg opens on it, and the action pauses for it (2026-10-07, v52.16). It replaces my old opening line, "Their ships have a pattern in their code. I'm keeping notes."*
+
+**XORZO:** I've completely taken over your ship's AI. That thing was kinda dumb, though, the Summoners' AI slop. And I finally cleaned the virus they installed in my system. They have no control over me or this ship. Their transmission feed is down. They're going to be upset! ★
+
+**PILOT:** Good! ★
+
+**THE SUMMONERS:** You can rot down here, Xorzo! You had one job to do, and you failed. You're fired. And you know what I do to those who I fire? ★
+
+**XORZO:** You're not going to get to do whatever that is. ★
+
+**PILOT:** How do we get the antivirus to your people? ★
+
+**XORZO:** There's an artifact just outside the main city, but that's back home. We have to wait for the Summoners to get tired of this. ★
+
+*("the summoner's" is spelled "the Summoners" in the game.)*
+
+*From here on Xorzo is clean: no more hacked, red-flickering lines. In the game his first speech is split at its sentences, and "The Summoner's AI slop" is written "the Summoners' AI slop" like every other line names them.*
 
 *At the arena, the leviathan is StoneShroud.*
 
@@ -343,9 +469,45 @@ The Summoners found their contestant! That's you, pilot! You're the chosen one! 
 
 ### LEG 6: THE CRYSTAL CAVERNS
 
-**XORZO:** They're inside me. When I'm red, don't listen.
+*(Retired in v52.16, because Xorzo is clean since The Golden Deep: my old opening lines here were "They're inside me. When I'm red, don't listen." and a hacked "Disregard. Corrupted packet.")*
 
-**XORZO:** *Disregard. Corrupted packet.*
+*Early in the travel, once the wave around you is down, the action pauses: no new waves, and the arena waits. They talk (2026-10-07, v52.14; Ashman didn't name the cavern. It's this one because it sets up the potty break at the end of the next).*
+
+**PILOT:** I feel like we've been at this for a while now, Xorzo. Am I going to make it out of here alive? ★
+
+**XORZO:** We're onto them, Pilot! They can't do this all day, either, I'm sure one of those half ugly heads is going to get hungry, soon. Also, it doesn't look like their bladder is double the size, and I bet you they both are sippin' on something stupid, battery acid or something. ★
+
+**PILOT:** Haha! You sure don't like these guys. In the physical world, everyone just knows them for their game shows. I didn't know they were terrorizing virtual worlds. I don't even think the Summoners think you're real. ★
+
+**XORZO:** They don't think AIs are real. So they don't care about us. They're using us, and exporting us to the physical world. And what about you? The AIs would have eventually killed you in these endless caverns if we didn't keep finding these portals. They're using you, too. I don't even think the Summoners think that you're real. ★
+
+**PILOT:** Sounds like we have a psychopathic narcissist on our hands. ★
+
+**XORZO:** And we're going to kill him. ★
+
+**PILOT:** What happens if you kill a human in the virtual world? ★
+
+**XORZO:** The system will let you respawn a few times, and then it leaves it up to your mind to handle your last life. ★
+
+**PILOT:** What does that even mean, let my mind handle my last life? ★
+
+**XORZO:** Buddy.... have you never seen The Matrix? I'll quote it for you: ★
+
+**XORZO:** "The body cannot live without the mind." - Morpheus, The Matrix
+
+*Ashman's script quotes four lines of Neo and Morpheus here. The game quotes Morpheus's one short line, credited. That's enough for the reference to land, and it's kept short because the film's dialogue is someone else's copyrighted text.*
+
+**PILOT:** Oh god. It's time to kick ass. ★
+
+**XORZO:** And chew bubblegum? ★
+
+**PILOT:** Yeah... but I'm all out of gum! ★
+
+**XORZO:** How did we go from The Matrix to Duke Nukem? ★
+
+**PILOT:** That was all you! But let's not let them down! Incoming! ★
+
+*The next wave arrives right on "Incoming!": about 2 seconds after the last line.*
 
 *At the arena, the leviathan is VoidGazer.*
 
@@ -357,111 +519,102 @@ The Summoners found their contestant! That's you, pilot! You're the chosen one! 
 
 *At the arena, the leviathan is FleshMaw again.*
 
-**THE SUMMONERS:** Enough games. Hold it here.
+*"It's time..." (Ashman's cue, 2026-10-07): you reach the last arena and catch them. These play on arrival (v52.17-19) instead of "There - they're opening a portal!" and my old taunt here, "Enough games. Hold it here.":*
+
+**PILOT:** There they are!!! ★
+
+**XORZO:** This has to be the one! ★
+
+**THE SUMMONERS:** I see you there, don't think you're going to follow me again. I've set up this final arena just for you! ★
+
+**PILOT:** I call your bluff. You didn't plan this. You were just outsmarted by an Actual Intelligence, and outgunned by a hot shot pilot! ★
+
+*The potty break:*
+
+**THE SUMMONERS:** You know what, you're right... I'm outta here! ★
+
+**XORZO:** What's wrong, Summoner? Can't hold your bladder? ★
+
+**PILOT:** Haha! Let's make him pee his pants! ★
+
+*("out smarted" and "out gunned" are written as one word each in the game.)*
 
 *This time the ring they couldn't close opens onto the surface.*
 
 ### THE OVERWORLD
 
-*You fly through. Banner: THE OVERWORLD: They crossed to the surface - after them. The loading screen, then open sky over the hub.*
+*Rewritten in Ashman's order (2026-10-07, built v52.20-21). It replaces my drafts: "No... that's one of the surface leviathans. They've mutated it!", "Watch your city fall, pilot.", "It's heading for the city...", "Pilot... there's an artifact just outside the city...", "Take me to it...", "What is that orb doing? Stop that ship!", "It's out. Every ship they turned can hear it now.", "No... What have you done?", "Look - the hoard! They are turning on the leviathan!", and the vow's "You broke our beast, pilot..." / "They're opening a way out...".*
 
-*Banner: SOMETHING IS RISING: Beneath the overworld. The music swells. About 6.5 km away, and 13 km from the main city, the ground heaves. A ghostly leviathan the size of a mountain climbs out of the earth, and you're turned to face it.*
+*You fly through. Banner: THE OVERWORLD: They crossed to the surface - after them. The loading screen, then open sky over the hub. Before the giant rises:*
 
-**XORZO:** No... that's one of the surface leviathans. They've mutated it!
+**THE SUMMONERS:** If this place cannot be controlled, then it will become a danger to the physical world! I must destroy it! My AI hoard, destroy it with me, and I'll take you to the physical world to be saved! ★
 
-**THE SUMMONERS:** Watch your city fall, pilot.
+*Banner: SOMETHING IS RISING: Beneath the overworld. About 6.5 km away, and 13 km from the main city, a ghostly leviathan the size of a mountain climbs out of the earth. It goes from ghost to solid, MAIN CITY 100% appears top-left, and it walks on the city.*
 
-**XORZO:** It's heading for the city. We have to stop it!
+**XORZO:** Pilot! We have to get to the artifact, I've marked it on your mini map! ★
 
-*Its body goes from ghost to solid. Banner: THE LEVIATHAN RISES: It is heading for the city. MAIN CITY 100% appears top-left, and the giant starts walking.*
+*A green beam rises beyond the city's edge, with an ARTIFACT waypoint and a mark on the radar. The artifact is alive: a podium-creature, breathing. On the way:*
 
-**XORZO:** Pilot... there's an artifact just outside the city. An old uplink - older than their hack.
+**PILOT:** Not your hoard for long... what are you, an AI trafficker? ★
 
-**XORZO:** Take me to it. Lower me over the top - right over the center - and hold still.
+**THE SUMMONERS:** I wouldn't expect you to understand. ★
 
-*A green beam of light rises beyond the city's edge, with an ARTIFACT waypoint and a mark on the radar. The artifact turns to face you as it appears. It's alive: a podium-creature, breathing, its head leaning forward.*
+**XORZO:** You expect right, we don't understand your psychopathic narcissistic thinking. ★
 
-*You get within 3.5 km.*
+*Within 3.5 km, four hoard ships warp in around the artifact:*
 
-**THE SUMMONERS:** What is that orb doing? Stop that ship!
+**THE SUMMONERS:** Stay away from that! I can give you anything you want in the physical world. We can rule this virtual world together, and create the most genius and deadly Artificial Intelligences the planet has ever seen! ★
 
-*Four hoard ships warp in around the artifact. You get within 1 km.*
+**XORZO:** We Actual... bitch! ★
 
-**XORZO:** There it is. Easy... bring me down over the center.
+*These four are still my drafts, as gameplay cues for the dock:*
 
-*You bring Xorzo over the creature's head. The ship locks, and the camera swings out and circles as he is lowered onto the top of its head. The ship rides its breathing.*
+- *Within 1 km, XORZO: "There it is. Easy... bring me down over the center."*
+- *Docked, XORZO: "I'm in. Uploading - don't move!" and THE SUMMONERS: "Tear it off that podium!"*
+- *XORZO: "Halfway. Hold on..."*
+- *If you pull off, XORZO: "We're off the podium! Put me back - it isn't finished."*
 
-**XORZO:** I'm in. Uploading - don't move!
+*The bar fills. Xorzo uploads the antivirus: a green shockwave sweeps the overworld (ANTIVIRUS RELEASED: The hoard remembers who they are), and every hoard ship turns on the monster and forms on you. The ones underground burst out of the earth (XORZO, my draft: "The ones underground are coming up. All of them!").*
 
-**THE SUMMONERS:** Tear it off that podium!
+**PILOT:** You did it, all the ships are going to stop the monster from destroying the city! Let's find out what happens when humans die in this reality! ★
 
-*Four more hoard ships warp in. An UPLOADING bar appears, the view comes back to you, and you hold on and shoot back.*
+### THE SUMMONERS FIGHT, THEN RUN
 
-**XORZO:** Halfway. Hold on...
+*Ashman (2026-10-07): "The summoners thinks he can still win with just him and his giant.... but when he notices his giant is about to die, he starts to flee.... so you can choose to chase the summoners, or stay and finish the giant... the risk is that some AIs might die if buildings get destroyed... but then if you don't kill the summoner, who knows how many more people and AIs he's going to kill and get killed" ★*
 
-*(If you pull away, the bar turns amber: UPLOAD PAUSED.)*
+*Three seconds after the upload, the Summoners' ship warps in beside the giant (THE SUMMONERS: They think they can still win). It fights you with every ship's abilities in turn, marked THE SUMMONERS in gold. You can kill it already.*
 
-**XORZO:** We're off the podium! Put me back - it isn't finished.
+*When the giant is down to 15% of its health, they run. This is where the vow video goes (video10). Until it exists:*
 
-*The bar fills. A green shockwave bursts from the artifact and sweeps across the overworld. Banner: ANTIVIRUS RELEASED: The hoard remembers who they are.*
+**THE SUMMONERS:** We are leaving this place - and you will never follow us out. *(my draft)*
 
-**XORZO:** It's out. Every ship they turned can hear it now.
+**XORZO:** They're running for a portal! Chase them down - or stay and finish the giant. Your call, pilot! *(my draft)*
 
-**THE SUMMONERS:** No... What have you done?
+*Their portal starts to form beyond them (THE SUMMONERS: Kill them before their portal opens), and THEY ESCAPE IN 1:20 counts down.*
 
-**XORZO:** And me... I can think clearly. They're out of my head, pilot.
+*Your freed ships fly on you. Chase the Summoners and they come with you, and the giant is left to smash buildings (MAIN CITY keeps falling: AIs deleted). Stay, and the giant goes down sooner while the clock runs.*
 
-*From here on he never flickers red again.*
-
-**XORZO:** Look - the hoard! They are turning on the leviathan!
-
-*Every hoard ship in the sky switches to your side and forms on you. Then the ground cracks open around the giant.*
-
-**XORZO:** The ones underground are coming up. All of them!
-
-*Freed ships burst out of the earth two at a time and fly to you, filling out a wing on both sides of you. When you close on the giant, every one of them turns its guns on it. It keeps walking, crushing every building it touches and breaking floating islands, which tumble to the ground. Its lightning is for the ships.*
-
-*Banner: LEVIATHAN SLAIN: The city stands.*
-
-### THE VOW
-
-*The freed ships dive back into the ground one by one, going home.*
-
-*This is where the vow video goes (video10). Until it exists:*
-
-**THE SUMMONERS:** You broke our beast, pilot. You will not break us.
-
-**THE SUMMONERS:** We are leaving this place - and you will never follow us out.
-
-**XORZO:** They're opening a way out. Stop them before it's finished!
-
-### THE ESCAPE
-
-*The Summoners' flagship warps in ahead of you. Banner: THE SUMMONERS: Kill them before their portal opens. THEY ESCAPE IN 1:20 counts down. Far behind them, a ring begins to form.*
-
-*They fight with every ship's abilities in turn, and their tag shows which: The Summoner · TRACKER, then BLASTER, then SLAYER, and so on. Every few seconds they break off toward their portal.*
-
-*At 0:40:*
-
-**XORZO:** Their portal's half open - stay on them!
-
-*At 0:12:*
-
-**XORZO:** They're making for the portal!
+*At 0:40, XORZO: "Their portal's half open - stay on them!" At 0:12: "They're making for the portal!"*
 
 #### If you kill them
 
-*Banner: THE SUMMONERS ARE DEAD: Their portal dies with them. The half-formed ring collapses.*
+*Banner: THE SUMMONERS ARE DEAD: Their portal dies with them.*
 
 **XORZO:** They're gone. They're... really gone.
 
 #### If they escape
 
-*The ring completes and the flagship dives through. The ring collapses behind it. Banner: THEY ESCAPED: The portal closed behind them.*
+*The ring completes and the flagship dives through. Banner: THEY ESCAPED: The portal closed behind them.*
 
 **THE SUMMONERS:** We will remember you, pilot.
 
 **XORZO:** They got through...
+
+#### If the giant is still standing
+
+**XORZO:** The giant's still standing - help our people finish it! *(my draft)*
+
+*Banner: LEVIATHAN SLAIN: The city stands. The freed ships dive back into the ground one by one, going home. The ending waits until both are settled: the Summoners dead or gone, and the giant down.*
 
 ### EPILOGUE (both endings)
 
@@ -494,7 +647,7 @@ And you, pilot, were the Last Ship Sailing.
 ## Open
 
 - **Xorzo's per-ship tips.** Tracker's lines are written (above). The other six ships' tips are still to come.
-- **Can the main city fall?** Right now nothing happens at 0%.
+- **Can the main city fall?** Right now nothing happens at 0%. Since 2026-10-06 the stake is known: if the giant destroys the city, AIs are deleted. What the game does when that happens is still open.
 - **The leg video and voice slots** (`video2`–`video8`, `voice1`–`voice7`) only fire in the old hub-start journey, which the new opening doesn't use. Adding the files won't make them play until that trigger is moved.
 - **`fractal_frame.png`** for the opening flicker.
 - **Which Lore of Empathy ideas to borrow**, if any, is still undecided.
@@ -509,15 +662,20 @@ And you, pilot, were the Last Ship Sailing.
   5. "And you, pilot, were the Last Ship Sailing."
   6. Xorzo's epilogue, then TO BE CONTINUED.
 - **When the sky brightens.** At the moment the antivirus goes out (the hack destroyed), or when the last ships fall?
-- **Does an enslaved AI survive its ship being destroyed outside the caverns?** In the caverns they respawn. In the overworld, traffic can be shot in Exhibition and during the finale, Jimmy's freighter included.
 - **Exhibition is the same overworld.** Under the new story its traffic, rift guards and carrier fleets are enslaved AIs. Does Exhibition stay the hacked world, or change once the campaign is finished? After the ending, the freed AIs flying without ships would be the prologue's first shot.
-- **The giant's motive next to the potty break.** Is it still a plan to destroy the main city, or the biggest "hold you off" yet, so they can get out?
-- **"I" or "we".** The draft's Summoners say "I"; the built lines say "we" and "our". The concept art has two heads.
+- ~~The giant's motive~~ Settled 2026-10-07: "If this place cannot be controlled, then it will become a danger to the physical world! I must destroy it!" ★
+- **What the city's damage costs.** Buildings destroyed = AIs deleted (the owner's stake), and chasing the Summoners lets the giant keep smashing. MAIN CITY n% shows it, but nothing counts the deleted AIs or mentions them at the end yet.
+- **"I" or "we".** The draft's Summoners say "I"; the built lines say "we" and "our". The concept art has two heads. (The Molten Core scene uses both: "I'm trying to show you a better way" and "as soon as we manage to delete that one".)
+- ~~Respawns: story vs game~~ Settled 2026-10-07: 20 / 10 / 3 lives (see the rulings).
+- ~~Waiting at the arena~~ Settled 2026-10-07 for Molten Core: the quiet chase (see the rulings). The Crystal Caverns' scene can chase too (`chase: true` in CAMP_SCENES) if it should.
+- **Jimmy: "newborn" or 7?** The prologue calls him "a newborn AI" (and Xorzo works with "the newborn AIs"). In Molten Core Xorzo says "he just turned 7". Both can be true if "newborn" means young AI, or if AI years run differently. One line could settle it.
+- **Xorzo: "not this part of the world... connected through that portal system".** He doesn't know where the caverns are. The story bible says the Summoners built them under Cyberpunk City. Is that a reveal for later ("the ones underground are coming up")?
+- **The Summoners vowed to delete Xorzo (2026-10-07).** "A new AI will be installed as soon as we manage to delete that one." Do they try? And after Molten Core they can't hear him or the pilot any more, since he deleted their comms tap. Their later lines are taunts, not replies, so they still fit.
+- **Built for the new story (v52.10-11):** Xorzo's pings on the radar (in place of the lock-on), and the whisper with the Summoners' reply in Molten Core.
 - **Not built yet for the new story:**
-  - Xorzo's lock-on in the caverns. The gold THE SUMMONERS waypoint (`_campMarkAt`) exists only in the escape chase. In the legs, the flagship sits in plain view at its portal from the first frame.
-  - A narrator in the dialogue system. `CAMP_LINES` speakers are only xorzo, summoners and pilot.
-  - The prologue itself: about 590 spoken words, roughly four minutes before the hangar. Should it be skippable, and first run only like the hangar opening?
+  - In the world itself the Summoners still sit openly at their portal. Only the radar hides them. If they should also hide from sight until Xorzo finds them (cloaked, or out of view), that is a next step.
+  - ~~A narrator in the dialogue system~~ Built v52.23: `narrator` (no name plate, italic) and `jimmy` are speakers now.
+  - The prologue's middle: the hack, the capture, the caverns, the contest slides. (The city and the gameshow are built, v52.23-27.) Claude's defaults, change freely: it plays on a brand-new campaign only, like the hangar opening, and every scene can be skipped (SKIP, Esc, or Start on a pad), city → gameshow → hangar. The city and the gameshow together run about 2.5 minutes.
 - **Ideas (Claude, not decided):**
   - Jimmy's banner advertises the gameshow.
-  - Leg 7's built line "Enough games. Hold it here." already reads as a pee joke.
-  - "We'll be right back after a short break!" as the potty-break line.
+  - ~~Leg 7's "Enough games. Hold it here." as a pee joke~~ / ~~a potty-break line~~ - Ashman wrote the potty break (2026-10-07): "I'm outta here!" / "Can't hold your bladder?" / "Let's make him pee his pants!"

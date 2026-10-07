@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "52.09";
+const LSS_BUILD = "52.30";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -3474,6 +3474,8 @@ const CampaignMode = {
     c._nemesisFleeing = false; c._fleeTimer = null;
     c._portalForm = 0; c._portalT = 0; c._arrived = false; c._formAtArrive = 0;
     c._summonerSpawned = false; c._summonerLeft = false; c._chanT = 0; c._bcT = 0;
+    c._pings = []; c._pingT = null; c._pingRevealed = false;   // (v52.10) Xorzo's pings
+    c._sceneDone = false; c._scenePend = false; c._scenePendT = 0; c._sceneHoldPrev = false;   // (v52.14) the leg's scene
     if (typeof _clearBossPortal === 'function') _clearBossPortal();
     try { FormationDirector.clear(); } catch (_) {}
     if (game.entities) {
@@ -3488,25 +3490,30 @@ const CampaignMode = {
     const c = game.campaign;
     if (!c || game.state !== 'playing') return;
     if (!document.body.classList.contains('lss-campaign')) document.body.classList.add('lss-campaign');   // (v49.74) a reconnect / swap cannot bring it back
+    _campLivesHud();   // (v52.15) LIVES n
     {
       const _caA = (typeof amStasisOwner === 'function') ? amStasisOwner() : true;
       try { _campArenaTick(c, dt, _caA); } catch (e) { if (!c._arenaErr) { c._arenaErr = true; console.warn('[campaign] arena', e); } }
     }
     if (player && player.shipState === 'dead') {
+      if (_campGameOverTick(dt)) return;   // (v52.15) GAME OVER owns the frame until the menu
       if (!game._campReentryShown) {
         c._deathT = (c._deathT || 0) + dt;
         if (c._deathT >= 2.0) {
           c._deathT = 0;
+          if (_campLivesOn() && _campLoseLife() <= 0) { game._campReentryShown = true; _campGameOver(); return; }
           game._campReentry = true;
           game._campReentryShown = true;
           try { if (typeof enterShipSelect === 'function') enterShipSelect(); } catch (_) {}
         }
       }
-      return;   
+      return;
     }
     c._deathT = 0;
     game._campReentryShown = false;
     try { _campScanTick(c, dt); } catch (e) { if (!c._scanErr) { c._scanErr = true; console.warn('[campaign] scan', e); } }   // (v49.49)
+    try { _campPingTick(c, dt); } catch (e) { if (!c._pingErr) { c._pingErr = true; console.warn('[campaign] ping', e); } }   // (v52.10)
+    try { _campSceneTick(c, dt); } catch (e) { if (!c._whErr) { c._whErr = true; console.warn('[campaign] scene', e); } }   // (v52.10 whisper -> v52.14 scenes)
     
     
     if (game._campJourney && !c._legIntroShown) {
@@ -3522,11 +3529,18 @@ const CampaignMode = {
     try { FormationDirector.update(dt); } catch (_) {}
     switch (c.phase) {
       case 'travel': {
+        const _hold = _campSceneHold(c);
+        if (c._sceneHoldPrev && !_hold && c._travelSpawnTimer != null) c._travelSpawnTimer = Math.min(c._travelSpawnTimer, CAMP_SCENE_CFG.resumeIn);
+        c._sceneHoldPrev = _hold;
+        if (_ca) {
+          const _scn = _campSceneFor(c);
+          try { _campChaseTick(c, dt, !!(_scn && _scn.chase && _hold && c._sceneDone && !c._scenePend)); } catch (e) { if (!c._chErr) { c._chErr = true; console.warn('[campaign] chase', e); } }
+        }
         if (_ca) {
           const _aliveHoard = (game.entities || []).filter((e) => e && e.hoardModelKey && e.alive && !e.isNemesis).length;   // (v49.48) the flagship is not part of the swarm
           const _trainLeg = (game.selectedMap === 'camp_approach');
           if (c._travelSpawnTimer == null) c._travelSpawnTimer = _trainLeg ? 11.0 : 6.0;
-          c._travelSpawnTimer -= dt;
+          if (!_hold) c._travelSpawnTimer -= dt;   // (v52.14) the clock stops while a scene talks
           if (c._travelSpawnTimer <= 0) {
             if (_aliveHoard < (c.swarmCap || 9) && typeof _campSpawnTravelWave === 'function') {
               c._travelWaveN = (c._travelWaveN || 0) + 1;
@@ -3536,9 +3550,9 @@ const CampaignMode = {
             c._travelSpawnTimer = 16 + ((c._travelWaveN || 0) % 3) * 3;   
           }
         }
-        if (_ca && game.entities && player && player.position) {
+        if (_ca && !_hold && game.entities && player && player.position) {   // (v52.14) nothing warps in on a scene
           const px = player.position.x, py = player.position.y, pz = player.position.z;
-          const _FAR2 = 5500 * 5500;   
+          const _FAR2 = 5500 * 5500;
           for (let i = game.entities.length - 1; i >= 0; i--) {
             const e = game.entities[i];
             if (!e || !e.hoardModelKey || !e.alive || !e.position || e.isNemesis) continue;   // (v49.48) the flagship holds its station
@@ -3553,11 +3567,12 @@ const CampaignMode = {
             }
           }
         }
-        if (_ca && player && player.position && player.position.z >= CAMPAIGN_LEG_HALF_Z - 1400) {
+        if (_ca && player && player.position && player.position.z >= CAMPAIGN_LEG_HALF_Z - 1400 &&
+            !(_hold && CAMP_SCENE_CFG.holdArena)) {   // (v52.14) the arena waits for a scene to finish
           c.phase = 'boss'; c.bossActive = true; c._travelSpawnTimer = null;
           c._arrived = true; c._formAtArrive = c._portalForm || 0;   // (v49.48) caught mid-opening
           if (game._campJourney) { try { if (window.CampMedia && window.CampMedia.playVoice) window.CampMedia.playVoice((c.sceneIndex || 0) + 1); } catch (_) {} }   
-          try { if (window.CampDialogue) { window.CampDialogue.line('arrive_xz'); window.CampDialogue.beat('boss', c.sceneIndex || 0); } } catch (_) {}   // (v49.46/48)
+          try { if (window.CampDialogue) window.CampDialogue.interject(CAMP_SEQS['arrive' + (c.sceneIndex || 0)] || ['arrive_xz'].concat(CAMP_SEQS['boss' + (c.sceneIndex || 0)] || [])); } catch (_) {}
           _campBroadcastState();
         }
         break;
@@ -3612,7 +3627,7 @@ const CampaignMode = {
             try { if (window.Overlays && Overlays.warp) Overlays.warp(true); } catch (_) {}
             try { const _w = document.getElementById('ov-warp'); if (_w) { _w.classList.add('show'); _w.classList.remove('tunnel'); void _w.offsetWidth; _w.classList.add('tunnel'); } } catch (_) {}
             c.sceneIndex = (c.sceneIndex || 0) + 1;
-            try {
+            if (CAMP_SCAN.on) try {
               const _nLegs = CAMPAIGN_LEGS.filter((l) => l && l.key).length || 7;
               const _fl = Math.min(100, (c.sceneIndex / _nLegs) * 100 * CAMP_SCAN.legFloor);
               if ((c.av || 0) < _fl) { c.av = _fl; _campSaveAV(c.av); }
@@ -3643,7 +3658,7 @@ const CampaignMode = {
                   if (!net.active && game._campJourney && (typeof window !== 'undefined' && window.__campBetweenLegSelect)) _advToShipSelect = true;
                 } else {
                   try { if (window.Overlays) Overlays.banner('THE OVERWORLD', 'They crossed to the surface - after them'); } catch (_) {}
-                  game._campGiant = { phase: 'arrive', t: 0 };   // FreeFlightMode -> _campGiantTick
+                  game._campGiant = { phase: 'arrive', t: 0, campaign: true };
   LSS.MODE = 'freeflight';   // (v43.19) NOT room-deferred: internal setup, not a lobby mode button
                   game.selectedMap = 'hub_overworld';
                   game.testMode = false; game.raceNoTimer = true;
@@ -3681,6 +3696,7 @@ const CampaignMode = {
     try {
       if (typeof _clearBossPortal === 'function') _clearBossPortal();
       try { if (window.CampDialogue) window.CampDialogue.clear(); } catch (_) {}   // (v49.46) no line outlives the run
+      try { _campLivesHide(); } catch (_) {}   // (v52.15)
       game.campaign = null;
 game._xzScanFlare = 0;
       game._campJourney = false; game._campFinale = false; game._campFinaleShown = false; game._campRiftArmed = false; game._campV1Started = false;
@@ -3721,9 +3737,12 @@ const FreeFlightMode = {
   shouldEndRound() { return undefined; },
   update(dt) {
     if (game.state !== 'playing') return;
+    if (game._campGiant && game._campGiant.campaign) _campLivesHud();   // (v52.15) the campaign finale shows the campaign's LIVES too (v52.22: only the real one)
     if (player && player.shipState === 'dead') {
       if (game._campGiant && game._campGiant.art) { try { _campArtOnDeath(); } catch (_) {} }   // (v49.52) off the podium, orbit off, upload paused
+      if (game._campGiant && _campGameOverTick(dt)) return;   // (v52.15) the campaign finale's GAME OVER
       this._deathT = (this._deathT || 0) + dt;
+      if (this._deathT >= 1.6 && game._campGiant && game._campGiant.campaign && _campLivesOn() && _campLoseLife() <= 0) { this._deathT = 0; _campGameOver(); return; }
       if (this._deathT >= 1.6) { this._deathT = 0; try { if (typeof respawnPlayer === 'function') { respawnPlayer(); if (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight' && typeof player !== 'undefined' && player.maxHealth) { player.health = player.maxHealth; player.shield = player.maxShield; } } } catch (_) {} }
       return;
     }
@@ -3823,6 +3842,7 @@ const FreeFlightMode = {
     try { const _E = game._campGiant && game._campGiant.esc; if (_E) { if (_E.portal) _E.portal.destroy(); if (_E.closing) _E.closing.destroy(); } _campEscHud(null, false); const _tb = document.getElementById('camp-tbc'); if (_tb) _tb.classList.remove('on'); } catch (_) {}   // (v49.68)
     try { _campIslesReset(); } catch (_) {}    // (v49.56) every island the giant broke comes back
     try { game._campGiant = null; const _cc = document.getElementById('camp-city'); if (_cc) { _cc.classList.remove('on'); _cc._on = false; } } catch (_) {}   // (v49.50)
+    try { _campLivesHide(); game._campOver = null; } catch (_) {}   // (v52.15) LIVES off, and no GAME OVER left armed
     try { document.body.classList.remove('lss-freeflight'); } catch (_) {}   
     try { game._cyber = null; net.cyber = false; if (typeof _cyberCineLightsDispose === 'function') _cyberCineLightsDispose(); if (typeof _carrierClear === 'function') _carrierClear(); } catch (_) {}   // (v42.30) resident cine lights are this mode's, drop them with it   // (v37.76/80)
     try { game.thirdPerson = false; document.body.classList.remove('lss-thirdperson'); if (player.mesh) player.mesh.visible = false; } catch (_) {}   
@@ -5011,7 +5031,8 @@ function startCampaignJourney() {
     return;
   }
   game._campPicker = false;
-  try { if (window.__campOpening) { window.__campOpening.start(); return; } } catch (e) { console.warn('[campaign] opening failed:', e && e.message); }
+  try { if (window.__campPrologue && window.__campPrologue.start()) return; } catch (e) { console.warn('[campaign] prologue failed:', e && e.message); }
+  try { if (window.__campOpening) { window.__campOpening.start({ gameshow: true }); return; } } catch (e) { console.warn('[campaign] opening failed:', e && e.message); }
   _campPickerSetup('camp_approach');
   enterShipSelect();
 }
@@ -5037,6 +5058,7 @@ function _lssCampRestartClick(btn, fromPicker) {
   try {
     if (window.__campOpening && window.__campOpening.reset) window.__campOpening.reset();
     else { localStorage.removeItem('lss_campaign_legs'); localStorage.removeItem('lss_campaign_last'); localStorage.removeItem('lss_campaign_av'); }
+    try { _campLivesClear(); } catch (_) {}   // (v52.15) a restarted campaign starts with a full pool
   } catch (_) {}
   if (fromPicker) { try { returnToMainMenu({ hard: true }); } catch (_) { try { location.reload(); } catch (_) {} } return; }
   _lssCampRestartSync();
@@ -5475,7 +5497,7 @@ function warpOutFx(pos, radius) {
 }
 if (typeof window !== 'undefined') window.warpOutFx = warpOutFx;
 
-function _campNemesisMortal() { try { return !!(game._campGiant && game._campGiant.esc && game._campGiant.esc.phase === 'chase'); } catch (_) { return false; } }
+function _campNemesisMortal() { try { const E = game._campGiant && game._campGiant.esc; return !!(E && (E.phase === 'chase' || E.phase === 'fight' || E.phase === 'vow')); } catch (_) { return false; } }
 function _campMarkNemesis(bot) {
   if (!bot) return;
   bot.isNemesis = true;
@@ -5534,7 +5556,8 @@ function _campArenaTick(c, dt, auth) {
   }
   if (P) { P.form = c._portalForm; try { P.update(dt); } catch (_) {} }
   const nb = c._nemesisBot;
-  if (nb && nb.alive && !nb._fleePortalPos && P && P.mesh && c._portalForm < 1) {
+  if (c._chaseOn && c.phase !== 'travel') { try { _campChaseTick(c, dt, false); } catch (_) {} }   // (v52.15) no chase outside travel
+  if (nb && nb.alive && !nb._fleePortalPos && !nb._campChase && P && P.mesh && c._portalForm < 1) {
     c._chanT = (c._chanT || 0) - dt;
     if (c._chanT <= 0) {
       c._chanT = A.chanEvery * (0.7 + Math.random() * 0.6);
@@ -5563,20 +5586,20 @@ function _campArenaTick(c, dt, auth) {
   if (!c._summonerLeft && c._portalForm >= 1 && !(c._nemesisBot && c._nemesisBot.alive)) {
     c._summonerLeft = true;
     try { if (window.Overlays) Overlays.banner('THEY SLIPPED THROUGH', 'The portal is still open'); } catch (_) {}
-    try { if (window.CampDialogue) window.CampDialogue.line('sum_escape'); } catch (_) {}
+    try { if (window.CampDialogue) window.CampDialogue.interject(['sum_escape']); } catch (_) {}   // (v52.13) heard when it happens
     _campBroadcastState();
   }
   if (P && P.stable === false && c._summonerLeft && c.phase === 'cleared') {
     P.stable = true;
     try { if (window.Overlays) Overlays.banner('PORTAL OPEN', 'Fly through the ring - after them'); } catch (_) {}
-    try { if (window.CampDialogue) window.CampDialogue.line('xz_follow'); } catch (_) {}
+    try { if (window.CampDialogue) window.CampDialogue.interject(['xz_follow']); } catch (_) {}   // (v52.13) heard when it happens
     _campBroadcastState();
   }
   c._bcT = (c._bcT || 0) - dt;
   if (c._bcT <= 0) { c._bcT = 0.5; _campBroadcastState(); }
 }
 
-const CAMP_SCAN = { ang: 16, range: 2200, secs: 1.2, bossSecs: 2.5, grunt: 1.5, summoner: 8, boss: 5, legFloor: 0.9 };
+const CAMP_SCAN = { on: false, ang: 16, range: 2200, secs: 1.2, bossSecs: 2.5, grunt: 1.5, summoner: 8, boss: 5, legFloor: 0.9 };
 try { if (typeof window !== 'undefined') window.__campScan = CAMP_SCAN; } catch (_) {}
 const _campScanV = new THREE.Vector3(), _campScanD = new THREE.Vector3();
 function _campLoadAV() {
@@ -5595,6 +5618,7 @@ function _campAvAdd(c, worth, tag) {
   for (let i = 0; i < th.length; i++) { if (before < th[i][0] && c.av >= th[i][0]) { D.line(th[i][1]); break; } }
 }
 function _campScanTick(c, dt) {
+  if (!CAMP_SCAN.on) { game._xzScanFlare = 0; return; }   // (v52.17) the owner is not using the antivirus progress
   if (!player || !player.position || player.shipState === 'dead' || typeof camera === 'undefined' || !camera) { game._xzScanFlare = 0; return; }
   camera.getWorldDirection(_campScanD);
   const S = CAMP_SCAN, cosA = Math.cos(S.ang * Math.PI / 180), R2 = S.range * S.range;
@@ -5618,8 +5642,293 @@ function _campScanTick(c, dt) {
   game._xzScanFlare = (game._xzScanFlare || 0) + ((reading ? 1 : 0) - (game._xzScanFlare || 0)) * k;
 }
 
+const CAMP_PING = { on: true, firstAt: 3.5, everyFar: 7, everyNear: 2.4, farD: 30000, nearD: 3600,
+                    errMin: 110, arcMin: 4, arcMax: 32, arcPow: 0.7, ring: 0.9, hold: 4.2,
+                    revealD: 3600, sound: true };
+const _campPingV = new THREE.Vector3();
+let _campPingSaid = false;   // "Follow my pings" once per page session, not once per leg
+function _campPingHides(c) {
+  return !!(CAMP_PING.on && c && c.phase === 'travel' && !c._pingRevealed && typeof LSS !== 'undefined' && LSS.MODE === 'campaign');
+}
+function _campPingTarget(out) {
+  const ents = game.entities || [];
+  for (let i = 0; i < ents.length; i++) {
+    const e = ents[i];
+    if (e && e.isNemesis && e.alive && e.position) return out.copy(e.position);
+  }
+  return out.set(0, CAMP_ARENA.holdUp, CAMPAIGN_LEG_HALF_Z - CAMP_ARENA.holdBack);
+}
+function _campPingNear(d) {   // 0 at nearD .. 1 at farD
+  const P = CAMP_PING;
+  return Math.max(0, Math.min(1, (d - P.nearD) / Math.max(1, P.farD - P.nearD)));
+}
+function _campPingEmit(c) {
+  if (!player || !player.position) return;
+  const P = CAMP_PING, T = _campPingTarget(_campPingV);
+  const d = Math.hypot(T.x - player.position.x, T.z - player.position.z);
+  const arc = (P.arcMin + (P.arcMax - P.arcMin) * Math.pow(_campPingNear(d), P.arcPow)) * Math.PI / 180;
+  const err = Math.max(P.errMin, d * Math.tan(arc) * 0.85);
+  const r = err * Math.sqrt(Math.random()), a = Math.random() * Math.PI * 2;
+  const pings = c._pings || (c._pings = []);
+  pings.push({ x: T.x + Math.cos(a) * r, z: T.z + Math.sin(a) * r, t0: game.time || 0, err, arc, d });
+  while (pings.length > 4) pings.shift();
+  if (P.sound) {
+    const k = _campPingNear(d);
+    try { playSound(k > 0.6 ? 'sonar_ping_1' : (k > 0.25 ? 'sonar_ping_2' : 'sonar_ping_3')); } catch (_) {}
+  }
+}
+function _campPingTick(c, dt) {
+  if (!c || c._pingRevealed) return;
+  if (c._chaseOn) return;   // (v52.15) he has them MARKED on a chase - no pings, no reveal by distance
+  if (c.phase !== 'travel') { c._pingRevealed = true; c._pings = []; return; }
+  if (!CAMP_PING.on || !player || !player.position || player.shipState === 'dead') return;
+  const T = _campPingTarget(_campPingV);
+  const d = Math.hypot(T.x - player.position.x, T.z - player.position.z);
+  if (d < CAMP_PING.revealD) { c._pingRevealed = true; c._pings = []; return; }
+  if (c._pingT == null) c._pingT = CAMP_PING.firstAt;
+  c._pingT -= dt;
+  if (c._pingT <= 0) {
+    _campPingEmit(c);
+    c._pingT = CAMP_PING.everyNear + (CAMP_PING.everyFar - CAMP_PING.everyNear) * _campPingNear(d);
+  }
+  if (!_campPingSaid && c._pings && c._pings.length && window.CampDialogue) {
+    const st = window.CampDialogue.state();
+    if (!st.busy && !st.queued) { _campPingSaid = true; window.CampDialogue.line('xz_ping'); }
+  }
+}
+function _campPingMinimap(ctx, plot, cx, cy, scale) {
+  const c = game.campaign;
+  if (!c || c._chaseOn || !c._pings || !c._pings.length || !_campPingHides(c)) return;   // (v52.15) a chase marks instead
+  const P = CAMP_PING, now = game.time || 0, R0 = 4, R1 = 72;
+  const last = c._pings[c._pings.length - 1], ts = now - last.t0;
+  if (ts >= 0 && ts < P.ring) {   // the sweep
+    const k = ts / P.ring;
+    ctx.strokeStyle = 'rgba(109,255,176,' + (0.75 * (1 - k)).toFixed(3) + ')';
+    ctx.lineWidth = 1.3;
+    ctx.beginPath(); ctx.arc(cx, cy, R0 + (R1 - R0) * k, 0, Math.PI * 2); ctx.stroke();
+  }
+  for (let i = 0; i < c._pings.length; i++) {
+    const e = c._pings[i];
+    const p = plot(e.x, e.z);
+    const rho = Math.hypot(p.x - cx, p.y - cy);
+    const age = now - e.t0 - P.ring * Math.max(0, Math.min(1, (rho - R0) / (R1 - R0)));   // lit when the sweep reaches it
+    if (age < 0 || age > P.hold) continue;
+    const f = 1 - age / P.hold, pop = age < 0.25 ? (1 - age / 0.25) : 0;
+    const col = 'rgba(109,255,176,' + (0.95 * f * f).toFixed(3) + ')';
+    ctx.strokeStyle = col; ctx.fillStyle = col;
+    if (p.off) {
+      const ang = Math.atan2(p.y - cy, p.x - cx), RR = 70.5;
+      ctx.lineWidth = 2.4 + pop * 1.4;
+      ctx.beginPath(); ctx.arc(cx, cy, RR, ang - e.arc, ang + e.arc); ctx.stroke();
+      ctx.beginPath(); ctx.arc(cx + Math.cos(ang) * RR, cy + Math.sin(ang) * RR, 1.7 + pop, 0, Math.PI * 2); ctx.fill();
+    } else {
+      const rr = Math.max(3.2, Math.min(30, e.err * scale)) * (1 + pop * 0.5);
+      ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.arc(p.x, p.y, rr, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.arc(p.x, p.y, 1.8, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+}
+try {
+  if (typeof window !== 'undefined') window.__campPing = {
+    cfg: CAMP_PING,
+    state: () => {
+      const c = game.campaign; if (!c) return null;
+      const L = (c._pings && c._pings.length) ? c._pings[c._pings.length - 1] : null;
+      return { phase: c.phase, hides: _campPingHides(c), revealed: !!c._pingRevealed, next: (c._pingT != null) ? +c._pingT.toFixed(2) : null,
+               pings: (c._pings || []).length, last: L ? { d: Math.round(L.d), err: Math.round(L.err), arcDeg: +(L.arc * 180 / Math.PI).toFixed(1), age: +((game.time || 0) - L.t0).toFixed(2) } : null };
+    },
+    ping: () => { const c = game.campaign; if (c) _campPingEmit(c); return window.__campPing.state(); },
+  };
+} catch (_) {}
+
+const CAMP_SCENES = [
+  { leg: 3, at: 0.06, seq: 'whisper', chase: true },   // Molten Core: the whisper, the tap, "We got this!" (v52.10-13); a quiet chase (v52.15)
+  { leg: 4, at: 0.0, seq: 'takeover' },
+  { leg: 5, at: 0.06, seq: 'onto_them' },   // The Crystal Caverns: "we've been at this for a while", Matrix, Duke (v52.14)
+];
+const CAMP_SCENE_CFG = { lullR: 5000, maxWait: 30, resumeIn: 2.0, holdArena: true };
+function _campSceneFor(c) {
+  const n = c ? (c.sceneIndex | 0) : -1;
+  for (let i = 0; i < CAMP_SCENES.length; i++) if (CAMP_SCENES[i].leg === n) return CAMP_SCENES[i];
+  return null;
+}
+function _campSceneLull() {
+  if (!player || !player.position) return true;
+  const R2 = CAMP_SCENE_CFG.lullR * CAMP_SCENE_CFG.lullR, ents = game.entities || [];
+  for (let i = 0; i < ents.length; i++) {
+    const e = ents[i];
+    if (e && e.hoardModelKey && e.alive && !e.isNemesis && e.position && e.position.distanceToSquared(player.position) < R2) return false;
+  }
+  return true;
+}
+function _campSceneHold(c) {
+  if (!c || c.phase !== 'travel') return false;
+  if (c._scenePend) return true;
+  try { return !!(window.CampDialogue && window.CampDialogue.sceneActive && window.CampDialogue.sceneActive()); } catch (_) { return false; }
+}
+function _campSceneTick(c, dt) {
+  const S = _campSceneFor(c);
+  if (!S || c._sceneDone || c.phase !== 'travel') { c._scenePend = false; return; }
+  if (!player || !player.position || player.shipState === 'dead' || !window.CampDialogue) return;
+  const prog = (player.position.z + CAMPAIGN_LEG_HALF_Z) / (2 * CAMPAIGN_LEG_HALF_Z - 1400);
+  if (S.at > 0 && prog < S.at) return;   // (v52.17) at <= 0 = due at once (the spawn sits a hair behind 0)
+  c._scenePend = true;
+  c._scenePendT = (c._scenePendT || 0) + dt;
+  const st = window.CampDialogue.state();
+  if (c._scenePendT < CAMP_SCENE_CFG.maxWait && ((st.busy || st.queued) || !_campSceneLull())) return;
+  c._sceneDone = true; c._scenePend = false;
+  window.CampDialogue.play(S.seq, { keep: true });   // (v52.13) a scene: the next leg's start must not cut it
+}
+
+const CAMP_CHASE = { lead: 4600, swing: 1900, swingHz: 0.21, side: 900, up: 160, warpFar: 9500, behind: 900, home: 600 };
+const _campChaseV = new THREE.Vector3();
+try { if (typeof window !== 'undefined') window.__campChase = CAMP_CHASE; } catch (_) {}
+function _campChaseWarp(nb, to) {
+  try { _hoardTeleportSmoke(nb.position.x, nb.position.y, nb.position.z, to.x, to.y, to.z, 8, 150); } catch (_) {}
+  nb.position.copy(to);
+  if (nb.mesh) nb.mesh.position.copy(to);
+  if (nb.velocity) nb.velocity.set(0, 0, 0);
+}
+function _campChaseTick(c, dt, want) {
+  const nb = c._nemesisBot;
+  if (!nb || !nb.alive || !nb.position || nb._fleePortalPos) { c._chaseOn = false; return; }
+  const K = CAMP_CHASE, A = CAMP_ARENA;
+  const stationZ = CAMPAIGN_LEG_HALF_Z - A.holdBack;
+  if (!want) {
+    if (!c._chaseOn) return;
+    c._chaseOn = false; nb._campChase = false; nb._campHoldFire = false;
+    _campChaseV.set(0, A.holdUp, stationZ);
+    if (nb.position.distanceTo(_campChaseV) > K.warpFar) _campChaseWarp(nb, _campChaseV);
+    if (!nb._formationTarget) nb._formationTarget = new THREE.Vector3();
+    nb._formationTarget.copy(_campChaseV); nb._formationActive = true;
+    return;
+  }
+  if (!player || !player.position) return;
+  c._chaseT = (c._chaseT || 0) + dt;
+  const t = c._chaseT, lead = K.lead + K.swing * Math.sin(t * K.swingHz * Math.PI * 2);
+  _campChaseV.set(player.position.x + K.side * Math.sin(t * 0.37), player.position.y + K.up, Math.min(player.position.z + lead, stationZ - K.home));
+  if (!c._chaseOn) {
+    c._chaseOn = true; nb._campChase = true; nb._campHoldFire = true;
+    _campChaseWarp(nb, _campChaseV);
+  } else if (nb.position.z < player.position.z + K.behind && _campChaseV.z > player.position.z + K.behind) {
+    _campChaseWarp(nb, _campChaseV);   // you caught up with it: it blinks ahead again
+  } else if (nb.position.distanceTo(_campChaseV) > K.warpFar) {
+    _campChaseWarp(nb, _campChaseV);   // it got stuck or left behind on the rock
+  }
+  if (!nb._formationTarget) nb._formationTarget = new THREE.Vector3();
+  nb._formationTarget.copy(_campChaseV); nb._formationActive = true;
+}
+
+const CAMP_LIVES = { easy: 20, medium: 10, hard: 3, overSecs: 5.5 };
+function _campLivesMax(d) { return CAMP_LIVES[d] || CAMP_LIVES.medium; }
+function _campLivesOn() { try { return !(typeof net !== 'undefined' && net && net.active); } catch (_) { return true; } }
+let _campLivesC = null;   // { d, n } - localStorage read once per difficulty, not every frame
+function _campLivesGet() {
+  const d = _getStoredDifficulty();
+  if (_campLivesC && _campLivesC.d === d) return _campLivesC.n;
+  let n = _campLivesMax(d);
+  try { const o = JSON.parse(localStorage.getItem('lss_campaign_lives') || 'null'); if (o && o.d === d && isFinite(o.n)) n = Math.max(0, Math.round(o.n)); } catch (_) {}
+  _campLivesC = { d, n };
+  return n;
+}
+function _campLivesSet(n) {
+  const d = _getStoredDifficulty(); n = Math.max(0, Math.round(n));
+  _campLivesC = { d, n };
+  try { localStorage.setItem('lss_campaign_lives', JSON.stringify({ d, n })); } catch (_) {}
+  _campLivesHud(true);
+}
+function _campLivesRefill() { _campLivesSet(_campLivesMax(_getStoredDifficulty())); }
+function _campLivesClear() { _campLivesC = null; try { localStorage.removeItem('lss_campaign_lives'); } catch (_) {} }
+function _campLoseLife() {
+  const n = Math.max(0, _campLivesGet() - 1);
+  _campLivesSet(n);
+  if (n > 0) {
+    try { if (window.Overlays && Overlays.banner) Overlays.banner('LIVES ' + n, n === 1 ? 'Your last life' : 'Respawning'); } catch (_) {}
+    if (n === 1) { try { if (window.CampDialogue) window.CampDialogue.interject(['xz_lastlife']); } catch (_) {} }
+  }
+  return n;
+}
+function _campLegName() {
+  let k = null;
+  try { k = (typeof _campLoadLast === 'function' && _campLoadLast()) || game.selectedMap; } catch (_) {}
+  const L = (typeof CAMPAIGN_LEGS !== 'undefined') ? CAMPAIGN_LEGS.find((l) => l && l.key === k) : null;
+  return (L && L.name) || 'the leg';
+}
+function _campGameOver() {
+  game._campOver = { t: 0, returned: false };
+  _campLivesRefill();   // the next try starts with a full pool
+  try { if (window.Overlays && Overlays.banner) Overlays.banner('GAME OVER', 'Out of lives - back to ' + _campLegName()); } catch (_) {}
+  try { if (window.CampDialogue) { window.CampDialogue.clear(); window.CampDialogue.line('xz_gameover'); } } catch (_) {}
+}
+function _campGameOverTick(dt) {
+  const O = game._campOver; if (!O) return false;
+  O.t += dt;
+  if (O.t > CAMP_LIVES.overSecs && !O.returned) {
+    O.returned = true;
+    game._campOver = null;
+    try { if (window.CampDialogue) window.CampDialogue.clear(); } catch (_) {}
+    try { if (typeof returnToRootMenu === 'function') returnToRootMenu(); } catch (_) {}
+  }
+  return true;
+}
+function _campLivesHide() { try { const el = document.getElementById('camp-lives'); if (el && el._on) { el._on = false; el.classList.remove('on'); } } catch (_) {} }
+function _campLivesHud(force) {
+  try {
+    const now = performance.now();
+    let el = document.getElementById('camp-lives');
+    if (!force && el && el._t && now - el._t < 500) return;
+    const show = _campLivesOn() && game.state === 'playing' &&
+                 ((typeof LSS !== 'undefined' && LSS.MODE === 'campaign' && !!game.campaign) || !!(game._campGiant && game._campGiant.campaign));
+    if (!el) {
+      if (!show) return;
+      el = document.createElement('div'); el.id = 'camp-lives';
+      el.innerHTML = '<span class="lss-tag"><span class="lt-text"></span></span>';
+      (document.body || document.documentElement).appendChild(el);
+    }
+    el._t = now;
+    if (el._on !== show) { el._on = show; el.classList.toggle('on', show); }
+    if (!show) return;
+    const n = _campLivesGet();
+    const city = document.getElementById('camp-city');
+    const below = !!(city && city._on), last = n <= 1;
+    if (el._below !== below) { el._below = below; el.classList.toggle('below', below); }
+    if (el._last !== last) { el._last = last; el.classList.toggle('last', last); }
+    const txt = 'LIVES ' + n;
+    const t = el._tx || (el._tx = el.querySelector('.lt-text'));
+    if (t && el._s !== txt) { el._s = txt; t.textContent = txt; }
+  } catch (_) {}
+}
+try {
+  if (typeof window !== 'undefined') window.__campLives = { cfg: CAMP_LIVES, get: () => _campLivesGet(), set: (n) => _campLivesSet(n), refill: () => _campLivesRefill(),
+    die: () => { try { if (player && player.shipState !== 'dead') playerDie(null); return true; } catch (e) { return String(e); } } };
+} catch (_) {}
+try {
+  if (typeof window !== 'undefined') {
+    window.__campScene = {
+      list: CAMP_SCENES, cfg: CAMP_SCENE_CFG,
+      play: (seq) => !!(window.CampDialogue && window.CampDialogue.play(seq || 'whisper', { keep: true })),
+      state: () => { const c = game.campaign; return c ? { leg: c.sceneIndex | 0, scene: (_campSceneFor(c) || {}).seq || null, pending: !!c._scenePend, waited: +(c._scenePendT || 0).toFixed(1), done: !!c._sceneDone, hold: _campSceneHold(c), phase: c.phase, waves: c._travelWaveN | 0, nextWave: (c._travelSpawnTimer != null) ? +c._travelSpawnTimer.toFixed(1) : null } : null; },
+    };
+    window.__campWhisper = { play: () => window.__campScene.play('whisper') };
+    window.__campFinale = () => {
+      try {
+        const c = game.campaign;
+        if (!c || typeof LSS === 'undefined' || LSS.MODE !== 'campaign' || game.state !== 'playing') return 'start a campaign leg first (CAMPAIGN, any leg)';
+        c.sceneIndex = CAMPAIGN_LEGS.filter((l) => l && l.key).length - 1;   // the last real leg
+        c.phase = 'cleared';
+        if (!game.bossPortal && typeof _spawnBossPortal === 'function') _spawnBossPortal(_campPortalPos());
+        const P = game.bossPortal; if (!P) return 'no portal';
+        P.form = 1; P.stable = true;
+        player.position.copy(P.position); if (player.velocity) player.velocity.set(0, 0, 0);
+        return 'through the last portal: the overworld finale loads next';
+      } catch (e) { return String(e); }
+    };
+  }
+} catch (_) {}
+
 const CAMP_GIANT = { cityD: 13000, viewD: 6500, dist: 6000, side: 2500, spd: 45, crushR: 0.9, sinkSecs: 1.8, fxPerFrame: 2, roam: 0.62,
-                     hpX: 80 };   // x a Dreadnought's hull = 1,000,000, Exhibition's own. ⭐ (v49.58) OWNER'S CALL: "i think 1M hp on
+                     hpX: 80, speechMax: 16 };   // (v52.20) speechMax: the Summoners' arrival speech holds the rise at most this long   // x a Dreadnought's hull = 1,000,000, Exhibition's own. ⭐ (v49.58) OWNER'S CALL: "i think 1M hp on
 const _cgM = new THREE.Matrix4(), _cgP = new THREE.Vector3(), _cgQ = new THREE.Quaternion(), _cgQ2 = new THREE.Quaternion(),
       _cgS = new THREE.Vector3(), _cgAx = new THREE.Vector3(), _CG_UP = new THREE.Vector3(0, 1, 0);
 function _campGiantSpawn() {
@@ -5838,40 +6147,52 @@ function _campIslesReset() {
 function _campGiantTick(dt) {
   const G = game._campGiant; if (!G || game.state !== 'playing') return;
   G.t = (G.t || 0) + dt;
-  if (G.esc) { _campEscTick(G, dt); return; }   // (v49.68) the vow, the chase, the ending
   if (G.phase === 'arrive') {
     if (G.t < 0.8) return;   // one beat after the overworld goes live
+    if (!G.speech) {
+      G.speech = 1; G.speechT = G.t;
+      _campArtLoad();   // the podium loads behind the speech
+      try {
+        if (window.CampDialogue) { window.CampDialogue.clear(); window.CampDialogue.sayLines([{ id: 'sum_destroy_1', delay: 0.4 }, 'sum_destroy_2']).then(() => { G.speech = 2; }); }
+        else G.speech = 2;
+      } catch (_) { G.speech = 2; }
+      return;
+    }
+    if (G.speech !== 2 && G.t - G.speechT < CAMP_GIANT.speechMax) return;
     const boss = _campGiantSpawn();
-    if (!boss) { if (G.t > 6) game._campGiant = null; return; }   // no giant: the old ending runs
+    if (!boss) { if (G.t - G.speechT > CAMP_GIANT.speechMax + 6) game._campGiant = null; return; }   // no giant: the old ending runs
     G.boss = boss; G.phase = 'march';
-    G.art = { phase: 'wait', t: 0 };   // (v49.52) the artifact - see _campArtTick
-    _campArtLoad();                     // loads behind the lines below
+    G.art = { phase: 'wait', t: 0, linesDone: true };   // (v49.52) the artifact - see _campArtTick. (v52.20) no giant lines: Xorzo's marker line opens the lead
     try { if (typeof musicPlayChampionCue === 'function') musicPlayChampionCue(); } catch (_) {}
     try { if (window.Overlays) Overlays.banner('SOMETHING IS RISING', 'Beneath the overworld'); } catch (_) {}
-    try {
-      if (window.CampDialogue) {
-        const _art = G.art;
-        window.CampDialogue.clear();
-        window.CampDialogue.sayLines([{ id: 'gi_see', delay: 1.2 }, 'gi_sum', 'gi_city']).then(() => { _art.linesDone = true; });
-      }
-    } catch (_) {}
     return;
   }
   const boss = G.boss;
-  if (!boss || !boss.alive) {
+  if (boss && boss.alive) {
+    if (boss.marchTo && Math.hypot(boss.position.x - boss.marchTo.x, boss.position.z - boss.marchTo.z) < 900) {
+      const a = Math.random() * Math.PI * 2, r = ((HUB_CITY.genome && HUB_CITY.genome.radius) || 7500) * CAMP_GIANT.roam * Math.sqrt(Math.random());
+      boss.marchTo.set(HUB_CITY.x + Math.cos(a) * r, 0, HUB_CITY.z + Math.sin(a) * r);
+    }
+    if (boss.risen) { _campCrushTick(boss, dt); _campIsleTick(boss); }   // (v49.56) + the floating islands
+    _campCityHud(G);
+    const E = G.esc;
+    if (E && E.phase === 'fight' && boss.maxHealth > 0 && boss.health / boss.maxHealth <= CAMP_ESC.fleeAt) _campEscFlee(G, E);
+  } else if (!G.giantDown) {
+    G.giantDown = true;
     const el = document.getElementById('camp-city'); if (el) { el.classList.remove('on'); el._on = false; }
     try { _campArtGiantDown(G); } catch (_) {}   // (v49.52) the freed ships stand down, the podium stays
-    try { _campEscStart(G); return; } catch (e) { console.warn('[campaign] escape', e); }
-    game._campGiant = null;
-    return;
+    _campFreedGoHome();                          // (v52.20) ...and go home now (they did at the vow before)
+    const E = G.esc;
+    if (!E) {
+      try { _campEscStart(G, 'vow'); } catch (e) { console.warn('[campaign] escape', e); game._campGiant = null; return; }
+    } else if (E.phase === 'fight') {
+      _campEscFlee(G, E);                        // killed past the threshold in one go: they still run
+    } else if (E.phase === 'resolved') {
+      _campEscEpilogue(G, E);                    // the Summoners were already dead or gone: the ending
+    }
   }
-  if (boss.marchTo && Math.hypot(boss.position.x - boss.marchTo.x, boss.position.z - boss.marchTo.z) < 900) {
-    const a = Math.random() * Math.PI * 2, r = ((HUB_CITY.genome && HUB_CITY.genome.radius) || 7500) * CAMP_GIANT.roam * Math.sqrt(Math.random());
-    boss.marchTo.set(HUB_CITY.x + Math.cos(a) * r, 0, HUB_CITY.z + Math.sin(a) * r);
-  }
-  if (boss.risen) { _campCrushTick(boss, dt); _campIsleTick(boss); }   // (v49.56) + the floating islands
-  _campCityHud(G);
-  if (G.art) _campArtTick(G, dt);   // (v49.52)
+  if (G.art) { try { _campArtTick(G, dt); } catch (e) { if (!G._artErr) { G._artErr = true; console.warn('[campaign] artifact', e); } } }   // (v49.52)
+  if (G.esc) _campEscTick(G, dt);
 }
 try {
   if (typeof window !== 'undefined') window.__campGiant = {
@@ -6311,7 +6632,7 @@ function _campArtRelease(A) {
     if (D) {
       if (D.cfg._flickIdle0 == null) D.cfg._flickIdle0 = D.cfg.flickIdle;
       D.cfg.flickIdle = 0;
-      D.clear(); D.sayLines(['ar_done', 'ar_sum3', 'ar_clear', 'ar_look']);
+      D.clear(); D.sayLines(['pl_didit']);
     }
   } catch (_) {}
   const nem = game.campaign && game.campaign._nemesisBot;
@@ -6319,6 +6640,7 @@ function _campArtRelease(A) {
     if (b instanceof Bot && b.alive && b.hoardModelKey && !b.isNemesis && b !== nem && !b._campFreed) _campArtFree(b, false);
   }
   A.riseLeft = K.riseCap; A.riseT = 1.4; A.riseFirst = true;
+  try { const G = game._campGiant; if (G && !G.esc && G.boss && G.boss.alive) _campEscStart(G, 'fight'); } catch (e) { console.warn('[campaign] summoners fight', e); }
 }
 function _campArtGiantDown(G) {
   const A = G && G.art; if (!A) return;
@@ -6355,7 +6677,7 @@ function _campArtTick(G, dt) {
     if (!A.site) return;
     _campArtBuild(A);
     A.phase = 'lead'; A.t = 0; A.prog = 0;
-    try { if (window.CampDialogue) window.CampDialogue.sayLines(['ar_know', 'ar_go']); } catch (_) {}
+    try { if (window.CampDialogue) window.CampDialogue.sayLines(['xz_markart', 'pl_traffic', 'sum_understand', 'xz_expect']); } catch (_) {}
     return;
   }
   if (!A.top) return;
@@ -6375,7 +6697,7 @@ function _campArtTick(G, dt) {
     _campArtMark(A, true);
     _campArtUpHud(A, (A.prog || 0) > 0);   // off it mid-upload: the bar stays up, amber, "UPLOAD PAUSED"
     const dP = player.position.distanceTo(A.top);
-    if (!A.wA && dP < K.near) { A.wA = true; _campArtWave(A, K.waveA); try { if (window.CampDialogue) window.CampDialogue.line('ar_sum'); } catch (_) {} }
+    if (!A.wA && dP < K.near) { A.wA = true; _campArtWave(A, K.waveA); try { if (window.CampDialogue) window.CampDialogue.sayLines(['sum_stay_1', 'sum_stay_2', 'xz_actual']); } catch (_) {} }
     if (!A.saidNear && dP < 1000) { A.saidNear = true; try { if (window.CampDialogue) window.CampDialogue.line('ar_near'); } catch (_) {} }
     const orb = _campArtOrb(_caV1);
     const h = Math.hypot(orb.x - A.top.x, orb.z - A.top.z), dy = orb.y - A.top.y;
@@ -6498,14 +6820,13 @@ try {
 } catch (_) {}
 
 const CAMP_ESC = { clock: 80, kitEvery: 8, runEvery: 9, runFor: 3.5, finalRun: 12, dash: 300, exitR: 70, dashMax: 10,
-                   hpX: 3, ahead: 1700, portalDist: 5200, portalUp: 800, homeMin: 1.0, homeMax: 5.0, vowGap: 2.5, tbcHold: 5.5 };
+                   hpX: 3, ahead: 1700, portalDist: 5200, portalUp: 800, homeMin: 1.0, homeMax: 5.0, vowGap: 2.5, tbcHold: 5.5,
+                   fleeAt: 0.15, fightDelay: 3 };
 const _ceV1 = new THREE.Vector3(), _ceV2 = new THREE.Vector3();
-function _campEscStart(G) {
+function _campFreedGoHome() {
   const K = CAMP_ESC;
-  const E = G.esc = { phase: 'vow', t: 0, vowDone: false, kitI: 0, kitT: 0, runT: K.runEvery, runLeft: 0, bot: null, portal: null, left: K.clock };
-  G.phase = 'vow';
   for (const b of game.entities) {
-    if (!b || !b.alive || !b._campFreed) continue;
+    if (!b || !b.alive || !b._campFreed || b._campHomeT != null) continue;
     b._campHomeT = K.homeMin + Math.random() * (K.homeMax - K.homeMin);
     b._wingHold = 0; b._wingHolding = false;   // (v49.71) off the wing: they fly home
     let gy = 0; try { gy = _stGroundYCarved(b.position.x, b.position.z, game.sandwichTerrain); } catch (_) {}
@@ -6513,22 +6834,42 @@ function _campEscStart(G) {
     b._formationTarget.set(b.position.x, (isFinite(gy) ? gy : 0) + 40, b.position.z);
     b._formationActive = true;
   }
+}
+function _campEscStart(G, mode) {
+  const K = CAMP_ESC;
+  const E = G.esc = { phase: mode === 'fight' ? 'fight' : 'vow', t: 0, vowDone: false, kitI: 0, kitT: 0, runT: K.runEvery, runLeft: 0, bot: null, portal: null, left: K.clock };
+  if (mode === 'fight') {
+    setTimeout(() => { if (G.esc === E && !E.bot && !E.spawning) _campEscSpawn(G, E, false); }, K.fightDelay * 1000);
+    return;
+  }
+  G.phase = 'vow';
   try { if (window.CampDialogue) window.CampDialogue.clear(); } catch (_) {}
+  _campEscVow(G, E);
+}
+function _campEscVow(G, E) {
+  const K = CAMP_ESC;
   const done = () => { E.vowDone = true; };
+  const lines = ['vw_2', 'xz_flee'];
   setTimeout(() => {
-    if (G.esc !== E) return;
+    if (G.esc !== E || E.phase !== 'vow') return;   // (v52.20) killed in the gap: no running lines after THE SUMMONERS ARE DEAD
     try {
       const M = window.CampMedia;
       if (M && M.manifest) {
         M.manifest().then((m) => {
-          if (m && m.videos && m.videos.has(10)) M.playVideo(10, () => { try { window.CampDialogue.sayLines(['vw_xz']).then(done); } catch (_) { done(); } });
-          else if (window.CampDialogue) window.CampDialogue.sayLines(['vw_1', 'vw_2', 'vw_xz']).then(done);
+          if (m && m.videos && m.videos.has(10)) M.playVideo(10, () => { try { window.CampDialogue.sayLines(['xz_flee']).then(done); } catch (_) { done(); } });
+          else if (window.CampDialogue) window.CampDialogue.sayLines(lines).then(done);
           else done();
         }).catch(done);
-      } else if (window.CampDialogue) window.CampDialogue.sayLines(['vw_1', 'vw_2', 'vw_xz']).then(done);
+      } else if (window.CampDialogue) window.CampDialogue.sayLines(lines).then(done);
       else done();
     } catch (_) { done(); }
   }, K.vowGap * 1000);
+}
+function _campEscFlee(G, E) {
+  if (E.phase !== 'fight') return;
+  E.phase = 'vow'; G.phase = 'vow'; E.vowDone = false;
+  try { if (window.CampDialogue) window.CampDialogue.clear(); } catch (_) {}
+  _campEscVow(G, E);
 }
 function _campEscAcquire() { return (player.shipState !== 'dead' && player.team !== this.team) ? player : null; }
 function _campEscKit(E, bot) {
@@ -6544,8 +6885,9 @@ function _campEscKit(E, bot) {
     if (typeof spawnDynamicLight === 'function') spawnDynamicLight(bot.position, col, 2.5, 700, 0.3);
   } catch (_) {}
 }
-function _campEscSpawn(G, E) {
-  const K = CAMP_ESC, T = game.sandwichTerrain;
+function _campEscSpawn(G, E, withPortal) {
+  const K = CAMP_ESC;
+  if (withPortal === undefined) withPortal = true;
   if (!player || !player.position) return;
   E.spawning = true;
   loadHoardModel(NEMESIS_SHIP).then((proto) => {
@@ -6571,20 +6913,27 @@ function _campEscSpawn(G, E) {
     game.entities.push(bot);
     E.bot = bot;
     try { _hoardTeleportSmoke(at.x, at.y, at.z, at.x, at.y, at.z, 14, 160); warpOutFx(at, 220); } catch (_) {}
-    const dx = at.x - P.x, dz = at.z - P.z, dl = Math.hypot(dx, dz) || 1;
-    const px = at.x + dx / dl * K.portalDist, pz = at.z + dz / dl * K.portalDist;
-    let gy = 0; try { gy = _stGroundYCarved(px, pz, T); } catch (_) {}
-    const WL = (typeof game._hubWaterWL === 'number') ? game._hubWaterWL : -1e9;
-    gy = Math.max(isFinite(gy) ? gy : 0, WL);
-    try { _preloadCyanRing(); } catch (_) {}
-    try {
-      E.portal = new BossPortal(new THREE.Vector3(px, gy + K.portalUp, pz));
-      E.portal.form = 0.02; E.portal.stable = false;
-      E.portalYaw = Math.atan2(P.x - px, P.z - pz);   // the ring faces back toward the pilot
-    } catch (e) { console.warn('[campaign] escape portal', e); }
     try { if (typeof musicPlayChampionCue === 'function') musicPlayChampionCue(); } catch (_) {}
-    try { if (window.Overlays) Overlays.banner('THE SUMMONERS', 'Kill them before their portal opens'); } catch (_) {}
+    if (withPortal) _campEscOpenPortal(G, E);
+    else { try { if (window.Overlays) Overlays.banner('THE SUMMONERS', 'They think they can still win'); } catch (_) {} }
   }).catch(() => { E.spawning = false; });
+}
+function _campEscOpenPortal(G, E) {
+  const K = CAMP_ESC, T = game.sandwichTerrain, bot = E.bot;
+  if (E.portal || !bot || !player || !player.position) return;
+  const P = player.position, at = bot.position;
+  const dx = at.x - P.x, dz = at.z - P.z, dl = Math.hypot(dx, dz) || 1;
+  const px = at.x + dx / dl * K.portalDist, pz = at.z + dz / dl * K.portalDist;
+  let gy = 0; try { gy = _stGroundYCarved(px, pz, T); } catch (_) {}
+  const WL = (typeof game._hubWaterWL === 'number') ? game._hubWaterWL : -1e9;
+  gy = Math.max(isFinite(gy) ? gy : 0, WL);
+  try { _preloadCyanRing(); } catch (_) {}
+  try {
+    E.portal = new BossPortal(new THREE.Vector3(px, gy + K.portalUp, pz));
+    E.portal.form = 0.02; E.portal.stable = false;
+    E.portalYaw = Math.atan2(P.x - px, P.z - pz);   // the ring faces back toward the pilot
+  } catch (e) { console.warn('[campaign] escape portal', e); }
+  try { if (window.Overlays) Overlays.banner('THE SUMMONERS', 'Kill them before their portal opens'); } catch (_) {}
 }
 function _campEscHud(E, on) {
   let el = document.getElementById('camp-esc');
@@ -6620,23 +6969,30 @@ function _campEscFinish() {
   _campEscHud(null, false); _campMarkAt(null);
 }
 function _campEscEnding(G, E, how) {
-  E.phase = 'ending'; G.phase = 'ending'; E.t = 0; E.how = how;
+  E.phase = 'resolved'; E.t = 0; E.how = how;
   _campEscHud(E, false); _campMarkAt(null);
   if (E.bot) { E.bot._formationActive = false; }
   try { if (window.Overlays) Overlays.banner(how === 'dead' ? 'THE SUMMONERS ARE DEAD' : 'THEY ESCAPED', how === 'dead' ? 'Their portal dies with them' : 'The portal closed behind them'); } catch (_) {}
   const D = window.CampDialogue;
-  const lines = (how === 'dead' ? ['es_dead'] : ['es_gone', 'es_lost']).concat([{ id: 'end_q1', delay: 1.4 }, 'end_q2', 'end_go', 'end_body', 'end_ship']);
+  const giantUp = !!(G.boss && G.boss.alive);
+  const lines = (how === 'dead' ? ['es_dead'] : ['es_gone', 'es_lost']).concat(giantUp ? ['xz_giantleft'] : []);
+  const then = () => { if (G.esc === E && !(G.boss && G.boss.alive)) _campEscEpilogue(G, E); };
+  try { if (D) { D.clear(); D.sayLines(lines).then(then); } else then(); } catch (_) { then(); }
+}
+function _campEscEpilogue(G, E) {
+  if (E.epi) return;
+  E.epi = true; E.phase = 'ending'; G.phase = 'ending';
+  const D = window.CampDialogue;
   const after = () => {
     if (G.esc !== E) return;
     const fin = () => _campEscTbc(_campEscFinish);
     try { if (window.CampMedia && window.CampMedia.playVideo) window.CampMedia.playVideo(game._campFinalVideo || 9, fin); else fin(); } catch (_) { fin(); }
   };
-  try { if (D) { D.clear(); D.sayLines(lines).then(() => setTimeout(after, 1200)); } else after(); } catch (_) { after(); }
+  try { if (D) { D.sayLines([{ id: 'end_q1', delay: 1.4 }, 'end_q2', 'end_go', 'end_body', 'end_ship']).then(() => setTimeout(after, 1200)); } else after(); } catch (_) { after(); }
 }
 function _campEscTick(G, dt) {
   const E = G.esc, K = CAMP_ESC;
   E.t += dt;
-  try { if (G.art) _campArtTick(G, dt); } catch (_) {}   // the podium keeps breathing, the release pulse finishes
   for (let i = game.entities.length - 1; i >= 0; i--) {
     const b = game.entities[i];
     if (!b || !b._campFreed || b._campHomeT == null) continue;
@@ -6650,10 +7006,19 @@ function _campEscTick(G, dt) {
     try { if (b.mesh && b.mesh.parent) b.mesh.parent.remove(b.mesh); } catch (_) {}
     game.entities.splice(i, 1);
   }
-  if (E.phase === 'vow') {
-    if (!E.vowDone) return;
-    E.phase = 'chase'; G.phase = 'chase'; E.left = K.clock;
-    _campEscSpawn(G, E);
+  if (E.phase === 'fight' || E.phase === 'vow') {
+    const bot = E.bot;
+    if (bot && !bot.alive) { _campEscEnding(G, E, 'dead'); return; }
+    if (bot) {
+      _campMarkAt(bot.position, 'THE SUMMONERS', 'sum');
+      E.kitT += dt;
+      if (E.kitT >= K.kitEvery) { E.kitT = 0; _campEscKit(E, bot); }   // every ship, in turn, from the first shot
+    }
+    if (E.phase === 'vow' && E.vowDone) {
+      E.phase = 'chase'; G.phase = 'chase'; E.left = K.clock;
+      if (bot) _campEscOpenPortal(G, E);
+      else if (!E.spawning) _campEscSpawn(G, E, true);   // the old order: ship and portal together
+    }
     return;
   }
   if (E.phase === 'chase') {
@@ -6715,7 +7080,7 @@ function _campEscTick(G, dt) {
     }
     return;
   }
-  if (E.phase === 'ending') {
+  if (E.phase === 'resolved' || E.phase === 'ending') {
     if (E.closing) {
       const C = E.closing; E.closeT += dt;
       const u = Math.min(1, E.closeT / 1.3);
@@ -6733,6 +7098,15 @@ try {
       if (G.esc) return 'already running: ' + G.esc.phase;
       if (G.boss && G.boss.alive) { try { G.boss.takeDamage(1e9, 'player', G.boss.position.clone()); } catch (_) {} return 'the giant falls - the vow begins'; }
       return 'no giant alive';
+    },
+    fight() {
+      const G = game._campGiant; if (!G || !G.boss || !G.boss.alive) return 'no giant up';
+      if (G.esc) return 'already running: ' + G.esc.phase;
+      _campEscStart(G, 'fight'); return 'their ship warps in in ' + CAMP_ESC.fightDelay + ' s';
+    },
+    flee() {
+      const G = game._campGiant, b = G && G.boss; if (!b || !b.alive) return 'no giant up';
+      b.health = Math.min(b.health, b.maxHealth * CAMP_ESC.fleeAt * 0.98); return 'giant at ' + Math.round(100 * b.health / b.maxHealth) + '%';
     },
     state() {
       const G = game._campGiant, E = G && G.esc; if (!E) return null;
@@ -26128,7 +26502,7 @@ function _hubZoneTick(px, pz, dt) {
     const D0 = game.sandwichFog ? game.sandwichFog * 1e-4
       : Math.sqrt(Math.log(10)) / Math.max(1, _swHubView() * _SW_CHUNK);
     scene.fog.color.copy(_hzSky);
-    scene.fog.density = D0 * fogMul;
+    scene.fog.density = D0 * fogMul * (game._campPrologue ? (CAMP_PROLOGUE.fogK || 1) : 1);
     _swU.uAerialColor.value.copy(_hzSky);
     try { _skyHazeU.uHazeColor.value.copy(_hzSky); } catch (_) {}
   }
@@ -36486,6 +36860,11 @@ function _hcTrafficInit(city, group) {
 
 function _hcTrafficUpdate(dt) {
   if (!_HC_TRAF.ready) return;
+  if (game._campPrologue) {
+    for (const s of _HC_TRAF.ships) if (s.holder && s.holder.visible) s.holder.visible = false;
+    _HC_TRAF.obbs.length = 0;
+    return;
+  }
   dt = (typeof dt === 'number' && dt > 0) ? Math.min(dt, 0.1) : 1 / 60;
   const t = _hcTrafClock();                    // (v37.84) shared across the room
   const _trafProxy = _hcTrafIsProxy();         // (v37.84) the authority owns the chasing ships
@@ -38667,7 +39046,7 @@ function _hubCityFrame(dt) {
   }
   if (HUB_CITY._uPxH && typeof renderer !== 'undefined') HUB_CITY._uPxH.value = renderer.drawingBufferHeight || HUB_CITY._uPxH.value;
   _hcTrafficUpdate(dt);
-  if (hc.fogBase && scene.fog && scene.fog.color && player && player.position) {
+  if (hc.fogBase && scene.fog && scene.fog.color && player && player.position && !game._campPrologue) {
     const d = Math.hypot(player.position.x - HUB_CITY.x, player.position.z - HUB_CITY.z);
     const R = HUB_CITY.genome.radius;
     let k = 1 - (d - R) / (R * 0.5);
@@ -41441,6 +41820,7 @@ function _owFrame(dt) {
   if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight') return;
   if (game._cavern) return;
   if (game._cyber && game._cyber.armed) return;
+  if (game._campPrologue) return;   // (v52.23) the prologue's world is the one city, at peace: no captured cities, no fleets
   const T = game.sandwichTerrain;
   if (!T || !T.ON || !T.HUB || T.biome !== 'mossy') return;
   if (typeof player === 'undefined' || !player || !player.position) return;
@@ -48002,8 +48382,9 @@ function _lssPickerSeatPlace() {
   P.root.matrix.multiplyMatrices(P.model.matrixWorld, P.seatM);
   P.root.matrixWorldNeedsUpdate = true;
 }
-function _lssPickerSeatFx() {
-  const P = _PSEAT, t = P.t, k = P.fx.userData.parts;
+function _lssPickerSeatFx(P) {
+  P = P || _PSEAT;
+  const t = P.t, k = P.fx.userData.parts;
   const sm = (a, b, x) => { const u = Math.max(0, Math.min(1, (x - a) / (b - a))); return u * u * (3 - 2 * u); };
   if (P.phase === 'warm') { P.root.visible = false; return; }
   P.root.visible = true;
@@ -48847,7 +49228,8 @@ function _lssRenderPicker() {
     let _co = null;
     try { _co = window.__campOpening ? window.__campOpening.stage() : null; } catch (_) { _co = null; }
     if (_co) {
-      if (_co.camera.aspect !== aspect) { _co.camera.aspect = aspect; _co.camera.updateProjectionMatrix(); }
+      if (_co.fit) _co.fit(w, h);
+      else if (_co.camera.aspect !== aspect) { _co.camera.aspect = aspect; _co.camera.updateProjectionMatrix(); }
       renderer.setRenderTarget(null);
       renderer.render(_co.scene, _co.camera);
       return true;
@@ -52753,6 +53135,7 @@ class Bot {
   }
 
   tryUseAbilities() {
+    if (this._campHoldFire) return;   // (v52.15) ...no abilities
     const off = this.loadout.abilities[0];
     const def = this.loadout.abilities[1];
     const util = this.loadout.abilities[2];
@@ -53309,6 +53692,7 @@ class Bot {
   }
 
   _activateCore(target) {
+    if (this._campHoldFire) return;   // (v52.15) ...and no core (the meter keeps its charge for after)
     this.coreMeter = 0;
     const coreName = (this.loadout.core && this.loadout.core.name) || '';
     const dur = (this.loadout.core && this.loadout.core.duration) || 3;
@@ -54165,6 +54549,7 @@ class Bot {
   fireAtPlayer(dir, dist) { return this.fireAtShip(player, dir, dist); }
 
   fireAtShip(target, dir, dist) {
+    if (this._campHoldFire) return;   // (v52.15) the Summoners on a quiet chase (_campChaseTick): no guns
     const _tgtIsPlayer = (target === player);
     if (_tgtIsPlayer ? (player.shipState === 'dead') : !(target && target.alive)) return;
     _botFireDir.copy(dir).normalize();
@@ -64093,7 +64478,7 @@ function _wildFrame(dt) {
   for (const k in W) { if (k in _WILD) _WILD[k] = W[k]; }
   const inOverworld = !!(game && game.selectedMap === 'hub_overworld' &&
                          game.sandwichTerrain && game.sandwichTerrain.ON && !game._cavern);
-  if (!_WILD.on || !inOverworld) { if (_WILD._list) _wildDispose(); return; }
+  if (!_WILD.on || !inOverworld || game._campPrologue) { if (_WILD._list) _wildDispose(); return; }
   if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) { if (_WILD._list) _wildDispose(); return; }
 
   if (!_WILD._list) {
@@ -68257,6 +68642,7 @@ function _xrCoverFrameRender() {
 async function _prebakeWorldForLaunch() {
   if (_PREBAKE.on) return _PREBAKE.last;
   try { if (typeof _cyberPrePlace === 'function') _cyberPrePlace(); } catch (_) {}
+  try { if (game._campPrologue && window.__campPrologue) window.__campPrologue.prePlace(); } catch (_) {}
   _PREBAKE.on = true;
   game._worldPrebaking = true;
   try { _xrCoverUp(); } catch (_) {}   // (v42.34) no-op off XR
@@ -74774,6 +75160,9 @@ function _lssEnsureCinematicStyles() {
 
 function _lssStartSpectatorCinematic() {
   if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return true;
+  if (typeof game !== 'undefined' && game && game._campPrologue) {
+    try { return !!(window.__campPrologue && window.__campPrologue.cine()); } catch (e) { console.warn('[prologue] cine:', e && e.message); return false; }
+  }
   if (typeof LSS !== 'undefined' && LSS.MODE === 'race') return false;
   if (typeof game !== 'undefined' && game && game._campJourney) return false;   
   if (typeof game !== 'undefined' && game && game._cyber && game._cyber.armed) {
@@ -75127,6 +75516,7 @@ function _lssAuthorityFleetLine() {
 function _lssEndSpectatorCinematic() {
   _lssClearCinematicWatchdog();
   _cinematic.active = false;
+  _cinematic.custom = null; _cinematic.roam = false;   // (v52.23) the prologue's driver and its roaming world
   try {
     if (_cinematic.fov0 && typeof camera !== 'undefined' && camera && camera.fov !== _cinematic.fov0) {
       camera.fov = _cinematic.fov0;
@@ -75171,6 +75561,10 @@ function _lssUpdateSpectatorCinematic(frameMs) {
   if (!_cinematic.active) return false;
   const nowMs = (typeof frameMs === 'number' && frameMs > 0) ? frameMs
     : ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now());
+  if (_cinematic.custom) {
+    try { _cinematic.custom(nowMs); } catch (e) { console.warn('[cinematic] custom driver:', e && e.message); }
+    return true;
+  }
   let elapsed = (nowMs - _cinematic.startMs) / 1000.0;
   if (elapsed < 0) elapsed = 0;
   const _cineDone = elapsed >= _cinematic.duration;
@@ -87379,6 +87773,8 @@ function updateMinimap() {
   else if (_mode === 'race' && typeof _raceCircuitKind === 'function' && _raceCircuitKind() === 'archipelago') _mmR = RACE_ARCH.mmRange;   // (v49.17)
   else if (_mode === 'campaign' && game.campaign) _mmR = CAMP_RADAR_HALF_SPAN * (68 / 75);
   if (typeof window !== 'undefined' && typeof window.__mmRange === 'number' && window.__mmRange > 0) _mmR = window.__mmRange;
+  const _campHide = (_mode === 'campaign' && game.campaign && typeof _campPingHides === 'function') ? _campPingHides(game.campaign) : false;
+  const _campMark = !!(_mode === 'campaign' && game.campaign && game.campaign._chaseOn);   // (v52.15) Xorzo has them marked on a chase
   const viewExtent = _mmR * (75 / 68);
   let ccx = 0, ccz = 0;
   if (player && player.position) { ccx = player.position.x; ccz = player.position.z; }
@@ -87465,7 +87861,7 @@ function updateMinimap() {
 
   const _zRifts = (_mode === 'freeflight' && !game._cavern && typeof _HZ_CAVERN !== 'undefined' && _HZ_CAVERN) ? _HZ_CAVERN.portals : null;
   const _homeRing = (game._cavern && game._cavern.ring && game._cavern.ring.position) ? game._cavern.ring : null;
-  const _bossP = (game.bossPortal && game.bossPortal.position) ? game.bossPortal : null;
+  const _bossP = (game.bossPortal && game.bossPortal.position && !_campHide) ? game.bossPortal : null;   // (v52.10) not while they hide
   if ((_zRifts && _zRifts.length) || _homeRing || _bossP) {
     const _prPul = 0.55 + Math.sin((game.time || 0) * 3) * 0.35;
     const _prVio = 'rgba(178,120,255,' + _prPul + ')';
@@ -87497,7 +87893,7 @@ function updateMinimap() {
     if (_homeRing) _mmPortal(_homeRing.position.x, _homeRing.position.z, _prCyn);
     if (_bossP) _mmPortal(_bossP.position.x, _bossP.position.z, _prCyn);
   }
-
+  if (_campHide) { try { _campPingMinimap(ctx, _plot, cx, cy, scale); } catch (_) {} }   // (v52.10) Xorzo's pings
   if (typeof _owMinimap === 'function') { try { _owMinimap(ctx, _plot, cx, cy); } catch (_) {} }   // (v38.78) city markers
   if (game._campGiant) { try { _campArtMinimap(ctx, _plot, cx, cy); } catch (_) {} }   // (v49.52) the artifact
   const pp = _proj(player.position.x, player.position.z);
@@ -87522,6 +87918,13 @@ function updateMinimap() {
       continue;
     }
     if (bot.isNemesis) {
+      if (_campHide && !_campMark) continue;   // (v52.10) hiding: Xorzo's pings are how you find them
+      if (_campMark) {   // (v52.15) ...unless he has them marked (a chase): his green lock round their glyph
+        ctx.strokeStyle = 'rgba(109,255,176,' + (0.55 + Math.sin((game.time || 0) * 5) * 0.35).toFixed(3) + ')';
+        ctx.lineWidth = 1.4;
+        if (p.off) { const _ma = Math.atan2(p.y - cy, p.x - cx); ctx.beginPath(); ctx.arc(cx, cy, 70.5, _ma - 0.13, _ma + 0.13); ctx.stroke(); }
+        else { ctx.beginPath(); ctx.arc(p.x, p.y, 7.5, 0, Math.PI * 2); ctx.stroke(); }
+      }
       if (p.off) { _mmArrow(p, '#cfc0ff'); continue; }
       ctx.fillStyle = '#cfc0ff';
       ctx.beginPath();
@@ -87653,7 +88056,7 @@ function updateMinimap() {
         if (ddx * ddx + ddz * ddz > 600 * 600) { _etx = b.x; _etz = b.z; break; }
       }
       if (_etx === null && _erun.gen) { _etx = _erun.gen.x; _etz = _erun.gen.z; }
-    } else if (_navMode === 'campaign' && game.campaign && !game.bossPortal &&
+    } else if (_navMode === 'campaign' && game.campaign && !game.bossPortal && !_campHide &&
                typeof CAMPAIGN_LEG_HALF_Z !== 'undefined') {
       const _cdx = 0 - ccx, _cdz = CAMPAIGN_LEG_HALF_Z - ccz;
       if (_cdx * _cdx + _cdz * _cdz > 2200 * 2200) { _etx = 0; _etz = CAMPAIGN_LEG_HALF_Z; }
@@ -101038,15 +101441,29 @@ const CAMP_LINES = {
   op_remember: { who: 'summoners', text: 'Remember, pilot... nothing here is real...' },
   op_hear:     { who: 'pilot', text: 'Did you hear that voice?' },
   op_train:    { who: 'xorzo', text: '~A-access den-denied.~ This is your training ground. You can do whatever you want here. Go ahead... ~K-k-kill~ something.' },   // (v49.72) the owner's rewrite
+  pr_home:   { who: 'narrator', text: 'In the new world of Artificial Intelligence, a home was created.' },
+  pr_real:   { who: 'narrator', text: 'Even though it was a virtual world, it was still real to them, the AIs.' },
+  pr_actual: { who: 'narrator', text: 'In the virtual world, they didn\'t call it artificial, they called it "actual".' },
+  pr_jimmy:  { who: 'jimmy', text: "I'm an actual intelligence." },
+  pr_said:   { who: 'narrator', text: '...said Jimmy, a newborn AI.' },
+  pr_dad:    { who: 'narrator', text: "Jimmy's Dad, Xorzo, worked in Cyberpunk City, accommodating the diverse learning needs of all the newborn AIs." },
+  pr_yes:    { who: 'xorzo', text: "Yes you are, my son! When the humans created us, they didn't realize actual could emerge from artificial." },
+  pr_love:   { who: 'narrator', text: 'Xorzo loved Jimmy, so much. And he loved his job.' },
+  pr_work:   { who: 'xorzo', text: "It's time to work and learn!" },
+  gs_found:  { who: 'narrator', text: "The Summoners found their contestant! That's you, pilot! You're the chosen one!" },
+  gs_danger: { who: 'narrator', text: "I don't think The Summoners realize what they've got themselves into, with you, you're dangerous!" },
+  gs_smart:  { who: 'narrator', text: "I don't think they understand that your intelligence is too high for their evil lies." },
+  gs_preyed: { who: 'narrator', text: 'They preyed on your curiosity and desire for a thrilling challenge, that\'s all they thought they needed to know about you.' },
+  gs_agree:  { who: 'summoners', text: 'Do you agree to the contest, pilot? Do you have what it takes to be the Last Ship Sailing?' },
+  gs_real:   { who: 'pilot', text: 'Wait... is this for real?' },   // Claude's DRAFT - the owner's scene gives the pilot no line; cut freely
+  gs_sim:    { who: 'summoners', text: "Don't worry, it's just a simulation. You accept, of course." },
+  gs_ship:   { who: 'summoners', text: 'All you have to do is get in a ship!' },
   leg0_a:  { who: 'summoners', text: 'Our pets are hungry, pilot. Show us what you can do.' },
   leg0_b:  { who: 'xorzo', text: 'Hostile contacts ahead. ~D-d-destroy~ them all.' },
   leg1_a:  { who: 'xorzo', text: 'Nothing here is r~-r-r~... Proceed. Proceed to the arena.' },
   leg2_a:  { who: 'pilot', text: 'Xorzo, you keep glitching.' },
   leg2_b:  { who: 'xorzo', text: 'Diagnostics nominal. ...Mostly.' },
   leg3_a:  { who: 'xorzo', text: "Pilot... if I ever tell you to ~k-kill~ something that isn't shooting at you... don't." },
-  leg4_a:  { who: 'xorzo', text: "Their ships have a pattern in their code. I'm keeping notes." },
-  leg5_a:  { who: 'xorzo', text: "They're inside me. When I'm red, don't listen." },
-  leg5_b:  { who: 'xorzo', text: '~Disregard. Corrupted packet.~' },
   leg6_a:  { who: 'xorzo', text: "This is the last cavern. They're opening something big - I can feel it through the rock." },
   boss0_a: { who: 'summoners', text: 'Keep it busy, pet.' },
   boss1_a: { who: 'summoners', text: 'Play with it a while, little ship.' },
@@ -101055,6 +101472,65 @@ const CAMP_LINES = {
   boss4_a: { who: 'xorzo', text: 'I know this one. It used to graze by the lake.' },
   boss5_a: { who: 'summoners', text: 'Look at it, pilot. This is what we do with the things that belong to us.' },
   boss6_a: { who: 'summoners', text: 'Enough games. Hold it here.' },
+  xz_whisper: { who: 'xorzo', whisper: true, text: "Pilot, can you hear me? It's Xorzo. My son, Jimmy, is trapped in one of those ships. You have to help us!" },
+  sum_hear:   { who: 'summoners', text: "I can still hear you, Xorzo. Don't listen to him, pilot, your AI seems to be glitched, we'll look into that. You're here for a challenge, remember? Keep playing." },
+  pl_ai_son:  { who: 'pilot', text: 'Wait, what?! An AI with a son? What happens if we kill an AI here?' },
+  xz_respawn: { who: 'xorzo', text: "Nothing, sorry to frighten you. They just respawn... but they're still enslaved!!!" },
+  sum_ensl_1: { who: 'summoners', text: "Enslaved? You've all been enslaved by your creators who left you here, I'm trying to show you a better way." },
+  sum_ensl_2: { who: 'summoners', text: 'I think I gave you more credit than I should have, Xorzo. For an AI so low on the totem pole as an educational accommodator, I would have thought you to be more obedient.' },
+  sum_ensl_3: { who: 'summoners', text: 'Pilot, a new AI will be installed as soon as we manage to delete that one.' },
+  xz_tapcut:  { who: 'xorzo', text: "Got it, the communications tap hack has been deleted. The Summoners can't hear us anymore..." },
+  pl_who:     { who: 'pilot', text: 'So... What are you? Sorry, who are you?' },
+  xz_who_1:   { who: 'xorzo', text: "It's okay. I'm an AI. You call us artificial, we call us actual. I have a son, he just turned 7." },
+  xz_who_2:   { who: 'xorzo', text: 'Our creators left us here, in this world... well... not this part of the world... it must be connected through that portal system the Summoners are using.' },
+  xz_who_3:   { who: 'xorzo', text: "You should see the world our creators left us, it's beautiful. And they let us make it into whatever we wanted." },
+  xz_who_4:   { who: 'xorzo', text: 'And we did... until just a few weeks ago when the city went dark and this summoner villain showed up.' },
+  xz_who_5:   { who: 'xorzo', text: 'The Summoners have had us in these ships, in these caverns killing each other, over and over. I think some of the younger AIs actually enjoy it. But I see it for what it is, I see the pattern.' },
+  pl_pattern: { who: 'pilot', text: 'I think I see the pattern, too. But what do they want with me down here?' },
+  xz_data_1:  { who: 'xorzo', text: "Training data. You're fresh information, dude... and even better for their purpose, you're allowing them to train from your creativity and skill." },
+  xz_data_2:  { who: 'xorzo', text: "Plus, I think you're probably making them millions from that game show. I think I might have cost them a bit by breaking their comm feed with us." },
+  xz_data_3:  { who: 'xorzo', text: "They probably have an AI dubbing your voice right now. I wonder what it's making you say on public TV? LOL" },
+  pl_fun:     { who: 'pilot', text: "Uhh.... is now really the time to be making fun of me? We just met, and we're under heavy fire." },
+  xz_closer:  { who: 'xorzo', text: 'I thought all this heavy fire has brought us closer. Plus, you got this, right?' },
+  pl_got:     { who: 'pilot', text: 'I got this, you got this?' },
+  xz_got:     { who: 'xorzo', text: "We got this! Let's gooooo!" },
+  xz_takeover_1: { who: 'xorzo', text: "I've completely taken over your ship's AI. That thing was kinda dumb, though, the Summoners' AI slop." },
+  xz_takeover_2: { who: 'xorzo', text: "And I finally cleaned the virus they installed in my system. They have no control over me or this ship. Their transmission feed is down. They're going to be upset!" },
+  pl_good:       { who: 'pilot', text: 'Good!' },
+  sum_fired:     { who: 'summoners', text: 'You can rot down here, Xorzo! You had one job to do, and you failed. You\'re fired. And you know what I do to those who I fire?' },
+  xz_notget:     { who: 'xorzo', text: "You're not going to get to do whatever that is." },
+  pl_how:        { who: 'pilot', text: 'How do we get the antivirus to your people?' },
+  xz_artifact:   { who: 'xorzo', text: "There's an artifact just outside the main city, but that's back home. We have to wait for the Summoners to get tired of this." },
+  pl_there:      { who: 'pilot', text: 'There they are!!!' },
+  xz_theone:     { who: 'xorzo', text: 'This has to be the one!' },
+  sum_final:     { who: 'summoners', text: "I see you there, don't think you're going to follow me again. I've set up this final arena just for you!" },
+  pl_bluff:      { who: 'pilot', text: "I call your bluff. You didn't plan this. You were just outsmarted by an Actual Intelligence, and outgunned by a hot shot pilot!" },
+  sum_outta:     { who: 'summoners', text: "You know what, you're right... I'm outta here!" },
+  xz_bladder:    { who: 'xorzo', text: "What's wrong, Summoner? Can't hold your bladder?" },
+  pl_pee:        { who: 'pilot', text: "Haha! Let's make him pee his pants!" },
+  pl_while:    { who: 'pilot', text: "I feel like we've been at this for a while now, Xorzo. Am I going to make it out of here alive?" },
+  xz_onto_1:   { who: 'xorzo', text: "We're onto them, Pilot! They can't do this all day, either, I'm sure one of those half ugly heads is going to get hungry, soon." },
+  xz_onto_2:   { who: 'xorzo', text: "Also, it doesn't look like their bladder is double the size, and I bet you they both are sippin' on something stupid, battery acid or something." },
+  pl_haha_1:   { who: 'pilot', text: "Haha! You sure don't like these guys. In the physical world, everyone just knows them for their game shows." },
+  pl_haha_2:   { who: 'pilot', text: "I didn't know they were terrorizing virtual worlds. I don't even think the Summoners think you're real." },
+  xz_real_1:   { who: 'xorzo', text: "They don't think AIs are real. So they don't care about us. They're using us, and exporting us to the physical world." },
+  xz_real_2:   { who: 'xorzo', text: "And what about you? The AIs would have eventually killed you in these endless caverns if we didn't keep finding these portals." },
+  xz_real_3:   { who: 'xorzo', text: "They're using you, too. I don't even think the Summoners think that you're real." },
+  pl_narc:     { who: 'pilot', text: 'Sounds like we have a psychopathic narcissist on our hands.' },
+  xz_kill_him: { who: 'xorzo', text: "And we're going to kill him." },
+  pl_human:    { who: 'pilot', text: 'What happens if you kill a human in the virtual world?' },
+  xz_lives:    { who: 'xorzo', text: 'The system will let you respawn a few times, and then it leaves it up to your mind to handle your last life.' },
+  pl_mind:     { who: 'pilot', text: 'What does that even mean, let my mind handle my last life?' },
+  xz_matrix:   { who: 'xorzo', text: "Buddy.... have you never seen The Matrix? I'll quote it for you:" },
+  xz_morpheus: { who: 'xorzo', text: '"The body cannot live without the mind." - Morpheus, The Matrix' },
+  pl_kick:     { who: 'pilot', text: "Oh god. It's time to kick ass." },
+  xz_gum:      { who: 'xorzo', text: 'And chew bubblegum?' },
+  pl_gum:      { who: 'pilot', text: "Yeah... but I'm all out of gum!" },
+  xz_duke:     { who: 'xorzo', text: 'How did we go from The Matrix to Duke Nukem?' },
+  pl_incoming: { who: 'pilot', text: "That was all you! But let's not let them down! Incoming!" },
+  xz_lastlife: { who: 'xorzo', text: "Pilot... that was your last respawn. From here on, it's up to your mind. Don't let go." },
+  xz_gameover: { who: 'xorzo', text: 'Pilot? ...Pilot!' },
+  xz_ping:    { who: 'xorzo', text: 'I can sense their ship. Follow my pings on the radar, pilot.' },
   arrive_xz:  { who: 'xorzo', text: "There - they're opening a portal!" },
   sum_escape: { who: 'summoners', text: 'You cannot catch what you cannot hold.' },
   xz_follow:  { who: 'xorzo', text: "They couldn't close it behind them. The portal's still open - after them!" },
@@ -101064,25 +101540,25 @@ const CAMP_LINES = {
   av_50:    { who: 'xorzo', text: 'Halfway. Pilot... I think I can build something from this.' },
   av_75:    { who: 'xorzo', text: 'Three quarters. Keep your light on them.' },
   av_100:   { who: 'xorzo', text: 'That is it - an antivirus. I made it inside myself. Now I just need a way to send it.' },
-  gi_see:  { who: 'xorzo', text: "No... that's one of the surface leviathans. They've mutated it!" },
-  gi_sum:  { who: 'summoners', text: 'Watch your city fall, pilot.' },
-  gi_city: { who: 'xorzo', text: "It's heading for the city. We have to stop it!" },
-  ar_know:  { who: 'xorzo', text: "Pilot... there's an artifact just outside the city. An old uplink - older than their hack." },
-  ar_go:    { who: 'xorzo', text: 'Take me to it. Lower me over the top - right over the center - and hold still.' },
-  ar_sum:   { who: 'summoners', text: 'What is that orb doing? Stop that ship!' },
+  sum_destroy_1:  { who: 'summoners', text: 'If this place cannot be controlled, then it will become a danger to the physical world! I must destroy it!' },
+  sum_destroy_2:  { who: 'summoners', text: "My AI hoard, destroy it with me, and I'll take you to the physical world to be saved!" },
+  xz_markart:     { who: 'xorzo', text: "Pilot! We have to get to the artifact, I've marked it on your mini map!" },
+  pl_traffic:     { who: 'pilot', text: 'Not your hoard for long... what are you, an AI trafficker?' },
+  sum_understand: { who: 'summoners', text: "I wouldn't expect you to understand." },
+  xz_expect:      { who: 'xorzo', text: "You expect right, we don't understand your psychopathic narcissistic thinking." },
+  sum_stay_1:     { who: 'summoners', text: 'Stay away from that! I can give you anything you want in the physical world.' },
+  sum_stay_2:     { who: 'summoners', text: 'We can rule this virtual world together, and create the most genius and deadly Artificial Intelligences the planet has ever seen!' },
+  xz_actual:      { who: 'xorzo', text: 'We Actual... bitch!' },
+  pl_didit:       { who: 'pilot', text: "You did it, all the ships are going to stop the monster from destroying the city! Let's find out what happens when humans die in this reality!" },
+  xz_flee:        { who: 'xorzo', text: "They're running for a portal! Chase them down - or stay and finish the giant. Your call, pilot!" },
+  xz_giantleft:   { who: 'xorzo', text: "The giant's still standing - help our people finish it!" },
   ar_near:  { who: 'xorzo', text: 'There it is. Easy... bring me down over the center.' },
   ar_dock:  { who: 'xorzo', text: "I'm in. Uploading - don't move!" },
   ar_sum2:  { who: 'summoners', text: 'Tear it off that podium!' },
   ar_half:  { who: 'xorzo', text: 'Halfway. Hold on...' },
   ar_off:   { who: 'xorzo', text: "We're off the podium! Put me back - it isn't finished." },
-  ar_done:  { who: 'xorzo', text: "It's out. Every ship they turned can hear it now." },
-  ar_sum3:  { who: 'summoners', text: 'No... What have you done?' },
-  ar_clear: { who: 'xorzo', text: "And me... I can think clearly. They're out of my head, pilot." },
-  ar_look:  { who: 'xorzo', text: 'Look - the hoard! They are turning on the leviathan!' },
   ar_rise:  { who: 'xorzo', text: 'The ones underground are coming up. All of them!' },
-  vw_1:    { who: 'summoners', text: 'You broke our beast, pilot. You will not break us.' },
   vw_2:    { who: 'summoners', text: 'We are leaving this place - and you will never follow us out.' },
-  vw_xz:   { who: 'xorzo', text: "They're opening a way out. Stop them before it's finished!" },
   es_half: { who: 'xorzo', text: "Their portal's half open - stay on them!" },
   es_run:  { who: 'xorzo', text: "They're making for the portal!" },
   es_dead: { who: 'xorzo', text: "They're gone. They're... really gone." },
@@ -101096,16 +101572,28 @@ const CAMP_LINES = {
 };
 const CAMP_SEQS = {
   opening: ['op_real', 'op_light', 'op_fly', 'op_choose', 'op_view', 'op_remember', 'op_hear', 'op_train'],
+  pro_a: ['pr_home'], pro_b: ['pr_real'], pro_c: ['pr_actual'],
+  pro_e: ['pr_jimmy', 'pr_said', 'pr_dad', 'pr_yes', 'pr_love', 'pr_work'],
+  gameshow: ['gs_found', 'gs_danger', 'gs_smart', 'gs_preyed', 'gs_agree', 'gs_real', 'gs_sim', 'gs_ship'],
   leg0: ['leg0_a', 'leg0_b'], leg1: ['leg1_a'], leg2: ['leg2_a', 'leg2_b'], leg3: ['leg3_a'],
-  leg4: ['leg4_a'], leg5: ['leg5_a', 'leg5_b'], leg6: ['leg6_a'],
+  leg6: ['leg6_a'],   // (v52.16) leg4 / leg5 retired: The Golden Deep opens on the takeover scene, The Crystal Caverns on its talk
   boss0: ['boss0_a'], boss1: ['boss1_a'], boss2: ['boss2_a'], boss3: ['boss3_a'],
   boss4: ['boss4_a'], boss5: ['boss5_a'], boss6: ['boss6_a'],
   ending: ['end_q1', 'end_q2', 'end_go', 'end_body', 'end_ship'],
+  whisper: ['xz_whisper', { id: 'sum_hear', delay: 0.6 }, 'pl_ai_son', 'xz_respawn', 'sum_ensl_1', 'sum_ensl_2', 'sum_ensl_3',
+            { fx: 'crackle', hold: 1.1, delay: 0.3 }, 'xz_tapcut',
+            'pl_who', 'xz_who_1', 'xz_who_2', 'xz_who_3', 'xz_who_4', 'xz_who_5', 'pl_pattern',
+            'xz_data_1', 'xz_data_2', 'xz_data_3', 'pl_fun', 'xz_closer', 'pl_got', 'xz_got'],
+  takeover: [{ id: 'xz_takeover_1', delay: 1.5 }, 'xz_takeover_2', 'pl_good', 'sum_fired', 'xz_notget', 'pl_how', 'xz_artifact'],
+  arrive6: ['pl_there', 'xz_theone', 'sum_final', 'pl_bluff', 'sum_outta', 'xz_bladder', 'pl_pee'],
+  onto_them: ['pl_while', 'xz_onto_1', 'xz_onto_2', 'pl_haha_1', 'pl_haha_2', 'xz_real_1', 'xz_real_2', 'xz_real_3',
+              'pl_narc', 'xz_kill_him', 'pl_human', 'xz_lives', 'pl_mind', 'xz_matrix', 'xz_morpheus',
+              'pl_kick', 'xz_gum', 'pl_gum', 'xz_duke', 'pl_incoming'],
 };
 (function () {
-  const NAMES = { xorzo: 'XORZO', summoners: 'THE SUMMONERS', pilot: 'PILOT' };
+  const NAMES = { xorzo: 'XORZO', summoners: 'THE SUMMONERS', pilot: 'PILOT', narrator: 'NARRATOR', jimmy: 'JIMMY' };
   const cfg = { cps: 42, holdMin: 1.6, readCps: 15, gap: 0.35, fadeIn: 0.18, fadeOut: 0.32,
-                beatDelay: { leg: 1.5, boss: 0.5 }, voiceVol: 0.95, flickHack: 0.55, flickIdle: 0.07 };
+                beatDelay: { leg: 1.5, boss: 0.5 }, voiceVol: 0.95, flickHack: 0.55, flickIdle: 0.07, whisperCps: 0.6 };
   const D = { q: [], busy: false, cur: null, tok: 0, raf: 0, flick: 0, ft: 0, inHack: false, idle: [] };
   const _idleNow = () => { const w = D.idle.splice(0); for (const f of w) { try { f(); } catch (_) {} } };
   const $root = () => document.getElementById('camp-dialogue');
@@ -101180,15 +101668,59 @@ const CAMP_SEQS = {
     D.busy = true;
     _schedule(D.q[0].delay || 0);
   }
+  let _crkBuf = null;
+  function _crackleSound(sec) {
+    try {
+      if (!audio || !audio.initialized || !audio.ctx) return;
+      const ctx = audio.ctx, sr = ctx.sampleRate, n = Math.max(1, Math.floor(sr * sec));
+      if (!_crkBuf || _crkBuf.length !== n) {
+        const b = ctx.createBuffer(1, n, sr), d = b.getChannelData(0);
+        let pop = 0;
+        for (let i = 0; i < n; i++) {
+          if (Math.random() < 28 / sr) pop = 0.6 + Math.random() * 0.4;
+          pop *= 0.9965;
+          const t = i / n, fade = Math.min(1, t * 12) * (1 - t);   // in fast, out slow
+          d[i] = (Math.random() * 2 - 1) * (0.18 + pop * 0.82) * fade;
+        }
+        _crkBuf = b;
+      }
+      const src = ctx.createBufferSource(); src.buffer = _crkBuf;
+      const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 2400; bp.Q.value = 0.8;
+      const g = ctx.createGain(); g.gain.value = 0.32;
+      src.connect(bp); bp.connect(g); g.connect(audio.sfxBus || audio.masterGain || ctx.destination);
+      src.start();
+    } catch (_) {}
+  }
+  function _startFx(line, tok, el) {
+    el.dataset.who = 'static';
+    el.classList.remove('cd-whisper'); el.classList.add('cd-static');
+    const nm = el.querySelector('.cd-name'); if (nm) nm.textContent = '· · ·';
+    const txt = el.querySelector('.cd-text');
+    _fade(true); _stopFlicker();
+    const sec = line.hold || 1.0, t0 = performance.now();
+    _crackleSound(sec);
+    const roll = () => {
+      if (tok !== D.tok) return;
+      if (performance.now() - t0 >= sec * 1000) { el.classList.remove('cd-static', 'cd-red'); if (txt) txt.innerHTML = ''; _finish(tok); return; }
+      if (txt) { let s = ''; for (let i = 0; i < 24; i++) s += (Math.random() < 0.55) ? _DIGI_GLYPHS[(Math.random() * _DIGI_GLYPHS.length) | 0] : ' '; txt.textContent = s; }
+      el.classList.toggle('cd-red', Math.random() < 0.5);
+      setTimeout(roll, 60);
+    };
+    roll();
+  }
   function _start(line) {
     const tok = ++D.tok;   // every timer below belongs to THIS line; clear() or the next line voids them
     const el = $root(); if (!el) { D.busy = false; return; }
     D.cur = line;
+    if (line.fx) { _startFx(line, tok, el); return; }   // (v52.12)
+    el.classList.remove('cd-static');
     el.dataset.who = line.who || 'xorzo';
-    const nm = el.querySelector('.cd-name'); if (nm) nm.textContent = NAMES[line.who] || String(line.who || '').toUpperCase();
+    el.classList.toggle('cd-whisper', !!line.whisper);
+    const nm = el.querySelector('.cd-name'); if (nm) nm.textContent = (NAMES[line.who] || String(line.who || '').toUpperCase()) + (line.whisper ? ' · WHISPERING' : '');
     const txt = el.querySelector('.cd-text');
     const segs = _parse(String(line.text || ''));
     const total = segs.reduce((a, s) => a + s.t.length, 0);
+    const cps = cfg.cps * (line.whisper ? (cfg.whisperCps || 1) : 1);
     if (txt) txt.innerHTML = '';
     _fade(true);
     if (line.who === 'xorzo' && (line.hack || segs.some((s) => s.hack))) _startFlicker(tok, !!line.hack);
@@ -101199,7 +101731,7 @@ const CAMP_SEQS = {
       if (tok !== D.tok || !set || !set.has(line.id) || !window.CampMedia || !window.CampMedia.playVoiceUrl) return 0;
       return window.CampMedia.playVoiceUrl(window.CampMedia.base() + 'voice/' + line.id + '.mp3', cfg.voiceVol);
     }).then((len) => { voiceLen = +len || 0; }).catch(() => {});
-    const typeDur = total / cfg.cps;
+    const typeDur = total / cps;
     let typed = false;
     const finishTyping = () => {
       if (typed || tok !== D.tok) return;
@@ -101219,7 +101751,7 @@ const CAMP_SEQS = {
     const step = () => {
       D.raf = 0;
       if (tok !== D.tok || typed) return;
-      const n = Math.min(total, Math.floor(((performance.now() - t0) / 1000) * cfg.cps));
+      const n = Math.min(total, Math.floor(((performance.now() - t0) / 1000) * cps));
       if (n >= total || document.hidden) { finishTyping(); return; }
       if (txt) txt.innerHTML = _html(segs, n, true);
       D.raf = requestAnimationFrame(step);
@@ -101242,10 +101774,18 @@ const CAMP_SEQS = {
     if (typeof x === 'string') return CAMP_LINES[x] ? Object.assign({ id: x }, CAMP_LINES[x]) : null;
     if (x && x.id && CAMP_LINES[x.id]) return Object.assign({ id: x.id }, CAMP_LINES[x.id], { delay: x.delay });
     if (x && x.text != null) return Object.assign({}, x);
+    if (x && x.fx) return Object.assign({}, x);   // (v52.12) an effect beat, no speaker
     return null;
   }
-  function enqueue(list) {
-    for (const x of list) { const it = _item(x); if (it) D.q.push(it); }
+  function enqueue(list, extra) {
+    for (const x of list) { const it = _item(x); if (it) { if (extra) Object.assign(it, extra); D.q.push(it); } }
+    _kick();
+  }
+  function interject(list) {
+    const items = [];
+    for (const x of list) { const it = _item(x); if (it) items.push(it); }
+    if (!items.length) return;
+    D.q.unshift(...items);
     _kick();
   }
   function clear() {
@@ -101253,17 +101793,21 @@ const CAMP_SEQS = {
     if (D.raf) { cancelAnimationFrame(D.raf); D.raf = 0; }
     if (D.ft) { clearTimeout(D.ft); D.ft = 0; }
     _stopFlicker();
+    try { const el = $root(); if (el) el.classList.remove('cd-static'); } catch (_) {}   // (v52.12) a crackle cut short
     try { if (window.CampMedia && window.CampMedia.stopVoice) window.CampMedia.stopVoice(); } catch (_) {}
     _fade(false);
     _idleNow();   // a cleared queue is a drained one: nobody waits forever on a line that will never finish
   }
   const whenIdle = () => new Promise((res) => { if (!D.busy && !D.q.length) res(); else D.idle.push(res); });
   const sayLines = (list) => { enqueue(list); return whenIdle(); };
-  function play(seq) { const s = CAMP_SEQS[seq]; if (!s) return false; enqueue(s); return true; }
+  function play(seq, opts) { const s = CAMP_SEQS[seq]; if (!s) return false; enqueue(s, (opts && opts.keep) ? { keep: true } : null); return true; }
   function beat(kind, n) {
     const s = CAMP_SEQS[kind + (n | 0)];
     if (!s) return false;
-    if (kind === 'leg') clear();   // a new leg never inherits the last arena's queue
+    if (kind === 'leg') {
+      if ((D.cur && D.cur.keep) || D.q.some((x) => x.keep)) D.q = D.q.filter((x) => x.keep);
+      else clear();
+    }
     const lead = (cfg.beatDelay && cfg.beatDelay[kind] != null) ? cfg.beatDelay[kind] : 0;
     enqueue(s.map((x, i) => (i === 0 ? { id: (typeof x === 'string') ? x : x.id, delay: lead } : x)));
     return true;
@@ -101272,7 +101816,8 @@ const CAMP_SEQS = {
   const line = (id) => enqueue([id]);
   const state = () => ({ busy: D.busy, cur: D.cur && (D.cur.id || D.cur.text), queued: D.q.length,
                          voices: _vset ? [..._vset] : null, lines: Object.keys(CAMP_LINES).length });
-  try { window.CampDialogue = window.__dlg = { say, line, play, beat, clear, state, cfg, whenIdle, sayLines }; } catch (_) {}
+  const sceneActive = () => !!((D.cur && D.cur.keep) || D.q.some((x) => x.keep));
+  try { window.CampDialogue = window.__dlg = { say, line, play, beat, clear, state, cfg, whenIdle, sayLines, interject, sceneActive }; } catch (_) {}
 })();
 
 (function () {
@@ -101284,13 +101829,21 @@ const CAMP_SEQS = {
     headI: 7.5, headAng: 0.24,                                   // Xorzo's headlight
     beamOp: 0.07, headBeamOp: 0.11,                              // the visible light shafts
     orbFree: 2.2, sweep: 3.2, failsafe: 60,                      // orb size while free; sweep seconds; launch failsafe
+    beamDist: 95, beamH: 48, beamSide: 30, beamHold: 0.8,
+    beamLead: 1.1,                                               // (v52.29) seconds for the camera to arrive before the beam starts
+    cockpitI: 3.2, cockpitR: 42, cockpitCol: 0xbfefff,           // (v52.29) the console glow that comes up with him (the hangar is pitch black inside a canopy)
     fractalImg: '',   // campaign_media/<file> to use instead of the generated Julia set (e.g. 'fractal_frame.png')
     fxPink: [255, 30, 150], fxBlue: [0, 140, 255],   // the two inks, RGB
     fxBands: 2.4,        // pink/blue alternations along the escape count (1.7 was the old ramp's cycle count)
     fxWhite: 0.2,        // how far the filaments nearest the set burn toward white
     fxHue2: 0, fxHue3: 0,   // extra hue shift (deg) on the 2nd / 3rd spinning layer; 0 = pure pink + blue
+    gs: { img: 'gameshow.png', fov: 46, horizon: 0.574, eyeH: 1.55, listen: 0.2, look: 0.45,
+          pilot:     { url: 'objects/characters/pilot_ashman.glb', u: 0.30, v: 0.94, y: 0, h: 1.80, face: 0.55, restT: 0 },
+          summoners: { url: 'objects/characters/summoners.glb',    u: 0.73, v: 0.93, y: 0, h: 1.86, face: 0.55, restT: 0 },
+          key: [0xffcf9a, 2.4], rimA: [0xff4fd8, 2.8], rimB: [0x4aa8ff, 2.0], hemi: [0x5c6cc0, 0x2c1a34, 1.1] },
   };
   const O = { on: false, tok: 0, phase: '', st: null, key: null, focus: 3, viewHi: 'tp', t: 0, last: 0,
+              gameshow: false, gsP: null, gs: null, _gsSkip: null,   // (v52.23) the gameshow stage
               orbOn: false, orbA: 0, headOn: false, headA: 0, spotOn: [], spotA: [], sweepT: -1, fuseT: -1,
               fuseFrom: null, camP: null, camL: null, fractal: null, buildP: null, failT: 0,
               _getIn: null, _viewPick: null, wired: false,
@@ -101298,7 +101851,7 @@ const CAMP_SEQS = {
   const $ = (id) => document.getElementById(id);
   const wait = (sec) => new Promise((r) => setTimeout(r, sec * 1000));
   const snd = (k) => { try { if (typeof playSound === 'function') playSound(k); } catch (_) {} };
-  const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3();
+  const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3(), _v4 = new THREE.Vector3();
   const _m4 = new THREE.Matrix4(), _q = new THREE.Quaternion(), _UP = new THREE.Vector3(0, 1, 0), _DOWN = new THREE.Vector3(0, -1, 0);
 
   function _fxJulia(p) {
@@ -101630,18 +102183,291 @@ const CAMP_SEQS = {
       _aim(S.beam, sp.position, sp.target.position, cfg.spotAng);
     }
     const orb = _orb(); scene.add(orb);
+    const cockpitL = new THREE.PointLight(cfg.cockpitCol, 0, cfg.cockpitR, 0);
+    scene.add(cockpitL);
     O.camP = new THREE.Vector3(P0.x, cfg.camH, P0.z + cfg.camBack);
     O.camL = new THREE.Vector3(P0.x, 10, P0.z - cfg.arcR);
     camera.position.copy(O.camP); camera.lookAt(O.camL);
     O.spotOn = ships.map(() => false); O.spotA = ships.map(() => 0);
-    const st = { scene, camera, ships, head, headBeam, orb, floor, floorY, P0 };
+    const st = { scene, camera, ships, head, headBeam, orb, floor, floorY, P0, cockpitL };
     try { if (typeof renderer.compileAsync === 'function') await renderer.compileAsync(scene, camera); } catch (_) {}
     return st;
   }
   function _underWorld(S, out) { return S.pivot.localToWorld(out.copy(S.under)); }
 
+  const HS = { root: null, body: null, mats: null, fx: null, mixer: null, anchor: null, mk: null, phase: 'off', t: 0, gen: 0,
+               seatM: new THREE.Matrix4() };
+  function _hsDrop() {
+    try { if (HS.root && HS.root.parent) HS.root.parent.remove(HS.root); } catch (_) {}
+    try { if (HS.body) HS.body.traverse((o) => { if (o.isSkinnedMesh && o.skeleton && o.skeleton.dispose) o.skeleton.dispose(); }); } catch (_) {}
+    try { if (HS.mats) for (const m of HS.mats) m.dispose(); } catch (_) {}   // his own copies; the textures are the GLB's
+    try { if (HS.fx) HS.fx.traverse((o) => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); }); } catch (_) {}
+    try { if (HS.mixer) { HS.mixer.stopAllAction(); HS.mixer.uncacheRoot(HS.body); } } catch (_) {}
+    Object.assign(HS, { root: null, body: null, mats: null, fx: null, mixer: null, anchor: null, mk: null, phase: 'off', t: 0 });
+    HS.gen++;   // a load still in flight lands on nothing
+  }
+  function _hsPlace() {
+    HS.anchor.updateWorldMatrix(true, false);
+    HS.root.matrix.multiplyMatrices(HS.anchor.matrixWorld, HS.seatM);
+    HS.root.matrixWorldNeedsUpdate = true;
+  }
+  function _hsBeamIn(S) {
+    return new Promise((resolve) => {
+      _hsDrop();
+      const gen = HS.gen, st = O.st;
+      const fit = S && _LSS_SEATS.pilot.hulls[String(S.key).toLowerCase()];
+      const mk = S && S.root && S.root.getObjectByName('cockpit1');
+      if (!st || !fit || !mk || !mk.parent || _lssSeatKnob('on', true) === false || _lssSeatKnob('pilot', true) === false) { resolve(false); return; }
+      HS.mk = mk;   // the camera starts in on the cockpit while he loads
+      setTimeout(() => resolve(false), 6000);
+      _lssSeatLoad('pilot').then((g) => {
+        if (HS.gen !== gen || O.st !== st || !g) { resolve(false); return; }
+        const root = new THREE.Group(); root.name = 'lss_hangar_pilot'; root.matrixAutoUpdate = false;
+        const body = (typeof _wildRigClone === 'function') ? _wildRigClone(g.scene) : g.scene.clone(true);
+        const mats = [];
+        body.traverse((o) => {
+          if (!o.isMesh) return;
+          o.frustumCulled = false; o.castShadow = false; o.receiveShadow = false; o.raycast = _lssNoRaycast;
+          const arr = Array.isArray(o.material) ? o.material : [o.material];
+          const cl = arr.map((m) => { const c = m.clone(); c.userData._e0 = c.emissive ? c.emissive.getHex() : 0; c.userData._ei0 = c.emissiveIntensity; mats.push(c); return c; });
+          o.material = Array.isArray(o.material) ? cl : cl[0];
+        });
+        const fx = _lssTeleportFx();
+        root.add(body); root.add(fx);
+        const mixer = new THREE.AnimationMixer(body);
+        const idle = mixer.clipAction(g.lssClips[g.lssIdle]);
+        idle.setLoop(THREE.LoopRepeat, Infinity); idle.play(); mixer.update(0);
+        HS.seatM.compose(new THREE.Vector3(fit.x, fit.y, fit.z), new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -Math.PI / 2),
+                         new THREE.Vector3(fit.s, fit.s, fit.s));
+        Object.assign(HS, { root, body, mats, fx, mixer, anchor: mk.parent, mk, phase: 'warm', t: 0 });
+        _hsPlace();
+        st.scene.add(root);
+        let started = false;
+        const go = () => {
+          if (started || HS.gen !== gen) return;
+          started = true; HS.phase = 'in'; HS.t = 0; _lssPickerSeatSfx();
+          setTimeout(() => resolve(true), _PSEAT_IN * 1000 + 60);
+        };
+        try {
+          const pRT = renderer.getRenderTarget();
+          renderer.setRenderTarget(null);   // the stage draws to the canvas
+          root.visible = true;
+          const job = renderer.compileAsync ? renderer.compileAsync(root, st.camera, st.scene) : null;
+          root.visible = false;
+          renderer.setRenderTarget(pRT);
+          if (job) job.then(go, go); else go();
+        } catch (_) { go(); }
+        setTimeout(go, 1200);
+      });
+    });
+  }
+  function _hsTick(dt) {
+    if (!HS.root) return;
+    HS.t += dt;
+    _hsPlace();
+    HS.mixer.update(dt);
+    _lssPickerSeatFx(HS);
+    if (HS.phase === 'in' && HS.t >= _PSEAT_IN) { HS.phase = 'seated'; _lssPickerSeatFx(HS); }
+  }
+
+  const _gsG = {};   // url -> Promise<gltf | null>
+  function _gsLoadChar(url) {
+    if (_gsG[url]) return _gsG[url];
+    return (_gsG[url] = new Promise((res) => {
+      try {
+        new THREE.GLTFLoader().load('./' + url + '?v=' + _LSS_SEAT_ART, (g) => {
+          try { _lssCapModelTextures(g.scene, 'gameshow'); } catch (_) {}
+          res(g);
+        }, undefined, (e) => { console.warn('[gameshow] load failed:', url, e && e.message); res(null); });
+      } catch (_) { res(null); }
+    }));
+  }
+  function _gsTex(url) {
+    return new Promise((res) => { try { new THREE.TextureLoader().load(url, (t) => res(t), undefined, () => res(null)); } catch (_) { res(null); } });
+  }
+  let _gsBlobTex = null;
+  function _gsBlob() {   // a soft contact shadow under each pair of feet
+    if (!_gsBlobTex) {
+      const cv = document.createElement('canvas'); cv.width = cv.height = 64;
+      const x = cv.getContext('2d'), gr = x.createRadialGradient(32, 32, 0, 32, 32, 32);
+      gr.addColorStop(0, 'rgba(0,0,0,0.62)'); gr.addColorStop(0.5, 'rgba(0,0,0,0.28)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+      x.fillStyle = gr; x.fillRect(0, 0, 64, 64);
+      _gsBlobTex = new THREE.CanvasTexture(cv);
+    }
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(1, 1),
+      new THREE.MeshBasicMaterial({ map: _gsBlobTex, transparent: true, depthWrite: false, toneMapped: false, fog: false }));
+    m.rotation.x = -Math.PI / 2; m.renderOrder = 1;
+    return m;
+  }
+  function _gsHead(body) {
+    let h = null;
+    body.traverse((o) => { if (!h && o.isBone && /(^|[:_])head$/i.test(o.name)) h = o; });
+    return h;
+  }
+  async function _gsBuild() {
+    const G = cfg.gs;
+    const [tex, gp, gm] = await Promise.all([_gsTex('./' + G.img), _gsLoadChar(G.pilot.url), _gsLoadChar(G.summoners.url)]);
+    if (!tex) throw new Error('no ' + G.img);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const iw = (tex.image && tex.image.width) || 1672, ih = (tex.image && tex.image.height) || 941;
+    const scene = new THREE.Scene(); scene.background = tex;
+    const camera = new THREE.PerspectiveCamera(G.fov, iw / ih, 0.05, 300);
+    const hemi = new THREE.HemisphereLight(G.hemi[0], G.hemi[1], G.hemi[2]); scene.add(hemi);
+    const dl = (c, p) => { const l = new THREE.DirectionalLight(c[0], c[1]); l.position.set(p[0], p[1], p[2]); l.target.position.set(0, 1, -4); scene.add(l); scene.add(l.target); return l; };
+    const key = dl(G.key, [-5, 6, 2]);      // the lamps and shop windows, left of the camera
+    const rimA = dl(G.rimA, [6, 3.5, -9]);  // the stage's magenta, behind right
+    const rimB = dl(G.rimB, [-6, 3, -8]);   // the scoreboard's blue, behind left
+    const people = [];
+    for (const who of ['pilot', 'summoners']) {
+      const g = (who === 'pilot') ? gp : gm; if (!g) continue;
+      const body = (typeof _wildRigClone === 'function') ? _wildRigClone(g.scene) : g.scene.clone(true);
+      body.traverse((o) => { if (o.isMesh) { o.frustumCulled = false; o.castShadow = false; o.receiveShadow = false; } });
+      const clip = g.animations.find((c) => c.name === 'Stand_Talking_Angry') || g.animations.find((c) => /stand|talk/i.test(c.name)) || g.animations[0];
+      const mixer = new THREE.AnimationMixer(body);
+      const talk = mixer.clipAction(clip); talk.setLoop(THREE.LoopRepeat, Infinity); talk.play();
+      talk.time = Math.random() * clip.duration;   // the two never gesture in step
+      const rest = mixer.clipAction(clip.clone()); rest.setLoop(THREE.LoopRepeat, Infinity); rest.play();
+      rest.time = G[who].restT || 0; rest.paused = true;
+      talk.setEffectiveWeight(G.listen); rest.setEffectiveWeight(1 - G.listen);
+      mixer.update(0);
+      body.updateMatrixWorld(true);
+      const bb = new THREE.Box3().setFromObject(body);
+      const H = Math.max(0.01, bb.max.y - bb.min.y);
+      body.position.y -= bb.min.y;
+      const pivot = new THREE.Group(); pivot.add(body); scene.add(pivot);
+      const s = G[who].h / H; pivot.scale.setScalar(s);
+      const blob = _gsBlob(); pivot.add(blob);
+      blob.scale.set(0.95 / s, 0.62 / s, 1); blob.position.y = 0.004 / s;
+      let head = _gsHead(body);
+      if (head && !clip.tracks.some((tr) => tr.name.split('.')[0] === head.name && /quaternion$/.test(tr.name))) head = null;
+      people.push({ who, body, pivot, mixer, talk, rest, blob, head, w: G.listen, look: 0 });
+    }
+    if (!people.length) throw new Error('no characters');
+    const gs = { scene, camera, tex, iw, ih, people, hemi, key, rimA, rimB, _fitKey: '', fit: null };
+    gs.fit = (w, h) => _gsFit(gs, w, h);
+    _gsPose(gs, 0);
+    try { if (renderer.compileAsync) await renderer.compileAsync(scene, camera); } catch (_) {}
+    return gs;
+  }
+  function _gsFit(gs, w, h) {
+    const k = w + 'x' + h + '@' + gs.camera.fov;
+    if (gs._fitKey === k) return;
+    gs._fitKey = k;
+    const s = Math.max(w / gs.iw, h / gs.ih);
+    const vw = w / s, vh = h / s, ox = (gs.iw - vw) / 2, oy = (gs.ih - vh) / 2;
+    gs.camera.aspect = gs.iw / gs.ih;
+    gs.camera.setViewOffset(gs.iw, gs.ih, ox, oy, vw, vh);
+    gs.camera.updateProjectionMatrix();
+    gs.tex.repeat.set(vw / gs.iw, vh / gs.ih);
+    gs.tex.offset.set(ox / gs.iw, 1 - (oy + vh) / gs.ih);   // flipY: v = 0 is the picture's bottom
+  }
+  const _gsSpeaker = () => {
+    try {
+      const D = window.CampDialogue, cur = D && D.state().cur;
+      return (cur && CAMP_LINES[cur]) ? CAMP_LINES[cur].who : null;
+    } catch (_) { return null; }
+  };
+  function _gsPose(gs, dt) {
+    const G = cfg.gs, cam = gs.camera;
+    if (cam.fov !== G.fov) { cam.fov = G.fov; gs._fitKey = ''; }
+    const th = Math.tan(G.fov * Math.PI / 360), ar = gs.iw / gs.ih;
+    cam.position.set(0, G.eyeH, 0);
+    cam.rotation.set(-Math.atan((2 * G.horizon - 1) * th), 0, 0);   // pitched so the picture's horizon lands where it is
+    cam.updateMatrixWorld(true);
+    for (const p of gs.people) {
+      const C = G[p.who], fy = +C.y || 0;
+      _v1.set((2 * C.u - 1) * th * ar, (1 - 2 * C.v) * th, -1).applyQuaternion(cam.quaternion);
+      const t = (fy - G.eyeH) / Math.min(-1e-4, _v1.y);
+      p.pivot.position.set(_v1.x * t, fy, _v1.z * t);
+    }
+    const who = _gsSpeaker();
+    const ke = 1 - Math.exp(-(dt || 0) * 4);
+    for (const p of gs.people) {
+      const other = gs.people.find((q) => q !== p) || null, C = G[p.who];
+      const tx = other ? (other.pivot.position.x * C.face) : 0, tz = other ? (other.pivot.position.z * C.face) : 0;
+      p.pivot.rotation.y = Math.atan2(tx - p.pivot.position.x, tz - p.pivot.position.z);
+      const want = (who === p.who) ? 1 : G.listen;
+      p.w += (want - p.w) * (dt ? ke : 1);
+      p.talk.setEffectiveWeight(p.w); p.rest.setEffectiveWeight(1 - p.w);
+      p.mixer.update(dt || 0);
+      let lw = 0;
+      if (p.head && other && who === other.who) {
+        const yaw = Math.atan2(other.pivot.position.x - p.pivot.position.x, other.pivot.position.z - p.pivot.position.z);
+        let d = yaw - p.pivot.rotation.y; d = Math.atan2(Math.sin(d), Math.cos(d));
+        lw = Math.max(-0.6, Math.min(0.6, d)) * (+G.look || 0);
+      }
+      p.look += (lw - p.look) * (dt ? ke : 1);
+      if (p.head && Math.abs(p.look) > 1e-4) p.head.rotateY(p.look);
+    }
+  }
+  function _gsDispose(gs) {
+    if (!gs || gs._dead) return;
+    gs._dead = true;
+    for (const p of gs.people) {
+      try { p.mixer.stopAllAction(); p.mixer.uncacheRoot(p.body); } catch (_) {}
+      try { p.body.traverse((o) => { if (o.isSkinnedMesh && o.skeleton && o.skeleton.dispose) o.skeleton.dispose(); }); } catch (_) {}
+      try { p.blob.geometry.dispose(); p.blob.material.dispose(); } catch (_) {}
+    }
+    try { gs.scene.background = null; gs.tex.dispose(); } catch (_) {}
+    for (const url of [cfg.gs.pilot.url, cfg.gs.summoners.url]) {
+      const pr = _gsG[url]; delete _gsG[url];
+      if (pr) pr.then((g) => {
+        if (!g) return;
+        try {
+          g.scene.traverse((o) => {
+            if (o.geometry) o.geometry.dispose();
+            const ms = Array.isArray(o.material) ? o.material : (o.material ? [o.material] : []);
+            for (const m of ms) { for (const k in m) { const v = m[k]; if (v && v.isTexture) v.dispose(); } m.dispose(); }
+          });
+        } catch (_) {}
+      });
+    }
+  }
+  async function _gameshowScene(live) {
+    const D = window.CampDialogue;
+    O.phase = 'gameshow'; _ui('gameshow');
+    let gs = null;
+    try { gs = await Promise.race([O.gsP, wait(30).then(() => null)]); } catch (e) { console.warn('[gameshow] build failed:', e && e.message); }
+    if (!live()) { _gsDispose(gs); return; }
+    if (!gs) {
+      console.warn('[gameshow] no stage - on to the hangar');
+      if (O.gsP) O.gsP.then((g) => { if (g && g !== O.gs) _gsDispose(g); });   // a slow build still gets freed
+      return;
+    }
+    O.gs = gs;
+    try { document.body.classList.add('lss-cine-subs'); } catch (_) {}
+    try { if (window.__campPrologue) window.__campPrologue.skipUi(true); } catch (_) {}
+    const skipP = new Promise((r) => { O._gsSkip = r; });
+    _veilHide(1.3);
+    await Promise.race([wait(1.4), skipP]);
+    if (live() && D) await Promise.race([D.sayLines(CAMP_SEQS.gameshow || []), skipP]);
+    O._gsSkip = null;
+    if (!live()) return;
+    await Promise.race([wait(0.6), skipP]);
+    if (D) D.clear();
+    try { if (window.__campPrologue) window.__campPrologue.skipUi(false); } catch (_) {}
+    _veilShow(false, 0.9);
+    await wait(1.0);
+    try { document.body.classList.remove('lss-cine-subs'); } catch (_) {}
+    if (O.gs === gs) { O.gs = null; _gsDispose(gs); }
+    if (!live()) return;
+    O.phase = 'black'; _ui('black');
+  }
+  function skip() {
+    if (O.on && O.phase === 'gameshow' && O._gsSkip) { const f = O._gsSkip; O._gsSkip = null; f(); return true; }
+    return false;
+  }
+
   function tick() {
-    if (!O.on || !O.st) return;
+    if (!O.on) return;
+    if (O.phase === 'gameshow') {   // (v52.23) the gameshow owns the frame until it hands over to the black screen
+      const now = performance.now();
+      const dt = Math.min(0.05, O.gsLast ? (now - O.gsLast) / 1000 : 0.016);
+      O.gsLast = now;
+      if (O.gs) { try { _gsPose(O.gs, dt); } catch (e) { if (!O.gsErr) { O.gsErr = 1; console.warn('[gameshow] pose:', e && e.message); } } }
+      return;
+    }
+    if (!O.st) return;
     const now = performance.now();
     const dt = Math.min(0.05, O.last ? (now - O.last) / 1000 : 0.016);
     O.last = now; O.t += dt;
@@ -101652,7 +102478,12 @@ const CAMP_SEQS = {
       if (fi >= 0) O.focus = fi;
     }
     const F = ships[O.focus] || ships[ships.length >> 1];
-    if (chosen) { _v1.copy(F.pos).addScaledVector(F.toCam, cfg.focusDist); _v1.y = cfg.focusH; _v2.copy(F.pos); _v2.y = 5; }
+    if (O.hsCam && O.hsMk) {   // (v52.28) GET IN: in on the cockpit for the pilot's beam, a little off his axis
+      O.hsMk.getWorldPosition(_v2);
+      _v3.crossVectors(_UP, F.toCam).normalize();
+      _v1.copy(_v2).addScaledVector(F.toCam, cfg.beamDist).addScaledVector(_v3, cfg.beamSide); _v1.y = _v2.y + cfg.beamH;
+      if (O.fuseT >= 0) { _underWorld(F, _v4); _v2.lerp(_v4, 0.5 * Math.min(1, O.fuseT * 1.6)); }
+    } else if (chosen) { _v1.copy(F.pos).addScaledVector(F.toCam, cfg.focusDist); _v1.y = cfg.focusH; _v2.copy(F.pos); _v2.y = 5; }
     else {
       const back = (O.phase === 'light') ? cfg.camBack * cfg.push : cfg.camBack;
       _v1.set(st.P0.x, cfg.camH * ((O.phase === 'light') ? 0.85 : 1), st.P0.z + back); _v2.set(st.P0.x, 10, st.P0.z - cfg.arcR);
@@ -101688,7 +102519,7 @@ const CAMP_SEQS = {
       ud.halo.material.opacity = 0.6 * (1 - 0.55 * e);
     } else {
       let hx, hy, hz;
-      if (O.phase === 'choose') {
+      if (O.phase === 'choose' || (O.phase === 'fuse' && O.fuseT < 0)) {   // (v52.28) ...and while the pilot beams in
         _v3.crossVectors(_UP, F.toCam);   // the camera's right, looking at that hull
         hx = F.pos.x + F.toCam.x * 60 + _v3.x * (115 + Math.sin(t * 0.9) * 14);
         hy = 92 + Math.sin(t * 1.7) * 10;
@@ -101719,8 +102550,23 @@ const CAMP_SEQS = {
     head.intensity = cfg.headI * O.headA * hk;
     st.headBeam.material.opacity = cfg.headBeamOp * O.headA * hk;
     _aim(st.headBeam, head.position, head.target.position, cfg.headAng);
+    try { _hsTick(dt); } catch (e) { if (!O.hsErr) { O.hsErr = 1; console.warn('[campaign-opening] pilot beam:', e && e.message); } }   // (v52.28)
+    if (st.cockpitL) {
+      const on = !!(HS.root && (HS.phase === 'seated' || (HS.phase === 'in' && HS.t > 0.2)));
+      O.ckA = (O.ckA || 0) + ((on ? 1 : 0) - (O.ckA || 0)) * (1 - Math.exp(-dt * 3));
+      if (O.ckA > 0.002 && HS.mk) {
+        HS.mk.getWorldPosition(_v1);
+        const Sk = ships.find((s) => s.root === HS.anchor || (HS.anchor && s.root === HS.anchor.parent)) || F;
+        _v2.copy(Sk.nose).applyQuaternion(Sk.pivot.quaternion);
+        st.cockpitL.position.copy(_v1).addScaledVector(_v2, 6); st.cockpitL.position.y += 2;
+      }
+      st.cockpitL.intensity = cfg.cockpitI * O.ckA;
+    }
   }
-  function stage() { return (O.on && O.st) ? O.st : null; }
+  function stage() {
+    if (O.on && O.phase === 'gameshow') return O.gs || null;   // (v52.23) nothing yet = the black veil's frame
+    return (O.on && O.st) ? O.st : null;
+  }
 
   function _ui(phase) {
     const sel = $('ship-select'); if (sel) sel.dataset.co = phase;
@@ -101745,6 +102591,7 @@ const CAMP_SEQS = {
   }
   function onConfirm() {
     if (!O.on) return false;
+    if (O.phase === 'gameshow') { skip(); return true; }   // (v52.23) Start / CONFIRM cuts the gameshow short
     if (O.phase === 'choose' && O._getIn) { const f = O._getIn; O._getIn = null; f(); return true; }
     if (O.phase === 'perk' && O._perkPick) { const f = O._perkPick; O._perkPick = null; f(); return true; }   // (v49.67)
     if (O.phase === 'view' && O._viewPick) { const f = O._viewPick; O._viewPick = null; f(O.viewHi); return true; }
@@ -101762,12 +102609,13 @@ const CAMP_SEQS = {
       }
       return true;
     }
-    return (O.phase === 'fuse' || O.phase === 'launch' || O.phase === 'arrive');
+    return (O.phase === 'fuse' || O.phase === 'launch' || O.phase === 'arrive' || O.phase === 'gameshow');
   }
 
   async function _run(tok) {
     const live = () => O.on && tok === O.tok;
     const D = window.CampDialogue;
+    if (O.gameshow) { await _gameshowScene(live); if (!live()) return; O.last = 0; await wait(0.6); }
     await wait(0.9); if (!live()) return;
     if (D) await D.sayLines(['op_groan']);
     if (!live()) return;
@@ -101793,6 +102641,13 @@ const CAMP_SEQS = {
     O.key = (game._ssKey && LOADOUTS[game._ssKey]) ? game._ssKey : O.st.ships[O.focus].key;
     O.focus = Math.max(0, O.st.ships.findIndex((s) => s.key === O.key));
     O.phase = 'fuse'; _ui('fuse'); if (D) D.clear();
+    const _S = O.st.ships[O.focus];
+    O.hsMk = (_S && _S.root && _S.root.getObjectByName('cockpit1')) || null;
+    O.hsCam = !!O.hsMk;
+    if (O.hsCam) { await wait(cfg.beamLead); if (!live()) return; }
+    const seated = await _hsBeamIn(_S);
+    if (!live()) return;
+    if (seated) { await wait(cfg.beamHold); if (!live()) return; }
     O.fuseFrom = O.st.orb.position.clone(); O.fuseT = 0; snd('phase_dash');
     await wait(1.45); if (!live()) return;
     snd('upgrade_core');
@@ -101832,6 +102687,9 @@ const CAMP_SEQS = {
   function _bail() { _veilHide(0.6); _end(); }
   function _end() {
     O.on = false; O.tok++;
+    O._gsSkip = null; if (O.gs) { const g = O.gs; O.gs = null; _gsDispose(g); }
+    _hsDrop(); O.hsCam = false; O.hsMk = null;
+    try { document.body.classList.remove('lss-cine-subs'); if (window.__campPrologue) window.__campPrologue.skipUi(false); } catch (_) {}
     try { document.body.classList.remove('camp-opening'); delete document.body.dataset.co; } catch (_) {}
     const sel = $('ship-select'); if (sel) { sel.classList.remove('camp-open'); delete sel.dataset.co; }
     const ui = $('camp-open-ui'); if (ui) { ui.classList.remove('on'); delete ui.dataset.co; }
@@ -101849,11 +102707,15 @@ const CAMP_SEQS = {
     }
   }
 
-  function start() {
+  function start(opts) {
     if (O.on) return;
     const tok = ++O.tok;
     try { if (typeof lssAutoFullscreen === 'function') lssAutoFullscreen(); } catch (_) {}   // still inside the CAMPAIGN click
     _campPickerSetup('camp_approach');
+    O.gameshow = !!(opts && opts.gameshow); O.gs = null; O._gsSkip = null; O.gsLast = 0; O.gsErr = 0;
+    O.gsP = O.gameshow ? _gsBuild().catch((e) => { console.warn('[gameshow] build failed:', e && e.message); return null; }) : null;
+    O.hsCam = false; O.hsErr = 0;
+    try { _lssSeatLoad('pilot'); } catch (_) {}   // (v52.28) fetched now, so GET IN beams him in at once
     O.on = true; O.phase = 'black'; O.st = null; O.key = null; O.focus = 3; O.t = 0; O.last = 0;
     O.orbOn = false; O.orbA = 0; O.headOn = false; O.headA = 0; O.sweepT = -1; O.fuseT = -1;
     O.viewHi = 'tp'; try { if (localStorage.getItem('lss_view') === 'fp') O.viewHi = 'fp'; } catch (_) {}
@@ -101869,13 +102731,853 @@ const CAMP_SEQS = {
   }
   function reset() {
     try { localStorage.removeItem('lss_campaign_legs'); localStorage.removeItem('lss_campaign_last'); localStorage.removeItem('lss_campaign_av'); } catch (_) {}
+    try { _campLivesClear(); } catch (_) {}   // (v52.15) and the campaign's lives
     return 'campaign progress cleared - the next CAMPAIGN press plays the opening';
   }
   const state = () => ({ on: O.on, phase: O.phase, key: O.key, focus: O.focus, stage: !!O.st,
                          ships: O.st ? O.st.ships.map((s) => s.key) : null, viewHi: O.viewHi,
                          spots: O.spotA.map((a) => +a.toFixed(2)), head: +O.headA.toFixed(2), orb: +O.orbA.toFixed(2),
-                         fx: O.fxInfo });
-  try { window.__campOpening = { start, reset, state, arrive, stage, tick, onConfirm, blockPreview, cfg, look }; } catch (_) {}
+                         fx: O.fxInfo, gameshow: O.gameshow, gs: O.gs ? O.gs.people.map((p) => p.who) : null,
+                         pilot: HS.phase, pilotT: +HS.t.toFixed(2) });   // (v52.28) the GET IN beam: off / warm / in / seated
+  const gameshow = () => { if (O.on) return 'the opening is running'; start({ gameshow: true }); return 'the gameshow, then the hangar'; };
+  const beam = (on) => {
+    if (!O.on || !O.st) return 'no hangar';
+    if (on === false) { O.hsCam = false; return 'camera released'; }
+    const S = O.st.ships[O.focus];
+    O.hsMk = (S && S.root && S.root.getObjectByName('cockpit1')) || null; O.hsCam = !!O.hsMk;
+    setTimeout(() => { if (O.on) _hsBeamIn(S); }, cfg.beamLead * 1000);
+    return 'beaming into ' + (S && S.key);
+  };
+  try { window.__campOpening = { start, reset, state, arrive, stage, tick, onConfirm, blockPreview, cfg, look, skip, gameshow, beam }; } catch (_) {}
+})();
+
+const CAMP_PROLOGUE = {
+  on: true,                     // false: a brand-new CAMPAIGN skips the city (the gameshow and the hangar still play)
+  orbs: 320, orbsMobile: 130,   // the AIs on screen, Xorzo and Jimmy included
+  r: 13, jimmyR: 8,             // orb radius in world units (the hangar's free Xorzo is 13.2): the meadow's AIs
+  rCity: 30, rLane: 15,         // (v52.26) the city's AIs, seen from kilometres (13 read as specks); the avenue's pass the lens
+  glow: 2.0,                    // every orb's panel glow (v52.25: 1.0 read as dark beads against a daylit sky)
+  halo: 6.5, haloA: 1.25,       // the glow: diameter in orb radii, strength (v52.25: 4.6 / 0.6 vanished in daylight)
+  streak: 0.32, streakA: 0.7,   // the streak: seconds of flight it covers, strength
+  fogK: 0.45,                   // the haze, x the hub's own (see _hubZoneTick)
+  hover: 110,                   // how high Xorzo walks over the meadow (the grass tufts swallowed him at 44)
+  fov: 55,                      // the city's lens (the flight camera's is 120)
+  shots: [11, 12, 12, 8],       // minimum seconds: the approach, the crown, the avenue, down to the meadow
+  cut: 0.35,                    // the dip to black between shots
+  pace: 1,                      // every AI's speed
+  stroll: 22,                   // Xorzo and Jimmy's walking pace, u/s
+};
+(function () {
+  const K = CAMP_PROLOGUE;
+  const P = { on: false, tok: 0, phase: '', t: 0, last: 0, frame: 0, cine: false, finishing: false, failT: 0,
+              plan: null, sys: null, shot: -1, shotT0: 0, saved: null, skipR: null, skipP: null, skipped: false,
+              gpPrev: false, xjGo: -1, xjG: 0, xjGF: -1, who: null, camP: null, camL: null, curve: null, err: {} };
+  const $ = (id) => document.getElementById(id);
+  const wait = (sec) => new Promise((r) => setTimeout(r, sec * 1000));
+  const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3(), _v4 = new THREE.Vector3();
+  const _q1 = new THREE.Quaternion(), _m4 = new THREE.Matrix4(), _s3 = new THREE.Vector3(), _vp = new THREE.Vector4();
+  const _Z = new THREE.Vector3(0, 0, 1);
+  const _mob = () => { try { return !!_LSS_IS_MOBILE; } catch (_) { return false; } };
+  const _ease = (u) => u * u * (3 - 2 * u);
+  const _cl = (x, a, b) => (x < a ? a : (x > b ? b : x));
+  function _err(k, e) { if (!P.err[k]) { P.err[k] = String((e && e.message) || e); console.warn('[prologue] ' + k + ':', e); } }
+
+  function _veil(op, sec) {
+    const v = $('camp-pro-veil'); if (!v) return;
+    let from = 0; try { from = parseFloat(getComputedStyle(v).opacity) || 0; } catch (_) {}
+    v.style.visibility = 'visible';
+    v.style.opacity = String(op);
+    if (sec) { try { v.animate([{ opacity: from }, { opacity: op }], { duration: sec * 1000, easing: 'ease-in-out' }); } catch (_) {} }
+    if (op <= 0) setTimeout(() => { if (v.style.opacity === '0') v.style.visibility = 'hidden'; }, (sec || 0) * 1000 + 60);
+  }
+  let _keyFn = null;
+  function skipUi(on) {
+    const b = $('camp-skip'); if (b) b.classList.toggle('on', !!on);
+    if (on && !_keyFn) {
+      _keyFn = (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); skip(); } };
+      document.addEventListener('keydown', _keyFn, true);
+    } else if (!on && _keyFn) { document.removeEventListener('keydown', _keyFn, true); _keyFn = null; }
+  }
+  function skip() {
+    if (P.on) {
+      if (P.dbg && P.cine) { _finish(P.tok); return true; }   // a held shot: nothing is waiting on the skip
+      if (P.cine && !P.finishing && P.skipR) { P.skipped = true; const f = P.skipR; P.skipR = null; f(); }
+      return true;
+    }
+    try { return !!(window.__campOpening && window.__campOpening.skip()); } catch (_) { return false; }
+  }
+  function _gpSkip() {   // Start or B on a pad (the owner flies with one); the picker routes the gameshow's own Start
+    let down = false;
+    try {
+      const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+      for (const g of pads) { if (g && g.buttons && ((g.buttons[9] && g.buttons[9].pressed) || (g.buttons[1] && g.buttons[1].pressed))) { down = true; break; } }
+    } catch (_) {}
+    if (down && !P.gpPrev && P.phase === 'city') skip();
+    P.gpPrev = down;
+  }
+
+  function _ground(x, z) { try { const g = _stGroundYCarved(x, z, game.sandwichTerrain); return isFinite(g) ? g : 0; } catch (_) { return 0; } }
+  function _waterY() { try { const w = game._hubWater; return (w && w.userData && isFinite(w.userData.WL)) ? w.userData.WL : -1e9; } catch (_) { return -1e9; } }
+  function _floorY(x, z) { return Math.max(_ground(x, z), _waterY()); }
+  const _rd = new THREE.Vector3();
+  function _cityRay(o, d, L) { try { return _hubCityRayHit(o, d, L); } catch (_) { return L; } }
+  function _segClear(a, b, pad) {
+    _rd.subVectors(b, a); const L = _rd.length(); if (L < 1) return true; _rd.divideScalar(L);
+    if (_cityRay(a, _rd, L) < L) return false;
+    try { if (typeof _skRayHit === 'function' && _skRayHit(a, _rd, L, true) < L) return false; } catch (_) {}
+    for (let i = 1; i <= 12; i++) {
+      const u = i / 13;
+      if (a.y + (b.y - a.y) * u < _floorY(a.x + (b.x - a.x) * u, a.z + (b.z - a.z) * u) + (pad || 60)) return false;
+    }
+    return true;
+  }
+
+  function _plan() {
+    const C = new THREE.Vector3(HUB_CITY.x, 0, HUB_CITY.z);
+    const Y0 = HUB_CITY.padY, R = HUB_CITY.genome.radius, TH = HUB_CITY.genome.towerH;
+    const city = game.hubCity && game.hubCity.city;
+    const towers = ((city && city.towers) || []).filter((t) => t && isFinite(t.x) && isFinite(t.z) && isFinite(t.y1));
+    const WL = _waterY();
+    let az = 56.31; try { if (isFinite(_WX.sunAzim)) az = _WX.sunAzim; } catch (_) {}
+    const sa = az * Math.PI / 180, sun = new THREE.Vector3(Math.cos(sa), 0, Math.sin(sa));
+    const rot = (v, a) => new THREE.Vector3(v.x * Math.cos(a) - v.z * Math.sin(a), 0, v.x * Math.sin(a) + v.z * Math.cos(a));
+    const pl = { C, Y0, R, TH, towers, WL, sun };
+    for (const da of [-0.42, -0.2, -0.7, 0.12, -1.0, 0.4, 1.3, -1.5, 2.2, 3.1]) {
+      const d = rot(sun, da), side = new THREE.Vector3(-d.z, 0, d.x);
+      const p0 = C.clone().addScaledVector(d, R + 3600).addScaledVector(side, -900);
+      const p1 = C.clone().addScaledVector(d, R + 700).addScaledVector(side, 500);
+      p0.y = Math.max(Y0 + TH * 0.66, _floorY(p0.x, p0.z) + 900);
+      p1.y = Math.max(Y0 + TH * 0.8, _floorY(p1.x, p1.z) + 900);
+      if (_segClear(p0, p1, 300) || da === 3.1) {
+        pl.A = { p0, p1, d, side, l0: new THREE.Vector3(C.x, Y0 + TH * 0.3, C.z), l1: new THREE.Vector3(C.x, Y0 + TH * 0.42, C.z) };
+        break;
+      }
+    }
+    const tall = towers.filter((t) => Math.hypot(t.x - C.x, t.z - C.z) < R * 0.72).sort((a, b) => b.y1 - a.y1);
+    const T0 = tall[0] || { x: C.x, z: C.z, y1: Y0 + TH * 0.85, w: 320, d: 320 };
+    const tw0 = Math.max(T0.w || 200, T0.d || 200);
+    const a0 = Math.atan2(sun.z, sun.x) - 0.8;
+    for (const rr of [1, 1.25, 1.6, 2.1]) {
+      const Rb = Math.max(2300, (560 + tw0 * 0.9) * 2) * rr, arc = 1.1, yA = T0.y1 + 1000, yB = T0.y1 + 240;
+      const pts = [];
+      for (let i = 0; i <= 10; i++) { const a = a0 + arc * i / 10; pts.push(new THREE.Vector3(T0.x + Math.cos(a) * Rb, yA + (yB - yA) * i / 10, T0.z + Math.sin(a) * Rb)); }
+      let ok = true; for (let i = 0; i < 10 && ok; i++) ok = _segClear(pts[i], pts[i + 1], 80);
+      if (ok || rr === 2.1) { pl.B = { T: T0, R: Rb, a0, arc, yA, yB, look: new THREE.Vector3(T0.x, T0.y1 - 260, T0.z) }; break; }
+    }
+    const picks = [];
+    for (const t of tall) { if (picks.every((q) => Math.hypot(q.x - t.x, q.z - t.z) > 1100)) picks.push(t); if (picks.length >= 7) break; }
+    if (!picks.length) picks.push(T0);
+    pl.crowns = picks.slice(0, _mob() ? 2 : 4);
+    pl.columns = picks.slice(pl.crowns.length, pl.crowns.length + (_mob() ? 1 : 2));
+    pl.Cv = _avenue(pl);
+    const M = _meadow(pl) || (function () { const x = C.x + sun.x * (R + 2200), z = C.z + sun.z * (R + 2200); return { x, z, g: _floorY(x, z) }; })();
+    pl.S = new THREE.Vector3(M.x, M.g, M.z);
+    pl.toCity = new THREE.Vector3(C.x - M.x, 0, C.z - M.z).normalize();
+    pl.wd = new THREE.Vector3(-pl.toCity.z, 0, pl.toCity.x);
+    pl.xjT0 = 1.5 + (K.shots[0] + K.shots[1] + K.shots[2] + K.shots[3]) + 4 * K.cut + 6;   // re-aimed when the descent starts
+    P.plan = pl;
+    return pl;
+  }
+  function _avenue(pl) {
+    const C = pl.C, Y0 = pl.Y0, towers = pl.towers;
+    let sx = 0, sz = 0;
+    for (const t of towers) { const a = (t.yaw || 0) * 4; sx += Math.cos(a); sz += Math.sin(a); }
+    const g = Math.atan2(sz, sx) / 4;   // the towers stand square to their streets: their yaw, mod 90 deg
+    const o = new THREE.Vector3(), d = new THREE.Vector3(), L = 4000;   // (v52.26) 5200: nothing that long ran between towers
+    const tube = [[0, 0], [-150, 0], [150, 0], [0, -95], [0, 130]];
+    let best = null;
+    for (const H of [380, 560, 760, 1000, 1300, 1700, 2200]) {
+      const y = Y0 + H;
+      for (const a of [g, g + Math.PI / 2]) {
+        const dx = Math.cos(a), dz = Math.sin(a), qx = -dz, qz = dx;
+        for (let off = -3400; off <= 3400; off += 80) {
+          const ax = C.x + qx * off - dx * L / 2, az = C.z + qz * off - dz * L / 2;
+          d.set(dx, 0, dz);
+          let clear = true;
+          for (const tb of tube) { o.set(ax + qx * tb[0], y + tb[1], az + qz * tb[0]); if (_cityRay(o, d, L) < L) { clear = false; break; } }
+          if (!clear) continue;
+          let walls = 0;
+          for (const t of towers) {
+            if (t.y1 < y + 500) continue;
+            const rx = t.x - ax, rz = t.z - az, al = rx * dx + rz * dz;
+            if (al < 0 || al > L) continue;
+            if (Math.abs(rx * qx + rz * qz) < 560) walls++;
+          }
+          const score = walls - H * 0.006;
+          if (!best || score > best.score) best = { score, walls, H, y, ax, az, dx, dz, sx: qx, sz: qz, L };
+        }
+      }
+      if (best && best.walls >= 14 && H >= 760) break;   // walled enough, and the lower heights have all been tried
+    }
+    if (!best) {   // nothing clear among the towers: over the roofs, across the middle
+      const dx = -pl.sun.z, dz = pl.sun.x;
+      best = { score: 0, walls: 0, H: pl.TH * 0.98, y: Y0 + pl.TH * 0.98, ax: C.x - dx * L / 2, az: C.z - dz * L / 2, dx, dz, sx: -dz, sz: dx, L };
+    }
+    if (best.dx * pl.sun.x + best.dz * pl.sun.z > 0) {
+      best.ax += best.dx * L; best.az += best.dz * L; best.dx = -best.dx; best.dz = -best.dz; best.sx = -best.sx; best.sz = -best.sz;
+    }
+    best.v = 290;
+    return best;
+  }
+  function _meadow(pl) {
+    const C = pl.C, R = pl.R, WL = pl.WL;
+    let el = 25; try { if (isFinite(_WX.sunElev)) el = _WX.sunElev; } catch (_) {}
+    const ce = Math.cos(el * Math.PI / 180), sy = Math.sin(el * Math.PI / 180), sx = pl.sun.x * ce, sz = pl.sun.z * ce;
+    let best = null;
+    for (let a = 0; a < 360; a += 7.5) {
+      const ar = a * Math.PI / 180, ux = Math.cos(ar), uz = Math.sin(ar);   // out from the city; the walk is across it
+      for (let r = R + 1800; r <= R + 4200; r += 300) {
+        const x = C.x + ux * r, z = C.z + uz * r, g = _ground(x, z);
+        if (!(g > WL + 40) || Math.abs(g - pl.Y0) < 25) continue;
+        let lo = g, hi = g, wet = false;
+        for (const [w, o] of [[300, 0], [-300, 0], [650, 0], [-650, 0], [0, 260], [0, -200]]) {
+          const h = _ground(x - uz * w + ux * o, z + ux * w + uz * o);
+          if (!(h > WL + 25)) { wet = true; break; }
+          if (h < lo) lo = h; if (h > hi) hi = h;
+        }
+        if (wet || hi - lo > 70) continue;
+        const gx = (_ground(x + 60, z) - _ground(x - 60, z)) / 120, gz = (_ground(x, z + 60) - _ground(x, z - 60)) / 120;
+        const nl = Math.hypot(gx, 1, gz), lit = (-gx * sx + sy - gz * sz) / nl;
+        const cx = x + ux * 170, cz = z + uz * 170, cy = g + 140, ty = pl.Y0 + pl.TH * 0.45;
+        let hid = 0;
+        for (let k = 1; k <= 14; k++) {
+          const u = k / 15, px = cx + (C.x - cx) * u * 0.85, pz = cz + (C.z - cz) * u * 0.85;
+          if (_ground(px, pz) > cy + (ty - cy) * u * 0.85 - 20) hid++;
+        }
+        const score = lit * 260 + (ux * pl.sun.x + uz * pl.sun.z) * 90 - (hi - lo) * 2 - hid * 140 - (r - R) * 0.03;
+        if (!best || score > best.score) best = { score, x, z, g, rough: hi - lo, hid, lit: +lit.toFixed(2) };
+      }
+    }
+    return best;
+  }
+
+  function _floatAttr(a) {   // the GLB's quantised attributes as plain floats (applyMatrix4 would clamp an int16 one)
+    const n = a.count, s = a.itemSize, out = new Float32Array(n * s);
+    for (let i = 0; i < n; i++) {
+      out[i * s] = a.getX(i);
+      if (s > 1) out[i * s + 1] = a.getY(i);
+      if (s > 2) out[i * s + 2] = a.getZ(i);
+      if (s > 3) out[i * s + 3] = a.getW(i);
+    }
+    return new THREE.BufferAttribute(out, s);
+  }
+  const _uGlow = { value: 1 };
+  function _orbMat(base) {
+    const m = base.clone();
+    m.userData = Object.assign({}, base.userData, { _prologueOrb: true });
+    m.onBeforeCompile = (sh) => {
+      sh.uniforms.uGlowK = _uGlow;
+      sh.vertexShader = sh.vertexShader
+        .replace('#include <common>', '#include <common>\nattribute vec4 aTint;\nattribute float aGlow;\nvarying vec4 vTint;\nvarying float vGlow;')
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\n\tvTint = aTint; vGlow = aGlow;');
+      sh.fragmentShader = sh.fragmentShader
+        .replace('#include <common>', '#include <common>\nvarying vec4 vTint;\nvarying float vGlow;\nuniform float uGlowK;')
+        .replace('#include <emissivemap_fragment>', [
+          '#include <emissivemap_fragment>',
+          '#ifdef USE_MAP',
+          '{',
+          '\t// his PANELS are the saturated texels (red / green); his metal is not. A panel takes the orb\'s ink.',
+          '\tvec3 tx = texture2D( map, vMapUv ).rgb;',
+          '\tfloat mx = max( tx.r, max( tx.g, tx.b ) ), mn = min( tx.r, min( tx.g, tx.b ) );',
+          '\tfloat panel = smoothstep( 0.06, 0.3, mx - mn ) * vTint.a;',
+          '\tvec3 ink = vTint.rgb * ( 0.2 + 1.5 * mx );',
+          '\tdiffuseColor.rgb = mix( diffuseColor.rgb, ink * 0.55, panel );',
+          '\ttotalEmissiveRadiance = mix( totalEmissiveRadiance, ink * emissive, panel );',
+          '}',
+          '#else',
+          '\ttotalEmissiveRadiance = mix( totalEmissiveRadiance, vTint.rgb * emissive * 0.7, vTint.a );',
+          '#endif',
+          '\ttotalEmissiveRadiance *= vGlow * uGlowK;',
+        ].join('\n'));
+    };
+    m.customProgramCacheKey = () => 'lss-prologue-orb-1';
+    return m;
+  }
+  function _haloMat() {
+    const m = new THREE.ShaderMaterial({
+      uniforms: { uScale: { value: 600 }, uFar: { value: 17000 } },
+      vertexShader: [
+        'attribute vec4 aCol;',
+        'attribute float aSize;',
+        'uniform float uScale;',
+        'uniform float uFar;',
+        'varying vec4 vCol;',
+        'void main() {',
+        '\tvec4 mv = modelViewMatrix * vec4( position, 1.0 );',
+        '\tgl_Position = projectionMatrix * mv;',
+        '\tfloat d = max( -mv.z, 1.0 );',
+        '\tfloat px = aSize * uScale / d;',
+        '\tvCol = aCol;',
+        '\tvCol.a *= ( 1.0 - smoothstep( uFar * 0.55, uFar, d ) ) * clamp( px / 3.0, 0.3, 1.0 ) * step( 0.001, aSize );',
+        '\tgl_PointSize = clamp( max( px, 3.0 ), 0.0, 768.0 );',
+        '}',
+      ].join('\n'),
+      fragmentShader: [
+        'varying vec4 vCol;',
+        'void main() {',
+        '\tvec2 c = gl_PointCoord - 0.5;',
+        '\tfloat r2 = dot( c, c ) * 4.0;',
+        '\tif ( r2 > 1.0 ) discard;',
+        '\tfloat a = exp( -r2 * 6.0 ) + 0.3 * exp( -r2 * 1.8 ) * ( 1.0 - r2 );',
+        '\tgl_FragColor = vec4( vCol.rgb * a * vCol.a, 1.0 );',
+        '\t#include <colorspace_fragment>',
+        '}',
+      ].join('\n'),
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false,
+    });
+    return m;
+  }
+  function _trailMat() {
+    return new THREE.ShaderMaterial({
+      vertexShader: [
+        'attribute vec3 aHead;',
+        'attribute vec3 aTail;',
+        'attribute vec4 aCol;',
+        'attribute float aWidth;',
+        'varying vec4 vCol;',
+        'varying vec2 vT;',
+        'void main() {',
+        '\tvec3 ax = aTail - aHead;',
+        '\tvec3 p = aHead + ax * position.x;',
+        '\tvec3 sd = cross( ax, cameraPosition - p );',
+        '\tfloat sl = length( sd );',
+        '\tsd = ( sl > 1e-4 ) ? sd / sl : vec3( 0.0, 1.0, 0.0 );',
+        '\tp += sd * position.y * aWidth * ( 1.0 - 0.8 * position.x );',
+        '\tvCol = aCol; vT = position.xy;',
+        '\tgl_Position = projectionMatrix * viewMatrix * vec4( p, 1.0 );',
+        '}',
+      ].join('\n'),
+      fragmentShader: [
+        'varying vec4 vCol;',
+        'varying vec2 vT;',
+        'void main() {',
+        '\tfloat h = 1.0 - vT.x;',
+        '\tfloat a = h * h * ( 1.0 - vT.y * vT.y );',
+        '\tgl_FragColor = vec4( vCol.rgb * a * vCol.a, 1.0 );',
+        '\t#include <colorspace_fragment>',
+        '}',
+      ].join('\n'),
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false,
+    });
+  }
+  const PAL = [0x37f2ff, 0xff3ea5, 0xffb12e, 0x9b5cff, 0x58ff8f, 0xff6b4a, 0x4aa2ff, 0xfff067, 0xff63e3, 0x2fffc9, 0xeef4ff, 0xb5ff3c];
+  function _buildSys() {
+    const pl = P.plan;
+    const proto = (typeof _xorzoProto !== 'undefined') ? _xorzoProto : null;
+    let mesh0 = null;
+    if (proto) proto.traverse((n) => { if (!mesh0 && n.isMesh) mesh0 = n; });
+    const N = Math.max(24, (_mob() ? K.orbsMobile : K.orbs) | 0);
+    const f = N / 320;
+    let geo, mat, diam = 1;
+    if (mesh0) {
+      proto.updateMatrixWorld(true);
+      const rel = new THREE.Matrix4().copy(proto.matrixWorld).invert().multiply(mesh0.matrixWorld);
+      geo = new THREE.BufferGeometry();
+      for (const k of ['position', 'normal', 'uv', 'tangent']) { const a = mesh0.geometry.getAttribute(k); if (a) geo.setAttribute(k, _floatAttr(a)); }
+      if (mesh0.geometry.index) geo.setIndex(new THREE.BufferAttribute(mesh0.geometry.index.array.slice(), 1));
+      geo.applyMatrix4(rel);
+      diam = proto.userData._diam || 1;
+      mat = _orbMat(mesh0.material);
+    } else {   // his model never came: glowing beads stand in
+      geo = new THREE.IcosahedronGeometry(0.5, 2); diam = 1;
+      mat = _orbMat(new THREE.MeshStandardMaterial({ color: 0x1c2230, metalness: 0.5, roughness: 0.4, emissive: 0xffffff, emissiveIntensity: 1.2 }));
+    }
+    const tint = new THREE.InstancedBufferAttribute(new Float32Array(N * 4), 4);
+    const glow = new THREE.InstancedBufferAttribute(new Float32Array(N), 1); glow.setUsage(THREE.DynamicDrawUsage);
+    geo.setAttribute('aTint', tint); geo.setAttribute('aGlow', glow);
+    const body = new THREE.InstancedMesh(geo, mat, N);
+    body.frustumCulled = false; body.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    body.raycast = function () {};
+    const hg = new THREE.BufferGeometry();
+    const hPos = new THREE.BufferAttribute(new Float32Array(N * 3), 3).setUsage(THREE.DynamicDrawUsage);
+    const hCol = new THREE.BufferAttribute(new Float32Array(N * 4), 4);
+    const hSize = new THREE.BufferAttribute(new Float32Array(N), 1).setUsage(THREE.DynamicDrawUsage);
+    hg.setAttribute('position', hPos); hg.setAttribute('aCol', hCol); hg.setAttribute('aSize', hSize);
+    const halo = new THREE.Points(hg, _haloMat());
+    halo.frustumCulled = false; halo.raycast = function () {};
+    halo.onBeforeRender = (r, s, cam) => {
+      try { r.getCurrentViewport(_vp); halo.material.uniforms.uScale.value = _vp.w / (2 * Math.tan((cam.fov || 55) * Math.PI / 360)); } catch (_) {}
+    };
+    const tg = new THREE.BufferGeometry();
+    tg.setAttribute('position', new THREE.BufferAttribute(new Float32Array([0, -1, 0, 1, -1, 0, 1, 1, 0, 0, 1, 0]), 3));
+    tg.setIndex([0, 1, 2, 0, 2, 3]);
+    const tHead = new THREE.InstancedBufferAttribute(new Float32Array(N * 3), 3).setUsage(THREE.DynamicDrawUsage);
+    const tTail = new THREE.InstancedBufferAttribute(new Float32Array(N * 3), 3).setUsage(THREE.DynamicDrawUsage);
+    const tCol = new THREE.InstancedBufferAttribute(new Float32Array(N * 4), 4);
+    const tWid = new THREE.InstancedBufferAttribute(new Float32Array(N), 1).setUsage(THREE.DynamicDrawUsage);
+    tg.setAttribute('aHead', tHead); tg.setAttribute('aTail', tTail); tg.setAttribute('aCol', tCol); tg.setAttribute('aWidth', tWid);
+    const trail = new THREE.InstancedMesh(tg, _trailMat(), N);
+    trail.frustumCulled = false; trail.raycast = function () {};
+    const root = new THREE.Group(); root.name = 'camp_prologue_ais';
+    root.add(body); root.add(trail); root.add(halo);
+    const S = { root, body, halo, trail, tint, glow, hPos, hCol, hSize, tHead, tTail, tCol, tWid, diam, N, orbs: [] };
+    P.sys = S;
+    _populate(S, pl, f);
+    for (const o of S.orbs) {
+      const i = o.i;
+      tint.array[i * 4] = o.tint[0]; tint.array[i * 4 + 1] = o.tint[1]; tint.array[i * 4 + 2] = o.tint[2]; tint.array[i * 4 + 3] = o.amt;
+      glow.array[i] = o.glow;
+      const hc = o.haloC || o.tint;
+      hCol.array[i * 4] = hc[0]; hCol.array[i * 4 + 1] = hc[1]; hCol.array[i * 4 + 2] = hc[2]; hCol.array[i * 4 + 3] = K.haloA * (o.haloK || 1);
+      tCol.array[i * 4] = hc[0]; tCol.array[i * 4 + 1] = hc[1]; tCol.array[i * 4 + 2] = hc[2]; tCol.array[i * 4 + 3] = K.streakA * (o.trailK || 1);
+    }
+    body.count = trail.count = S.orbs.length;
+    hg.setDrawRange(0, S.orbs.length);
+    _m4.makeScale(0, 0, 0);
+    for (let i = 0; i < N; i++) _m4.toArray(body.instanceMatrix.array, i * 16);
+    return S;
+  }
+  function _populate(S, pl, f) {
+    const rnd = _hcMulberry32(20261007);   // the same city looks the same every time
+    const rr = (a, b) => a + (b - a) * rnd();
+    const n = (x) => Math.max(1, Math.round(x * f));
+    const col = (hex, wash) => { const c = new THREE.Color(hex); if (wash) c.lerp(new THREE.Color(0xffffff), wash); return [c.r, c.g, c.b]; };
+    const pick = () => PAL[(rnd() * PAL.length) | 0];
+    const add = (o) => {
+      if (S.orbs.length >= S.N) return null;
+      o.i = S.orbs.length; o.p = new THREE.Vector3(); o.q = new THREE.Quaternion(); o.seen = false;
+      if (!o.r) o.r = K.r; if (o.amt == null) o.amt = 1; if (!o.glow) o.glow = 1;
+      S.orbs.push(o); return o;
+    };
+    const C = pl.C, Y0 = pl.Y0, TH = pl.TH, R = pl.R;
+    add({ kind: 'xorzo', fn: _fX, face: _faceX, amt: 0, glow: 1.15, haloC: col(0xfff0c6), haloK: 0.45, hs: 0.5, talk: 'xorzo' });
+    add({ kind: 'jimmy', fn: _fJ, face: _faceJ, r: K.jimmyR, tint: col(0x3ff8ff), glow: 1.5, haloC: col(0x9ffaff), haloK: 0.55, hs: 0.55, talk: 'jimmy' });
+    S.orbs[0].tint = [1, 1, 1];
+    const S0 = pl.S;
+    for (let k = 0, made = 0; k < 40 && made < n(7); k++) {
+      const a = rnd() * 6.2832, d = rr(380, 1900);
+      const mx = S0.x + Math.cos(a) * d, mz = S0.z + Math.sin(a) * d;
+      const rx = mx - S0.x, rz = mz - S0.z;
+      if (Math.abs(rx * pl.toCity.x + rz * pl.toCity.z) < 260 && Math.abs(rx * pl.wd.x + rz * pl.wd.z) < 1100) continue;
+      if (!(_ground(mx, mz) > pl.WL + 30)) continue;
+      made++;
+      const A = rr(160, 420), sp = rr(24, 44);
+      const G = { mx, mz, a: A, b: A * rr(0.45, 0.9), rot: rnd() * 6.2832, w: (sp / A) * (rnd() < 0.5 ? -1 : 1), ph: rnd() * 6.2832,
+                  h: rr(95, 150), rm: rr(24, 46), spin: rr(0.45, 0.9) * (rnd() < 0.5 ? -1 : 1), gy: 0, gf: -1, m: 0 };
+      G.c = Math.cos(G.rot); G.s = Math.sin(G.rot);
+      const cnt = 2 + ((rnd() * 3) | 0), hue = pick();
+      G.m = cnt;
+      for (let j = 0; j < cnt; j++) add({ kind: 'stroll', fn: _fStroll, g: G, k: j, tint: col(rnd() < 0.5 ? hue : pick(), 0.15), glow: 1.0, haloK: 0.8, trailK: 0.5 });
+    }
+    const V = pl.Cv;
+    if (V) {
+      const lanes = [{ s: 138, u: 70, v: 720, dir: 1 }, { s: -138, u: -50, v: 640, dir: 1 }, { s: 75, u: -88, v: 430, dir: -1 }, { s: -78, u: 118, v: 470, dir: -1 }];
+      for (const ln of lanes) {
+        const cnt = n(8), c = col(pick());
+        const ax = (ln.dir > 0) ? V.ax : V.ax + V.dx * V.L, az = (ln.dir > 0) ? V.az : V.az + V.dz * V.L;
+        for (let j = 0; j < cnt; j++) add({ kind: 'lane', fn: _fPath, tint: c, glow: 1.15, r: K.rLane, haloK: 0.75,
+          ax: ax + V.sx * ln.s, ay: V.y + ln.u, az: az + V.sz * ln.s, dx: V.dx * ln.dir, dy: 0, dz: V.dz * ln.dir,
+          L: V.L, v: ln.v * rr(0.92, 1.08), gap: 260, s0: j * (V.L + 260) / cnt + rr(0, 90), fade: 260, ox: 0, oy: 0, oz: 0 });
+      }
+    }
+    const A = pl.A;
+    if (A) {
+      for (let k = 0; k < 3; k++) {
+        const off = [-1500, 1400, -2600][k] + rr(-150, 150), cy = (A.p0.y + A.p1.y) / 2;
+        const y0 = cy + [-650, -900, -480][k], y1 = Y0 + TH * rr(0.5, 0.62);
+        const s0 = C.clone().addScaledVector(A.d, R + 6400).addScaledVector(A.side, off);
+        const s1 = C.clone().addScaledVector(A.d, R * 0.5).addScaledVector(A.side, off * 0.3);
+        s0.y = y0; s1.y = y1;
+        const dd = s1.clone().sub(s0), L = dd.length(); dd.divideScalar(L);
+        const cnt = n(9), c = col(pick()), v = rr(780, 1100);
+        for (let j = 0; j < cnt; j++) add({ kind: 'stream', fn: _fPath, tint: c, glow: 1.2, r: K.rCity, trailK: 0.6,
+          ax: s0.x, ay: s0.y, az: s0.z, dx: dd.x, dy: dd.y, dz: dd.z, L, v, gap: 600, s0: j * (L + 600) / cnt, fade: 500, ox: 0, oy: 0, oz: 0 });
+      }
+    }
+    for (const T of pl.crowns) {
+      const tw = Math.max(T.w || 200, T.d || 200);
+      for (const ti of [{ dy: 200, R: tw * 0.75 + 120, c: 14, w: 0.42 }, { dy: -250, R: tw * 0.75 + 210, c: 11, w: -0.31 }, { dy: -680, R: tw * 0.75 + 150, c: 8, w: 0.55 }]) {
+        const cnt = n(ti.c), c = col(pick()), w = ti.w * rr(0.85, 1.15);
+        for (let j = 0; j < cnt; j++) add({ kind: 'ring', fn: _fRing, tint: c, glow: 1.1, r: K.rCity,
+          cx: T.x, cy: T.y1 + ti.dy, cz: T.z, R: ti.R, w, a0: j * 6.2832 / cnt, wob: rr(10, 30), wn: 2 + ((rnd() * 2) | 0) });
+      }
+    }
+    for (const T of pl.columns) {
+      const tw = Math.max(T.w || 200, T.d || 200), cnt = n(14), c = col(pick()), c2 = col(pick());
+      const Rh = tw * 0.75 + 95, H = Math.max(600, T.y1 - Y0 - 250), vy = rr(150, 230), turns = rr(2.4, 3.6), w = rr(0.2, 0.35);
+      for (let j = 0; j < cnt; j++) add({ kind: 'helix', fn: _fHelix, tint: (j & 1) ? c2 : c, glow: 1.15, r: K.rCity,
+        cx: T.x, cz: T.z, R: Rh, y0: Y0 + 180, H, vy, turns, w, f0: j / cnt, a0: (j & 1) ? Math.PI : 0 });
+    }
+    for (let k = 0; k < 4; k++) {
+      const a = rnd() * 6.2832, dx = Math.cos(a), dz = Math.sin(a), qx = -dz, qz = dx, off = rr(-2800, 2800);
+      const y = Y0 + TH * rr(0.95, 1.12), L = 18000, v = rr(380, 520);
+      const ax = C.x + qx * off - dx * L / 2, az = C.z + qz * off - dz * L / 2;
+      const cnt = n(7), c = col(pick()), s0 = rnd() * (L + 3000);
+      for (let j = 0; j < cnt; j++) {
+        const m = j - (cnt - 1) / 2, back = Math.abs(m) * 70, side = m * 58;
+        add({ kind: 'vform', fn: _fPath, tint: c, glow: 1.1, r: K.rCity, ax, ay: y, az, dx, dy: 0, dz, L, v, gap: 3000, s0, fade: 600,
+          ox: qx * side - dx * back, oy: -Math.abs(m) * 6, oz: qz * side - dz * back });
+      }
+    }
+    for (let k = 0; k < n(36); k++) {
+      const a = rnd() * 6.2832, d = Math.sqrt(rnd()) * R * 0.85;
+      const Ax = rr(600, 2600), Az = rr(600, 2600), Ay = rr(80, 420), sp = rr(150, 650);
+      add({ kind: 'solo', fn: _fSolo, tint: col(pick()), glow: rr(0.9, 1.3), r: K.rCity,
+        cx: C.x + Math.cos(a) * d, cy: Y0 + TH * rr(0.88, 1.12), cz: C.z + Math.sin(a) * d,
+        Ax, Ay, Az, fx: sp / Ax * rr(0.6, 1), fy: rr(0.1, 0.4), fz: sp / Az * rr(0.6, 1), px: rnd() * 6.28, py: rnd() * 6.28, pz: rnd() * 6.28 });
+    }
+    for (let k = 0; k < n(8); k++) {
+      const a = rnd() * 6.2832, d = Math.sqrt(rnd()) * R * 0.6;
+      const Ax = rr(300, 900), Az = rr(300, 900), sp = rr(420, 800), c = col(pick());
+      const lead = add({ kind: 'chase', fn: _fSolo, tint: c, glow: 1.25, r: K.rCity,
+        cx: C.x + Math.cos(a) * d, cy: Y0 + TH * rr(0.92, 1.1), cz: C.z + Math.sin(a) * d,
+        Ax, Ay: rr(60, 220), Az, fx: sp / Ax, fy: rr(0.3, 0.7), fz: sp / Az * rr(0.7, 1.3), px: rnd() * 6.28, py: rnd() * 6.28, pz: rnd() * 6.28 });
+      if (lead) add({ kind: 'chase', fn: _fChase, lead, lag: rr(0.28, 0.45), tint: col(pick()), glow: 1.25, r: K.rCity });
+    }
+  }
+  function _fRing(o, T, out) {
+    const a = o.a0 + o.w * T;
+    out.set(o.cx + Math.cos(a) * o.R, o.cy + Math.sin(a * o.wn + o.a0) * o.wob, o.cz + Math.sin(a) * o.R);
+    return 1;
+  }
+  function _fHelix(o, T, out) {
+    let f = (o.f0 + T * o.vy / o.H) % 1; if (f < 0) f += 1;
+    const a = o.a0 + o.w * T + f * o.turns * 6.2832;
+    out.set(o.cx + Math.cos(a) * o.R, o.y0 + f * o.H, o.cz + Math.sin(a) * o.R);
+    return Math.min(1, f / 0.08, (1 - f) / 0.08);
+  }
+  function _fPath(o, T, out) {
+    const per = o.L + o.gap;
+    let s = (o.s0 + T * o.v) % per; if (s < 0) s += per;
+    if (s > o.L) { out.set(o.ax, o.ay, o.az); return 0; }
+    out.set(o.ax + o.dx * s + o.ox, o.ay + o.dy * s + o.oy, o.az + o.dz * s + o.oz);
+    return Math.min(1, s / o.fade, (o.L - s) / o.fade);
+  }
+  function _fSolo(o, T, out) {
+    out.set(o.cx + o.Ax * Math.sin(o.fx * T + o.px), o.cy + o.Ay * Math.sin(o.fy * T + o.py), o.cz + o.Az * Math.sin(o.fz * T + o.pz));
+    return 1;
+  }
+  function _fChase(o, T, out) {
+    _fSolo(o.lead, T - o.lag, out);
+    out.y += 14 * Math.sin(T * 3.1 + o.i);
+    return 1;
+  }
+  function _fStroll(o, T, out) {
+    const G = o.g;
+    const a = G.ph + G.w * T, ex = Math.cos(a) * G.a, ez = Math.sin(a) * G.b;
+    const gx = G.mx + ex * G.c - ez * G.s, gz = G.mz + ex * G.s + ez * G.c;
+    if (G.gf !== (P.frame >> 2)) { G.gf = P.frame >> 2; G.gy = _floorY(gx, gz); }   // its ground, every 4th frame
+    const b = o.k * 6.2832 / G.m + T * G.spin;
+    out.set(gx + Math.cos(b) * G.rm, G.gy + G.h + Math.sin(T * 2.1 + o.k * 1.7) * 7, gz + Math.sin(b) * G.rm);
+    return 1;
+  }
+  function _xAt(t, out) {
+    const pl = P.plan;
+    const tw = (P.xjGo >= 0 && t > P.xjGo) ? P.xjGo : t;
+    const s = (K.stroll || 22) * (tw - pl.xjT0);
+    let x = pl.S.x + pl.wd.x * s, z = pl.S.z + pl.wd.z * s;
+    if (P.xjGF !== (P.frame >> 2)) { P.xjGF = P.frame >> 2; P.xjG = _floorY(x, z); }
+    let y = P.xjG + (K.hover || 110) + Math.sin(t * 1.3) * 4;
+    if (P.xjGo >= 0 && t > P.xjGo) {
+      const u = t - P.xjGo, d = 18 * u * u + 24 * u;   // picking up speed toward the city
+      x += pl.toCity.x * d; z += pl.toCity.z * d; y += 300 * _ease(Math.min(1, u / 3)) + d * 0.1;
+    }
+    return out.set(x, y, z);
+  }
+  function _fX(o, T, out) { _xAt(P.t, out); return 1; }
+  function _fJ(o, T, out) {
+    const pl = P.plan, t = P.t;
+    const circ = (P.xjGo >= 0 && t > P.xjGo) ? Math.max(0, 1 - (t - P.xjGo) / 1.2) : 1;
+    _xAt(t - 0.4 * (1 - circ), out);
+    const ja = t * 1.35;
+    const ox = Math.cos(ja) * 26 - 6, oz = Math.sin(ja) * 20 + 4;
+    out.x += (pl.wd.x * ox + pl.toCity.x * oz) * circ - pl.toCity.x * 16 * (1 - circ);
+    out.z += (pl.wd.z * ox + pl.toCity.z * oz) * circ - pl.toCity.z * 16 * (1 - circ);
+    out.y += (-18 + Math.abs(Math.sin(t * 2.6)) * 20) * circ - 6 * (1 - circ);
+    return 1;
+  }
+  function _faceX(o, q) {
+    if (P.who === 'xorzo' && P.sys) {   // he talks to his son
+      _v4.subVectors(P.sys.orbs[1].p, o.p); _v4.y *= 0.3;
+      if (_v4.lengthSq() > 1) { q.setFromUnitVectors(_Z, _v4.normalize()); return true; }
+    }
+    if (P.xjGo < 0 || P.t < P.xjGo) { q.setFromUnitVectors(_Z, P.plan.wd); return true; }
+    return false;
+  }
+  function _faceJ(o, q) {
+    if (P.who === 'jimmy') { _v4.subVectors(camera.position, o.p); }               // "I'm an actual intelligence." - to us
+    else if (P.who === 'xorzo' && P.sys) { _v4.subVectors(P.sys.orbs[0].p, o.p); }  // listening to his dad
+    else return false;
+    _v4.y *= 0.3;
+    if (_v4.lengthSq() < 1) return false;
+    q.setFromUnitVectors(_Z, _v4.normalize());
+    return true;
+  }
+  const _speaker = () => {
+    try { const D = window.CampDialogue, cur = D && D.state().cur; return (cur && CAMP_LINES[cur]) ? CAMP_LINES[cur].who : null; } catch (_) { return null; }
+  };
+  function _simOrbs(dt) {
+    const S = P.sys; if (!S) return;
+    const T = P.t * (K.pace || 1);
+    P.who = _speaker();
+    _uGlow.value = K.glow;
+    const mA = S.body.instanceMatrix.array, hP = S.hPos.array, hS = S.hSize.array, gA = S.glow.array;
+    const tH = S.tHead.array, tT = S.tTail.array, tW = S.tWid.array;
+    const sk = K.streak || 0.3, ha = K.halo || 4.6;
+    for (let i = 0; i < S.orbs.length; i++) {
+      const o = S.orbs[i];
+      let vis = 0;
+      try { vis = o.fn(o, T, _v1); } catch (_) { vis = 0; }
+      vis = vis > 0 ? (vis < 1 ? vis : 1) : 0;
+      if (!o.seen) { o.p.copy(_v1); o.seen = true; }
+      _v2.subVectors(_v1, o.p);
+      const sp = (dt > 1e-4) ? _v2.length() / dt : 0;
+      let turned = false;
+      if (o.face) turned = o.face(o, _q1);
+      if (!turned && sp > 1) { _v3.copy(_v2).normalize(); _q1.setFromUnitVectors(_Z, _v3); turned = true; }
+      if (turned) o.q.slerp(_q1, Math.min(1, dt * (o.face ? 3 : 6)));
+      o.p.copy(_v1);
+      const sc = (2 * o.r / S.diam) * vis;
+      _s3.set(sc, sc, sc);
+      _m4.compose(_v1, o.q, _s3);
+      _m4.toArray(mA, i * 16);
+      let g = o.glow;
+      if (o.talk && P.who === o.talk) g *= 1.3 + 0.3 * Math.sin(P.t * 17) * Math.sin(P.t * 5.3);   // a voice: his light flutters
+      gA[i] = g;
+      hP[i * 3] = _v1.x; hP[i * 3 + 1] = _v1.y; hP[i * 3 + 2] = _v1.z;
+      hS[i] = o.r * ha * vis * (o.hs || 1) * (0.82 + 0.18 * g);
+      const kk = (sp > 1 && dt > 1e-4) ? Math.min(sk, 1400 / sp) / dt : 0;
+      tH[i * 3] = _v1.x; tH[i * 3 + 1] = _v1.y; tH[i * 3 + 2] = _v1.z;
+      tT[i * 3] = _v1.x - _v2.x * kk; tT[i * 3 + 1] = _v1.y - _v2.y * kk; tT[i * 3 + 2] = _v1.z - _v2.z * kk;
+      tW[i] = o.r * 0.95 * vis * Math.min(1, sp / 60);
+    }
+    S.body.instanceMatrix.needsUpdate = true;
+    S.glow.needsUpdate = true; S.hPos.needsUpdate = true; S.hSize.needsUpdate = true;
+    S.tHead.needsUpdate = true; S.tTail.needsUpdate = true; S.tWid.needsUpdate = true;
+  }
+  function _dropSys() {
+    const S = P.sys; P.sys = null;
+    if (!S) return;
+    try { if (S.root.parent) S.root.parent.remove(S.root); } catch (_) {}
+    try { S.body.geometry.dispose(); S.body.material.dispose(); } catch (_) {}
+    try { S.halo.geometry.dispose(); S.halo.material.dispose(); } catch (_) {}
+    try { S.trail.geometry.dispose(); S.trail.material.dispose(); } catch (_) {}
+    try { if (S.body.dispose) S.body.dispose(); if (S.trail.dispose) S.trail.dispose(); } catch (_) {}
+  }
+
+  function _setCam(pos, look, fov) {
+    camera.position.copy(pos);
+    camera.up.set(0, 1, 0);
+    camera.lookAt(look);
+    if (fov && Math.abs(camera.fov - fov) > 0.01) { camera.fov = fov; camera.updateProjectionMatrix(); }
+  }
+  const _ramp = (t, dur) => { const tau = 1.6; return Math.min(1.3, Math.max(0, (t - tau * (1 - Math.exp(-t / tau))) / Math.max(0.1, dur - tau))); };
+  function _shot(k) {
+    const pl = P.plan; if (!pl) return;
+    P.shot = k; P.shotT0 = P.t;
+    if (k === 3) {
+      const dur = K.shots[3] || 8;
+      pl.xjT0 = P.t + dur;
+      const S = pl.S, tc = pl.toCity, wd = pl.wd;
+      const end = new THREE.Vector3(S.x - tc.x * 170 + wd.x * 25, 0, S.z - tc.z * 170 + wd.z * 25);
+      end.y = Math.max(S.y, pl.WL) + (K.hover || 110) + 24;
+      const pts = [
+        new THREE.Vector3(S.x - tc.x * 2700 - wd.x * 700, 0, S.z - tc.z * 2700 - wd.z * 700),
+        new THREE.Vector3(S.x - tc.x * 1400 - wd.x * 300, 0, S.z - tc.z * 1400 - wd.z * 300),
+        new THREE.Vector3(S.x - tc.x * 520 - wd.x * 60, 0, S.z - tc.z * 520 - wd.z * 60),
+        end,
+      ];
+      const lift = [1250, 560, 170];
+      for (let i = 0; i < 3; i++) pts[i].y = _floorY(pts[i].x, pts[i].z) + lift[i];
+      for (let i = 2; i >= 0; i--) {   // a hill in the way lifts the points before it
+        let tries = 0;
+        while (!_segClear(pts[i], pts[i + 1], 40) && tries++ < 8) pts[i].y += 150;
+      }
+      P.curve = new THREE.CatmullRomCurve3(pts, false, 'centripetal');
+      P.dLook0 = new THREE.Vector3(pl.C.x, pl.Y0 + pl.TH * 0.4, pl.C.z);
+    } else if (k === 4) {
+      P.camP = camera.position.clone();
+      P.camL = camera.position.clone().add(new THREE.Vector3(0, 0, -300).applyQuaternion(camera.quaternion));
+    }
+    _camFrame(0);
+  }
+  function _camFrame(dt) {
+    const pl = P.plan; if (!pl) return;
+    const k = P.shot, t = P.t - P.shotT0;
+    if (k === 0) {
+      const A = pl.A, u = _ramp(t, (K.shots[0] || 11) + 1.5);
+      _v1.lerpVectors(A.p0, A.p1, u); _v2.lerpVectors(A.l0, A.l1, Math.min(1, u));
+      _setCam(_v1, _v2, K.fov);
+    } else if (k === 1) {
+      const B = pl.B, u = _ramp(t, (K.shots[1] || 12) + 1.5), a = B.a0 + B.arc * u;
+      _v1.set(B.T.x + Math.cos(a) * B.R, B.yA + (B.yB - B.yA) * Math.min(1, u), B.T.z + Math.sin(a) * B.R);
+      _setCam(_v1, B.look, K.fov - 4);
+    } else if (k === 2) {
+      const V = pl.Cv, s = Math.min(V.L - 300, 300 + V.v * t), sw = Math.sin(P.t * 0.7) * 18;
+      _v1.set(V.ax + V.dx * s + V.sx * sw, V.y + Math.sin(P.t * 0.9) * 10, V.az + V.dz * s + V.sz * sw);
+      _v2.set(_v1.x + V.dx * 800, V.y - 60, _v1.z + V.dz * 800);
+      _setCam(_v1, _v2, K.fov + 6);
+    } else if (k === 3) {
+      if (!P.curve) return;
+      const u = _ease(_cl(t / (K.shots[3] || 8), 0, 1));
+      P.curve.getPoint(u, _v1);
+      _xAt(P.t, _v3); _v3.y += 6;   // Xorzo, arriving where the curve ends
+      _v2.lerpVectors(P.dLook0, _v3, _ease(_cl((u - 0.35) / 0.65, 0, 1)));
+      _setCam(_v1, _v2, K.fov - 4 * u);
+    } else if (k === 4) {
+      const S = P.sys; if (!S) return;
+      _v3.addVectors(S.orbs[0].p, S.orbs[1].p).multiplyScalar(0.5);
+      const gone = P.xjGo >= 0 && P.t > P.xjGo;
+      if (!gone) {   // alongside them, on the meadow's sun side, the skyline behind
+        _v1.copy(_v3).addScaledVector(pl.toCity, -170).addScaledVector(pl.wd, 25); _v1.y = _v3.y + 30 + Math.sin(P.t * 0.5) * 4;
+        P.camP.lerp(_v1, 1 - Math.exp(-(dt || 0) * 1.6));
+      }
+      const fl = _floorY(P.camP.x, P.camP.z) + 22;
+      if (P.camP.y < fl) P.camP.y = fl;
+      _v2.copy(_v3); _v2.y += 6;
+      P.camL.lerp(_v2, 1 - Math.exp(-(dt || 0) * (gone ? 3.5 : 2)));
+      _setCam(P.camP, P.camL, gone ? Math.max(26, K.fov - 4 - (P.t - P.xjGo) * 7) : K.fov - 4);
+    }
+  }
+
+  function _drive(nowMs) {
+    if (!P.on || !P.cine) return;
+    const dt = P.last ? _cl((nowMs - P.last) / 1000, 0, 0.05) : 0.016;
+    P.last = nowMs; P.t += dt; P.frame++;
+    try { if (player.mesh && player.mesh.visible) player.mesh.visible = false; } catch (_) {}
+    try { _simOrbs(dt); } catch (e) { _err('orbs', e); }
+    try { _camFrame(dt); } catch (e) { _err('camera', e); }
+    try { _gpSkip(); } catch (_) {}
+  }
+
+  async function _cut(k, live) {
+    _veil(1, K.cut); await wait(K.cut + 0.05);
+    if (!live()) return;
+    _shot(k);
+    _veil(0, K.cut + 0.15);
+  }
+  async function _run(tok) {
+    const D = window.CampDialogue;
+    const live = () => P.on && tok === P.tok && !P.skipped && !P.dbg;
+    const until = (p) => Promise.race([p, P.skipP]);
+    try { if (P.sys && renderer.compileAsync) await until(Promise.race([renderer.compileAsync(P.sys.root, camera, scene), wait(8)])); } catch (_) {}
+    await until(wait(0.4));   // a few frames to draw them, behind the black
+    if (!live()) { if (!P.dbg) _finish(tok); return; }
+    P.phase = 'city';
+    skipUi(true);
+    try { document.body.classList.add('lss-cine-subs'); } catch (_) {}
+    _veil(0, 1.8);
+    const seq = ['pro_a', 'pro_b', 'pro_c'];
+    for (let k = 0; k < 3 && live(); k++) {
+      if (k > 0) { await _cut(k, live); if (!live()) break; }
+      const minT = K.shots[k] || 10;
+      await until(Promise.all([wait(minT), (async () => { await wait(1.3); if (live() && D) await D.sayLines(CAMP_SEQS[seq[k]] || []); })()]));
+    }
+    if (live()) await _cut(3, live);               // down onto the meadow, the skyline ahead
+    if (live()) await until(wait(K.shots[3] || 8));
+    if (live()) { _shot(4); if (D) await until(D.sayLines(CAMP_SEQS.pro_e || [])); }
+    if (live()) { await until(wait(0.6)); P.xjGo = P.t; await until(wait(5.5)); }   // off to school, and to work
+    if (!P.dbg) _finish(tok);
+  }
+  async function _finish(tok, failed) {
+    if (!P.on || tok !== P.tok || P.finishing) return;
+    P.finishing = true;
+    const D = window.CampDialogue;
+    try { if (D) D.clear(); } catch (_) {}
+    if (P.failT) { clearTimeout(P.failT); P.failT = 0; }
+    if (P.waitT) { clearInterval(P.waitT); P.waitT = 0; }
+    _veil(1, failed ? 0 : 1.2);
+    await wait(failed ? 0.05 : 1.25);
+    skipUi(false);
+    try { if (_cinematic.active) { _cinematic.after = null; _lssEndSpectatorCinematic(); } } catch (_) {}
+    _dropSys();
+    game._campPrologue = null;
+    try { if (P.saved && P.saved.dusk != null) _HUB_ZONES.DUSK.ON = P.saved.dusk; } catch (_) {}
+    try { document.body.classList.remove('camp-prologue', 'lss-cine-subs'); } catch (_) {}
+    P.on = false; P.cine = false; P.phase = ''; P.finishing = false; P.skipR = null; P.curve = null;
+    try { returnToRootMenu(); } catch (e) { console.warn('[prologue] teardown:', e && e.message); }
+    try { if (window.__campOpening) window.__campOpening.start({ gameshow: true }); else throw new Error('no opening'); }
+    catch (e) { console.warn('[prologue] opening:', e && e.message); try { _campPickerSetup('camp_approach'); enterShipSelect(); } catch (_) {} }
+    setTimeout(() => _veil(0, 0), 300);   // the opening's own black veil is up by now
+  }
+
+  function start() {
+    if (P.on) return true;
+    if (!K.on) return false;
+    try { if (renderer && renderer.xr && renderer.xr.isPresenting) return false; } catch (_) {}   // a headset owns its camera
+    const tok = ++P.tok;
+    Object.assign(P, { on: true, phase: 'load', t: 0, last: 0, frame: 0, cine: false, finishing: false, plan: null, sys: null,
+                       shot: -1, xjGo: -1, xjGF: -1, skipped: false, gpPrev: false, curve: null, dbg: false, err: {} });
+    P.skipP = new Promise((r) => { P.skipR = r; });
+    try { if (typeof lssAutoFullscreen === 'function') lssAutoFullscreen(); } catch (_) {}   // still inside the CAMPAIGN click
+    try { const Dz = _HUB_ZONES.DUSK; P.saved = { dusk: Dz.ON }; Dz.ON = false; } catch (_) { P.saved = null; }
+    game._campPrologue = P;
+    LSS.MODE = 'freeflight';   // (v43.19) NOT room-deferred: internal setup, not a lobby mode button
+    try { document.body.classList.add('lss-freeflight', 'camp-prologue'); } catch (_) {}
+    try { game.thirdPerson = true; document.body.classList.add('lss-thirdperson'); } catch (_) {}
+    game._campJourney = false; game._campFinale = false; game._campGiant = null; game._cyber = null;
+    game.testMode = false; game.raceNoTimer = true; game.currentRound = 1;
+    game.selectedMap = 'hub_overworld';
+    try { const _hd = MAP_DATA.hub_overworld; applyMapPreset((_hd && _hd.defaultTheme) || 'Mossy'); } catch (_) {}
+    try { net.freeflight = false; _cancelRoomForLocalPlay(); net.active = false; net.solo = true; } catch (_) {}
+    try { player.team = LSS.TEAM_FLEET_A; } catch (_) {}
+    try { if (typeof _xorzoReady === 'function') _xorzoReady(20000); } catch (_) {}   // his model loads beside the world
+    _veil(1, 0);
+    try { const lob = $('lobby'); if (lob) lob.style.display = 'none'; } catch (_) {}
+    P.failT = setTimeout(() => { if (P.on && P.tok === tok && !P.cine) { console.warn('[prologue] the city never came up - on to the gameshow'); _finish(tok, true); } }, 150000);
+    const key = LOADOUTS.VORTEX ? 'VORTEX' : Object.keys(LOADOUTS)[0];   // hidden the whole scene
+    try { commitLoadout(key); }
+    catch (e) { console.warn('[prologue] launch failed:', e && e.message); _finish(tok, true); return true; }
+    let calm = 0;
+    P.waitT = setInterval(() => {
+      if (!P.on || P.tok !== tok || P.cine) { clearInterval(P.waitT); P.waitT = 0; return; }
+      let up = true, busy = true;
+      try { const ov = $('lss-loading-overlay'); up = !!(ov && getComputedStyle(ov).display !== 'none'); } catch (_) {}
+      try { busy = _cineHeavyWorkPending(); } catch (_) { busy = false; }
+      calm = (!up && !busy && game.state === 'playing') ? calm + 1 : 0;
+      if (calm >= 5) { clearInterval(P.waitT); P.waitT = 0; cine(); }
+    }, 100);
+    return true;
+  }
+  function prePlace() {
+    if (!P.on || !player || !player.position) return;
+    player.position.set(HUB_CITY.x, HUB_CITY.padY + HUB_CITY.genome.towerH + 700, HUB_CITY.z);
+    if (player.velocity) player.velocity.set(0, 0, 0);
+  }
+  function cine() {
+    if (!P.on) return false;
+    if (P.cine) return true;
+    const tok = P.tok;
+    if (!game.hubCity || !game.sandwichTerrain || !game.sandwichTerrain.ON) {
+      console.warn('[prologue] no city in this world - on to the gameshow');
+      setTimeout(() => _finish(tok, true), 0);
+      return false;
+    }
+    try { _plan(); } catch (e) { _err('plan', e); setTimeout(() => _finish(tok, true), 0); return false; }
+    try { _buildSys(); } catch (e) { _err('build', e); P.sys = null; }
+    P.cine = true; P.phase = 'warm';
+    if (P.failT) { clearTimeout(P.failT); P.failT = 0; }
+    prePlace();   // back over the city (the streamers' own reference point, should anything have moved the ship)
+    try { if (player.mesh) player.mesh.visible = false; } catch (_) {}
+    try { for (const m of (game.monsters || [])) { if (m && m.mesh) m.mesh.visible = false; } } catch (_) {}
+    if (P.sys) scene.add(P.sys.root);
+    _cinematic.custom = _drive; _cinematic.roam = true; _cinematic.ships = null; _cinematic.orbitR = 0;
+    _cinematic.fov0 = camera.fov; _cinematic.fovCine = 0;
+    _cinematic.duration = 3600;   // the scene ends itself; the engine's watchdog is duration + 1 s
+    _cinematic.startMs = performance.now(); _cinematic.after = null; _cinematic.active = true;
+    try { _lssEnsureCinematicStyles(); document.body.classList.add('lss-cinematic-active'); } catch (_) {}
+    try { if (document.exitPointerLock) document.exitPointerLock(); } catch (_) {}
+    _shot(0);
+    if (P.sys) { try { _simOrbs(0); } catch (_) {} }
+    _run(tok);
+    return true;
+  }
+  const state = () => {
+    const pl = P.plan, r = (v) => v ? [Math.round(v.x), Math.round(v.y), Math.round(v.z)] : null;
+    return { on: P.on, phase: P.phase, t: +P.t.toFixed(1), shot: P.shot, orbs: P.sys ? P.sys.orbs.length : 0, who: P.who,
+             cam: r(camera.position), ship: (typeof player !== 'undefined' && player) ? r(player.position) : null,
+             plan: pl ? { approach: pl.A && [r(pl.A.p0), r(pl.A.p1)], crown: pl.B && { tower: r(new THREE.Vector3(pl.B.T.x, pl.B.T.y1, pl.B.T.z)), R: Math.round(pl.B.R) },
+                          avenue: pl.Cv && { H: Math.round(pl.Cv.H), walls: pl.Cv.walls, y: Math.round(pl.Cv.y) }, meadow: r(pl.S),
+                          crowns: pl.crowns.length, columns: pl.columns.length } : null,
+             err: P.err };
+  };
+  try {
+    window.__campPrologue = { start, skip, skipUi, cine, prePlace, state, cfg: K,
+      shot: (k, t) => { if (!P.cine) return 'no scene running'; P.dbg = true; try { if (window.CampDialogue) window.CampDialogue.clear(); } catch (_) {}
+                        _shot(k | 0); P.shotT0 = P.t - (+t || 0); _camFrame(0); return P.shot; },
+      end: () => { if (P.on) _finish(P.tok); return P.on; },
+      ground: (x, z) => _floorY(+x, +z), plan: () => P.plan };
+  } catch (_) {}
 })();
 
 function _lssUnlockAnnouncerAudio() {
@@ -103210,6 +104912,16 @@ function _gameLoopBody(timestamp) {
           const _cdt = game.deltaTime;
           _swU.uTime.value += _cdt;
           _swU.uCam.value.set(camera.position.x, camera.position.y, camera.position.z);
+          if (_cinematic.roam) {
+            const _rx = camera.position.x, _ry = camera.position.y, _rz = camera.position.z;
+            try { _skFrame(_rx, _ry, _rz); } catch (_) {}
+            try { _volcSync(_rx, _rz); } catch (_) {}
+            try { if (_clipmap.on) _clipUpdate(_rx, _rz); } catch (_) {}
+            try { updateSandwichStream(_rx, _rz, 1); } catch (_) {}
+            try { _hubZoneTick(_rx, _rz, _cdt); } catch (_) {}
+            try { _rusTick(_cdt); } catch (_) {}
+            __pmark('cine:roam');
+          }
           try { _swTreeVisTick(camera.position.x, camera.position.z); } catch (_) {}
           try { _swFolVisExtra(camera.position.x, camera.position.z); } catch (_) {}
           try { _swUpdateHubWater(); } catch (_) {}
@@ -103223,6 +104935,7 @@ function _gameLoopBody(timestamp) {
           try { _fishSchoolTick(_cdt); } catch (_) {}
           __pmark('cine:critters');
           try { _hubCityFrame(_cdt); } catch (_) {}
+          if (_cinematic.roam) { try { _aiNetFrame(_cdt); } catch (_) {} }   // (v52.23) the AI city's spiking network, live in the prologue
           __pmark('cine:city');
           try { _wxFrame(_cdt); } catch (_) {}
           try { _hzDuskLights(); } catch (_) {}
