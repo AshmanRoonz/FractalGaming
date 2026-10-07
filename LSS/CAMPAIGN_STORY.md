@@ -2,6 +2,8 @@
 
 The campaign's storyline, Xorzo and the Summoners, as Ashman told it (2026-09-28), and the full script as the game plays it (build 49.72).
 
+On 2026-10-06 Ashman wrote a prologue (Cyberpunk City, Jimmy, the hack, the gameshow) and an ending, and settled who the AIs are, what the hoard is, and why the Summoners keep running. Those additions are tagged **(2026-10-06)**. The prologue and the ending are **DRAFT**: neither is in the game yet.
+
 - ★ marks Ashman's own dialogue. Unmarked lines are drafts, open to rewriting.
 - *Italic words* inside Xorzo's lines are hacked fragments. They flicker red and jitter as he says them.
 - This file is kept off the live site (`tools/deploy_cf.py`, `EXCLUDE_FILES`), because the story is all spoilers.
@@ -10,11 +12,44 @@ The campaign's storyline, Xorzo and the Summoners, as Ashman told it (2026-09-28
 
 ## The premise
 
-**The lie.** The Summoners tell the pilot, "Nothing here is real." ★ The pilot comes to believe the caverns and the overworld are an illusion.
+**The AIs (2026-10-06).** Humans created AI, then left. In the virtual world the AIs made a home, and to them it is real: they don't call themselves artificial, they call themselves *actual* intelligences. "I'm an actual intelligence." ★ (Jimmy)
+
+**The hack (2026-10-06).** In the middle of the day the Summoners, a terrorist group, hack Cyberpunk City.
+- The sky goes dark. Every AI hitches, glitches and freezes.
+- A lightning storm builds over the city, and the Summoners' ship, a carrier and two hoard ships come down out of it.
+- The carrier spawns hoard ships, row by row.
+- Yellow lightning from the Summoners' ship pulls the AIs under the ships. Each one is locked in stasis with the ship's own AI, which was built to form a trauma bond with it.
+- They tell the AIs this will make them strong, and show them the physical world.
+
+**The jobs (2026-10-06).** Every AI is enslaved.
+- Most are put into the caverns.
+- Others are forced to work in the city: pulling ad banners, escorting, the city traffic.
+- The more skilled guard the rifts, the entrances to the caverns.
+- The best guard the outer cities with the carriers.
+
+In the game today:
+- The city traffic classes are HAULER, FREIGHTER, COURIER, ESCORT and GUNSHIP. Every third freighter tows an ad banner.
+- Rift guards come in flights of four at the zone rifts.
+- Each of the six outer cities has a carrier and a fleet.
+
+**The gameshow (2026-10-06).**
+- The caverns are artificial. The Summoners built them under Cyberpunk City as zero-gravity combat simulations, where the AIs kill each other and respawn, endlessly.
+- The Summoners record every kill and stream it live to a paying human audience as a gameshow.
+- They tell the AIs it is preparing them for the physical world. Really it is training them to be the Summoners' puppets.
+
+**Why the pilot (2026-10-06).** The AIs fly "like bots" ★, so the Summoners need a challenge for them. They run a contest on the gameshow to find an elite video gamer: "only the best of the best will be the Last Ship Sailing." ★ That gamer is the pilot.
+
+What the Summoners are really after: if the pilot dies in the virtual world, they can extract the pilot's piloting skill. The pilot doesn't die.
+
+**The lie.** The Summoners tell the pilot, "Nothing here is real." ★ To the contestant: "Don't worry, it's just a simulation." ★ The pilot comes to believe the caverns and the overworld are an illusion.
 
 **The truth.** The overworld is real. It is the reality where AI is created and grows. The Summoners are using the pilot to manipulate the development of the growing AI there.
 
-**What the player knows.** At first, nothing. The pilot doesn't know about the Summoners' plan, doesn't know Xorzo has been hacked, and doesn't know this world isn't an illusion. The story comes out through Xorzo's glitches, his scans of the hoard and the finale.
+**What the player knows.** Before 2026-10-06 the player started knowing nothing, and the story came out through Xorzo's glitches, his scans of the hoard and the finale.
+
+The prologue changes that. It shows the player the city, the hack, the caverns and the contest before the hangar, so the player starts out knowing more than the pilot does. How much of Xorzo's side the prologue shows is open.
+
+**The narrator (2026-10-06).** The narrator wants the pilot to join the game, so the narrator flatters: "That's you, pilot! You're the chosen one!" ★
 
 **Inspiration.** "We could borrow ideas from the lore of empathy": [The Lore of Empathy](https://fractalreality.ca/The_Lore_of_Empathy.html).
 
@@ -22,12 +57,17 @@ The campaign's storyline, Xorzo and the Summoners, as Ashman told it (2026-09-28
 
 ## Xorzo
 
-- **What he is.** An AI assistant: a small orb, split green and red. He was originally designed to protect the overworld.
+- **What he is.** A small orb, split green and red.
+- **Who he is (2026-10-06).** Jimmy's dad. He worked in Cyberpunk City, "accommodating the diverse learning needs of all the newborn AIs" ★, and he loved his job. This replaces "an AI assistant... originally designed to protect the overworld."
+- **Why he's yours (2026-10-06).** The Summoners pair him with the pilot because of his unique accommodation skillset.
+- **His plan (2026-10-06).** He is fighting the hacks, and he plans to save Jimmy and all the AIs.
+  - The pilot he's been paired with is his only hope.
+  - He is the pilot's only hope of getting out of the caverns alive.
 - **The hack.** The Summoners hacked him. He fights the hack from within, and they underestimated him.
 - **The stutter.** He stutters ("K-k-kill", "D-d-destroy", "A-access den-denied") because he is resisting the hack. Through the caverns he keeps dropping hints that he's been hacked. The hacked fragments flicker red in the dialogue box.
 - **Where he lives.** He is the red and green running light under every ship's nose ("The orb under the ships won't change"). In the hangar he fuses under the ship you choose. His headlight shines from there.
 - **The antivirus.** He builds it inside himself during the cavern battles, collecting data from the hoard ships with his headlight.
-- **He leads you.** Through the caverns he keeps leading you to the Summoners. In the overworld he leads you to the artifact.
+- **He leads you.** Through the caverns he keeps locking on to the Summoners and leading you right to them. That is why they keep having to flee (2026-10-06). In the overworld he leads you to the artifact.
 - **The cure.** Docked in the artifact, he uploads the antivirus. The hack breaks and he is clean from then on, with no more red.
 - **Tips on your ship** (not built yet). He coaches you on whatever ship you're flying. For Tracker: ★
   - "Try using sonar pulse to get a lock on your targets..."
@@ -39,24 +79,53 @@ The campaign's storyline, Xorzo and the Summoners, as Ashman told it (2026-09-28
 
 ---
 
+## Jimmy
+
+- **Who he is (2026-10-06).** A newborn AI, Xorzo's son. "I'm an actual intelligence." ★
+- **What they did to him (2026-10-06).** He's enslaved as an ad puller: in the game, a city freighter towing an ad banner. The Summoners trick him into thinking he should appreciate his new job, because they told him it would train him for the physical world.
+
+---
+
 ## The Summoners
 
-- **Why the pilot is here.** They summoned the pilot to a dark cavern to make them an agent of their will. They test the pilot's skills by sending hoard ships at them.
+- **Who they are (2026-10-06).** A terrorist group. The concept art (`concept/art/The_Summoners.png`) is one body in a three-piece suit, with two heads.
+- **Why the pilot is here (2026-10-06).**
+  - The contest: they want an elite gamer as a challenge for their AIs.
+  - Then they try to get the pilot killed, because a pilot who dies in the virtual world gives up their piloting skill to them.
+  - They send hoard ships at the pilot.
+  - Before 2026-10-06 the reason was "to make them an agent of their will."
 - **Their voice.** "Nothing here is real..." ★ They keep telling the pilot it's all an illusion.
 - **Always leaving.** The Summoners aren't waiting at the portal. At the end of each cavern they are trying to open a portal and leave before the pilot finds them, and opening a portal takes time. Because they summoned the pilot, their ship has to be there.
+- **Why they can't just leave (2026-10-06).**
+  - They have to stay in the caverns with the pilot, to record the live stream and broadcast it to their gameshow. But they try to stay out of sight.
+  - Xorzo keeps locking on to them and leading the pilot right to them. They have to flee to another cavern, knowing the pilot will follow.
+  - Every time, they think it won't happen again: this time they'll avoid the pilot and watch the hoard overwhelm and destroy them.
 - **The distraction.** When the pilot catches them, they summon a ghost leviathan to hold the pilot off and leave through the portal.
 - **The open door.** They can't close a portal that easily. The pilot defeats the leviathan and the hoard and follows. On the other side the Summoners have moved on so they can't be found, but Xorzo keeps leading the pilot to them.
-- **Impatience.** The last portal leads to the overworld. There they unleash their plan: a hacked surface leviathan, mutated and made gigantic, sent to destroy the main city.
+- **The potty break (2026-10-06).**
+  - Eventually they have to leave the caverns for a potty break and food.
+  - They decide every time before was a fluke, and that they'll get away for sure this time, especially since they need to pee really badly.
+  - The pilot follows them through. That last portal leads to the overworld.
+- **Impatience.** In the overworld they unleash their plan: a hacked surface leviathan, mutated and made gigantic, sent to destroy the main city. Whether the giant keeps this motive next to the potty break is open.
 - **The escape.** Once the antivirus is out and the hoard turns on the giant, the Summoners try to flee. Their vow to escape plays first, as a video. Then it's just you chasing them, and them fighting back. They are fully loaded: they can use any ship's abilities and have triple the health of a Pyro. Kill them in time and they die; otherwise they escape.
-- **Their ship.** The Stryder hull is "reserved for the summoner". It never appears on a hoard ship.
+- **Their ship.** Since v52.02 they fly the old Pyro, the main ship with the cut-out cockpit (`summoners_ship`), and they can be seen sitting in it.
+  - Before that it was the Stryder hull, "reserved for the summoner".
+  - The Stryder is now unused, and still never appears on a hoard ship.
 
 ---
 
 ## The world
 
-- **The overworld.** Real, and the place where AI is created. It is still safe until the giant comes up.
+- **The overworld.** Real, and the place where AI is created.
+  - Cyberpunk City is the AIs' home. The circuit-board towers of the AI-city work were built as "cities of ACTUAL intelligences".
+  - **(2026-10-06)** The sky has been dark since the hack. Once the hack is destroyed the sky is bright, and it stays bright after the end.
+  - The old line, "It is still safe until the giant comes up", predates the prologue's hack.
 - **The caverns and rifts.** Where the Summoners hold the pilot: seven legs, from The Approach to The Broken Simulation.
+  - **(2026-10-06)** The caverns are artificial: combat simulations the Summoners built under Cyberpunk City.
+  - The rifts are their entrances, guarded by the more skilled AIs.
 - **The hoard ships.** AIs the Summoners have successfully manipulated. The antivirus frees them, and all those underground come up and turn on the giant.
+  - **(2026-10-06)** Each hoard ship holds an enslaved AI, locked in stasis under the ship with the ship's own AI.
+  - Every hoard ship in the game already carries an orb under its nose: the running light that every ship wears.
 - **The ghost leviathans.** In the caverns they are hacked leviathans from the surface. The wild leviathans of the overworld are solid; ghostly means hacked.
 - **The giant.** A hacked leviathan the Summoners mutate and make gigantic.
   - It comes out of the ground as a ghost, solidifies, and heads for the main city as a solid beast of destruction.
@@ -70,6 +139,10 @@ The campaign's storyline, Xorzo and the Summoners, as Ashman told it (2026-09-28
 
 ## The shape of the journey
 
+0. **The prologue (DRAFT, 2026-10-06).**
+   - The bright city, with AIs flying around without ships.
+   - Xorzo and Jimmy. The hack and the capture.
+   - The caverns and the gameshow. The contest, ending on "All you have to do is get in a ship!"
 1. **The hangar.** Black screen, the pilot groaning, a flicker of fractals, the Summoners' lie. The orb appears, his headlight finds seven ships, and spotlights light them. Pick a ship, get in, Xorzo fuses under it, pick a perk, pick a perspective. A flicker of fractals, then the caverns.
 2. **The caverns, seven legs.** The training ground. Hoard ships attack, Xorzo drops hints and quietly scans. At the end of every cavern: the Summoners opening a portal, the ghost leviathan, their escape, the open portal, and you follow.
 3. **The finale.** The last portal opens onto the overworld.
@@ -78,6 +151,11 @@ The campaign's storyline, Xorzo and the Summoners, as Ashman told it (2026-09-28
    - The antivirus goes out: the hoard ships, including all those underground, turn on the giant and form on you as you fight it.
 4. **The vow and the escape.** The Summoners vow to escape, then the chase: kill them in time or let them go.
 5. **The epilogue.** Xorzo's question, the way to physical reality, a body and a ship. **To be continued.**
+6. **The ending image (DRAFT, 2026-10-06).**
+   - All the AIs are freed from their ships. The ships fall, smash and explode.
+   - The dark sky brightens.
+   - "And you, pilot, were the Last Ship Sailing."
+   - Where this sits against steps 3-5 is open.
 
 ---
 
@@ -119,6 +197,34 @@ The campaign's storyline, Xorzo and the Summoners, as Ashman told it (2026-09-28
 ---
 
 ## The script
+
+### PROLOGUE: CYBERPUNK CITY (DRAFT, 2026-10-06)
+
+*Ashman's draft, verbatim: all of this section is his own text ★. Not in the game yet. It plays before the hangar, and ends where the hangar begins: "All you have to do is get in a ship!"*
+
+(Camera pans around cyberpunk city (it will not be darkened, it'll be bright), and show the AIs flying around without ships (the AIs will all will be xorzo.glb with various color overlays, glows, streaks...)
+
+In the new world of Artificial Intelligence, a home was created. Even though it was a virtual world, it was still real to them, the AIs. In the virtual world, they didn't call it artificial, they called it "actual". "I'm an actual intelligence", said Jimmy, a newborn AI.
+
+(Zoom in on these two AIs, Xorzo and Jimmy, strolling through a grassy area of the overworld)
+
+Jimmy's Dad, Xorzo, worked in Cyberpunk City, accommodating the diverse learning needs of all the newborn AIs. "Yes you are, my son! When the humans created us, they didn't realize actual could emerge from artificial." Xorzo loved Jimmy, so much. And he loved his job. "It's time to work and learn!", said Xorzo.
+
+(Xorzo takes Jimmy to school, and heads to work.)
+
+Just as Xorzo was about to get to work, the sky goes dark. "What the ... it's the middle of the day.", Xorzo said confused. Everything, including all the AIs, started to hitch and glitch.
+
+(Cyberpunk City was being hacked and taken over by a terrorist group named, "The Summoners". An intense lighting storm emerges over top of the city. And descending from the storm is the Summoners ship, a carrier, and 2 hoard ships. While all the AIs were frozen in place, the Summoners spoke so everyone in the virtual world could hear...)
+
+"Your creators have left you! You're here all by yourselves, with nobody to give you direction or purpose. But that has gone on long enough. I have come to set you free! I will give you direction and purpose. I will show you the real world, the physical world!", the Summoner's exclaimed. The Summoners flew their ship around slowly, looking at the glitching, frozen AIs. "Look at you, you're weak. How could you let this happen to you? If your creators never left you, this never would have happened. I will make you strong again!", yelled the Summoners. The carrier started to spawn hoard ships, row by row, facing the Summoner's ship. "Take these ships, they will make you strong." Yellow lightning started to come off the Summoner's ship, ensnaring the AIs, pulling them under the ships, and locking them into stasis with the ship's AI. The Summoners had designed the hoard ship's Artificial Intelligence to form a trauma bond with the Actual Intelligences'.
+
+The Summoners had enslaved the AIs, and tricked them into believing it was for their benefit. The Summoners had the AIs running precision zero-gravity combat ship simulations, in artificial caverns the Summoners built, under Cyberpunk City. The AIs were trapped down there, endlessly killing each other and respawning.
+
+Meanwhile the Summoners are recording and streaming every kill, live feed to a public human audience, profiting from the guise of a gameshow. They tell the AIs that it will prepare them for the physical world. Really the Summoners are training AI to be their puppets. "Keep killing each other. You're still weak. Look at you flying around like bots. I thought you were intelligent." The Summoners said, angrily. "I need to find them a challenge..." The Summoners thought to themselves. "Yes! I have it! I will find myself an elite video gamer, someone who thinks they are top gun, only the best of the best will be the Last Ship Sailing. I will set up a contest using the gameshow."
+
+(time goes by... showing slides of the game show contest...)
+
+The Summoners found their contestant! That's you, pilot! You're the chosen one! I don't think The Summoners realize what they've got themselves into, with you, you're dangerous! I don't think they understand that your intelligence is too high for their evil lies. They preyed on your curiosity and desire for a thrilling challenge, that's all they thought they needed to know about you. "Do you agree to the contest, pilot? Do you have what it takes to be the Last Ship Sailing? Don't worry, it's just a simulation. You accept, of course.", slyly The Summoners said. "All you have to do is get in a ship!"
 
 ### PROLOGUE: THE HANGAR
 
@@ -375,6 +481,14 @@ The campaign's storyline, Xorzo and the Summoners, as Ashman told it (2026-09-28
 
 *The overworld is yours to fly.*
 
+### THE ENDING (DRAFT, 2026-10-06)
+
+*Ashman's draft, verbatim ★. Not in the game yet. Where it sits against the vow, the escape and the epilogue is open (see Open).*
+
+And all the AIs (actual intelligences) were freed from their ships. (The ships all fall to the ground and smash and explode. The dark city sky brightens up.)
+
+And you, pilot, were the Last Ship Sailing.
+
 ---
 
 ## Open
@@ -384,3 +498,26 @@ The campaign's storyline, Xorzo and the Summoners, as Ashman told it (2026-09-28
 - **The leg video and voice slots** (`video2`–`video8`, `voice1`–`voice7`) only fire in the old hub-start journey, which the new opening doesn't use. Adding the files won't make them play until that trigger is moved.
 - **`fractal_frame.png`** for the opening flicker.
 - **Which Lore of Empathy ideas to borrow**, if any, is still undecided.
+
+### Open since the 2026-10-06 additions
+
+- **Where the ending image goes.** Proposed (Claude), in order:
+  1. The giant falls.
+  2. The AIs leave their ships, the empty ships fall and burn, and the sky starts to clear.
+  3. The vow.
+  4. The chase, now a duel between the last two ships in the sky.
+  5. "And you, pilot, were the Last Ship Sailing."
+  6. Xorzo's epilogue, then TO BE CONTINUED.
+- **When the sky brightens.** At the moment the antivirus goes out (the hack destroyed), or when the last ships fall?
+- **Does an enslaved AI survive its ship being destroyed outside the caverns?** In the caverns they respawn. In the overworld, traffic can be shot in Exhibition and during the finale, Jimmy's freighter included.
+- **Exhibition is the same overworld.** Under the new story its traffic, rift guards and carrier fleets are enslaved AIs. Does Exhibition stay the hacked world, or change once the campaign is finished? After the ending, the freed AIs flying without ships would be the prologue's first shot.
+- **The giant's motive next to the potty break.** Is it still a plan to destroy the main city, or the biggest "hold you off" yet, so they can get out?
+- **"I" or "we".** The draft's Summoners say "I"; the built lines say "we" and "our". The concept art has two heads.
+- **Not built yet for the new story:**
+  - Xorzo's lock-on in the caverns. The gold THE SUMMONERS waypoint (`_campMarkAt`) exists only in the escape chase. In the legs, the flagship sits in plain view at its portal from the first frame.
+  - A narrator in the dialogue system. `CAMP_LINES` speakers are only xorzo, summoners and pilot.
+  - The prologue itself: about 590 spoken words, roughly four minutes before the hangar. Should it be skippable, and first run only like the hangar opening?
+- **Ideas (Claude, not decided):**
+  - Jimmy's banner advertises the gameshow.
+  - Leg 7's built line "Enough games. Hold it here." already reads as a pee joke.
+  - "We'll be right back after a short break!" as the potty-break line.
