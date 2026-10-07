@@ -114,6 +114,29 @@ if EXTRA_FILES:
         ok_codes=(0, 1, 2, 3, 4, 5, 6, 7))
 print("staged ->", STAGE)
 
+# (2026-10-06) SIZE GUARD. Cloudflare Pages rejects any single file over 25 MiB, and the whole upload fails
+# with it. It nearly happened: the owner's raw Meshy character exports (Pilot_Ashman_Roonz.zip 241 MiB,
+# The_Summoners.zip 72 MiB) were dropped into LSS/concept/objects/, and concept/ cannot be excluded wholesale
+# because the game fetches concept/shaders/, concept/camos/ and concept/seafoam.png at runtime. The zips now
+# live in assets_base/objects/characters/meshy_zips/. Raw source art belongs in assets_base/ (git-ignored,
+# never deployed); this check names anything oversized BEFORE wrangler starts, instead of a failed upload.
+PAGES_MAX = 25 * 1024 * 1024
+_big = []
+for _root, _dirs, _files in os.walk(STAGE):
+    for _f in _files:
+        _p = os.path.join(_root, _f)
+        try:
+            _s = os.path.getsize(_p)
+        except OSError:
+            continue
+        if _s > PAGES_MAX:
+            _big.append((_s, os.path.relpath(_p, STAGE)))
+if _big:
+    for _s, _p in sorted(_big, reverse=True):
+        print(f"!! {_s / 1048576:7.1f} MiB  {_p}")
+    sys.exit(f"ABORTED: {len(_big)} file(s) over Cloudflare Pages' 25 MiB limit (listed above). Move raw "
+             f"sources out of LSS/ (assets_base/ is the place) or add the folder to EXCLUDE_DIRS.")
+
 if "--stage" not in sys.argv:
     # (2026-08-23) wrangler is no longer globally installed on this machine;
     # fall back to `npx --yes wrangler` (uses the npm cache, auth comes from

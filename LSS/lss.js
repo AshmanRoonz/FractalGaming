@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "52.01";
+const LSS_BUILD = "52.09";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -5057,9 +5057,12 @@ function loadHoardModel(key) {
   if (_hoardLoading[key]) return _hoardLoading[key];
   if (typeof THREE === 'undefined' || typeof THREE.GLTFLoader === 'undefined') return Promise.resolve(null);
   const loader = new THREE.GLTFLoader();
+  const _hmUrl = (key === 'summoners_ship')
+    ? './objects/' + ((typeof _shipsVariant === 'function') ? _shipsVariant() : '') + 'summoners_ship.glb'
+    : _hoardBaseUrl + key + '.glb';
   const p = new Promise((resolve) => {
     loader.load(
-      _hoardBaseUrl + key + '.glb' + _MODEL_CACHE_BUST,   // (v36.25) art version, not LSS_BUILD
+      _hmUrl + _MODEL_CACHE_BUST,   // (v36.25) art version, not LSS_BUILD
       (gltf) => {
         const proto = gltf.scene;
         try { _lssCapModelTextures(proto, 'hoard ' + key); } catch (_) {}   // (v38.28)
@@ -5110,7 +5113,7 @@ const FormationDirector = {
   },
 };
 
-const NEMESIS_SHIP = 'stryder';
+const NEMESIS_SHIP = 'summoners_ship';
 const HOARD_SHIPS = [
   'bumblebee', 'concord', 'cruise', 'disco', 'draino', 'flamethrower', 'goldian',
   'iceski', 'indigo', 'interceptor', 'knifehand', 'mantaray', 'matrix', 'midknight',
@@ -19025,14 +19028,17 @@ function _orbitStickTick() {
   }
   return true;
 }
+function _orbitCamLive() {
+  let O;
+  try { O = window.__orbitCam; } catch (_) { return false; }
+  if (!O || !O.on) return false;
+  try { if (renderer && renderer.xr && renderer.xr.isPresenting) return false; } catch (_) {}
+  return !!(typeof player !== 'undefined' && player && player.position);
+}
 function _orbitCamApply() {
   let O;
   try { O = window.__orbitCam; } catch (_) { return; }
-  let live = !!(O && O.on);
-  if (live) {
-    try { if (renderer && renderer.xr && renderer.xr.isPresenting) live = false; } catch (_) {}
-    if (typeof player === 'undefined' || !player || !player.position) live = false;
-  }
+  const live = _orbitCamLive();   // (v52.04) the same test every seat treatment now asks
   if (live !== _ORB.hud) {
     _ORB.hud = live;
     try { document.body.classList.toggle('lss-orbit', live); } catch (_) {}   // see `body.lss-orbit` in the stylesheet for exactly what goes, and what deliberately stays
@@ -21639,6 +21645,7 @@ function renderFrame() {
   try { if (typeof _vscSync === 'function') _vscSync(); } catch (_) {}   // (v50.47) the HUD on the console's screens, in 3D
   try { _orbitCamApply(); } catch (_) {}   // (v44.81) dev orbit camera; one property read when off
   try { _rplFrame(); } catch (_) {}        // (v47.97) the replay recorder / final kill cam: samples, or poses + owns the camera
+  try { _lssSeatFrame(); } catch (_) {}    // (v52.02) the pilot and the Summoners take their seats (after the replay's poses)
   if (renderer.xr.isPresenting) {
     if (!renderFrame._xrLogged) {
       renderFrame._xrLogged = true;
@@ -47689,6 +47696,386 @@ const SHIP_MODELS = {
 
 const shipModelCache = { loaded: {}, ready: null };
 
+const _LSS_SEAT_ART = '52.05';
+const _LSS_SEATS = {
+  pilot: {
+    url: 'objects/characters/pilot_ashman_seat.glb',
+    clip: 'Sit_Alert', fallback: 'Sit_and_Doze_Off', cheer: 'Sit_Cheer_with_Left_Hand',
+    hulls: {
+      blaster: { s: 0.0984, x: -0.6198, y: -0.0042, z: -0.0005 },
+      puncture: { s: 0.0952, x: -0.3321, y: 0.0091, z: -0.0004 },
+      pyro: { s: 0.1292, x: -0.4999, y: -0.0069, z: -0.0006 },
+      slayer: { s: 0.1518, x: -0.5103, y: -0.0436, z: -0.0007 },
+      syphon: { s: 0.1122, x: -0.5328, y: -0.0512, z: -0.0005 },
+      tracker: { s: 0.1391, x: -0.5313, y: -0.0492, z: -0.0007 },
+      vortex: { s: 0.1092, x: -0.4572, y: -0.0581, z: -0.0005 },
+    },
+  },
+  summoners: {
+    url: 'objects/characters/summoners.glb',
+    clip: 'Sitting_Answering_Questions',
+    hulls: { summoners_ship: { s: 0.17, x: -0.3498, y: -0.0788, z: -0.0235 } },
+  },
+};
+const _lssSeatG = {};          // who -> Promise<gltf | null>, one load per character
+const _lssSeatRecs = [];       // the seated bodies on screen (or about to be)
+let _lssSeatT0 = 0, _lssSeatScanN = 0;
+function _lssNoRaycast() {}    // a seated body is never a hit target (r165 raycasts a skinned mesh vertex by vertex)
+function _lssSeatKnob(k, d) { try { const S = window.__seatKnobs; if (S && S[k] !== undefined) return S[k]; } catch (_) {} return d; }
+
+function _lssSeatLoad(who) {
+  if (_lssSeatG[who]) return _lssSeatG[who];
+  const def = _LSS_SEATS[who];
+  return (_lssSeatG[who] = new Promise((res) => {
+    try {
+      new THREE.GLTFLoader().load('./' + def.url + '?v=' + _LSS_SEAT_ART, (g) => {
+        const pick = (n) => n && g.animations.find((c) => c.name === n);
+        g.lssIdle = (pick(def.clip) || pick(def.fallback) || g.animations.find((c) => /^Sit/.test(c.name)) || g.animations[0]).name;
+        const fitClip = pick(g.lssIdle);
+        const hipsT = fitClip && fitClip.tracks.find((t) => /Hips\.position$/.test(t.name));
+        const pin = hipsT ? [hipsT.values[0], hipsT.values[1], hipsT.values[2]] : null;
+        g.lssClips = {};
+        for (const c of g.animations) {
+          const cc = c.clone();
+          if (pin) for (const t of cc.tracks) if (/Hips\.position$/.test(t.name)) {
+            for (let i = 0; i < t.values.length; i += 3) { t.values[i] = pin[0]; t.values[i + 1] = pin[1]; t.values[i + 2] = pin[2]; }
+          }
+          g.lssClips[c.name] = cc;
+        }
+        try { _lssCapModelTextures(g.scene, 'seat ' + who); } catch (_) {}
+        res(g);
+      }, undefined, (e) => { console.warn('[seats] load failed:', who, e && e.message); res(null); });
+    } catch (_) { res(null); }
+  }));
+}
+
+function _lssSeatEnsure(ship, hull, who) {
+  const ud = ship && ship.userData;
+  if (!ud) return;
+  const have = ud.lssSeat;
+  if (have) {
+    if (have.body && _lssSeatRecs.indexOf(have) < 0 && have.shown) _lssSeatRecs.push(have);   // back from the bot pool
+    return;
+  }
+  const def = _LSS_SEATS[who], fit = def && def.hulls[hull];
+  if (!fit) return;
+  const now = performance.now();
+  if (ud.lssSeatTry && now - ud.lssSeatTry < 1000) return;
+  ud.lssSeatTry = now;
+  const mk = ship.getObjectByName('cockpit1');
+  if (!mk || !mk.parent) return;
+  const rec = { who, hull, ship, anchor: mk.parent, marker: mk, body: null, shown: false, gone: 0 };
+  ud.lssSeat = rec;
+  _lssSeatLoad(who).then((g) => {
+    if (!g || ud.lssSeat !== rec) { if (ud.lssSeat === rec) ud.lssSeat = null; return; }
+    const body = (typeof _wildRigClone === 'function') ? _wildRigClone(g.scene) : g.scene.clone(true);
+    body.name = 'lss_seat_' + who;
+    body.matrixAutoUpdate = false;
+    body.userData.lssSeatBody = true;
+    body.traverse((o) => {
+      if (!o.isMesh) return;
+      o.frustumCulled = false;     // a skinned bounding volume is the bind pose, not the seat
+      o.castShadow = false;        // inside the canopy anyway, and a skinned depth program is one more cold link
+      o.receiveShadow = true;
+      o.raycast = _lssNoRaycast;
+    });
+    const mixer = new THREE.AnimationMixer(body);
+    const idle = mixer.clipAction(g.lssClips[g.lssIdle]);
+    idle.setLoop(THREE.LoopRepeat, Infinity);
+    idle.play();
+    idle.time = Math.random() * Math.min(4, idle.getClip().duration);   // two seated bodies never breathe in step
+    mixer.update(0);
+    Object.assign(rec, { body, mixer, idle, g, seatM: new THREE.Matrix4(), fitSig: '' });
+    const go = () => {
+      if (rec.shown || ud.lssSeat !== rec) return;
+      rec.shown = true;
+      scene.add(body);
+      _lssSeatPlace(rec);
+      try { if (typeof _warmDrawRoot === 'function' && typeof postFX !== 'undefined' && postFX && postFX.rtScene) _warmDrawRoot(body, postFX.rtScene, false); } catch (_) {}
+      _lssSeatRecs.push(rec);
+    };
+    let job = null;
+    const pRT = renderer.getRenderTarget();
+    try {
+      if (typeof postFX !== 'undefined' && postFX && postFX.rtScene) renderer.setRenderTarget(postFX.rtScene);
+      if (renderer.compileAsync && camera) job = renderer.compileAsync(body, camera, scene);   // its compile() runs NOW, under rtScene
+    } catch (_) {} finally { try { renderer.setRenderTarget(pRT); } catch (_) {} }
+    if (job) job.then(go, go); else go();
+    setTimeout(go, 1500);
+  });
+}
+
+function _lssSeatPlace(r) {
+  const fitK = _lssSeatKnob('fit', null);
+  const base = _LSS_SEATS[r.who].hulls[r.hull], ov = fitK && fitK[r.hull];
+  const f = ov ? Object.assign({}, base, ov) : base;
+  const sig = f.s + ',' + f.x + ',' + f.y + ',' + f.z;
+  if (sig !== r.fitSig) {
+    r.fitSig = sig;
+    r.seatM.compose(new THREE.Vector3(f.x, f.y, f.z), new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -Math.PI / 2), new THREE.Vector3(f.s, f.s, f.s));
+  }
+  r.anchor.updateWorldMatrix(true, false);
+  r.body.matrix.multiplyMatrices(r.anchor.matrixWorld, r.seatM);
+  r.body.matrixWorldNeedsUpdate = true;
+}
+
+function _lssSeatDrop(r) {
+  const i = _lssSeatRecs.indexOf(r);
+  if (i >= 0) _lssSeatRecs.splice(i, 1);
+  try { if (r.body && r.body.parent) r.body.parent.remove(r.body); } catch (_) {}
+  try { r.body.traverse((o) => { if (o.isSkinnedMesh && o.skeleton && o.skeleton.dispose) o.skeleton.dispose(); }); } catch (_) {}
+  try { r.mixer.stopAllAction(); r.mixer.uncacheRoot(r.body); } catch (_) {}
+  if (r.ship && r.ship.userData && r.ship.userData.lssSeat === r) r.ship.userData.lssSeat = null;
+}
+
+function _lssSeatFrame() {
+  if (typeof scene === 'undefined' || !scene) return;
+  const now = performance.now();
+  const dt = _lssSeatT0 ? Math.min(0.1, (now - _lssSeatT0) / 1000) : 0;
+  _lssSeatT0 = now;
+  const on = _lssSeatKnob('on', true) !== false;
+  if (on) {
+    try {
+      if (typeof player !== 'undefined' && player && player.mesh && player.loadoutKey && _lssSeatKnob('pilot', true) !== false)
+        _lssSeatEnsure(player.mesh, String(player.loadoutKey).toLowerCase(), 'pilot');
+    } catch (_) {}
+    if ((_lssSeatScanN++ % 15) === 0 && _lssSeatKnob('summoners', true) !== false) {
+      try {
+        const E = (typeof game !== 'undefined' && game && game.entities) || [];
+        for (let i = 0; i < E.length; i++) {
+          const e = E[i];
+          if (e && e.hoardModelKey === NEMESIS_SHIP && e.mesh && !e.isDead) _lssSeatEnsure(e.mesh, 'summoners_ship', 'summoners');
+        }
+      } catch (_) {}
+    }
+  }
+  if (!_lssSeatRecs.length) return;
+  let seatView = false;
+  try {
+    seatView = (typeof _seatViewLive === 'function') && _seatViewLive();
+    if (seatView && typeof _RPL !== 'undefined' && _RPL && (_RPL.kc || _RPL.studio)) seatView = false;   // replays watch from outside
+  } catch (_) {}
+  for (let i = _lssSeatRecs.length - 1; i >= 0; i--) {
+    const r = _lssSeatRecs[i];
+    if (!r.body) continue;
+    if (r.ship.userData.lssSeat !== r) { _lssSeatDrop(r); continue; }
+    let vis = on && _lssSeatKnob(r.who, true) !== false;
+    let o = r.anchor, inScene = false;
+    while (o) {
+      if (o === scene) { inScene = true; break; }
+      if (!o.visible) vis = false;
+      o = o.parent;
+    }
+    if (!inScene) {
+      vis = false;
+      if (++r.gone > 900) { _lssSeatDrop(r); continue; }   // a parked bot hull keeps its seat ~15 s, then lets it go
+    } else r.gone = 0;
+    if (vis && r.who === 'pilot' && seatView && typeof player !== 'undefined' && player && r.ship === player.mesh && !_lssSeatKnob('fp', false)) vis = false;
+    r.body.visible = vis;
+    if (inScene) r.mixer.update(dt);
+    if (vis) _lssSeatPlace(r);
+  }
+}
+
+function _lssSeatCheer() {
+  for (const r of _lssSeatRecs) {
+    if (r.who !== 'pilot' || !r.body || r.cheering) continue;
+    if (typeof player === 'undefined' || !player || r.ship !== player.mesh) continue;
+    const c = r.g.lssClips[_LSS_SEATS.pilot.cheer];
+    if (!c) continue;
+    const a = r.mixer.clipAction(c);
+    a.reset(); a.setLoop(THREE.LoopOnce, 1); a.clampWhenFinished = true;
+    a.play(); a.crossFadeFrom(r.idle, 0.25, false);
+    r.cheering = true;
+    const back = (e) => {
+      if (e.action !== a) return;
+      r.mixer.removeEventListener('finished', back);
+      r.idle.reset().play(); r.idle.crossFadeFrom(a, 0.4, false);
+      r.cheering = false;
+    };
+    r.mixer.addEventListener('finished', back);
+  }
+}
+if (typeof window !== 'undefined') {
+  window.__seatInfo = () => _lssSeatRecs.map((r) => ({
+    who: r.who, hull: r.hull, visible: !!(r.body && r.body.visible), playerShip: !!(typeof player !== 'undefined' && player && r.ship === player.mesh),
+    clip: r.cheering ? 'cheer' : (r.idle && r.idle.getClip().name),
+    pos: r.body ? (() => { const p = new THREE.Vector3().setFromMatrixPosition(r.body.matrixWorld); return [Math.round(p.x), Math.round(p.y), Math.round(p.z)]; })() : null,
+  }));
+  window.__seatCheer = () => _lssSeatCheer();
+  window.__seatTick = () => { _lssSeatScanN = 0; _lssSeatFrame(); return window.__seatInfo(); };
+}
+
+const _PSEAT = { root: null, body: null, mats: null, fx: null, mixer: null, model: null, phase: 'off', t: 0, last: 0,
+                 gen: 0, loading: false, seatM: new THREE.Matrix4() };
+const _PSEAT_IN = 0.95, _PSEAT_OUT = 0.6;   // seconds
+function _lssPickerSeatWanted() {
+  try {
+    const s = _shipPreview3D;
+    if (!game || !game._ssConfirmed || !s || !s.model || !s.lastKey) return false;
+    if (_lssSeatKnob('on', true) === false || _lssSeatKnob('pilot', true) === false) return false;
+    return !!_LSS_SEATS.pilot.hulls[String(s.lastKey).toLowerCase()];
+  } catch (_) { return false; }
+}
+function _lssPickerSeatSfx() { try { if (_lssSeatKnob('sfx', true) !== false) playSound('phase_dash'); } catch (_) {} }
+function _lssPickerSeatDrop() {
+  const P = _PSEAT;
+  try { if (P.root && P.root.parent) P.root.parent.remove(P.root); } catch (_) {}
+  try { if (P.body) P.body.traverse((o) => { if (o.isSkinnedMesh && o.skeleton && o.skeleton.dispose) o.skeleton.dispose(); }); } catch (_) {}
+  try { if (P.mats) for (const m of P.mats) m.dispose(); } catch (_) {}   // its own copies; textures belong to the GLB
+  try { if (P.fx) P.fx.traverse((o) => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); }); } catch (_) {}
+  try { if (P.mixer) { P.mixer.stopAllAction(); P.mixer.uncacheRoot(P.body); } } catch (_) {}
+  Object.assign(P, { root: null, body: null, mats: null, fx: null, mixer: null, model: null, phase: 'off', t: 0, loading: false });
+  P.gen++;   // anything still loading for the old stage lands on nothing
+}
+let _lssBeamTex = null;
+function _lssTeleportFx() {
+  if (!_lssBeamTex) {
+    const c = document.createElement('canvas'); c.width = 4; c.height = 64;
+    const x = c.getContext('2d'), gr = x.createLinearGradient(0, 0, 0, 64);
+    gr.addColorStop(0, '#000'); gr.addColorStop(0.25, '#fff'); gr.addColorStop(0.75, '#fff'); gr.addColorStop(1, '#000');
+    x.fillStyle = gr; x.fillRect(0, 0, 4, 64);
+    _lssBeamTex = new THREE.CanvasTexture(c);
+  }
+  const mk = (col) => new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0, alphaMap: _lssBeamTex,
+    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, toneMapped: false, fog: false });
+  const g = new THREE.Group(); g.name = 'lss_teleport_fx';
+  const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.55, 2.9, 32, 1, true), mk(0x6fe8ff));
+  const core = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.15, 2.9, 16, 1, true), mk(0xeaffff));
+  beam.position.y = core.position.y = 1.0;
+  const ring = new THREE.Mesh(new THREE.RingGeometry(0.42, 0.56, 48),
+    new THREE.MeshBasicMaterial({ color: 0x6fe8ff, transparent: true, opacity: 0, blending: THREE.AdditiveBlending,
+                                  depthWrite: false, side: THREE.DoubleSide, toneMapped: false, fog: false }));
+  ring.rotation.x = -Math.PI / 2; ring.position.y = 0.22;
+  for (const m of [beam, core, ring]) { m.frustumCulled = false; m.renderOrder = 5; m.raycast = _lssNoRaycast; g.add(m); }
+  g.userData.parts = { beam, core, ring };
+  return g;
+}
+function _lssPickerSeatBuild(s, key) {
+  const P = _PSEAT, gen = ++P.gen, model = s.model, lastKey = s.lastKey;
+  P.loading = true;
+  _lssSeatLoad('pilot').then((g) => {
+    if (P.gen !== gen) return;
+    P.loading = false;
+    if (!g || s.model !== model || s.lastKey !== lastKey || !_lssPickerSeatWanted()) return;
+    const fit = _LSS_SEATS.pilot.hulls[key];
+    const root = new THREE.Group(); root.name = 'lss_picker_pilot'; root.matrixAutoUpdate = false;
+    const body = (typeof _wildRigClone === 'function') ? _wildRigClone(g.scene) : g.scene.clone(true);
+    const mats = [];
+    body.traverse((o) => {
+      if (!o.isMesh) return;
+      o.frustumCulled = false; o.castShadow = false; o.receiveShadow = false; o.raycast = _lssNoRaycast;
+      const arr = Array.isArray(o.material) ? o.material : [o.material];
+      const cl = arr.map((m) => { const c = m.clone(); c.userData._e0 = c.emissive ? c.emissive.getHex() : 0; c.userData._ei0 = c.emissiveIntensity; mats.push(c); return c; });
+      o.material = Array.isArray(o.material) ? cl : cl[0];
+    });
+    const fx = _lssTeleportFx();
+    root.add(body); root.add(fx);
+    const mixer = new THREE.AnimationMixer(body);
+    const idle = mixer.clipAction(g.lssClips[g.lssIdle]);
+    idle.setLoop(THREE.LoopRepeat, Infinity); idle.play(); mixer.update(0);
+    P.seatM.compose(new THREE.Vector3(fit.x, fit.y, fit.z), new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -Math.PI / 2),
+                    new THREE.Vector3(fit.s, fit.s, fit.s));
+    Object.assign(P, { root, body, mats, fx, mixer, model, phase: 'warm', t: 0 });
+    _lssPickerSeatPlace();
+    s.scene.add(root);
+    let started = false;
+    const go = () => {
+      if (started || P.gen !== gen) return;
+      started = true; P.phase = 'in'; P.t = 0; _lssPickerSeatSfx();
+    };
+    try {
+      const r = s.renderer || renderer, pRT = r.getRenderTarget();
+      r.setRenderTarget(null);   // the stage draws to the canvas
+      root.visible = true;
+      const job = r.compileAsync ? r.compileAsync(root, s.camera, s.scene) : null;
+      root.visible = false;
+      r.setRenderTarget(pRT);
+      if (job) job.then(go, go); else go();
+    } catch (_) { go(); }
+    setTimeout(go, 1200);
+  });
+}
+function _lssPickerSeatPlace() {
+  const P = _PSEAT;
+  P.model.updateWorldMatrix(true, false);
+  P.root.matrix.multiplyMatrices(P.model.matrixWorld, P.seatM);
+  P.root.matrixWorldNeedsUpdate = true;
+}
+function _lssPickerSeatFx() {
+  const P = _PSEAT, t = P.t, k = P.fx.userData.parts;
+  const sm = (a, b, x) => { const u = Math.max(0, Math.min(1, (x - a) / (b - a))); return u * u * (3 - 2 * u); };
+  if (P.phase === 'warm') { P.root.visible = false; return; }
+  P.root.visible = true;
+  let beam = 0, ring = 0, ringS = 1, grow = 1, flash = 0, widen = 1;
+  if (P.phase === 'in') {
+    beam = sm(0, 0.12, t) * (1 - sm(0.45, _PSEAT_IN, t)); widen = 0.25 + 0.75 * sm(0, 0.16, t);
+    grow = sm(0.12, 0.5, t);                                   // he builds up from the seat
+    flash = sm(0.1, 0.22, t) * (1 - sm(0.32, 0.9, t));
+    ring = sm(0.24, 0.32, t) * (1 - sm(0.36, 0.8, t)); ringS = 0.4 + 2.2 * sm(0.24, 0.8, t);
+  } else if (P.phase === 'out') {
+    beam = sm(0, 0.1, t) * (1 - sm(0.3, _PSEAT_OUT, t)); widen = 1 - 0.6 * sm(0.3, _PSEAT_OUT, t);
+    flash = sm(0, 0.12, t) * (1 - sm(0.35, 0.5, t));
+    grow = 1 - sm(0.1, 0.42, t);                               // ...and drains back down into it
+    ring = sm(0.04, 0.12, t) * (1 - sm(0.16, 0.5, t)); ringS = 0.4 + 2.0 * sm(0.04, 0.5, t);
+  }
+  k.beam.material.opacity = 0.5 * beam; k.core.material.opacity = 0.85 * beam; k.ring.material.opacity = 0.9 * ring;
+  k.beam.scale.set(widen, 1, widen); k.core.scale.set(widen, 1, widen); k.ring.scale.setScalar(ringS);
+  P.fx.visible = beam > 0.002 || ring > 0.002;
+  P.body.visible = grow > 0.002;
+  P.body.scale.set(1, Math.max(0.002, grow), 1);
+  for (const m of P.mats) {
+    if (!m.emissive) continue;
+    if (flash > 0.002) { m.emissive.setHex(0x66e8ff); m.emissiveIntensity = 2.4 * flash; }
+    else if (m.emissiveIntensity !== m.userData._ei0 || m.emissive.getHex() !== m.userData._e0) { m.emissive.setHex(m.userData._e0); m.emissiveIntensity = m.userData._ei0; }
+  }
+}
+function _lssPickerSeatTick() {
+  const s = _shipPreview3D, P = _PSEAT;
+  if (!s || !s.scene) return;
+  const now = performance.now();
+  const gap = P.last ? (now - P.last) / 1000 : 0;
+  P.last = now;
+  if (gap > 0.5 && P.phase !== 'off') _lssPickerSeatDrop();   // the picker was closed: start clean, no beam-out
+  const dt = Math.min(0.1, gap);
+  if (s.model && !P.prefetched) { P.prefetched = true; try { _lssSeatLoad('pilot'); } catch (_) {} }   // so CONFIRM beams at once
+  if (P.phase !== 'off' && P.model && P.model !== s.model) _lssPickerSeatDrop();                   // another hull on the stage
+  const want = _lssPickerSeatWanted();
+  if (want && P.phase === 'off' && !P.loading) _lssPickerSeatBuild(s, String(s.lastKey).toLowerCase());
+  if (!want) {
+    if (P.phase === 'in' || P.phase === 'seated') { P.phase = 'out'; P.t = 0; _lssPickerSeatSfx(); }
+    else if (P.phase === 'warm' || P.loading) _lssPickerSeatDrop();
+  } else if (P.phase === 'out') { P.phase = 'in'; P.t = 0; _lssPickerSeatSfx(); }   // confirmed again mid beam-out
+  if (!P.root) return;
+  P.t += dt;
+  _lssPickerSeatPlace();
+  P.mixer.update(dt);
+  _lssPickerSeatFx();
+  if (P.phase === 'in' && P.t >= _PSEAT_IN) { P.phase = 'seated'; _lssPickerSeatFx(); }
+  else if (P.phase === 'out' && P.t >= _PSEAT_OUT) _lssPickerSeatDrop();
+}
+if (typeof window !== 'undefined') {
+  window.__pickerSeat = () => {
+    let px = null;
+    try {
+      const s = _shipPreview3D;
+      if (_PSEAT.root && s && s.camera) {
+        const v = new THREE.Vector3().setFromMatrixPosition(_PSEAT.root.matrixWorld).project(s.camera);
+        const el = renderer.domElement;
+        px = [Math.round((v.x * 0.5 + 0.5) * el.width), Math.round((1 - (v.y * 0.5 + 0.5)) * el.height)];
+      }
+    } catch (_) {}
+    return { phase: _PSEAT.phase, t: +_PSEAT.t.toFixed(2), loading: _PSEAT.loading, px,
+             hull: (_shipPreview3D && _shipPreview3D.lastKey) || null, confirmed: !!(game && game._ssConfirmed) };
+  };
+  window.__pickerDraw = (dt) => {
+    try { if (dt > 0) _PSEAT.last = performance.now() - dt * 1000; _spinShipPreview(); _lssRenderPicker(); } catch (e) { return String(e); }
+    return window.__pickerSeat();
+  };
+  window.__pickerSeatObj = _PSEAT;               // dev: the picker pilot's state (root, body, fx, phase)
+  window.__shipStage = () => _shipPreview3D;     // dev: the picker's stage (scene, camera, model, rotationSpeed)
+}
+
 let _PROCEDURAL_SHIP_NORMALMAP = null;
 function _makeProceduralShipNormalMap() {
   if (_PROCEDURAL_SHIP_NORMALMAP) return _PROCEDURAL_SHIP_NORMALMAP;
@@ -48408,6 +48795,7 @@ function _animateShipPreview() {
     }
   }
   _spinShipPreview();
+  try { _lssPickerSeatTick(); } catch (_) {}   // (v52.06) CONFIRM beams the pilot into the stage hull
   s.renderer.render(s.scene, s.camera);
   s.animId = requestAnimationFrame(_animateShipPreview);
 }
@@ -48471,6 +48859,7 @@ function _lssRenderPicker() {
       s._bgFitted = true;
     }
     try { const _pe = s.model && s.model.userData && s.model.userData._pvEng; if (_pe) _lssPreviewEnginesTick(_pe, s.camera); } catch (_) {}
+    try { _lssPickerSeatTick(); } catch (_) {}   // (v52.06) CONFIRM beams the pilot into the stage hull
     renderer.setRenderTarget(null);
     renderer.render(s.scene, s.camera);
     return true;
@@ -54099,6 +54488,7 @@ const isChaingunBot = (weapon.fireRate <= 0.10);
           player._streakCount = 1;
         }
         player._lastKillTime = now;
+        try { _lssSeatCheer(); } catch (_) {}   // (v52.02) the pilot in your seat cheers the kill (his Sit_Cheer clip, once)
         if (player._streakCount >= 2) Overlays.killStreak(player._streakCount);
         if (!game._firstBloodClaimed) {
           game._firstBloodClaimed = true;
@@ -75422,6 +75812,7 @@ function _ghostSeatWanted() {
   const _vr = (typeof isXRPresenting === 'function') && isXRPresenting();
   if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return false;
   if (_RPL.kc || _RPL.studio) return false;   // (v47.97) the kill cam shows your hull from outside - solid, not the seat's ghost shell
+  if (_orbitCamLive()) return false;          // (v52.04) ...and so does the selfie camera (see _orbitCamLive)
   if (game.thirdPerson && !_vr) return (!!game._tpGhost || (game._adsGhostZ || 0) > 0.002) && _ghostHullKnobs(_ghostSeatSolidity()).on;   // (v44.27) (v51.39 a wall overrides Solid)
   if (!game._cockpit3dLive) return false;
   return _ghostHullKnobs().on;
@@ -75430,6 +75821,7 @@ function _seatViewLive() {
   if (typeof game === 'undefined' || !game || typeof player === 'undefined' || !player) return false;
   const _vr = (typeof isXRPresenting === 'function') && isXRPresenting();
   if (!game._cockpit3dLive) return false;
+  if (_orbitCamLive()) return false;   // (v52.04) the selfie camera is outside the hull - see _orbitCamLive
   if (game.thirdPerson && !_vr) return false;
   if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return false;
   return true;
@@ -76542,7 +76934,7 @@ function _lssApplyShipRig(dt) {
         }
         if (game._cockpitFrameObjs) for (const _fo of game._cockpitFrameObjs) if (!_fo.visible) _fo.visible = true;
         {
-          const _gShow = !!(window.__cockpit && window.__cockpit.glass === true);
+          const _gShow = !!(window.__cockpit && window.__cockpit.glass === true) || _orbitCamLive();
           if (game._cockpitGlassObjs) for (const _go of game._cockpitGlassObjs) if (_go.visible !== _gShow) _go.visible = _gShow;
         }
         try {
@@ -76757,6 +77149,7 @@ function _cockpitOverlayWanted() {
   try {
     if (typeof window !== 'undefined' && window.__cockpitOverlay === false) return false;
     if (!game || !game._cockpit3dLive || game.thirdPerson) return false;
+    if (_orbitCamLive()) return false;   // (v52.04) the selfie camera sees the hull from outside: it is part of the world again
     if ((typeof isXRPresenting === 'function') && isXRPresenting()) return false;
     if (typeof _shouldUseCineFXFrame === 'function' && _shouldUseCineFXFrame()) return false;
     const m = (typeof player !== 'undefined' && player) ? player.mesh : null;

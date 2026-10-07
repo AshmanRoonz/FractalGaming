@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Character Lab</title>
+<!--
+  CHARACTER LAB (2026-10-06) - the rigged humanoids in objects/characters/, loaded with the game's own three
+  (0.165 GLTFLoader, same importmap as index-working.html), so what plays here is what the game would play.
+
+  The files: Meshy bipeds (28-joint Mixamo-named rig, no finger bones - each hand is ONE rigid bone). Meshy
+  fused the resting hands into the thighs, so every clip that lifted an arm dragged the fingers down to the leg
+  (edges stretched 70-155x). tools/blender/work/chars/handfix.py cut them apart (a min-cut that deletes the
+  bridge faces between hand and leg, then caps both openings) and re-weighted both sides; Blender exported every
+  clip into one file; tools/compress_glb.mjs 'character' recipe made these.
+
+  CLAY shows the geometry without the texture (the cut + caps), SKELETON the bones, IN PLACE pins the hips
+  (the clips carry root motion). Hooks for headless checks: window.CL (see the bottom of the script).
+-->
+<style>
+  :root { --bg:#0d1016; --panel:rgba(14,18,26,.86); --ink:#dfe7f2; --dim:#8a97a8; --acc:#ff8a2a; --line:#273041; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--ink); font:13px/1.35 system-ui, Segoe UI, sans-serif; overflow:hidden; }
+  canvas { display:block; }
+  #ui { position:fixed; top:12px; left:12px; width:300px; max-height:calc(100% - 24px); overflow:auto; background:var(--panel);
+        border:1px solid var(--line); border-radius:10px; padding:10px 12px; backdrop-filter:blur(6px); }
+  h1 { font-size:14px; margin:0 0 6px; letter-spacing:.06em; color:var(--acc); }
+  h2 { font-size:12px; margin:10px 0 4px; color:var(--ink); }
+  .meta { color:var(--dim); font-size:11px; margin-bottom:4px; }
+  .clips { display:flex; flex-wrap:wrap; gap:4px; }
+  button { background:#1a2130; color:var(--ink); border:1px solid var(--line); border-radius:6px; padding:4px 8px; cursor:pointer; font:inherit; font-size:12px; }
+  button:hover { border-color:#3b4a63; }
+  button.on { background:var(--acc); color:#111; border-color:var(--acc); }
+  .row { display:flex; align-items:center; gap:8px; margin:6px 0; }
+  .row label { color:var(--dim); min-width:52px; }
+  input[type=range] { flex:1; }
+  #hud { position:fixed; right:12px; bottom:12px; background:var(--panel); border:1px solid var(--line); border-radius:8px;
+         padding:6px 10px; font:12px ui-monospace, Consolas, monospace; color:var(--dim); white-space:pre; }
+  #msg { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%); color:var(--dim); }
+  @media (max-width:640px) { #ui { width:auto; right:12px; max-height:45%; } }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.min.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.165.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="ui">
+  <h1>CHARACTER LAB</h1>
+  <div class="meta">objects/characters/ &middot; three 0.165 &middot; drag to orbit</div>
+  <div id="chars"></div>
+  <h2>Playback</h2>
+  <div class="row"><button id="play" class="on">PLAYING</button><button id="sync">SYNC CLIPS</button></div>
+  <div class="row"><label>speed</label><input id="speed" type="range" min="0.05" max="2" step="0.05" value="1"><span id="speedv">1.00</span></div>
+  <div class="row"><label>time</label><input id="scrub" type="range" min="0" max="1" step="0.001" value="0"></div>
+  <h2>Inspect</h2>
+  <div class="row"><button id="clay">CLAY</button><button id="skel">SKELETON</button><button id="inplace" class="on">IN PLACE</button><button id="wire">WIRE</button></div>
+  <h2>Seated</h2>
+  <div class="meta">the pilot in your hulls, the Summoners in their ship</div>
+  <div class="clips" id="seats"></div>
+</div>
+<div id="hud"></div>
+<div id="msg">loading characters&hellip;</div>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+// the characters' art stamp - the same number as `_LSS_SEAT_ART` in index-working.html; bump both when a file
+// under objects/characters/ is rebuilt, or the browser hands back the old one
+const ART = '52.05';
+const FILES = [
+  { key: 'pilot', name: 'PILOT - ASHMAN ROONZ', url: 'objects/characters/pilot_ashman.glb', x: -0.75 },
+  { key: 'summoners', name: 'THE SUMMONERS', url: 'objects/characters/summoners.glb', x: 0.75 },
+];
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.shadowMap.enabled = true;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0d1016);
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+scene.add(new THREE.HemisphereLight(0xbfd4ff, 0x20242c, 0.6));
+const key = new THREE.DirectionalLight(0xffffff, 2.2);
+key.position.set(2.5, 4, 3); key.castShadow = true; key.shadow.mapSize.set(2048, 2048);
+Object.assign(key.shadow.camera, { left: -2.5, right: 2.5, top: 3, bottom: -1, near: 0.5, far: 12 });
+scene.add(key);
+const rim = new THREE.DirectionalLight(0xff9a50, 1.2); rim.position.set(-3, 2.5, -3); scene.add(rim);
+const floor = new THREE.Mesh(new THREE.CircleGeometry(4, 64), new THREE.MeshStandardMaterial({ color: 0x1b2029, roughness: 0.85, metalness: 0.1 }));
+floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; scene.add(floor);
+const grid = new THREE.GridHelper(8, 32, 0x2c3546, 0x1f2633); grid.position.y = 0.001; scene.add(grid);
+
+const camera = new THREE.PerspectiveCamera(35, innerWidth / innerHeight, 0.05, 100);
+camera.position.set(0, 1.35, 4.6);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0.95, 0); controls.enableDamping = true; controls.update();
+
+const clayMat = new THREE.MeshStandardMaterial({ color: 0x80858f, roughness: 0.8, metalness: 0.0 });
+const S = { playing: true, speed: 1, sync: false, clay: false, skel: false, inplace: true, wire: false, focus: 'pilot' };
+const chars = {};
+
+function stripRootXZ(clip) {
+  // IN PLACE: the clips walk their hips forward (root motion). The game plays creatures in place
+  // (_monStripRootMotion) and moves the body itself, so the lab can too: pin the hips' X/Z to frame 0.
+  const c = clip.clone();
+  for (const t of c.tracks) {
+    if (!/Hips\.position$/.test(t.name)) continue;
+    const v = t.values, x0 = v[0], z0 = v[2];
+    for (let i = 0; i < v.length; i += 3) { v[i] = x0; v[i + 2] = z0; }
+  }
+  return c;
+}
+
+function playClip(k, name) {
+  const C = chars[k]; if (!C) return;
+  const clip = C.clips.find((c) => c.name === name) || C.clips[0];
+  const use = S.inplace ? stripRootXZ(clip) : clip;
+  C.mixer.stopAllAction();
+  C.action = C.mixer.clipAction(use); C.action.reset().play();
+  C.clip = clip.name; C.duration = clip.duration;
+  renderUI();
+}
+
+function applyLooks() {
+  for (const C of Object.values(chars)) {
+    C.mesh.material = S.clay ? clayMat : C.mat;
+    C.mat.wireframe = S.wire; clayMat.wireframe = S.wire;
+    C.helper.visible = S.skel;
+  }
+}
+
+function renderUI() {
+  const box = document.getElementById('chars'); box.innerHTML = '';
+  for (const f of FILES) {
+    const C = chars[f.key]; if (!C) continue;
+    const h = document.createElement('h2'); h.textContent = f.name; box.appendChild(h);
+    const m = document.createElement('div'); m.className = 'meta';
+    m.textContent = `${C.tris.toLocaleString()} tris · ${C.bones} bones · ${(C.bytes / 1048576).toFixed(2)} MB`;
+    box.appendChild(m);
+    const cl = document.createElement('div'); cl.className = 'clips';
+    for (const c of C.clips) {
+      const b = document.createElement('button'); b.textContent = c.name.replace(/_/g, ' ');
+      if (c.name === C.clip) b.className = 'on';
+      b.onclick = () => {
+        S.focus = f.key;
+        if (S.sync) { for (const k of Object.keys(chars)) if (chars[k].clips.some((x) => x.name === c.name)) playClip(k, c.name); }
+        playClip(f.key, c.name);
+      };
+      cl.appendChild(b);
+    }
+    box.appendChild(cl);
+  }
+}
+
+const loader = new GLTFLoader();
+async function load(f) {
+  const res = await fetch(f.url + '?v=' + ART); const bytes = Number(res.headers.get('content-length')) || 0;
+  const buf = await res.arrayBuffer();
+  const g = await loader.parseAsync(buf, '');
+  const root = g.scene; root.position.x = f.x;
+  let mesh = null, tris = 0, bones = 0;
+  root.traverse((o) => {
+    if (o.isSkinnedMesh) { mesh = o; o.castShadow = true; o.receiveShadow = true; o.frustumCulled = false;
+      tris += (o.geometry.index ? o.geometry.index.count : o.geometry.attributes.position.count) / 3; bones = o.skeleton.bones.length; }
+  });
+  scene.add(root);
+  const helper = new THREE.SkeletonHelper(root); helper.visible = false; scene.add(helper);
+  const mixer = new THREE.AnimationMixer(root);
+  chars[f.key] = { root, mesh, mat: mesh.material, mixer, helper, clips: g.animations, tris, bones, bytes: bytes || buf.byteLength, clip: null, action: null, duration: 1 };
+  const walk = g.animations.find((c) => /Walking/.test(c.name)) || g.animations[0];
+  playClip(f.key, walk.name);
+}
+
+Promise.all(FILES.map(load)).then(() => {
+  document.getElementById('msg').remove(); applyLooks(); renderUI();
+}).catch((e) => { document.getElementById('msg').textContent = 'load failed: ' + e.message; console.error(e); });
+
+const tog = (id, k, after) => { const b = document.getElementById(id); b.onclick = () => { S[k] = !S[k]; b.classList.toggle('on', S[k]); if (after) after(); }; };
+tog('clay', 'clay', applyLooks); tog('skel', 'skel', applyLooks); tog('wire', 'wire', applyLooks); tog('sync', 'sync');
+tog('inplace', 'inplace', () => { for (const k of Object.keys(chars)) if (chars[k].clip) playClip(k, chars[k].clip); });
+const playB = document.getElementById('play');
+playB.onclick = () => { S.playing = !S.playing; playB.classList.toggle('on', S.playing); playB.textContent = S.playing ? 'PLAYING' : 'PAUSED'; };
+const speed = document.getElementById('speed'), speedv = document.getElementById('speedv');
+speed.oninput = () => { S.speed = +speed.value; speedv.textContent = S.speed.toFixed(2); };
+const scrub = document.getElementById('scrub');
+scrub.oninput = () => {
+  S.playing = false; playB.classList.remove('on'); playB.textContent = 'PAUSED';
+  for (const C of Object.values(chars)) if (C.action) { C.action.time = +scrub.value * C.duration; C.mixer.update(0); }
+};
+
+// ---- SEATED: each character in its ship, at the fit tools/blender/chars/seatfit.py measured ----
+// ⚠ The SAME numbers as `_LSS_SEATS` in index-working.html: change one, change both. Ship model space (forward -X,
+// up +Y); the character is parented beside the hull's `cockpit1` marker, turned to face -X and scaled.
+const SEATS = {
+  pilot: { url: 'objects/characters/pilot_ashman_seat.glb', clip: 'Sit_Alert', hulls: {   // (v52.05) the alert idle, chin up
+    blaster: { s: 0.0984, x: -0.6198, y: -0.0042, z: -0.0005 },
+    puncture: { s: 0.0952, x: -0.3321, y: 0.0091, z: -0.0004 },
+    pyro: { s: 0.1292, x: -0.4999, y: -0.0069, z: -0.0006 },
+    slayer: { s: 0.1518, x: -0.5103, y: -0.0436, z: -0.0007 },
+    syphon: { s: 0.1122, x: -0.5328, y: -0.0512, z: -0.0005 },
+    tracker: { s: 0.1391, x: -0.5313, y: -0.0492, z: -0.0007 },
+    vortex: { s: 0.1092, x: -0.4572, y: -0.0581, z: -0.0005 },
+  } },
+  summoners: { url: 'objects/characters/summoners.glb', clip: 'Sitting_Answering_Questions', hulls: {
+    summoners_ship: { s: 0.17, x: -0.3498, y: -0.0788, z: -0.0235 },
+  } },
+};
+const hullUrl = (h) => (h === 'summoners_ship' ? 'objects/summoners_ship.glb' : `ships/${h}.glb`);
+const VIEW_SCALE = 3;        // hulls are ~1.9 model units long; x3 makes them ~5.7 m on the lab floor
+const seatState = { root: null, mixer: null, hull: null };
+const seatCache = {};
+async function loadGLB(url) { return seatCache[url] || (seatCache[url] = await loader.loadAsync(url)); }
+async function seat(hull) {
+  const who = Object.keys(SEATS).find((k) => SEATS[k].hulls[hull]);
+  const fit = SEATS[who].hulls[hull];
+  const [ship, ch] = await Promise.all([loadGLB(hullUrl(hull)), loader.loadAsync(SEATS[who].url + '?v=' + ART)]);
+  stand(false);
+  const root = new THREE.Group(); root.scale.setScalar(VIEW_SCALE); root.position.y = 1.0;
+  const hullObj = ship.scene.clone(true); root.add(hullObj);
+  let mk = null; hullObj.traverse((o) => { if (!mk && o.name === 'cockpit1') mk = o; });
+  const body = ch.scene;
+  body.position.set(fit.x, fit.y, fit.z); body.rotation.y = -Math.PI / 2; body.scale.setScalar(fit.s);
+  body.traverse((o) => { if (o.isSkinnedMesh) { o.frustumCulled = false; o.castShadow = true; } });
+  (mk ? mk.parent : hullObj).add(body);
+  hullObj.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+  scene.add(root);
+  const mixer = new THREE.AnimationMixer(body);
+  const clip = ch.animations.find((c) => c.name === SEATS[who].clip) || ch.animations[0];
+  mixer.clipAction(clip).play();
+  Object.assign(seatState, { root, mixer, hull });
+  root.updateMatrixWorld(true);
+  const eye = new THREE.Vector3(); (mk || hullObj).getWorldPosition(eye);
+  // three-quarter view from the nose's left, above the canopy (the hull is ~5.7 m long and ~4.8 m wide here)
+  controls.target.copy(eye); camera.position.set(eye.x - 2.2, eye.y + 1.7, eye.z + 3.0); controls.update();
+  renderSeats();
+}
+function stand(show = true) {
+  if (seatState.root) { scene.remove(seatState.root); seatState.root = null; seatState.mixer = null; seatState.hull = null; }
+  for (const C of Object.values(chars)) C.root.visible = show;
+  if (show) { controls.target.set(0, 0.95, 0); camera.position.set(0, 1.35, 4.6); controls.update(); }
+  renderSeats();
+}
+function renderSeats() {
+  const box = document.getElementById('seats'); box.innerHTML = '';
+  const mk = (label, on, fn) => { const b = document.createElement('button'); b.textContent = label; if (on) b.className = 'on'; b.onclick = fn; box.appendChild(b); };
+  mk('STANDING', !seatState.hull, () => stand(true));
+  for (const who of Object.keys(SEATS)) for (const h of Object.keys(SEATS[who].hulls))
+    mk(h === 'summoners_ship' ? 'SUMMONERS SHIP' : h.toUpperCase(), seatState.hull === h, () => seat(h));
+}
+renderSeats();
+
+const clock = new THREE.Clock(); let fpsT = 0, fpsN = 0, fps = 0;
+function frame() {
+  const dt = Math.min(clock.getDelta(), 0.1);
+  if (S.playing) for (const C of Object.values(chars)) C.mixer.update(dt * S.speed);
+  if (S.playing && seatState.mixer) seatState.mixer.update(dt * S.speed);
+  const F = chars[S.focus];
+  if (F && F.action && S.playing) scrub.value = (F.action.time % F.duration) / F.duration;
+  controls.update();
+  renderer.render(scene, camera);
+  fpsN++; fpsT += dt; if (fpsT > 0.5) { fps = fpsN / fpsT; fpsN = 0; fpsT = 0; }
+  const ri = renderer.info.render;
+  document.getElementById('hud').textContent = `${fps.toFixed(0)} fps  draws ${ri.calls}  tris ${ri.triangles.toLocaleString()}` +
+    (F && F.clip ? `\n${S.focus}: ${F.clip}  ${(F.action.time % F.duration).toFixed(2)} / ${F.duration.toFixed(2)} s` : '');
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+
+// ---- hooks for headless checks (no UI needed) ----
+window.CL = {
+  THREE, scene, camera, renderer, controls, chars, S,
+  ready: () => Object.keys(chars).length === FILES.length,
+  play: (k, name) => playClip(k, name),
+  // pose every character at clip time t (seconds) and stop the clock there
+  at: (t) => { S.playing = false; for (const C of Object.values(chars)) if (C.action) { C.action.time = t; C.mixer.update(0); } },
+  set: (k, v) => { S[k] = v; const b = document.getElementById(k); if (b) b.classList.toggle('on', !!v); applyLooks(); },
+  view: (pos, tgt) => { camera.position.set(...pos); controls.target.set(...tgt); controls.update(); },
+  seat: (hull) => seat(hull), stand: () => stand(true), seats: SEATS, seatState,
+  info: () => Object.fromEntries(Object.entries(chars).map(([k, C]) => [k, { tris: C.tris, bones: C.bones, clips: C.clips.map((c) => [c.name, +c.duration.toFixed(2)]), mat: C.mat.type }])),
+};
+</script>
+</body>
+</html>

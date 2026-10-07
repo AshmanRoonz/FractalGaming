@@ -7342,7 +7342,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "52.01";
+const LSS_BUILD = "52.09";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -14778,9 +14778,14 @@ function loadHoardModel(key) {
   if (_hoardLoading[key]) return _hoardLoading[key];
   if (typeof THREE === 'undefined' || typeof THREE.GLTFLoader === 'undefined') return Promise.resolve(null);
   const loader = new THREE.GLTFLoader();
+  // (v52.02) the Summoners' flagship is not a hoard file: the c1seat Pyro beside objects/hoard/, with the phone
+  // twin under objects/m/ picked by the same gate as the player hulls (see NEMESIS_SHIP)
+  const _hmUrl = (key === 'summoners_ship')
+    ? './objects/' + ((typeof _shipsVariant === 'function') ? _shipsVariant() : '') + 'summoners_ship.glb'
+    : _hoardBaseUrl + key + '.glb';
   const p = new Promise((resolve) => {
     loader.load(
-      _hoardBaseUrl + key + '.glb' + _MODEL_CACHE_BUST,   // (v36.25) art version, not LSS_BUILD
+      _hmUrl + _MODEL_CACHE_BUST,   // (v36.25) art version, not LSS_BUILD
       (gltf) => {
         const proto = gltf.scene;
         try { _lssCapModelTextures(proto, 'hoard ' + key); } catch (_) {}   // (v38.28)
@@ -14846,7 +14851,12 @@ const FormationDirector = {
 // (M2) Hoard ship GLB keys (LSS/objects/hoard/<key>.glb). The full renamed
 // fleet ; _campWaveShips() rotates through it so successive waves show variety.
 // NEMESIS_SHIP is the recurring villain's flagship (held OUT of the hoard pool).
-const NEMESIS_SHIP = 'stryder';
+// ⭐ (v52.02) THE SUMMONERS FLY THE OLD PYRO. Owner: "summoners, we will switch to using one of the older of the
+// main ships that already had a cut out cockpit, the old pyro" - so the Summoners can be SEEN in their seat
+// (the Stryder hull is a 2.4k-triangle hoard model with no canopy and no seat). The key is not a hoard file:
+// loadHoardModel maps it to objects/summoners_ship.glb (the c1seat Pyro as it flew v38.9x-v49.92, restored from
+// git 7793287; objects/m/ for phones), and the Summoners sit in it (_LSS_SEATS). Was 'stryder'.
+const NEMESIS_SHIP = 'summoners_ship';
 // (v37.13) 'stryder' REMOVED again — v35.66 added it here thinking its absence
 // was an oversight, but the hold-out was deliberate (see NEMESIS_SHIP above):
 // the Stryder hull is the Summoner's flagship and must never appear on a hoard
@@ -34640,6 +34650,23 @@ function _orbitStickTick() {
   }
   return true;
 }
+// ⭐ (v52.04) IS THE SELFIE CAMERA OUT? The O key only MOVES the camera (below, in renderFrame); the ship is still
+// flown from whatever view you were in, so from first person the game still holds the seat state
+// (game._cockpit3dLive) - which the GUNS need (shipMuzzleWorld fires from the markers while it is set; without
+// it a shot leaves from a camera-relative point, i.e. beside the orbiting camera). But every VISUAL "you are
+// inside" treatment was keyed on that same state and so kept running with the camera 260 units outside. Owner:
+// "when i'm in selfie mode from first person, the pilot disappears and the orb/xorzo.glb goes translucent" -
+// the pilot hide (_lssSeatFrame) and the running-light dim (_navLightSeatDim) both read _seatViewLive; the
+// ghost seat shell (_ghostSeatWanted), the layer-5 cockpit overlay (_cockpitOverlayWanted) and the hidden
+// canopy glass (the rig's seat branch) had the same blind spot. They all ask this now. Exactly the test
+// _orbitCamApply uses to decide it owns the camera, so the two can never disagree.
+function _orbitCamLive() {
+  let O;
+  try { O = window.__orbitCam; } catch (_) { return false; }
+  if (!O || !O.on) return false;
+  try { if (renderer && renderer.xr && renderer.xr.isPresenting) return false; } catch (_) {}
+  return !!(typeof player !== 'undefined' && player && player.position);
+}
 function _orbitCamApply() {
   let O;
   try { O = window.__orbitCam; } catch (_) { return; }
@@ -34654,11 +34681,7 @@ function _orbitCamApply() {
   // teardown. Here, every one of those cases is already a `live === false` on the next frame.
   // Costs one classList write per TRANSITION, and when the view is off, one property read and a
   // comparison - the XR and player checks stay behind the `live &&` short-circuit they were in.
-  let live = !!(O && O.on);
-  if (live) {
-    try { if (renderer && renderer.xr && renderer.xr.isPresenting) live = false; } catch (_) {}
-    if (typeof player === 'undefined' || !player || !player.position) live = false;
-  }
+  const live = _orbitCamLive();   // (v52.04) the same test every seat treatment now asks
   if (live !== _ORB.hud) {
     _ORB.hud = live;
     try { document.body.classList.toggle('lss-orbit', live); } catch (_) {}   // see `body.lss-orbit` in the stylesheet for exactly what goes, and what deliberately stays
@@ -37743,6 +37766,7 @@ function renderFrame() {
   try { if (typeof _vscSync === 'function') _vscSync(); } catch (_) {}   // (v50.47) the HUD on the console's screens, in 3D
   try { _orbitCamApply(); } catch (_) {}   // (v44.81) dev orbit camera; one property read when off
   try { _rplFrame(); } catch (_) {}        // (v47.97) the replay recorder / final kill cam: samples, or poses + owns the camera
+  try { _lssSeatFrame(); } catch (_) {}    // (v52.02) the pilot and the Summoners take their seats (after the replay's poses)
   if (renderer.xr.isPresenting) {
     if (!renderFrame._xrLogged) {
       renderFrame._xrLogged = true;
@@ -75444,6 +75468,467 @@ const SHIP_MODELS = {
 
 const shipModelCache = { loaded: {}, ready: null };
 
+// ═══ (v52.02) THE PILOT AND THE SUMMONERS IN THEIR SEATS ═══════════════════════════════════════════════════
+// Owner (2026-10-06): "these two characters are going to sit in the ships... one is me, the pilot, and one is
+// the summoners, the bad guy in the game" - "seated only in ships" - "summoners, we will switch to using one of
+// the older of the main ships that already had a cut out cockpit, the old pyro" (NEMESIS_SHIP) - "use the sit
+// clips as they are".
+// THE BODIES: Meshy bipeds (28-joint Mixamo-named rig, one bone per hand). Meshy fused their resting hands into
+// the thighs and their inner arms into the torso; tools/blender/chars/ cut them apart, re-weighted them and put
+// every clip in one file (README there). The pilot here is the in-seat LOD (pilot_ashman_seat.glb, ~26k tris, 1k
+// maps); the full 174k one is kept for the standing scene.
+// THE FITS: tools/blender/chars/seatfit.py, in the SHIP GLB's own model space (forward -X, up +Y; `cockpit1` is a
+// top-level node in every hull, so its parent IS that space). The seven concept hulls: the pilot's back on the pod's
+// backrest, hips on its cushion, scaled so his eyes are at `cockpit1`'s height - where the first-person camera
+// sits. The old Pyro: its `cockpit1` is at chest height (the c1seat convention), so the Summoners are fitted to
+// its cushion and backrest at a scale chosen by eye. ⚠ The same table is in character_lab.html (SEATS).
+// ⚠ THE BODIES ARE NOT CHILDREN OF THE SHIPS. Every ship traversal would find them: the ghost seat shell and the
+// cloak swap every mesh's material (a non-skinning material on a SkinnedMesh draws its bind pose), the livery /
+// doomed dimmer / hit ray grids / water silhouette walk every mesh, and ship disposal would free the shared GLB.
+// Each body is a scene child that takes its ship's cockpit space in renderFrame (where every ship transform is
+// final), and goes wherever its ship goes: hidden with it, gone when it leaves the scene.
+// (v52.05) THE CHARACTERS' OWN ART STAMP. These GLBs are rebuilt on their own schedule (tools/blender/chars), and
+// bumping _MODELS_VERSION for one of them would re-mint every model URL in the game for every player. Bump this
+// instead whenever a file under objects/characters/ changes - a stale cached pilot without `Sit_Alert` is exactly
+// what it prevents.
+const _LSS_SEAT_ART = '52.05';
+const _LSS_SEATS = {
+  pilot: {
+    url: 'objects/characters/pilot_ashman_seat.glb',
+    // (v52.05) Owner: "make him so his sleepy looks more alert lol... stop his chin from dropping down". Sit_Alert
+    // is Meshy's Sit_and_Doze_Off with the face held ~7 deg down instead of 35-60 (tools/blender/chars/alert_head.py,
+    // `--alert` in char_pipeline.py): same body, same hips, a quarter of the original head motion kept so he still
+    // moves. The doze clip is still in the file. `fallback` covers a stale cached file without the new clip.
+    clip: 'Sit_Alert', fallback: 'Sit_and_Doze_Off', cheer: 'Sit_Cheer_with_Left_Hand',
+    hulls: {
+      blaster: { s: 0.0984, x: -0.6198, y: -0.0042, z: -0.0005 },
+      puncture: { s: 0.0952, x: -0.3321, y: 0.0091, z: -0.0004 },
+      pyro: { s: 0.1292, x: -0.4999, y: -0.0069, z: -0.0006 },
+      slayer: { s: 0.1518, x: -0.5103, y: -0.0436, z: -0.0007 },
+      syphon: { s: 0.1122, x: -0.5328, y: -0.0512, z: -0.0005 },
+      tracker: { s: 0.1391, x: -0.5313, y: -0.0492, z: -0.0007 },
+      vortex: { s: 0.1092, x: -0.4572, y: -0.0581, z: -0.0005 },
+    },
+  },
+  summoners: {
+    url: 'objects/characters/summoners.glb',
+    clip: 'Sitting_Answering_Questions',
+    hulls: { summoners_ship: { s: 0.17, x: -0.3498, y: -0.0788, z: -0.0235 } },
+  },
+};
+const _lssSeatG = {};          // who -> Promise<gltf | null>, one load per character
+const _lssSeatRecs = [];       // the seated bodies on screen (or about to be)
+let _lssSeatT0 = 0, _lssSeatScanN = 0;
+function _lssNoRaycast() {}    // a seated body is never a hit target (r165 raycasts a skinned mesh vertex by vertex)
+// live knobs: window.__seatKnobs = { on, pilot, summoners, fp (show your own pilot in first person),
+//   fit: { <hull>: { s, x, y, z } }, sfx (false mutes the picker beam) }
+// (v52.09: renamed from window.__seats, which is the v47.40 room-seat probe FUNCTION - `window.__seats = {...}`
+// would have replaced it, and it is the one a phone console uses to read a room's human tally)
+function _lssSeatKnob(k, d) { try { const S = window.__seatKnobs; if (S && S[k] !== undefined) return S[k]; } catch (_) {} return d; }
+
+function _lssSeatLoad(who) {
+  if (_lssSeatG[who]) return _lssSeatG[who];
+  const def = _LSS_SEATS[who];
+  return (_lssSeatG[who] = new Promise((res) => {
+    try {
+      new THREE.GLTFLoader().load('./' + def.url + '?v=' + _LSS_SEAT_ART, (g) => {
+        // SEATED = PINNED HIPS. Every clip plays with the hips held where the fit was measured (the first frame
+        // of the fit clip): the pilot's cheer lifts his hips ~6 cm and pushes them ~8 cm forward (human scale),
+        // which floats him off the cushion. The body still moves: everything above the hips is rotations.
+        // (v52.05) the idle, else its fallback, else any sit clip - never clip 0, which is `Running`
+        const pick = (n) => n && g.animations.find((c) => c.name === n);
+        g.lssIdle = (pick(def.clip) || pick(def.fallback) || g.animations.find((c) => /^Sit/.test(c.name)) || g.animations[0]).name;
+        const fitClip = pick(g.lssIdle);
+        const hipsT = fitClip && fitClip.tracks.find((t) => /Hips\.position$/.test(t.name));
+        const pin = hipsT ? [hipsT.values[0], hipsT.values[1], hipsT.values[2]] : null;
+        g.lssClips = {};
+        for (const c of g.animations) {
+          const cc = c.clone();
+          if (pin) for (const t of cc.tracks) if (/Hips\.position$/.test(t.name)) {
+            for (let i = 0; i < t.values.length; i += 3) { t.values[i] = pin[0]; t.values[i + 1] = pin[1]; t.values[i + 2] = pin[2]; }
+          }
+          g.lssClips[c.name] = cc;
+        }
+        try { _lssCapModelTextures(g.scene, 'seat ' + who); } catch (_) {}
+        res(g);
+      }, undefined, (e) => { console.warn('[seats] load failed:', who, e && e.message); res(null); });
+    } catch (_) { res(null); }
+  }));
+}
+
+// Make sure `ship` carries `who` in its seat. Idempotent; retried once a second while the ship is still a
+// procedural stand-in without its `cockpit1`.
+function _lssSeatEnsure(ship, hull, who) {
+  const ud = ship && ship.userData;
+  if (!ud) return;
+  const have = ud.lssSeat;
+  if (have) {
+    if (have.body && _lssSeatRecs.indexOf(have) < 0 && have.shown) _lssSeatRecs.push(have);   // back from the bot pool
+    return;
+  }
+  const def = _LSS_SEATS[who], fit = def && def.hulls[hull];
+  if (!fit) return;
+  const now = performance.now();
+  if (ud.lssSeatTry && now - ud.lssSeatTry < 1000) return;
+  ud.lssSeatTry = now;
+  const mk = ship.getObjectByName('cockpit1');
+  if (!mk || !mk.parent) return;
+  const rec = { who, hull, ship, anchor: mk.parent, marker: mk, body: null, shown: false, gone: 0 };
+  ud.lssSeat = rec;
+  _lssSeatLoad(who).then((g) => {
+    if (!g || ud.lssSeat !== rec) { if (ud.lssSeat === rec) ud.lssSeat = null; return; }
+    const body = (typeof _wildRigClone === 'function') ? _wildRigClone(g.scene) : g.scene.clone(true);
+    body.name = 'lss_seat_' + who;
+    body.matrixAutoUpdate = false;
+    body.userData.lssSeatBody = true;
+    body.traverse((o) => {
+      if (!o.isMesh) return;
+      o.frustumCulled = false;     // a skinned bounding volume is the bind pose, not the seat
+      o.castShadow = false;        // inside the canopy anyway, and a skinned depth program is one more cold link
+      o.receiveShadow = true;
+      o.raycast = _lssNoRaycast;
+    });
+    const mixer = new THREE.AnimationMixer(body);
+    const idle = mixer.clipAction(g.lssClips[g.lssIdle]);
+    idle.setLoop(THREE.LoopRepeat, Infinity);
+    idle.play();
+    idle.time = Math.random() * Math.min(4, idle.getClip().duration);   // two seated bodies never breathe in step
+    mixer.update(0);
+    Object.assign(rec, { body, mixer, idle, g, seatM: new THREE.Matrix4(), fitSig: '' });
+    // WARM BEFORE IT CAN BE SEEN: a skinned Standard / Physical material is a program nothing else in the game
+    // builds (_buildModelWarmGroup pins only skinned MeshBasic). Compile with postFX.rtScene bound - the target
+    // every gameplay draw uses (rule 5: the target forks the program key) - then DRAW it once off-screen
+    // (_warmDrawRoot: ANGLE builds a vertex executable per input layout at the first draw, v39.52), then show.
+    const go = () => {
+      if (rec.shown || ud.lssSeat !== rec) return;
+      rec.shown = true;
+      scene.add(body);
+      _lssSeatPlace(rec);
+      try { if (typeof _warmDrawRoot === 'function' && typeof postFX !== 'undefined' && postFX && postFX.rtScene) _warmDrawRoot(body, postFX.rtScene, false); } catch (_) {}
+      _lssSeatRecs.push(rec);
+    };
+    let job = null;
+    const pRT = renderer.getRenderTarget();
+    try {
+      if (typeof postFX !== 'undefined' && postFX && postFX.rtScene) renderer.setRenderTarget(postFX.rtScene);
+      if (renderer.compileAsync && camera) job = renderer.compileAsync(body, camera, scene);   // its compile() runs NOW, under rtScene
+    } catch (_) {} finally { try { renderer.setRenderTarget(pRT); } catch (_) {} }
+    if (job) job.then(go, go); else go();
+    setTimeout(go, 1500);
+  });
+}
+
+// the body into its ship's cockpit space for this frame (the fit, with a live override per hull for dialling a
+// seat in: window.__seatKnobs.fit.<hull> = { s, x, y, z })
+function _lssSeatPlace(r) {
+  const fitK = _lssSeatKnob('fit', null);
+  const base = _LSS_SEATS[r.who].hulls[r.hull], ov = fitK && fitK[r.hull];
+  const f = ov ? Object.assign({}, base, ov) : base;
+  const sig = f.s + ',' + f.x + ',' + f.y + ',' + f.z;
+  if (sig !== r.fitSig) {
+    r.fitSig = sig;
+    r.seatM.compose(new THREE.Vector3(f.x, f.y, f.z), new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -Math.PI / 2), new THREE.Vector3(f.s, f.s, f.s));
+  }
+  r.anchor.updateWorldMatrix(true, false);
+  r.body.matrix.multiplyMatrices(r.anchor.matrixWorld, r.seatM);
+  r.body.matrixWorldNeedsUpdate = true;
+}
+
+function _lssSeatDrop(r) {
+  const i = _lssSeatRecs.indexOf(r);
+  if (i >= 0) _lssSeatRecs.splice(i, 1);
+  try { if (r.body && r.body.parent) r.body.parent.remove(r.body); } catch (_) {}
+  // the clone's own skeletons (bone textures) are its own; geometry and materials belong to the shared GLB
+  try { r.body.traverse((o) => { if (o.isSkinnedMesh && o.skeleton && o.skeleton.dispose) o.skeleton.dispose(); }); } catch (_) {}
+  try { r.mixer.stopAllAction(); r.mixer.uncacheRoot(r.body); } catch (_) {}
+  if (r.ship && r.ship.userData && r.ship.userData.lssSeat === r) r.ship.userData.lssSeat = null;
+}
+
+// renderFrame: seat whoever should be seated, then put every body in its ship's cockpit for this frame.
+function _lssSeatFrame() {
+  if (typeof scene === 'undefined' || !scene) return;
+  const now = performance.now();
+  const dt = _lssSeatT0 ? Math.min(0.1, (now - _lssSeatT0) / 1000) : 0;
+  _lssSeatT0 = now;
+  const on = _lssSeatKnob('on', true) !== false;
+  if (on) {
+    // your ship, whichever hull it is this frame (a hull swap builds a new mesh; the old body leaves with it)
+    try {
+      if (typeof player !== 'undefined' && player && player.mesh && player.loadoutKey && _lssSeatKnob('pilot', true) !== false)
+        _lssSeatEnsure(player.mesh, String(player.loadoutKey).toLowerCase(), 'pilot');
+    } catch (_) {}
+    // every Summoners flagship in play (a few entities; looked for every 15th frame)
+    if ((_lssSeatScanN++ % 15) === 0 && _lssSeatKnob('summoners', true) !== false) {
+      try {
+        const E = (typeof game !== 'undefined' && game && game.entities) || [];
+        for (let i = 0; i < E.length; i++) {
+          const e = E[i];
+          if (e && e.hoardModelKey === NEMESIS_SHIP && e.mesh && !e.isDead) _lssSeatEnsure(e.mesh, 'summoners_ship', 'summoners');
+        }
+      } catch (_) {}
+    }
+  }
+  if (!_lssSeatRecs.length) return;
+  // your own seat view: the camera is where the pilot's eyes are, so his body is not drawn (window.__seatKnobs.fp shows it)
+  let seatView = false;
+  try {
+    seatView = (typeof _seatViewLive === 'function') && _seatViewLive();
+    if (seatView && typeof _RPL !== 'undefined' && _RPL && (_RPL.kc || _RPL.studio)) seatView = false;   // replays watch from outside
+  } catch (_) {}
+  for (let i = _lssSeatRecs.length - 1; i >= 0; i--) {
+    const r = _lssSeatRecs[i];
+    if (!r.body) continue;
+    if (r.ship.userData.lssSeat !== r) { _lssSeatDrop(r); continue; }
+    let vis = on && _lssSeatKnob(r.who, true) !== false;
+    let o = r.anchor, inScene = false;
+    while (o) {
+      if (o === scene) { inScene = true; break; }
+      if (!o.visible) vis = false;
+      o = o.parent;
+    }
+    if (!inScene) {
+      vis = false;
+      if (++r.gone > 900) { _lssSeatDrop(r); continue; }   // a parked bot hull keeps its seat ~15 s, then lets it go
+    } else r.gone = 0;
+    if (vis && r.who === 'pilot' && seatView && typeof player !== 'undefined' && player && r.ship === player.mesh && !_lssSeatKnob('fp', false)) vis = false;
+    r.body.visible = vis;
+    // the clock runs while he is hidden in your seat too (28 bones, CPU only), so a cheer begun in first person
+    // is over by the time you look from outside instead of starting then
+    if (inScene) r.mixer.update(dt);
+    if (vis) _lssSeatPlace(r);
+  }
+}
+
+// A kill: the pilot in your seat cheers (his second sit clip, once), then settles back into the idle.
+function _lssSeatCheer() {
+  for (const r of _lssSeatRecs) {
+    if (r.who !== 'pilot' || !r.body || r.cheering) continue;
+    if (typeof player === 'undefined' || !player || r.ship !== player.mesh) continue;
+    const c = r.g.lssClips[_LSS_SEATS.pilot.cheer];
+    if (!c) continue;
+    const a = r.mixer.clipAction(c);
+    // clampWhenFinished: the cheer HOLDS its last frame while the idle fades back in. Unclamped, a finished
+    // LoopOnce action drops to weight 0 at once, the idle is still fading in from 0, and for those 0.4 s the
+    // weights sum below 1 - the body sags toward its bind pose (standing) in the middle of the seat.
+    a.reset(); a.setLoop(THREE.LoopOnce, 1); a.clampWhenFinished = true;
+    a.play(); a.crossFadeFrom(r.idle, 0.25, false);
+    r.cheering = true;
+    const back = (e) => {
+      if (e.action !== a) return;
+      r.mixer.removeEventListener('finished', back);
+      r.idle.reset().play(); r.idle.crossFadeFrom(a, 0.4, false);
+      r.cheering = false;
+    };
+    r.mixer.addEventListener('finished', back);
+  }
+}
+if (typeof window !== 'undefined') {
+  window.__seatInfo = () => _lssSeatRecs.map((r) => ({
+    who: r.who, hull: r.hull, visible: !!(r.body && r.body.visible), playerShip: !!(typeof player !== 'undefined' && player && r.ship === player.mesh),
+    clip: r.cheering ? 'cheer' : (r.idle && r.idle.getClip().name),
+    pos: r.body ? (() => { const p = new THREE.Vector3().setFromMatrixPosition(r.body.matrixWorld); return [Math.round(p.x), Math.round(p.y), Math.round(p.z)]; })() : null,
+  }));
+  window.__seatCheer = () => _lssSeatCheer();
+  // one seat pass on demand, scan included: renderFrame does not run while the page is not painted (a hidden pane:
+  // the watchdog keeps the simulation stepping, not the render path), so a headless check has to drive it
+  window.__seatTick = () => { _lssSeatScanN = 0; _lssSeatFrame(); return window.__seatInfo(); };
+}
+
+// ═══ (v52.06) CONFIRM BEAMS THE PILOT INTO THE SHIP ON THE PICKER'S STAGE ═══════════════════════════════════
+// Owner: "when you click 'confirm' in the lobby/ship selection screen, the pilot should teleport into the ship".
+// CONFIRM is a toggle (`game._ssConfirmed`; while it is set the ship and perk are locked), so: confirm -> he beams
+// IN (a light column drops over the cockpit, he builds up from the seat with a cyan flash, a ring breaks out at the
+// cushion), unconfirm -> he beams OUT the same way in reverse. Same in-seat body, same Sit_Alert idle and the same
+// fit table as in flight (_LSS_SEATS); it sits on whatever hull the stage shows.
+// ⚠ The stage hull (`_shipPreview3D.model`) is walked by the preview code - liveries, `_ssPrevRelease` evicting a
+// hull's textures on small devices, its own compile - so the body is NOT its child either: a sibling group in the
+// stage scene, re-posed from the hull's matrixWorld every picker frame (same rule as the flying bodies above).
+// ⚠ It has its OWN material copies: the flash writes emissive, and the GLB's materials are shared with the pilot
+// in your flying ship.
+// Ticked from both picker draws (_lssRenderPicker, and the two-context path in _animateShipPreview) - the picker
+// owns the frame, so renderFrame (and _lssSeatFrame) does not run here. A picker that has not drawn for half a
+// second has been closed (LAUNCH, a match), so the body is dropped without a beam-out rather than beaming out the
+// next time the stage opens. Knobs: window.__seatKnobs.pilot (off hides it here too), window.__seatKnobs.sfx = false
+// mutes the sound (Vortex's phase-dash blink, the nearest thing the game has to a teleport).
+const _PSEAT = { root: null, body: null, mats: null, fx: null, mixer: null, model: null, phase: 'off', t: 0, last: 0,
+                 gen: 0, loading: false, seatM: new THREE.Matrix4() };
+const _PSEAT_IN = 0.95, _PSEAT_OUT = 0.6;   // seconds
+function _lssPickerSeatWanted() {
+  try {
+    const s = _shipPreview3D;
+    if (!game || !game._ssConfirmed || !s || !s.model || !s.lastKey) return false;
+    if (_lssSeatKnob('on', true) === false || _lssSeatKnob('pilot', true) === false) return false;
+    return !!_LSS_SEATS.pilot.hulls[String(s.lastKey).toLowerCase()];
+  } catch (_) { return false; }
+}
+function _lssPickerSeatSfx() { try { if (_lssSeatKnob('sfx', true) !== false) playSound('phase_dash'); } catch (_) {} }
+function _lssPickerSeatDrop() {
+  const P = _PSEAT;
+  try { if (P.root && P.root.parent) P.root.parent.remove(P.root); } catch (_) {}
+  try { if (P.body) P.body.traverse((o) => { if (o.isSkinnedMesh && o.skeleton && o.skeleton.dispose) o.skeleton.dispose(); }); } catch (_) {}
+  try { if (P.mats) for (const m of P.mats) m.dispose(); } catch (_) {}   // its own copies; textures belong to the GLB
+  try { if (P.fx) P.fx.traverse((o) => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); }); } catch (_) {}
+  try { if (P.mixer) { P.mixer.stopAllAction(); P.mixer.uncacheRoot(P.body); } } catch (_) {}
+  Object.assign(P, { root: null, body: null, mats: null, fx: null, mixer: null, model: null, phase: 'off', t: 0, loading: false });
+  P.gen++;   // anything still loading for the old stage lands on nothing
+}
+// the beam: an open column with soft ends, a bright core inside it, and a ring at the cushion. Built in the
+// CHARACTER's own space (metres: the rig is metric), so it scales with the seat fit like the body does.
+let _lssBeamTex = null;
+function _lssTeleportFx() {
+  if (!_lssBeamTex) {
+    const c = document.createElement('canvas'); c.width = 4; c.height = 64;
+    const x = c.getContext('2d'), gr = x.createLinearGradient(0, 0, 0, 64);
+    gr.addColorStop(0, '#000'); gr.addColorStop(0.25, '#fff'); gr.addColorStop(0.75, '#fff'); gr.addColorStop(1, '#000');
+    x.fillStyle = gr; x.fillRect(0, 0, 4, 64);
+    _lssBeamTex = new THREE.CanvasTexture(c);
+  }
+  const mk = (col) => new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0, alphaMap: _lssBeamTex,
+    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, toneMapped: false, fog: false });
+  const g = new THREE.Group(); g.name = 'lss_teleport_fx';
+  const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.55, 2.9, 32, 1, true), mk(0x6fe8ff));
+  const core = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.15, 2.9, 16, 1, true), mk(0xeaffff));
+  beam.position.y = core.position.y = 1.0;
+  const ring = new THREE.Mesh(new THREE.RingGeometry(0.42, 0.56, 48),
+    new THREE.MeshBasicMaterial({ color: 0x6fe8ff, transparent: true, opacity: 0, blending: THREE.AdditiveBlending,
+                                  depthWrite: false, side: THREE.DoubleSide, toneMapped: false, fog: false }));
+  ring.rotation.x = -Math.PI / 2; ring.position.y = 0.22;
+  for (const m of [beam, core, ring]) { m.frustumCulled = false; m.renderOrder = 5; m.raycast = _lssNoRaycast; g.add(m); }
+  g.userData.parts = { beam, core, ring };
+  return g;
+}
+function _lssPickerSeatBuild(s, key) {
+  const P = _PSEAT, gen = ++P.gen, model = s.model, lastKey = s.lastKey;
+  P.loading = true;
+  _lssSeatLoad('pilot').then((g) => {
+    if (P.gen !== gen) return;
+    P.loading = false;
+    if (!g || s.model !== model || s.lastKey !== lastKey || !_lssPickerSeatWanted()) return;
+    const fit = _LSS_SEATS.pilot.hulls[key];
+    const root = new THREE.Group(); root.name = 'lss_picker_pilot'; root.matrixAutoUpdate = false;
+    const body = (typeof _wildRigClone === 'function') ? _wildRigClone(g.scene) : g.scene.clone(true);
+    const mats = [];
+    body.traverse((o) => {
+      if (!o.isMesh) return;
+      o.frustumCulled = false; o.castShadow = false; o.receiveShadow = false; o.raycast = _lssNoRaycast;
+      const arr = Array.isArray(o.material) ? o.material : [o.material];
+      const cl = arr.map((m) => { const c = m.clone(); c.userData._e0 = c.emissive ? c.emissive.getHex() : 0; c.userData._ei0 = c.emissiveIntensity; mats.push(c); return c; });
+      o.material = Array.isArray(o.material) ? cl : cl[0];
+    });
+    const fx = _lssTeleportFx();
+    root.add(body); root.add(fx);
+    const mixer = new THREE.AnimationMixer(body);
+    const idle = mixer.clipAction(g.lssClips[g.lssIdle]);
+    idle.setLoop(THREE.LoopRepeat, Infinity); idle.play(); mixer.update(0);
+    P.seatM.compose(new THREE.Vector3(fit.x, fit.y, fit.z), new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -Math.PI / 2),
+                    new THREE.Vector3(fit.s, fit.s, fit.s));
+    Object.assign(P, { root, body, mats, fx, mixer, model, phase: 'warm', t: 0 });
+    _lssPickerSeatPlace();
+    s.scene.add(root);
+    // WARM, THEN BEAM. The stage scene has its own lights, so a skinned material is a fresh program here even
+    // after flight compiled it; the hull's own staging waits for compileAsync for the same reason (v39.30).
+    // compile() only takes VISIBLE objects, and runs synchronously inside the call - so the group is shown for
+    // the call and hidden straight after, and nobody sees it before the beam.
+    let started = false;
+    const go = () => {
+      if (started || P.gen !== gen) return;
+      started = true; P.phase = 'in'; P.t = 0; _lssPickerSeatSfx();
+    };
+    try {
+      const r = s.renderer || renderer, pRT = r.getRenderTarget();
+      r.setRenderTarget(null);   // the stage draws to the canvas
+      root.visible = true;
+      const job = r.compileAsync ? r.compileAsync(root, s.camera, s.scene) : null;
+      root.visible = false;
+      r.setRenderTarget(pRT);
+      if (job) job.then(go, go); else go();
+    } catch (_) { go(); }
+    setTimeout(go, 1200);
+  });
+}
+function _lssPickerSeatPlace() {
+  const P = _PSEAT;
+  P.model.updateWorldMatrix(true, false);
+  P.root.matrix.multiplyMatrices(P.model.matrixWorld, P.seatM);
+  P.root.matrixWorldNeedsUpdate = true;
+}
+function _lssPickerSeatFx() {
+  const P = _PSEAT, t = P.t, k = P.fx.userData.parts;
+  const sm = (a, b, x) => { const u = Math.max(0, Math.min(1, (x - a) / (b - a))); return u * u * (3 - 2 * u); };
+  if (P.phase === 'warm') { P.root.visible = false; return; }
+  P.root.visible = true;
+  let beam = 0, ring = 0, ringS = 1, grow = 1, flash = 0, widen = 1;
+  if (P.phase === 'in') {
+    beam = sm(0, 0.12, t) * (1 - sm(0.45, _PSEAT_IN, t)); widen = 0.25 + 0.75 * sm(0, 0.16, t);
+    grow = sm(0.12, 0.5, t);                                   // he builds up from the seat
+    flash = sm(0.1, 0.22, t) * (1 - sm(0.32, 0.9, t));
+    ring = sm(0.24, 0.32, t) * (1 - sm(0.36, 0.8, t)); ringS = 0.4 + 2.2 * sm(0.24, 0.8, t);
+  } else if (P.phase === 'out') {
+    beam = sm(0, 0.1, t) * (1 - sm(0.3, _PSEAT_OUT, t)); widen = 1 - 0.6 * sm(0.3, _PSEAT_OUT, t);
+    flash = sm(0, 0.12, t) * (1 - sm(0.35, 0.5, t));
+    grow = 1 - sm(0.1, 0.42, t);                               // ...and drains back down into it
+    ring = sm(0.04, 0.12, t) * (1 - sm(0.16, 0.5, t)); ringS = 0.4 + 2.0 * sm(0.04, 0.5, t);
+  }
+  k.beam.material.opacity = 0.5 * beam; k.core.material.opacity = 0.85 * beam; k.ring.material.opacity = 0.9 * ring;
+  k.beam.scale.set(widen, 1, widen); k.core.scale.set(widen, 1, widen); k.ring.scale.setScalar(ringS);
+  P.fx.visible = beam > 0.002 || ring > 0.002;
+  P.body.visible = grow > 0.002;
+  P.body.scale.set(1, Math.max(0.002, grow), 1);
+  for (const m of P.mats) {
+    if (!m.emissive) continue;
+    if (flash > 0.002) { m.emissive.setHex(0x66e8ff); m.emissiveIntensity = 2.4 * flash; }
+    else if (m.emissiveIntensity !== m.userData._ei0 || m.emissive.getHex() !== m.userData._e0) { m.emissive.setHex(m.userData._e0); m.emissiveIntensity = m.userData._ei0; }
+  }
+}
+function _lssPickerSeatTick() {
+  const s = _shipPreview3D, P = _PSEAT;
+  if (!s || !s.scene) return;
+  const now = performance.now();
+  const gap = P.last ? (now - P.last) / 1000 : 0;
+  P.last = now;
+  if (gap > 0.5 && P.phase !== 'off') _lssPickerSeatDrop();   // the picker was closed: start clean, no beam-out
+  const dt = Math.min(0.1, gap);
+  if (s.model && !P.prefetched) { P.prefetched = true; try { _lssSeatLoad('pilot'); } catch (_) {} }   // so CONFIRM beams at once
+  if (P.phase !== 'off' && P.model && P.model !== s.model) _lssPickerSeatDrop();                   // another hull on the stage
+  const want = _lssPickerSeatWanted();
+  if (want && P.phase === 'off' && !P.loading) _lssPickerSeatBuild(s, String(s.lastKey).toLowerCase());
+  if (!want) {
+    if (P.phase === 'in' || P.phase === 'seated') { P.phase = 'out'; P.t = 0; _lssPickerSeatSfx(); }
+    else if (P.phase === 'warm' || P.loading) _lssPickerSeatDrop();
+  } else if (P.phase === 'out') { P.phase = 'in'; P.t = 0; _lssPickerSeatSfx(); }   // confirmed again mid beam-out
+  if (!P.root) return;
+  P.t += dt;
+  _lssPickerSeatPlace();
+  P.mixer.update(dt);
+  _lssPickerSeatFx();
+  if (P.phase === 'in' && P.t >= _PSEAT_IN) { P.phase = 'seated'; _lssPickerSeatFx(); }
+  else if (P.phase === 'out' && P.t >= _PSEAT_OUT) _lssPickerSeatDrop();
+}
+if (typeof window !== 'undefined') {
+  window.__pickerSeat = () => {
+    // where the pilot is on the canvas (px), for cropping a check of the beam
+    let px = null;
+    try {
+      const s = _shipPreview3D;
+      if (_PSEAT.root && s && s.camera) {
+        const v = new THREE.Vector3().setFromMatrixPosition(_PSEAT.root.matrixWorld).project(s.camera);
+        const el = renderer.domElement;
+        px = [Math.round((v.x * 0.5 + 0.5) * el.width), Math.round((1 - (v.y * 0.5 + 0.5)) * el.height)];
+      }
+    } catch (_) {}
+    return { phase: _PSEAT.phase, t: +_PSEAT.t.toFixed(2), loading: _PSEAT.loading, px,
+             hull: (_shipPreview3D && _shipPreview3D.lastKey) || null, confirmed: !!(game && game._ssConfirmed) };
+  };
+  // one picker frame by hand (the stage spins and draws from its own rAF, which a background tab never gets):
+  // `dt` seconds of the beam, then the stage draw - returns the state after it
+  window.__pickerDraw = (dt) => {
+    try { if (dt > 0) _PSEAT.last = performance.now() - dt * 1000; _spinShipPreview(); _lssRenderPicker(); } catch (e) { return String(e); }
+    return window.__pickerSeat();
+  };
+  window.__pickerSeatObj = _PSEAT;               // dev: the picker pilot's state (root, body, fx, phase)
+  window.__shipStage = () => _shipPreview3D;     // dev: the picker's stage (scene, camera, model, rotationSpeed)
+}
+
 let _PROCEDURAL_SHIP_NORMALMAP = null;
 function _makeProceduralShipNormalMap() {
   if (_PROCEDURAL_SHIP_NORMALMAP) return _PROCEDURAL_SHIP_NORMALMAP;
@@ -76610,6 +77095,7 @@ function _animateShipPreview() {
     }
   }
   _spinShipPreview();
+  try { _lssPickerSeatTick(); } catch (_) {}   // (v52.06) CONFIRM beams the pilot into the stage hull
   s.renderer.render(s.scene, s.camera);
   s.animId = requestAnimationFrame(_animateShipPreview);
 }
@@ -76717,6 +77203,7 @@ function _lssRenderPicker() {
     }
     // (v51.08) the stage hull's engines, in the style picked for it (_lssPreviewEnginesTick)
     try { const _pe = s.model && s.model.userData && s.model.userData._pvEng; if (_pe) _lssPreviewEnginesTick(_pe, s.camera); } catch (_) {}
+    try { _lssPickerSeatTick(); } catch (_) {}   // (v52.06) CONFIRM beams the pilot into the stage hull
     renderer.setRenderTarget(null);
     renderer.render(s.scene, s.camera);
     return true;
@@ -84919,6 +85406,7 @@ const isChaingunBot = (weapon.fireRate <= 0.10);
           player._streakCount = 1;
         }
         player._lastKillTime = now;
+        try { _lssSeatCheer(); } catch (_) {}   // (v52.02) the pilot in your seat cheers the kill (his Sit_Cheer clip, once)
         if (player._streakCount >= 2) Overlays.killStreak(player._streakCount);
         // First blood: first kill of the current round.
         if (!game._firstBloodClaimed) {
@@ -115723,6 +116211,7 @@ function _ghostSeatWanted() {
   const _vr = (typeof isXRPresenting === 'function') && isXRPresenting();
   if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return false;
   if (_RPL.kc || _RPL.studio) return false;   // (v47.97) the kill cam shows your hull from outside - solid, not the seat's ghost shell
+  if (_orbitCamLive()) return false;          // (v52.04) ...and so does the selfie camera (see _orbitCamLive)
   // (v38.74) THE CHASE CAMERA INSIDE THE HULL. Owner: "in third person view, sometimes when i back
   // into a wall, i can see inside the ship... i want the inside to look ghost view instead of the
   // hard shell of the inside". The boom raycast pulls the camera to within 26u of the ship's
@@ -115742,6 +116231,7 @@ function _seatViewLive() {
   if (typeof game === 'undefined' || !game || typeof player === 'undefined' || !player) return false;
   const _vr = (typeof isXRPresenting === 'function') && isXRPresenting();
   if (!game._cockpit3dLive) return false;
+  if (_orbitCamLive()) return false;   // (v52.04) the selfie camera is outside the hull - see _orbitCamLive
   if (game.thirdPerson && !_vr) return false;
   if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return false;
   return true;
@@ -117251,7 +117741,8 @@ function _lssApplyShipRig(dt) {
         // no glass at all, so it gets none: hidden while the cockpit is live, shown again by _lssCockpitOff (third
         // person, other pilots and the hangar keep it). window.__cockpit.glass = true draws it from the seat again.
         {
-          const _gShow = !!(window.__cockpit && window.__cockpit.glass === true);
+          // (v52.04) ...but the selfie camera is outside the hull, where the glass belongs (see _orbitCamLive)
+          const _gShow = !!(window.__cockpit && window.__cockpit.glass === true) || _orbitCamLive();
           if (game._cockpitGlassObjs) for (const _go of game._cockpitGlassObjs) if (_go.visible !== _gShow) _go.visible = _gShow;
         }
         // (v38.42) THE NAV ORB STAYS LIT IN THE SEAT. It used to be hidden from the pilot,
@@ -117678,6 +118169,7 @@ function _cockpitOverlayWanted() {
   try {
     if (typeof window !== 'undefined' && window.__cockpitOverlay === false) return false;
     if (!game || !game._cockpit3dLive || game.thirdPerson) return false;
+    if (_orbitCamLive()) return false;   // (v52.04) the selfie camera sees the hull from outside: it is part of the world again
     if ((typeof isXRPresenting === 'function') && isXRPresenting()) return false;
     if (typeof _shouldUseCineFXFrame === 'function' && _shouldUseCineFXFrame()) return false;
     const m = (typeof player !== 'undefined' && player) ? player.mesh : null;

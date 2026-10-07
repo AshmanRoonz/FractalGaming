@@ -92,7 +92,7 @@
 
 import { NodeIO } from '@gltf-transform/core';
 import { ALL_EXTENSIONS } from '@gltf-transform/extensions';
-import { dedup, prune, weld, quantize, dequantize, simplify, simplifyPrimitive, textureCompress, join, flatten, cloneDocument } from '@gltf-transform/functions';
+import { dedup, prune, weld, quantize, dequantize, simplify, simplifyPrimitive, textureCompress, join, flatten, cloneDocument, resample } from '@gltf-transform/functions';
 import { MeshoptSimplifier } from 'meshoptimizer';
 import sharp from 'sharp';
 import fs from 'fs';
@@ -124,7 +124,9 @@ const ONLY = (() => { const i = process.argv.indexOf('--only'); return i > 0 ? p
 // Meshy concept hulls arrive with 4096 colour maps - 4x the texels of the c1seat art's 2k,
 // ~85 MB of VRAM per map with mips - and the seven ship entries now cap them at 2048. Files
 // without the knob (the carriers) are unchanged.
-const RECIPE_VERSION = '1.4';
+// (2026-10-06) 1.4 -> 1.5: new 'character' recipe for the rigged humanoids under objects/characters/
+// (the pilot + the Summoners). No other file's output changes.
+const RECIPE_VERSION = '1.5';
 // The game's marker empties. join() leaves every absorbed part behind as a node holding
 // an EMPTY mesh; prune strips the mesh, then everything mesh-less that is not one of
 // these is dropped (prune's keepLeaves would otherwise keep ~240 dead empties).
@@ -193,6 +195,15 @@ const OVERRIDES = {
   // (2026-09-28) the second carrier the owner added (Meshy, 1.19 M tris): ship_plain.py --nobake --no-eye took it to
   // 120k with its own UVs and all three maps, exactly as the first. Not referenced by the game yet.
   'objects/carrier2.glb': { simplify: 1.0, reason: 'Blender-decimated capital hull (not in the game yet)' },
+  // (2026-10-06) the pilot as he SITS in your ship (assets_src copy of pilot_ashman.glb): behind a canopy he is a
+  // few dozen pixels tall, so ~26k triangles and 1k maps. The full 174k / 2k file stays for the standing scene.
+  'objects/characters/pilot_ashman_seat.glb': { simplify: 0.15, texMax: 1024, reason: 'in-seat LOD of the pilot' },
+  // (2026-10-06) THE SUMMONERS' SHIP. Owner: "we will switch to using one of the older of the main ships that already
+  // had a cut out cockpit, the old pyro". It is the c1seat Pyro exactly as it flew from v38.9x until the concept hulls
+  // replaced it (git 7793287:LSS/ships/pyro.glb and its lean ships/m/ twin): ALREADY this script's output (welded,
+  // quantized, joined per material, markers kept), so it is copied, not rebuilt - a second pass only re-quantizes.
+  'objects/summoners_ship.glb': { skip: true, reason: 'the c1seat Pyro, already built (git 7793287)' },
+  'objects/m/summoners_ship.glb': { skip: true, reason: 'its lean phone twin, already built (git 7793287)' },
 };
 
 // ------------------------------------------------------------- categories --
@@ -205,6 +216,7 @@ function categoryOf(rel) {
   if (rel.startsWith('objects/hoard/')) return 'hoard';
   if (rel === 'objects/artifact.glb') return 'prop';
   if (rel === 'objects/Sphere.glb') return 'shell';
+  if (rel.startsWith('objects/characters/')) return 'character';
   if (rel.startsWith('rings/')) return 'ring';
   if (/^objects\/[A-Z]/.test(rel)) return 'monster';
   return 'other';
@@ -313,6 +325,32 @@ const RECIPES = {
         slots: /metallicRoughnessTexture|occlusionTexture/, resize: [1024, 1024] }),
     );
     return 'skinned prop: quantize ; colour + normal 2k WebP, MR 1k WebP ; every slot + specular ext kept';
+  },
+
+  // (2026-10-06) THE RIGGED HUMANOIDS (objects/characters/): Meshy bipeds on a 28-joint Mixamo-named rig,
+  // one skinned mesh + every clip in one file. tools/blender/chars/char_pipeline.py cut the hands off the thighs
+  // and the arms off the torso and re-weighted both (Meshy fused the resting hands into the legs and the inner
+  // arms into the sides: 70-155x stretch), then Blender exported float32 + Meshy's own 4096 PNGs. Here: quantize (8-bit weights like the monsters),
+  // colour + normal 2k WebP, metal/rough 1k, and resample() drops the keyframes Blender's per-frame bake
+  // made redundant. Every slot + the pilot's KHR_materials_specular (specularFactor 0) is KEPT, as for 'prop'.
+  // OVERRIDES knobs: `simplify` (meshopt ratio, < 1 = decimate; it keeps attribute seams, so Meshy's atlas
+  // islands do not smear) and `texMax` (colour + normal cap; metal/rough gets half). The in-seat pilot uses both:
+  // seated behind a canopy he is a few dozen pixels tall, so 174k triangles and 2k maps buy nothing there.
+  character: async (doc, o) => {
+    const tmax = o.texMax || 2048;
+    const steps = [dedup(), prune({ keepLeaves: true }), weld(), resample()];
+    if (o.simplify && o.simplify < 1) steps.push(simplify({ simplifier: MeshoptSimplifier, ratio: o.simplify, error: o.simplifyError ?? 0.002 }));
+    steps.push(
+      quantize({ ...Q, quantizeWeight: 8 }),
+      textureCompress({ encoder: sharp, targetFormat: 'webp', quality: 88, formats: /^image\/(png|jpeg)$/,
+        slots: /baseColorTexture/, resize: [tmax, tmax] }),
+      textureCompress({ encoder: sharp, targetFormat: 'webp', quality: 90, formats: /^image\/(png|jpeg)$/,
+        slots: /normalTexture/, resize: [tmax, tmax] }),
+      textureCompress({ encoder: sharp, targetFormat: 'webp', quality: 85, formats: /^image\/(png|jpeg)$/,
+        slots: /metallicRoughnessTexture|occlusionTexture/, resize: [tmax / 2, tmax / 2] }),
+    );
+    await doc.transform(...steps);
+    return `skinned character: resample${o.simplify ? ` + simplify ${o.simplify}` : ''} + quantize ; colour + normal ${tmax / 1024}k WebP, MR ${tmax / 2048}k WebP ; every slot kept`;
   },
 
   // (2026-09-28) XORZO - the red and green orb under every ship's nose, so he is instanced once per ship:

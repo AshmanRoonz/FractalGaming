@@ -174,6 +174,13 @@ def main():
     hoard_base_m = re.search(r"const _hoardBaseUrl[\s\S]{0,400}?return\s*'\./([^']+)'", src)
     hoard_base = hoard_base_m.group(1) if hoard_base_m else 'objects/hoard/'
     for k in sorted(hoard):
+        # (v52.02) the Summoners' flagship (NEMESIS_SHIP = 'summoners_ship') is the old c1seat Pyro, not a hoard
+        # file: loadHoardModel maps the key to objects/summoners_ship.glb (objects/m/ on phones). Same group, so it
+        # stays out of the preload exactly as the Stryder did.
+        if k == 'summoners_ship':
+            add('objects/summoners_ship.glb', True, 'hoard')
+            add('objects/m/summoners_ship.glb', True, 'hoard')
+            continue
         add(hoard_base + k + '.glb', True, 'hoard')
 
     # ---------------------------------------------------------------- rings --
