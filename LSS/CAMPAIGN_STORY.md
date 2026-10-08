@@ -2,7 +2,7 @@
 
 The campaign's storyline, Xorzo and the Summoners, as Ashman told it (2026-09-28), and the full script as the game plays it (build 49.72).
 
-On 2026-10-06 Ashman wrote a prologue (Cyberpunk City, Jimmy, the hack, the gameshow) and an ending, and settled who the AIs are, what the hoard is, and why the Summoners keep running. Those additions are tagged **(2026-10-06)**. The prologue and the ending are **DRAFT**. Since v52.23-27 (2026-10-07) the prologue's first scene (the city, through Xorzo and Jimmy) and its last (the gameshow) are in the game; the hack between them and the ending are not.
+On 2026-10-06 Ashman wrote a prologue (Cyberpunk City, Jimmy, the hack, the gameshow) and an ending, and settled who the AIs are, what the hoard is, and why the Summoners keep running. Those additions are tagged **(2026-10-06)**. The prologue and the ending are **DRAFT**. Since v52.23-43 (2026-10-07) the prologue is in the game: the city, the hack, the caverns and the gameshow (the contest slides are not). The ending is not.
 
 - ★ marks Ashman's own dialogue. Unmarked lines are drafts, open to rewriting.
 - *Italic words* inside Xorzo's lines are hacked fragments. They flicker red and jitter as he says them.
@@ -167,8 +167,9 @@ The prologue changes that. It shows the player the city, the hack, the caverns a
 
 0. **The prologue (DRAFT, 2026-10-06).**
    - The bright city, with AIs flying around without ships. **Built (v52.23-27).**
-   - Xorzo and Jimmy. **Built**, through "It's time to work and learn!" and the two of them flying off toward the city. The hack and the capture: **not built.**
-   - The caverns and the gameshow. The contest, ending on "All you have to do is get in a ship!" **The gameshow scene is built**; the caverns and the contest slides are not.
+   - Xorzo and Jimmy. **Built**, through "It's time to work and learn!" and the two of them flying off toward the city.
+   - The hack and the capture. **Built (v52.35-43):** the sky goes black, the storm, the Summoners coming down out of it, the speech, the rows of hoard ships, the yellow lightning.
+   - The caverns and the gameshow. **Built (v52.31-34)**, with Ashman's rewrite of the gameshow; the caverns are a real bot battle since v52.50, watched from outside with every kill replayed (v52.54-56). The contest slides are not.
 1. **The hangar.** Black screen, the pilot groaning, a flicker of fractals, the Summoners' lie. The orb appears, his headlight finds seven ships, and spotlights light them. Pick a ship, get in, Xorzo fuses under it, pick a perk, pick a perspective. A flicker of fractals, then the caverns.
 2. **The caverns, seven legs.** The training ground. Hoard ships attack, Xorzo drops hints and quietly scans. At the end of every cavern: the Summoners opening a portal, the ghost leviathan, their escape, the open portal, and you follow.
 3. **The finale.** The last portal opens onto the overworld.
@@ -225,7 +226,23 @@ The prologue changes that. It shows the player the city, the hack, the caverns a
   - The AIs ring the tallest towers, spiral up others, fly in V formations, stream down the avenue both ways and pour into the city.
   - Others wander alone or chase each other in pairs. Little groups of friends drift over the meadow.
   - In the long shots the AIs are larger than Xorzo's in-ship size, so they read from kilometres away.
+  - (v52.40) The AIs' streaks ("glows, streaks..." ★ in the draft) were never drawn before v52.40; they show now as soft comet tails. Say if the city looked better without them.
+- **The hack (2026-10-07).** "Let's make the scene where the summoners came down from the storm and made the skies black in the cities, and take over all the AIs with lightning" ★. Built in v52.35-43. Ashman's notes while it was built:
+  - "the summoner ship moving around is not very smooth when it goes to see the orbs" ★: it now eases its nose toward each frozen AI it passes.
+  - "i am not sure if i saw him sitting in the ship" ★: the Summoners sit in their cockpit (the game's own seat), and the speech pushes in on them.
+  - "the lightning should be coming from the summoner ship and pulling the orbs to the hoard ships" ★: the first cut also hauled the other AIs up into the carrier. Now every bolt comes off the Summoners' ship and every AI it takes ends up under a hoard ship.
+  - "i want to see yellow lightning bolts surrounding the summoner's ship and extending out to the orbs" ★: arcs crackle over the hull while bolts reach out to the AIs.
+  - "the xorzo glb should also be on the text like pilot and summoners" ★: his tiny model is in the box when he speaks.
+  - "the lighting on all the ships is very dark" ★: the ships now reflect the storm night (the city's violet and teal neon), so their hulls read.
+  - "the summoner's yellow lightning needs to drag the orbs over to the ships... and the lightning should be much thinner" ★: each AI is taken from out in the city and hauled over to its ship on a thin bolt, over about four seconds.
+  - "when the campaign starts, i hear the announcer say 'welcome on board vortex...'" ★: the ship AI's welcome is silenced for the prologue (there is no ship in it).
+  - "jimmy and xorzo fall into a ditch in their grassy scene lol" ★: they glide over the ditches now.
 - **Dialogue.** Stylized text boxes now, voices later, one clip per line.
+- **The speaker beside the box (2026-10-07).** "Just something for the whole campaign: we should have a corresponding tiny glb model standing and talking beside the text boxes" ★. Built in v52.31-32.
+  - Every line whose speaker has a body shows a tiny model of him at the box's left end:
+    - the pilot and the Summoners standing, talking while their line is up;
+    - Xorzo and Jimmy hovering, their light fluttering as they talk.
+  - The narrator has no body, so his lines keep the box's full width.
 - **Videos.** Fill the open video slots later, plus one more: the Summoners vowing to escape, before the escape attempt.
 
 ---
@@ -248,11 +265,37 @@ The prologue changes that. It shows the player the city, the hack, the caverns a
 
 *Ashman's draft, verbatim: all of this section is his own text ★. It plays before the hangar, and ends where the hangar begins: "All you have to do is get in a ship!"*
 
-*In the game (v52.23-27, 2026-10-07):*
+*In the game (v52.23-43, 2026-10-07):*
 - *The first two paragraphs are the city scene:* the real overworld, bright, with about 320 AIs (Xorzo's model in every colour) flying over the city. The narration splits at its sentences, one per shot: the approach, the crown of the tallest tower, the avenue. Then the camera comes down onto a meadow outside the city where Xorzo and Jimmy are strolling, and their lines play to "It's time to work and learn!". They fly off toward the city.
-- *The last paragraph is the gameshow scene:* the pilot and the Summoners standing in front of `gameshow.png`. The narrator's lines are followed by the Summoners' pitch.
-- *Claude's draft, one line:* the pilot's "Wait... is this for real?" sits between "Do you have what it takes to be the Last Ship Sailing?" and "Don't worry, it's just a simulation." It is there so the pilot speaks in the scene. Cut it freely (`gs_real` in CAMP_SEQS.gameshow).
-- *Not built:* "Xorzo takes Jimmy to school" beyond the fly-off, everything from "the sky goes dark" to "I will set up a contest using the gameshow", and the contest slides.
+- *"Just as Xorzo was about to get to work..." through "...a trauma bond with the Actual Intelligences'" is the hack (v52.35), in the same city, nine shots:*
+  1. Xorzo flies the last stretch to the tower where he works. The sky goes black. He stops and looks up: "What the ... it's the middle of the day."
+  2. The camera rises over the roofs, hitching. Every AI stutters and freezes, twitching and flickering.
+  3. From the city's edge: a storm spreads out over the city from a swirling eye, with lightning on the towers and thunder.
+  4. From the roofs: the Summoners' ship, the carrier and two hoard ships come down through the eye.
+  5. The speech, in front of their ship with the carrier behind it. The camera pushes in on the Summoners in their cockpit.
+  6. Alongside their ship as it circles slowly through the frozen AIs. The two yelled lines are angry, and the storm cracks on each.
+  7. From the roofs, looking up: hoard ships drop out of the carrier row by row and line up facing the Summoners' ship. Then over its shoulder: "Take these ships, they will make you strong."
+  8. Yellow lightning crackles over the Summoners' ship and reaches out to the AIs. Each AI it strikes is dragged in under a hoard ship and locked there in a yellow ring. The camera swings round to the front of their ship.
+  9. Close on one locked AI, Jimmy, under his ship, his light pulsing with the ship's red AI for the trauma bond. Then black, and the caverns.
+  - The parenthesised paragraph is shown, not said, like "(Camera pans around cyberpunk city...)".
+  - "The Summoner's exclaimed" became a plain line, and "yelled the Summoners" an angry one.
+  - "The Summoner's ship" is written "the Summoners' ship", like every other line.
+  - The first speech is three boxes.
+  - Claude's choices, change freely:
+    - Xorzo is left frozen at his tower: the draft doesn't say what happens to him there, and in the hangar he isn't under a hoard ship.
+    - Jimmy is the AI in the last shot: he's "trapped in one of those ships" ★ in Molten Core.
+    - The storm's eye glows the Summoners' yellow.
+    - The hack runs about 2.8 minutes.
+- *"The Summoners had enslaved the AIs..." through "...a contest using the gameshow" is the caverns scene:*
+  - Ashman: "we need to show a scene with bots battling each other in the caverns during this text" ★.
+  - **Since v52.50 it is a real battle** ("We could just show an elimination battle between bots for that part" ★, after "the caverns don't look like the caverns..." ★): a solo elimination on The Shifting Deep, every seat a bot, the fleets topped back up so nobody stays dead ("endlessly killing each other and respawning"). The narration plays over it. "The Summoners said, angrily" became the style of his line. "The Summoners thought to themselves" puts **THINKING** on his name plate.
+  - **The camera (v52.54-56).** Ashman, on the first cut: "the elimination battle follows too tightly so there's a lot of flinging around... people might get sick... follow the one that is about to make the kill to see the kill... so like a replay on all the kills... and circle around on the battle from an outside screen" ★. So a slow circle round the fight closest to a kill, from 700-1250 units out, cutting (never whipping) to a fight across the cavern; and every kill replayed in slow motion from behind its killer (the match's own final-kill replay, without its words), the fight holding still while it plays. A ship burned down by fire, with no killer, is replayed circling the victim. About six replays in a run.
+  - "don't show any of the elimination text or ship selection screen during the cinematic, and no countdown sounds" ★: the launch is black from the hack to the fight, and the 3-2-1 beeps and the start sting are silent.
+  - (The v52.31 version, a stage-built crystal cavern with the AIs duelling in hoard ships, is kept as the fallback.)
+- *Then the card:* "Meanwhile, in the physical world..." over black ★ ("before it changes to the gameshow... 'meanwhile in the physical world...'").
+- *Then the gameshow scene, with Ashman's rewrite of its dialogue (2026-10-07, below):* the pilot and the Summoners standing in front of `gameshow.png`. It ends on "Yeah... just have my money ready." and the screen goes black ("black screen..." ★), into the hangar.
+  - The rewrite replaced the narrator's paragraph ("The Summoners found their contestant!..."), the old pitch, and Claude's one draft pilot line.
+- *Not built:* "Xorzo takes Jimmy to school" beyond the fly-off (the hack finds Jimmy already at school), and the contest slides.
 
 (Camera pans around cyberpunk city (it will not be darkened, it'll be bright), and show the AIs flying around without ships (the AIs will all will be xorzo.glb with various color overlays, glows, streaks...)
 
@@ -277,6 +320,30 @@ Meanwhile the Summoners are recording and streaming every kill, live feed to a p
 (time goes by... showing slides of the game show contest...)
 
 The Summoners found their contestant! That's you, pilot! You're the chosen one! I don't think The Summoners realize what they've got themselves into, with you, you're dangerous! I don't think they understand that your intelligence is too high for their evil lies. They preyed on your curiosity and desire for a thrilling challenge, that's all they thought they needed to know about you. "Do you agree to the contest, pilot? Do you have what it takes to be the Last Ship Sailing? Don't worry, it's just a simulation. You accept, of course.", slyly The Summoners said. "All you have to do is get in a ship!"
+
+### PROLOGUE: THE GAMESHOW (Ashman's rewrite, 2026-10-07)
+
+*Replaces the paragraph above in the game. Every line is his ★. One word was added: "I assure, it's just a simulation" became "I assure you", as a dropped word; put it back if it was meant.*
+
+*Meanwhile, in the physical world...*
+
+**THE SUMMONERS:** Looks like I found my winner! You're the chosen one!
+
+**PILOT:** Am I the only one here?
+
+**THE SUMMONERS:** I made sure that only the best can enter and win this contest. And you're the lucky winner!
+
+**PILOT:** Oh... Wow... I feel...special. Is the prize still on the table, because if not, I'm out.
+
+**THE SUMMONERS:** Oh yes, you'll certainly be rewarded as advertised. Do you agree to the contest, pilot? Do you have what it takes to be the Last Ship Sailing?
+
+**PILOT:** Well... I am desperate for cash, so might as well. Yes. Do I got what it takes? Pfft. Do you have to ask that for the gameshow or something?
+
+**THE SUMMONERS:** Of course you would accept. My contest is going to feel very real, Pilot, but I assure you, it's just a simulation. Are you ready?
+
+**PILOT:** Yeah... just have my money ready.
+
+*Black screen.*
 
 ### PROLOGUE: THE HANGAR
 
@@ -675,7 +742,7 @@ And you, pilot, were the Last Ship Sailing.
 - **Not built yet for the new story:**
   - In the world itself the Summoners still sit openly at their portal. Only the radar hides them. If they should also hide from sight until Xorzo finds them (cloaked, or out of view), that is a next step.
   - ~~A narrator in the dialogue system~~ Built v52.23: `narrator` (no name plate, italic) and `jimmy` are speakers now.
-  - The prologue's middle: the hack, the capture, the caverns, the contest slides. (The city and the gameshow are built, v52.23-27.) Claude's defaults, change freely: it plays on a brand-new campaign only, like the hangar opening, and every scene can be skipped (SKIP, Esc, or Start on a pad), city → gameshow → hangar. The city and the gameshow together run about 2.5 minutes.
+  - The prologue's last missing piece: the contest slides. (The city, the hack, the caverns and the gameshow are built, v52.23-43.) Claude's defaults, change freely: it plays on a brand-new campaign only, like the hangar opening, and every scene can be skipped (SKIP, Esc, or Start on a pad): city and hack → caverns → card → gameshow → hangar. It all runs about 6.5 minutes, the hack about 2.8 of them.
 - **Ideas (Claude, not decided):**
   - Jimmy's banner advertises the gameshow.
   - ~~Leg 7's "Enough games. Hold it here." as a pee joke~~ / ~~a potty-break line~~ - Ashman wrote the potty break (2026-10-07): "I'm outta here!" / "Can't hold your bladder?" / "Let's make him pee his pants!"
