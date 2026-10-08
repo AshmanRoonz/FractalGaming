@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "52.83";
+const LSS_BUILD = "52.88";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -3753,6 +3753,7 @@ const FreeFlightMode = {
       return;
     }
     this._deathT = 0;
+    try { _exTipsTick(dt); } catch (e) { if (!this._exTipErr) { this._exTipErr = true; console.warn('[exhibition] tips', e); } }   // (v52.84) Xorzo's Exhibition tips
     if (_campIsles.falling.length) { try { _campIslesFrame(dt); } catch (_) {} }   // (v49.56) islands it broke, still falling
     if (game._campGiant) { try { _campGiantTick(dt); }catch (e) { if (!game._campGiant || !game._campGiant._err) { if (game._campGiant) game._campGiant._err = true; console.warn('[campaign] giant', e); } } }
     if (game._campJourney) {
@@ -4749,6 +4750,7 @@ function _applyStartView() {
 function startFreeFlight(_tag) {
   LSS.MODE = _lssRoomModeChoose((_tag === 'cyberpunk' || _tag === 'earth') ? _tag : 'freeflight');   // (v43.19) a room has one mode
   try { _lssSyncEarthToTag(_lssRoomTag()); } catch (_) {}   // (v45.47)
+  try { game._exhib = (LSS.MODE === 'freeflight' && _lssRoomTag() === 'freeflight'); } catch (_) { game._exhib = false; }
   try { if (typeof _owReset === 'function') _owReset(); } catch (_) {}   // (v38.78) every free flight starts with six hostile cities
   try { document.body.classList.add('lss-freeflight'); } catch (_) {}   
   
@@ -4983,6 +4985,7 @@ function _campHubSetup() {
   try { document.body.classList.add('lss-freeflight'); } catch (_) {}
   try { game.thirdPerson = true; document.body.classList.add('lss-thirdperson'); } catch (_) {}
   game._campJourney = true;
+  game._exhib = false;   // (v52.84) the campaign's hub, not Exhibition (no Summoners' watch, no Exhibition tips)
   game._campRiftArmed = false;
   game._campFinale = false; game._campFinaleShown = false; game._campFinalVideo = 0;
   game._campV1Started = false;
@@ -5006,6 +5009,7 @@ function _campPickerSetup(selMap) {
   net.active = false; net.solo = true;
   game.testMode = true; game.raceNoTimer = true; game.currentRound = 1;
   game._campReentry = false; game._campReentryShown = false; game._liveSwap = false;
+  game._exhib = false;   // (v52.84)
   game.campaign = {
     sceneIndex: 0, waveIndex: 0, bossActive: false, phase: 'travel',
     unlockedLoadouts: _campLoadUnlocks(), bodyKey: 'VORTEX_BODY',
@@ -5323,7 +5327,7 @@ function _campHoardTerrainNav(bot, dt) {
   desiredY = desiredY * 0.75 + Math.max(loA, Math.min(hiA, tY)) * 0.25;
   desiredY = Math.max(loA, Math.min(hiA, desiredY));
   if (bot._riftGuard) desiredY = Math.max(Math.max(fc, fa) + Math.max(120, safe), Math.min(hiA, tY));
-  const _owBot = (bot._owCity != null);
+  const _owBot = (bot._owCity != null) || !!bot._owSum;
   if (_owBot) {
     const _oy = (tgt && tgt.position) ? tgt.position.y : ((tgt && tgt.isVector3) ? tgt.y : midNow);
     desiredY = Math.max(Math.max(fc, fa) + Math.max(120, safe), T._openTop ? _oy : Math.min(hiA, _oy));
@@ -7507,6 +7511,7 @@ function _applyModeClientSetup(mode) {
     net.freeflight = true;
     try { document.body.classList.add('lss-freeflight'); } catch (_) {}
     game.testMode = false; game.raceNoTimer = true; game.selectedMap = 'hub_overworld';
+    game._exhib = (_tag === 'freeflight');   // (v52.84) a room's EXHIBITION (see startFreeFlight)
     try {
       if (typeof player !== 'undefined' && player && typeof _ffaTeamForPeer === 'function' &&
           (typeof _lssRoomTag !== 'function' || _lssRoomTag() === 'freeflight')) {
@@ -26499,15 +26504,18 @@ const _HUB_ZONES = {
     ON: true,
     R0: 9000,          // full dusk at or inside this radius from the city centre
     R1: 16500,         // untouched daylight at or beyond
-    fog:  0x243258,    // the haze the towers stack into
-    zen:  0x141d3c,    // overhead
-    hor:  0x5b3a86,    // violet horizon glow behind the skyline
-    tint: 0x1a1f2e,    // terrain pulled toward asphalt, not blue-grass
-    tintK: 0.90,       // how far terrain goes toward tint at full dusk
-    fogMul: 1.95,      // thicker haze = more depth separation between towers
-    amb: 4.4, key: 0.14, fill: 0.30, rim: 0.40, hemi: 1.00,
+    fog:  0x33427a,    // the haze the towers stack into
+    zen:  0x1f2552,    // overhead
+    hor:  0x7a4cae,    // violet horizon glow behind the skyline
+    tint: 0x252b3f,    // terrain pulled toward asphalt, not blue-grass
+    tintK: 0.85,       // how far terrain goes toward tint at full dusk
+    fogMul: 1.6,       // thicker haze = more depth separation between towers
+    amb: 6.5, key: 0.30, fill: 0.50, rim: 0.60, hemi: 1.6,
     ambColor: 0x2a3a90,   // blue fill; a neutral one just reads as underexposed day
-    hemiSky: 0x3a4a9a, hemiGnd: 0x141a2e,
+    hemiSky: 0x4a4aa8, hemiGnd: 0x1c1f36,
+    cloudAmb: [0.24, 0.13, 0.42],
+    cloudDusk: 0x6a4aa0, cloudDuskK: 0.75,
+    cloudHaze: 0x4a3478, cloudHazeK: 0.5,
     bloomThreshold: 0.14, // from 0.4 — let the window banks actually bleed
     bloomStrength: 1.70,  // from 0.6; restored outside the zone (it was
     _base: null,       // daylight light intensities, captured while cw === 0
@@ -26785,6 +26793,113 @@ function _hzDuskLights() {
     }
   } catch (_) {}
 }
+
+const _STORM_NIGHT_ENV = {
+  top: 0x45366e, band: 0x9a6ad0, low: 0x1d6878,   // the cloud ceiling, the violet horizon band, the city's teal below
+  blobs: [[30, -12, 18, 0xff3ec8, 7], [-26, -10, -24, 0x2ef2ff, 8], [6, -16, -34, 0x58ff8f, 5], [0, 46, 0, 0xffd27a, 9]],   // [x, y, z, colour, radius] on _hkEnvBuild's 50 u sphere
+};
+const _DUSK_SHIPS = { on: true, env: 10, step: 0.04, scan: 0.25 };
+const _dsk = { rt: null, pm: null, tex: null, storm: null, day: null, mix: null, cw: -1, envK: -1, dayEnv: null,
+               mats: new Map(), scanT: 0, pMesh: null, bakes: 0 };
+function _stormNightTexels(out, w, h) {
+  const P = _STORM_NIGHT_ENV;
+  const top = new THREE.Color(P.top), band = new THREE.Color(P.band), low = new THREE.Color(P.low), c = new THREE.Color();
+  const blobs = P.blobs.map(([x, y, z, hex, s]) => { const L = Math.hypot(x, y, z); return { x: x / L, y: y / L, z: z / L, col: new THREE.Color(hex), a: Math.asin(Math.min(1, s / L)) }; });
+  const e = Math.PI / h;   // about a texel of soft edge
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const phi = ((x + 0.5) / w) * Math.PI * 2 - Math.PI, theta = ((y + 0.5) / h - 0.5) * Math.PI;
+      const dy = Math.sin(theta), ch = Math.cos(theta), dx = ch * Math.cos(phi), dz = ch * Math.sin(phi);
+      if (dy > 0.1) c.copy(band).lerp(top, Math.min(1, (dy - 0.1) / 0.6));
+      else c.copy(band).lerp(low, Math.min(1, (0.1 - dy) / 0.45));
+      for (const B of blobs) {
+        const ang = Math.acos(Math.max(-1, Math.min(1, dx * B.x + dy * B.y + dz * B.z)));
+        const k = 1 - _hzSmooth(B.a - e, B.a + e, ang);
+        if (k > 0) c.lerp(B.col, k);
+      }
+      const i = (y * w + x) * 4;
+      out[i] = c.r; out[i + 1] = c.g; out[i + 2] = c.b; out[i + 3] = 1;
+    }
+  }
+  return out;
+}
+function _dskBake(cw) {
+  const S = _dsk, w = 64, h = 32, n = w * h * 4;
+  if (!S.storm) S.storm = _stormNightTexels(new Float32Array(n), w, h);
+  if (!S.day) S.day = new Float32Array(n);
+  if (!_wxDayEnvTexels(S.day, w, h)) return false;
+  if (!S.mix) S.mix = new Float32Array(n);
+  const ei = (typeof scene.environmentIntensity === 'number') ? scene.environmentIntensity : 1;
+  const a = ei * (1 - cw), b = (+_DUSK_SHIPS.env || 0) * cw, M = S.mix, D = S.day, T = S.storm;
+  for (let i = 0; i < n; i += 4) { M[i] = D[i] * a + T[i] * b; M[i + 1] = D[i + 1] * a + T[i + 1] * b; M[i + 2] = D[i + 2] * a + T[i + 2] * b; M[i + 3] = 1; }
+  if (!S.tex) { S.tex = new THREE.DataTexture(M, w, h, THREE.RGBAFormat, THREE.FloatType); S.tex.mapping = THREE.EquirectangularReflectionMapping; }
+  S.tex.needsUpdate = true;
+  if (!S.pm) S.pm = new THREE.PMREMGenerator(renderer);
+  const rt = S.pm.fromEquirectangular(S.tex, S.rt || null);   // into the same target from the second bake on
+  if (S.rt && rt !== S.rt) { const old = S.rt; S.rt = rt; for (const m of S.mats.keys()) m.envMap = rt.texture; try { old.dispose(); } catch (_) {} }
+  else S.rt = rt;
+  S.cw = cw; S.bakes++;
+  return true;
+}
+function _dskPatch(m) {
+  if (!m || !m.isMeshStandardMaterial) return;
+  if (m.transparent || /glas/i.test(m.name || '')) return;
+  const S = _dsk;
+  if (S.mats.has(m)) { if (m.envMap === S.rt.texture && m.envMapIntensity !== 1) m.envMapIntensity = 1; return; }   // a skin re-applied its own number
+  if (m.envMap) return;   // an env of its own: not ours to take
+  S.mats.set(m, m.envMapIntensity);
+  m.envMap = S.rt.texture; m.envMapIntensity = 1;
+}
+function _dskScan(root) {
+  if (!root || !root.traverse) return;
+  root.traverse((o) => {
+    if (!o.isMesh || !o.material) return;
+    if (Array.isArray(o.material)) { for (const m of o.material) _dskPatch(m); } else _dskPatch(o.material);
+  });
+}
+function _dskScanAll() {
+  try { if (player && player.mesh) _dskScan(player.mesh); } catch (_) {}
+  const E = (game && game.entities) || [];
+  for (let i = 0; i < E.length; i++) {
+    const e = E[i];
+    if (!e || !e.mesh || e.isOwBoss || e.isEarthLife) continue;
+    if ((typeof Bot !== 'undefined' && e instanceof Bot) || e.peerId || e.isOwCarrier || e.isHubTraffic || e.isCarrier) _dskScan(e.mesh);
+  }
+}
+function _dskOff() {
+  const S = _dsk;
+  for (const [m, k] of S.mats) { if (S.rt && m.envMap === S.rt.texture) m.envMap = null; m.envMapIntensity = k; }
+  S.mats.clear(); S.cw = -1; S.pMesh = null;
+}
+function _duskShipsTick(dt) {
+  const K = _DUSK_SHIPS, S = _dsk;
+  let cw = 0;
+  try { const D = _HUB_ZONES.DUSK; cw = (D && D.ON) ? (+D._cw || 0) : 0; } catch (_) {}
+  let ok = false;
+  try {
+    const T = game.sandwichTerrain, st = game.state;
+    ok = !!(K.on && cw > 0.002 && !game._campPrologue && !game._cavern && T && T.ON && T.biome === 'mossy' && _lssHubWorld() &&
+            (st === 'playing' || st === 'warmup' || st === 'roundEnd' || (typeof _cinematic !== 'undefined' && _cinematic.active)) &&
+            typeof _WX !== 'undefined' && _WX.on && _WX.dayEnv && scene.environment === _WX.dayEnv);
+  } catch (_) { ok = false; }
+  if (!ok) { if (S.mats.size || S.cw >= 0) _dskOff(); return; }
+  const want = (cw > 0.995) ? 1 : cw, envK = +K.env || 0;
+  if (!S.rt || S.cw < 0 || Math.abs(want - S.cw) >= (K.step || 0.04) || (want === 1 && S.cw !== 1) || S.envK !== envK || S.dayEnv !== _WX.dayEnv) {
+    S.envK = envK; S.dayEnv = _WX.dayEnv;
+    if (!_dskBake(want)) return;
+  }
+  S.scanT -= dt;
+  const pm = (typeof player !== 'undefined' && player) ? player.mesh : null;
+  if (S.scanT <= 0) { S.scanT = K.scan || 0.25; _dskScanAll(); S.pMesh = pm; }
+  else if (pm && pm !== S.pMesh) { _dskScan(pm); S.pMesh = pm; }   // a new hull of yours is lit on its first frame
+}
+try {
+  if (typeof window !== 'undefined') {
+    window.__duskShips = _DUSK_SHIPS;
+    _DUSK_SHIPS.state = () => ({ on: _DUSK_SHIPS.on, active: _dsk.mats.size > 0, cw: +_dsk.cw.toFixed(3), mats: _dsk.mats.size, bakes: _dsk.bakes,
+                                 env: _DUSK_SHIPS.env, sceneEnvI: (typeof scene !== 'undefined' && scene) ? scene.environmentIntensity : null });
+  }
+} catch (_) {}
 
 const _HZ_CAVERN = { portals: null, DIST: 21500, ALT: 1400, COOLDOWN: 120, coolBySector: {}, _pre: false, _returnPos: null };
 function _hzRoomShared() {
@@ -36418,6 +36533,7 @@ const _HC_TRAF_HUNT_R = 4200;     // units a pilot-friendly hot ship looks for a
 const _HC_TRAF_GRUDGE = 14;   // (v43.04) seconds a traffic ship keeps hunting whoever shot it
 const _hcTrafZeroV = new THREE.Vector3();
 function _hcTrafTarget(e) {
+  if (e._sumCall) { try { const g = _owSumCallTarget(); if (g) return g; } catch (_) {} }
   try {
     const g = e._foe;
     if (g && (game.time - (e._foeT || -99)) < _HC_TRAF_GRUDGE && _hcTrafTargetUp(g) && g.position &&
@@ -40349,7 +40465,9 @@ const OW = {
           dist: 9800, solidify: 2.6, touch: 0.42 },
   NET: { hz: 4 },
   TEAM0: 9600,
-  XP: { carrier: 5, boss: 30 },
+  XP: { carrier: 5, boss: 30, sum: 10 },
+  SUM: { on: true, team: 9650, up: 700, orbitR: 1500, bow: 520, beam: 620, rise: 220, wingHold: 260,
+         aggro: 45, chase: 15000, hpX: 3, shX: 3, kitEvery: 8, escorts: 2, respawn: 45, skySecs: 7, callEvery: 1, callR: 3500 },
   NAMES: { volcanic: 'EMBER REACH', goldmine: 'GILT HOLLOW', crystalcave: 'PRISM VAULT', snow: 'FROSTMARCH', rocky: 'CAIRN DEEP', brokensim: 'NULL SECTOR' },
   PAL: {
     volcanic:    { facade: [[0.16,0.07,0.06],[0.20,0.09,0.07],[0.12,0.06,0.06],[0.22,0.12,0.09]], neon: [[1.0,0.36,0.10],[1.0,0.62,0.16],[1.0,0.22,0.18],[1.0,0.80,0.30]], metal: [[0.18,0.12,0.10],[0.14,0.10,0.09],[0.22,0.16,0.12]], beam: 0xff6a2a, ground: [0.62,0.50,0.46],
@@ -40367,6 +40485,7 @@ const OW = {
   },
   cities: null, orphans: [], dying: [], boss: null, bossDone: false, _sunV: null,
   _auth: null, _sendT: 0, _lastPkt: 0, _fieldUI: -1,
+  sum: null,   // (v52.84) the Summoners' state for this flight (_owSumState); null = a fresh game, they come back
 };
 const _owV1 = new THREE.Vector3(), _owV2 = new THREE.Vector3(), _owV3 = new THREE.Vector3();
 const _owQ = new THREE.Quaternion();
@@ -40374,7 +40493,7 @@ const _OW_NEG_X = new THREE.Vector3(-1, 0, 0);
 const _OW_CLEAR_DIRS = [new THREE.Vector3(1, 0, 0), new THREE.Vector3(-1, 0, 0), new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 0, -1), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, -1, 0)];
 function _owK() { return window.__cities || (window.__cities = {}); }
 function _owBanner(t, s) { try { if (window.Overlays && Overlays.banner) Overlays.banner(t, s || ''); } catch (_) {} }
-function _owTowerTop(c) { return c.padY + c.site.genome.towerH * 0.75 + 320; }
+function _owTowerTop(c) { return (c.stationY != null) ? c.stationY : c.padY + c.site.genome.towerH * 0.75 + 320; }   // (v52.84) the Summoners' station has its own height
 function _owNet() { return !!(typeof net !== 'undefined' && net && net.active && net.sendEvent); }
 function _owElect() {
   if (typeof net === 'undefined' || !net || !net.active) return true;
@@ -40642,6 +40761,7 @@ function _owAggroEnt(attacker) {
 }
 function _owAggro(c, attacker) {
   if (!c) return;
+  if (c.isSum) { try { _owSumHit(null, attacker); } catch (_) {} return; }   // (v52.84) the Summoners' carrier: the whole group wakes (it owns c._aggro)
   const ent = _owAggroEnt(attacker); if (!ent) return;
   if (ent.team != null && ent.team === (c.owner != null ? c.owner : OW.TEAM0 + c.idx)) return;   // our own side
   c._aggro = { ent, t: game.time || 0 };
@@ -40711,6 +40831,410 @@ function _owFleetTick(c, dt) {
     if (c.respawnT <= 0) { c.respawnT = OW.RESPAWN; _owReviveFleet(c, car.position); }
   } else if (!dead) c.respawnT = OW.RESPAWN * 0.6;
 }
+const _owSumV = new THREE.Vector3();
+const _OW_SUM_ESCORTS = [['midknight', 'SLAYER'], ['knifehand', 'TRACKER']];   // [hull, loadout] per escort
+function _owSumOn() {
+  try {
+    if (!OW.SUM.on || typeof game === 'undefined' || !game || !game._exhib) return false;
+    if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight') return false;
+    if (game._campJourney || game._campGiant || game._campPrologue || game._campFinale) return false;
+    if ((game._cyber && game._cyber.armed) || (game._earth && game._earth.armed)) return false;
+    return true;
+  } catch (_) { return false; }
+}
+function _owSumState() {
+  return OW.sum || (OW.sum = { dead: false, failed: false, pending: false, tok: 0, lead: null, escorts: [], car: null, carDead: false,
+    angry: false, call: null, angryT: 0, lastTeam: null, callT: 0, kitT: 0, kitI: 0, kits: null, kitKey: null, hp: null,
+    respawnT: 0, liftT: 0, c: null, orbA: 0, vel: null, face: null, netAngry: false, _everRx: false });
+}
+function _owSumBeaten() { const S = OW.sum; return !!(S && (S.dead || S.failed)); }
+function _owSumAngry() { const S = OW.sum; return !!(S && !S.dead && (S.angry || S.netAngry)); }
+function _owSumCity() {
+  const S = _owSumState();
+  if (!S.c) S.c = { idx: 'sum', isSum: true, name: 'THE SUMMONERS', x: HUB_CITY.x, z: HUB_CITY.z, R: OW.RADIUS, padY: HUB_CITY.padY,
+                    stationY: HUB_CITY.padY + HUB_CITY.genome.towerH + OW.SUM.up, orbitR: OW.SUM.orbitR,
+                    site: { genome: HUB_CITY.genome }, owner: null, fleet: [], _aggro: null };
+  return S.c;
+}
+function _owSumDressCarrier(car) {
+  car._owSum = true;
+  car.loadout = { name: "THE SUMMONERS' CARRIER" };
+}
+function _owSumDressLead(b) {
+  b._owSum = 2;
+  try { _campSetShipName(b, 'THE SUMMONERS'); } catch (_) {}
+  const K = OW.SUM;
+  const DN = (typeof CHASSIS !== 'undefined' && CHASSIS.DREADNOUGHT) ? CHASSIS.DREADNOUGHT : { maxHealth: 12500, maxShield: 5000 };
+  b.maxHealth = Math.round(DN.maxHealth * K.hpX); b.maxShield = Math.round(DN.maxShield * K.shX);
+  b.health = b.maxHealth; b.shield = b.maxShield;
+  try {
+    if (b.mesh && typeof _addBasicRim === 'function') b.mesh.traverse((o) => {
+      if (o && o.isMesh && o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => { _addBasicRim(m, 0xc8b0ff, 1.1); m.needsUpdate = true; });
+    });
+  } catch (_) {}
+  _owSumWarm(b);
+}
+function _owSumWarm(b) {
+  const m = b && b.mesh; if (!m) return;
+  const show = () => {
+    if (b.mesh !== m) return;
+    m.visible = true;
+    try { if (typeof _warmDrawRoot === 'function' && typeof postFX !== 'undefined' && postFX && postFX.rtScene) _warmDrawRoot(m, postFX.rtScene, false); } catch (_) {}
+  };
+  let job = null;
+  try {
+    const pRT = renderer.getRenderTarget();
+    try {
+      if (typeof postFX !== 'undefined' && postFX && postFX.rtScene) renderer.setRenderTarget(postFX.rtScene);
+      if (renderer.compileAsync && typeof camera !== 'undefined' && camera) job = renderer.compileAsync(m, camera, scene);   // its compile() runs NOW, under rtScene
+    } finally { renderer.setRenderTarget(pRT); }
+  } catch (_) {}
+  if (job && typeof job.then === 'function') { m.visible = false; Promise.race([job, new Promise((r) => setTimeout(r, 4000))]).then(show, show); }
+  else show();
+}
+function _owSumUp(g) {
+  if (!g || !g.position) return false;
+  if (typeof player !== 'undefined' && g === player) return player.shipState !== 'dead';
+  if (g.peerId) { try { return !!g.alive && (net.networkPlayers || []).indexOf(g) >= 0; } catch (_) { return false; } }
+  return g.alive !== false && game.entities.indexOf(g) >= 0;
+}
+function _owSumAcquire() {
+  const S = OW.sum; if (!S || !S.angry || S.dead) return null;
+  const g = S.call;
+  if (!_owSumUp(g)) return null;
+  if (Math.hypot(g.position.x - HUB_CITY.x, g.position.z - HUB_CITY.z) > OW.SUM.chase) return null;
+  return g;
+}
+function _owSumCallTarget() { const S = OW.sum; return (S && S.angry && !S.dead && _owSumUp(S.call)) ? S.call : null; }
+function _owSumHit(ship, attacker) {
+  const S = OW.sum; if (!S || S.dead || !_owSumOn() || !_owAuthority()) return;
+  const team = _owKillerTeam(attacker);
+  if (team == null || team === OW.SUM.team) return;
+  const ent = _owOwnerEntity(team);
+  if (!_owSumUp(ent)) return;   // stray fire (a city ship's bolt, a monster, a hostile city's fleet) wakes nobody
+  S.lastTeam = team;
+  const was = S.angry;
+  S.angry = true; S.call = ent; S.angryT = game.time || 0;
+  if (!was) {
+    S.callT = 0; S.kitT = OW.SUM.kitEvery;   // the city is called this frame, and the flagship arms at once
+    _owLog('sum-wake', { by: _owDesc(attacker), team: team });
+    _owAnnounce({ k: 'sumwake', tm: team });
+  }
+}
+function _owSumCallCity(on, at) {
+  let n = 0;
+  try {
+    const R = +OW.SUM.callR || 0;
+    for (const s of _HC_TRAF.ships) {
+      const e = s && s.ent; if (!e) continue;
+      if (on) {
+        if (!e.alive || s.lastSeg === 5) continue;   // destroyed, or warped out: not in the city to hear it
+        if (!e._sumCall) {
+          if (R > 0 && at && e.position) { const dx = e.position.x - at.x, dz = e.position.z - at.z; if (dx * dx + dz * dz > R * R) continue; }
+          e._sumCall = true; e._sumWasAggro = !!e.aggro; e._sumTeam0 = e.team; e.team = OW.SUM.team;
+          e._fireT = Math.min((e._fireT != null) ? e._fireT : 1.5, 0.6 + Math.random() * 1.8);   // they open up at once, not in unison
+        }
+        e.aggro = true; n++;
+      } else if (e._sumCall) {
+        e._sumCall = false; n++;
+        if (e._sumTeam0 != null) { e.team = e._sumTeam0; e._sumTeam0 = null; }
+        if (!e._sumWasAggro) { e.aggro = false; e._foe = null; e._foeT = 0; e._fireT = 1.5; e._dmgLog = null; }
+      }
+    }
+  } catch (_) {}
+  return n;
+}
+function _owSumCalm(why) {
+  const S = OW.sum; if (!S || !S.angry) return;
+  S.angry = false; S.call = null;
+  if (S.c) S.c._aggro = null;
+  const n = _owSumCallCity(false);
+  const lead = S.lead; if (lead && lead._escBase) { lead.loadout = Object.assign({}, lead._escBase); S.kitKey = null; }
+  _owLog('sum-calm', { why: why, traffic: n });
+}
+function _owSumKit(S, bot) {
+  if (!S.kits || !S.kits.length) S.kits = Object.keys(LOADOUTS).sort(() => Math.random() - 0.5);
+  const k = S.kits[S.kitI % S.kits.length]; S.kitI++;
+  const L = LOADOUTS[k]; if (!L || !bot._escBase) return;
+  bot.loadout = Object.assign({}, bot._escBase, { name: 'THE SUMMONERS · ' + k, abilities: L.abilities, core: L.core });
+  bot.abilityCooldowns = [0.6, 0.6, 0.6];
+  S.kitKey = k;
+  try {
+    const col = (LSS.CLASS_COLORS && LSS.CLASS_COLORS[k] != null) ? LSS.CLASS_COLORS[k] : 0xffcf6a;
+    if (typeof v8SpawnSparks === 'function') v8SpawnSparks(bot.position, 22, 1.6, 460, col, 0xffffff);
+    if (typeof spawnDynamicLight === 'function') spawnDynamicLight(bot.position, col, 2.5, 700, 0.3);
+  } catch (_) {}
+}
+function _owSumMakeBot(S, key, lk, role, i) {
+  const c = _owSumCity(), K = OW.SUM;
+  const anchor = (S.car && S.car.alive) ? S.car.position : _owSumV.set(c.x + K.orbitR, c.stationY, c.z);
+  const p = anchor.clone(); p.y += K.rise + 140 * i; p.x += (i - 1) * 700;
+  const b = new Bot(lk, K.team, (typeof _campNextBotId === 'function') ? _campNextBotId() : (9790 + i), key);
+  b._owSum = role; b._owSumSlot = i;
+  b._riftGuard = true;   // the hub terrain-nav path (see Bot.update), like the city fleets
+  b._acquireCombatTarget = _owSumAcquire;   // instance override: the prototype (and PvP) is untouched
+  b.position.copy(p); if (b.mesh) b.mesh.position.copy(p);
+  b._formationTarget = p.clone(); b._formationActive = true;
+  if (role === 2) {
+    _owSumDressLead(b);
+    if (S.hp && S.hp.lead) { b.health = Math.max(1, Math.min(b.maxHealth, S.hp.lead[0])); b.shield = Math.max(0, Math.min(b.maxShield, S.hp.lead[1])); }
+    b.coreMeter = 100;   // "fully loaded"
+    try { _campBoostSpeed(b, 1.33); } catch (_) {}
+    b._escBase = Object.assign({}, b.loadout);
+  } else {
+    try { _campSetShipName(b, key); _campBoostSpeed(b, 1.2); } catch (_) {}
+  }
+  game.entities.push(b);
+  try { if (typeof spawnFXBurst === 'function') spawnFXBurst('cloud', p, 70, 0.7, { startScale: 0.3, endScale: 1.2 }); } catch (_) {}
+  return b;
+}
+function _owSumSpawn() {
+  const S = _owSumState(), K = OW.SUM;
+  if (S.pending || S.dead || S.failed || typeof Bot === 'undefined' || typeof loadHoardModel !== 'function') return;
+  for (const b of S.escorts) _owSumRemove(b, false);   // never two wings (a spawn whose flagship threw)
+  S.escorts = [];
+  S.pending = true;
+  const tok = S.tok = (S.tok | 0) + 1;
+  const c = _owSumCity();
+  if (!S.carDead && !(S.car && S.car.alive)) {
+    const at = new THREE.Vector3(c.x + K.orbitR, c.stationY, c.z);
+    const car = new OwCarrier(c, K.team, at, 'home');
+    _owSumDressCarrier(car);
+    if (S.hp && S.hp.car > 0) car.health = Math.min(car.maxHealth, S.hp.car);
+    game.entities.push(car); OW.orphans.push(car); S.car = car;
+    _owWarpFx(at, 800);
+    _owSend({ type: 'ow_evt', k: 'warp', p: [Math.round(at.x), Math.round(at.y), Math.round(at.z)], r: 800 });
+  }
+  const esc = _OW_SUM_ESCORTS.slice(0, Math.max(0, K.escorts | 0));
+  const keys = [NEMESIS_SHIP].concat(esc.map((e) => e[0]));
+  Promise.all(keys.map((k) => loadHoardModel(k))).then((protos) => {
+    if (OW.sum !== S || S.tok !== tok) return;
+    if (S.dead || !_owAuthority() || !_owSumOn()) { S.pending = false; return; }
+    if (!protos[0]) { S.pending = false; S.failed = true; _owLog('sum-fail', { why: 'no hull' }); _owBossCheck(); return; }
+    let i = 0;
+    const one = () => {
+      if (OW.sum !== S || S.tok !== tok || S.dead) return;
+      if (protos[i]) {
+        try {
+          if (i === 0) S.lead = _owSumMakeBot(S, keys[0], 'VORTEX', 2, 0);
+          else S.escorts.push(_owSumMakeBot(S, keys[i], esc[i - 1][1], 1, i));
+        } catch (e) { console.warn('[summoners] spawn threw:', e); }
+      }
+      i++;
+      if (i < keys.length) { setTimeout(one, 140); return; }
+      S.pending = false;
+      _owLog('sum+', { lead: !!S.lead, escorts: S.escorts.length, car: !!(S.car && S.car.alive), hp: S.lead ? Math.round(S.lead.health) : 0 });
+      try { if (typeof _botSendRoster === 'function') _botSendRoster(); } catch (_) {}
+    };
+    one();
+  }).catch(() => { if (OW.sum === S && S.tok === tok) { S.pending = false; S.failed = true; } });
+}
+function _owSumRemove(e, warp) {
+  if (!e) return;
+  try {
+    if (warp && e.alive && e.position) {
+      const at = e.position.clone();
+      if (e.isOwCarrier) { _owWarpFx(at, 900); _owSend({ type: 'ow_evt', k: 'warp', p: [Math.round(at.x), Math.round(at.y), Math.round(at.z)], r: 900 }); }
+      else if (typeof warpOutFx === 'function') warpOutFx(at, 220);
+    }
+  } catch (_) {}
+  if (e.isOwCarrier) { e.alive = false; try { e._chargeEnd(); } catch (_) {} }
+  try { e.destroy(); } catch (_) {}
+  const i = game.entities.indexOf(e); if (i >= 0) game.entities.splice(i, 1);
+  const j = OW.orphans.indexOf(e); if (j >= 0) OW.orphans.splice(j, 1);
+}
+function _owSumDispose() {
+  const S = OW.sum; if (!S) return;
+  const lead = S.lead, car = S.car;
+  S.hp = { lead: (lead && lead.alive) ? [lead.health, lead.shield] : ((S.hp && S.hp.lead) || null),
+           car: (car && car.alive) ? car.health : ((S.hp && S.hp.car) || 0) };
+  if (S.angry) _owSumCalm('reset');
+  S.tok = (S.tok | 0) + 1;   // a spawn still loading lands nowhere
+  for (const b of [lead].concat(S.escorts)) _owSumRemove(b, false);
+  if (car) _owSumRemove(car, false);
+  S.lead = null; S.escorts = []; S.car = null; S.pending = false;
+}
+function _owSumCarrierDied(car) {
+  const S = OW.sum;
+  const killerTeam = _owKillerTeam(car._lastAttacker);
+  _owLog('sum-carrier-', { id: car.id, by: _owDesc(car._lastAttacker), killerTeam: killerTeam });
+  const oi = OW.orphans.indexOf(car); if (oi >= 0) OW.orphans.splice(oi, 1);
+  OW.dying.push(car);   // in the state packet (alive 0) while the blast chain plays on every peer
+  setTimeout(() => { try { car.destroy(); } catch (_) {} }, 3600);
+  if (S) { S.carDead = true; if (S.car === car) S.car = null; if (S.hp) S.hp.car = 0; }
+  if (killerTeam != null && typeof player !== 'undefined' && player && killerTeam === player.team) {
+    try { addKillFeed('You', car.loadout.name); showKillMarker(); } catch (_) {}
+    try { if (typeof _aegisAwardXp === 'function') _aegisAwardXp(AEGIS.XP_PER_KILL * OW.XP.carrier); } catch (_) {}
+    player.kills = (player.kills | 0) + 1;
+  } else if (killerTeam != null) { try { addKillFeed(_owTeamName(killerTeam), car.loadout.name); } catch (_) {} }
+}
+function _owSumDied(lead) {
+  const S = OW.sum; if (!S || S.dead) return;
+  S.dead = true; S.liftT = 0;
+  const team = S.lastTeam;
+  const mine = (team != null && typeof player !== 'undefined' && player && team === player.team);
+  _owSumCalm('dead');
+  _owLog('sum-dead', { by: team, mine: mine });
+  if (mine) { try { if (typeof _aegisAwardXp === 'function') _aegisAwardXp(AEGIS.XP_PER_KILL * OW.XP.sum); } catch (_) {} }
+  _owAnnounce({ k: 'sumdead', tm: team });
+  const rest = S.escorts.slice(), car = S.car;
+  S.escorts = []; S.car = null; S.lead = null; S.hp = null;
+  for (const b of rest) _owSumRemove(b, true);
+  if (car && car.alive) _owSumRemove(car, true);
+  setTimeout(() => { try { _owSumRemove(lead, false); } catch (_) {} }, 4000);
+  _owBossCheck();
+}
+function _owSumTick(dt) {
+  const S = OW.sum, K = OW.SUM, now = game.time || 0;
+  const c = _owSumCity();
+  const lead = S.lead;
+  if (lead && !lead.alive) { _owSumDied(lead); return; }
+  if ((lead && game.entities.indexOf(lead) < 0) || S.escorts.some((b) => b && game.entities.indexOf(b) < 0)) { _owSumDispose(); return; }
+  if (S.car && !S.car.alive) S.car = null;
+  const car = S.car;
+  if (S.angry) {
+    const up = _owSumUp(S.call);
+    if (!up || now - S.angryT > K.aggro) _owSumCalm(up ? 'quiet' : 'down');
+  }
+  const tgt = _owSumAcquire();   // whom they fight right now (null: calm, or the pilot is out past `chase`)
+  c._aggro = tgt ? { ent: tgt, t: now } : null;   // the carrier's hunt (_owAggroTarget) is the group's anger
+  if (S.angry) {
+    S.callT -= dt;
+    if (S.callT <= 0) { S.callT = K.callEvery; const g = _owSumCallTarget(); if (g) _owSumCallCity(true, g.position); }   // (v52.86) the ships near the pilot, as they go
+    if (lead && tgt) { S.kitT += dt; if (S.kitT >= K.kitEvery) { S.kitT = 0; _owSumKit(S, lead); } }
+  }
+  let ax, ay, az, fx, fz, vel, hx = 0, hz = 0;
+  if (car) {
+    ax = car.position.x; ay = car.position.y; az = car.position.z; fx = car.dir.x; fz = car.dir.z; vel = car.velocity;
+    hx = car.half ? car.half.x : 1200; hz = car.half ? car.half.z : 450;
+  } else {
+    S.orbA += dt * (60 / Math.max(1, K.orbitR));
+    ax = c.x + Math.cos(S.orbA) * K.orbitR; ay = c.stationY; az = c.z + Math.sin(S.orbA) * K.orbitR;
+    fx = -Math.sin(S.orbA); fz = Math.cos(S.orbA);
+    vel = S.vel || (S.vel = new THREE.Vector3()); vel.set(fx * 60, 0, fz * 60);
+  }
+  const fl = Math.hypot(fx, fz) || 1; fx /= fl; fz /= fl;
+  const face = S.face || (S.face = new THREE.Vector3()); face.set(fx, 0, fz);
+  const ships = [lead].concat(S.escorts);
+  for (let i = 0; i < ships.length; i++) {
+    const b = ships[i]; if (!b || !b.alive) continue;
+    if (tgt) {   // fighting: off the wing, onto the pilot
+      b._formationActive = false; b._wingHold = 0; b._wingHolding = false;
+      b.combatTarget = tgt;
+      if (!b.aiTarget) b.aiTarget = new THREE.Vector3();
+      b.aiTarget.copy(tgt.position);
+      continue;
+    }
+    if (b.combatTarget) b.combatTarget = null;
+    if (!b._formationTarget) b._formationTarget = new THREE.Vector3();
+    if (i === 0) b._formationTarget.set(ax + fx * (hx + K.bow), ay + K.rise, az + fz * (hx + K.bow));   // off the bow
+    else {   // off a beam each, a little aft
+      const sd = (i === 1) ? 1 : -1, off = hz + K.beam;
+      b._formationTarget.set(ax - fz * sd * off - fx * hx * 0.25, ay + K.rise * 0.6, az + fx * sd * off - fz * hx * 0.25);
+    }
+    b._formationActive = true; b._wingHold = K.wingHold; b._wingFaceDir = face; b._wingVel = vel;
+  }
+  let dead = 0; for (const b of S.escorts) if (b && !b.alive) dead++;
+  if (dead && car) {
+    S.respawnT -= dt;
+    if (S.respawnT <= 0) {
+      S.respawnT = K.respawn;
+      for (let i = 0; i < S.escorts.length; i++) {
+        const b = S.escorts[i]; if (!b || b.alive) continue;
+        const sd = i ? -1 : 1, off = hz + K.beam;
+        _owReviveBot(b, ax - fz * sd * off, ay + K.rise, az + fx * sd * off);
+      }
+    }
+  } else if (!dead) S.respawnT = K.respawn;
+}
+function _owSumSkyTick(dt) {
+  const S = OW.sum; if (!S || !S.dead) return;
+  const secs = Math.max(0.1, OW.SUM.skySecs);
+  if (S.liftT < secs + 1) S.liftT += dt;
+  const u = Math.min(1, S.liftT / secs);
+  game._skyLiftK = 1 - u * u * (3 - 2 * u);
+}
+function _owSumFrame(dt, auth, playing) {
+  if (!_owSumOn()) { if (auth && OW.sum && (OW.sum.lead || OW.sum.escorts.length || OW.sum.car)) _owSumDispose(); return; }
+  const S = _owSumState();
+  _owSumSkyTick(dt);
+  if (!auth || S.dead || S.failed) return;
+  if (!S.lead && !S.pending && playing) _owSumSpawn();
+  if (S.lead || S.car) _owSumTick(dt);
+}
+function _owSumAdopt() {
+  const S = OW.sum; if (!S) return;
+  S.lead = null; S.escorts = []; S.car = null; S.pending = false;
+  S.angry = false; S.call = null; S.netAngry = false;   // the old authority's grudge left with it
+  for (const b of game.entities) {
+    if (!(b instanceof Bot) || !b._owSum) continue;
+    b.isProxy = false; b._netX = null; if (b.velocity) b.velocity.set(0, 0, 0);
+    b._acquireCombatTarget = _owSumAcquire; b._riftGuard = true;
+    if (b._owSum === 2) { S.lead = b; if (!b._escBase) b._escBase = Object.assign({}, b.loadout); }
+    else S.escorts.push(b);
+  }
+  for (const car of OW.orphans) if (car && car._owSum && car.alive) S.car = car;
+}
+function _owSumDemote() {
+  const S = OW.sum; if (!S) return;
+  if (S.angry) _owSumCalm('handover');
+  for (const b of [S.lead].concat(S.escorts)) { if (b && !b.isProxy) _owSumRemove(b, false); }
+  S.lead = null; S.escorts = []; S.car = null; S.pending = false;
+  S.tok = (S.tok | 0) + 1;
+}
+const EX_TIPS = { on: true, firstDelay: 14, gap: [28, 40], idleMin: 5 };
+const EX_TIP_LINES = [
+  'Take control of all 7 cities to fight a giant leviathan.',
+  'Killing ships and monsters gives you Aegis XP to power up your ship. Try a rift portal challenge!',
+];
+function _exTipsTick(dt) {
+  if (!EX_TIPS.on || !_owSumOn() || game._cavern) return;
+  try { if (typeof input !== 'undefined' && input && input.campTips === false) return; } catch (_) {}
+  try { if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return; } catch (_) {}
+  if (typeof player === 'undefined' || !player || player.shipState === 'dead') return;
+  const D = window.CampDialogue; if (!D || !D.tip || !D.idleFor) return;
+  const T = game._exTips || (game._exTips = { t: 0, order: EX_TIP_LINES.map((_, i) => i), nextAt: EX_TIPS.firstDelay, retried: {}, shown: [] });
+  T.t += dt;
+  if (!T.order.length || T.t < T.nextAt || D.idleFor() < EX_TIPS.idleMin) return;
+  const i = T.order[0];
+  const onCut = (fr) => {
+    if (!(fr < CAMP_TIPS.cutRead) || T.retried[i]) return;
+    T.retried[i] = true; T.shown.push('cut:' + i);
+    T.order.unshift(i); T.nextAt = Math.min(T.nextAt, T.t);   // due now: it still waits idleMin of quiet
+  };
+  if (D.tip(EX_TIP_LINES[i], onCut)) {
+    T.order.shift(); T.shown.push(i);
+    const g = EX_TIPS.gap; T.nextAt = T.t + g[0] + Math.random() * (g[1] - g[0]);
+  }
+}
+try {
+  if (typeof window !== 'undefined') {
+    window.__exTips = {
+      cfg: EX_TIPS, lines: EX_TIP_LINES,
+      state() { const T = game._exTips; return { on: _owSumOn(), t: T ? +T.t.toFixed(1) : 0, nextAt: T ? +T.nextAt.toFixed(1) : null, left: T ? T.order.slice() : null, shown: T ? T.shown.slice() : [] }; },
+      next() { const D = window.CampDialogue; return !!(D && D.tip(EX_TIP_LINES[(Math.random() * EX_TIP_LINES.length) | 0])); },
+    };
+    const sumInfo = () => {
+      const S = OW.sum, c = S && S.c;
+      const pos = (e) => e && e.position ? [Math.round(e.position.x), Math.round(e.position.y), Math.round(e.position.z)] : null;
+      const ship = (b) => b ? { alive: !!b.alive, hp: Math.round(b.health), sh: Math.round(b.shield || 0), max: Math.round(b.maxHealth), at: pos(b),
+                                form: !!b._formationActive, holding: !!b._wingHolding, tgt: b.combatTarget ? _owDesc(b.combatTarget) : null, proxy: !!b.isProxy } : null;
+      let called = 0, hot = 0;
+      try { for (const s of _HC_TRAF.ships) { if (s && s.ent && s.ent._sumCall) called++; if (s && s.ent && s.ent.aggro && s.ent.alive) hot++; } } catch (_) {}
+      return { on: _owSumOn(), auth: _owAuthority(), exhib: !!game._exhib, state: S ? { dead: S.dead, failed: S.failed, pending: S.pending, angry: S.angry, netAngry: S.netAngry,
+               call: S.call ? _owDesc(S.call) : null, lastTeam: S.lastTeam, kit: S.kitKey, carDead: S.carDead, liftT: +(S.liftT || 0).toFixed(1) } : null,
+               lead: ship(S && S.lead), escorts: S ? S.escorts.map(ship) : [],
+               car: (S && S.car) ? { id: S.car.id, alive: S.car.alive, hp: Math.round(S.car.health), at: pos(S.car), hunting: !!(c && c._aggro), proxy: !!S.car.isProxy } : null,
+               sky: game._skyLiftK, traffic: { called, hot } };
+    };
+    window.__summoners = sumInfo;
+    sumInfo.cfg = OW.SUM;
+    sumInfo.provoke = () => { const S = OW.sum; if (!S || S.dead) return 'not here'; _owSumHit(S.lead, 'player'); return sumInfo(); };
+    sumInfo.calm = () => { _owSumCalm('debug'); return sumInfo(); };
+    sumInfo.kill = () => { const S = OW.sum, b = S && S.lead; if (!b || !b.alive) return 'no flagship'; b.spawnProtection = 0; b.shield = 0; b.takeDamage(b.health + 1, 'player', b.position.clone()); return sumInfo(); };
+    sumInfo.fresh = () => { _owSumDispose(); if (OW.sum && OW.sum.dead) game._skyLiftK = undefined; OW.sum = null; return 'they come back on the next frame'; };
+  }
+} catch (_) {}
 function _owZapFx(from, to, boss) {
   try {
     if (boss) {
@@ -40884,7 +41408,7 @@ class OwCarrier {
         ty = hunt.position.y + 200;
         spd = _owK().followSpd || OW.FOLLOW.spd;
       } else {
-        const r = c.R * 0.55;
+        const r = (c.orbitR != null) ? c.orbitR : c.R * 0.55;   // (v52.84) the Summoners' circle is its own
         this.heading += dt * (60 / Math.max(1, r));
         tx = c.x + Math.cos(this.heading) * r; tz = c.z + Math.sin(this.heading) * r;
         ty = _owTowerTop(c);
@@ -40930,7 +41454,7 @@ class OwCarrier {
       const R = OW.REGEN; const now = game.time || 0;
       if (now - this._hitT > ((_owK().regenDelay != null) ? _owK().regenDelay : R.delay)) this.health = Math.min(this.maxHealth, this.health + this.maxHealth * ((_owK().regenRate != null) ? _owK().regenRate : R.rate) * dt);
     }
-    if (game.state === 'playing') { try { this._guns(dt); } catch (e) { if (!this._gunErr) { this._gunErr = true; console.warn('[cities] carrier guns threw:', e); } } }
+    if (game.state === 'playing' && !(this._owSum && !_owSumAngry())) { try { this._guns(dt); } catch (e) { if (!this._gunErr) { this._gunErr = true; console.warn('[cities] carrier guns threw:', e); } } }
   }
   _guns(dt) {
     if (!this.guns.length || typeof spawnLightningBolt !== 'function') return;
@@ -40962,7 +41486,7 @@ class OwCarrier {
     let best = null, bestD = range;
     const consider = (e) => { const d = e.position.distanceTo(this.position) - (e.isOwBoss ? (e.collisionRadius || 0) * 0.85 : 0); if (d < bestD) { bestD = d; best = e; } };
     if (player.shipState !== 'dead' && player.team !== this.team) consider(player);
-    for (const e of game.entities) { if (!e || !e.alive || e === this || e.team === this.team || e.isHubTraffic || !e.position) continue; consider(e); }
+    for (const e of game.entities) { if (!e || !e.alive || e === this || e.team === this.team || e.isHubTraffic || !e.position) continue; if (e._owSum && !_owSumAngry()) continue; consider(e); }   // (v52.84) never the Summoners at peace
     if (!best) return;
     let gun = this.guns[0], gd = Infinity;
     for (const g of this.guns) { g.getWorldPosition(_owV1); const d = _owV1.distanceToSquared(best.position); if (d < gd) { gd = d; gun = g; } }
@@ -41159,6 +41683,7 @@ function _owSpawnCarrier(c, team, at, mode, owner) {
   return car;
 }
 function _owCarrierDied(car) {
+  if (car._owSum) { _owSumCarrierDied(car); return; }   // (v52.84) the Summoners' carrier: no city falls with it
   const c = car.city;
   const killerTeam = _owKillerTeam(car._lastAttacker);
   const wasHostile = (c.owner == null);
@@ -41202,7 +41727,9 @@ function _owShow(e) {
     case 'launch': if (mine) _owBanner(nm + ' FLAGSHIP LAUNCHED', 'A new carrier joins your fleet'); else _owBanner(nm + ' FLAGSHIP LAUNCHED', who + ' has a new carrier'); break;
     case 'capture': if (mine) { _owBanner(nm + ' CAPTURED', 'Fleet deployed, flagship in 2:00'); fanfare = true; } else _owBanner(nm + ' LOST', who + ' took the field'); break;
     case 'carlost': if (mine) _owBanner(nm + ' CARRIER LOST', 'Recapture the city field to rebuild it'); break;
-    case 'wake': _owBanner('SIX CITIES HELD', 'Something enormous is waking beneath the ground'); fanfare = true; try { if (typeof musicPlayChampionCue === 'function') musicPlayChampionCue(); } catch (_) {} break;
+    case 'wake': _owBanner((e.n === 7 ? 'SEVEN' : 'SIX') + ' CITIES HELD', 'Something enormous is waking beneath the ground'); fanfare = true; try { if (typeof musicPlayChampionCue === 'function') musicPlayChampionCue(); } catch (_) {} break;   // (v52.84) n 7 = the Summoners counted
+    case 'sumwake': if (mine) _owBanner('THE SUMMONERS', 'You woke them - the city ships around you are coming'); else _owBanner('THE SUMMONERS', who + ' woke them - the city is at war'); break;
+    case 'sumdead': _owBanner('THE SUMMONERS ARE DEAD', (mine || e.tm == null) ? 'The night over the city is lifting' : (who + ' killed them - the night is lifting')); fanfare = true; try { if (typeof musicPlayChampionCue === 'function') musicPlayChampionCue(); } catch (_) {} break;
     case 'rise': _owBanner('THE LEVIATHAN RISES', game._campGiant ? 'It is heading for the city' : 'Six fleets against one'); fanfare = true; break;   // (v49.50)
     case 'slain': _owBanner('LEVIATHAN SLAIN', game._campGiant ? 'The city stands' : 'The overworld is yours'); fanfare = true; break;
     case 'zap': if (Array.isArray(e.f) && Array.isArray(e.t)) { _owV2.set(e.f[0], e.f[1], e.f[2]); _owV3.set(e.t[0], e.t[1], e.t[2]); _owZapFx(_owV2, _owV3, e.b ? (e.l ? 2 : 1) : 0); } break;
@@ -41757,6 +42284,7 @@ function _owBossTargets(boss, range, n) {
 function _owBossCheck() {
   if (OW.boss || OW.bossDone || !OW.cities || !_owAuthority()) return;
   for (const c of OW.cities) if (c.owner == null) return;
+  if (_owSumOn() && !_owSumBeaten()) return;
   _owBossSpawn();
 }
 function _owBossSpawn() {
@@ -41790,7 +42318,7 @@ function _owBossSpawn() {
   const boss = new OwBoss(new THREE.Vector3(x, gy - size * 0.42, z), gy);
   OW.boss = boss;
   game.entities.push(boss);
-  _owAnnounce({ k: 'wake' });
+  _owAnnounce({ k: 'wake', n: _owSumOn() ? 7 : 6 });   // (v52.84) seven with the Summoners
   return boss;
 }
 function _owNetSend(dt) {
@@ -41807,11 +42335,12 @@ function _owNetSend(dt) {
   const k = [];
   const pushCar = (car, ci) => { if (!car || !car.mesh) return; k.push([car.id, ci, car.team, car.mode === 'follow' ? 1 : 0, Math.round(car.position.x), Math.round(car.position.y), Math.round(car.position.z), Math.round(car.dir.x * 100), Math.round(car.dir.z * 100), Math.round(car.health), car.alive ? 1 : 0]); };
   for (const x of C) if (x.carrier) pushCar(x.carrier, x.idx);
-  for (const car of OW.orphans) pushCar(car, -1);
-  for (const car of OW.dying) pushCar(car, (car.city && OW.cities[car.city.idx] === car.city) ? car.city.idx : -1);
+  for (const car of OW.orphans) pushCar(car, car._owSum ? -2 : -1);   // (v52.84) -2 = the Summoners' carrier
+  for (const car of OW.dying) pushCar(car, car._owSum ? -2 : ((car.city && OW.cities[car.city.idx] === car.city) ? car.city.idx : -1));
   const B = OW.boss;
   const b = B ? [B.alive ? 1 : 0, B.risen ? 1 : 0, Math.round(B.position.x), Math.round(B.position.y), Math.round(B.position.z), Math.round(B.health), Math.round(B.mesh.rotation.y * 100), Math.round(B.groundY), (B.def && B.def.key) || ''] : 0;   // (v38.90) b[8] = which leviathan
-  _owSend({ type: 'ow_state', c, k, b, d: OW.bossDone ? 1 : 0 });
+  const S = OW.sum;   // (v52.84) the Summoners: [dead, angry] - a peer lifts its own night from s[0]
+  _owSend({ type: 'ow_state', c, k, b, d: OW.bossDone ? 1 : 0, s: S ? [S.dead ? 1 : 0, _owSumAngry() ? 1 : 0] : 0 });
 }
 function _owApplyState(m) {
   if (!OW.cities || _owAuthority()) return;
@@ -41835,8 +42364,9 @@ function _owApplyState(m) {
     const c = (ci >= 0) ? OW.cities[ci] : null;
     if (!car) {
       if (!r[10]) continue;   // a dead one we never saw
-      car = new OwCarrier(c || OW.cities[0], r[2], new THREE.Vector3(r[4], r[5], r[6]), r[3] ? 'follow' : 'home');
+      car = new OwCarrier(c || (ci === -2 ? _owSumCity() : OW.cities[0]), r[2], new THREE.Vector3(r[4], r[5], r[6]), r[3] ? 'follow' : 'home');
       car.isProxy = true; car.id = id;
+      if (ci === -2) _owSumDressCarrier(car);
       game.entities.push(car);
       if (c) c.carrier = car; else OW.orphans.push(car);
     }
@@ -41870,6 +42400,12 @@ function _owApplyState(m) {
     OW.boss = null;
   }
   OW.bossDone = !!m.d;
+  if (Array.isArray(m.s)) {
+    const S = _owSumState();
+    if (m.s[0] && !S.dead) { S.dead = true; S.liftT = S._everRx ? 0 : 1e9; }
+    S.netAngry = !!m.s[1];
+    S._everRx = true;
+  }
 }
 function _owOnDamage(evt, fromPeerId) {
   if (!_owAuthority()) return;
@@ -41922,6 +42458,7 @@ function _owAdopt() {
   for (const car of OW.orphans) { car.isProxy = false; car.owner = _owOwnerEntity(car.team); car.rideY = null; }
   for (const car of OW.dying) car.isProxy = false;
   if (OW.boss) OW.boss.isProxy = false;
+  try { _owSumAdopt(); } catch (e) { console.warn('[summoners] adopt threw:', e); }   // (v52.84) their ships from the roster
   OW._sendT = 0;
 }
 function _owDemote() {
@@ -41941,6 +42478,7 @@ function _owDemoteFinish() {
   for (const car of OW.orphans) car.isProxy = true;
   for (const car of OW.dying) car.isProxy = true;
   if (OW.boss) OW.boss.isProxy = true;
+  try { _owSumDemote(); } catch (_) {}   // (v52.84) their ships go; the new authority's roster brings its own
 }
 function _owCollide(pos, velocity, radius) {
   const C = OW.cities; if (!C) return;
@@ -42089,9 +42627,11 @@ function _owFrame(dt) {
       else if (!OW.boss._gone) OW.boss.sinkTick(dt);
     }
   }
+  try { _owSumFrame(dt, auth, playing); } catch (e) { if (!OW._sumErr) { OW._sumErr = true; console.warn('[summoners] frame threw:', e); } }   // (v52.84) the Summoners over the main city
   _owLocalFieldUI(dt);
 }
 function _owDispose() {
+  try { _owSumDispose(); } catch (_) {}   // (v52.84) the Summoners' ships go with the terrain; OW.sum (dead, their health) stays
   const C = OW.cities;
   if (C) for (const c of C) {
     try { _owKillFleet(c, false); } catch (_) {}
@@ -42109,7 +42649,13 @@ function _owDispose() {
   _owFieldUIOff();
   OW._auth = null;
 }
-function _owReset() { try { _owDispose(); } catch (_) {} OW.cities = null; OW.bossDone = false; }
+function _owReset() {
+  try { _owDispose(); } catch (_) {}
+  try { if (OW.sum && OW.sum.dead && typeof game !== 'undefined' && game) game._skyLiftK = undefined; } catch (_) {}
+  OW.sum = null;
+  try { if (typeof game !== 'undefined' && game) game._exTips = null; } catch (_) {}
+  OW.cities = null; OW.bossDone = false;
+}
 if (typeof window !== 'undefined') {
   window.__citiesInfo = () => ({
     auth: _owAuthority(), lastPkt: OW._lastPkt ? Math.round(performance.now() - OW._lastPkt) : null,
@@ -42509,6 +43055,7 @@ function _wxMakeClouds() {
       uFogC: { value: new THREE.Color(0x9fc8e8) }, uFogD: { value: 0.00011 },
       uSunC: { value: new THREE.Color(1.0, 0.94, 0.82) },
       uSunDir: _swU.uSunDir, uCloudLit: { value: new THREE.Vector4(0.72, 0.80, 0.35, 0.0) },
+      uDuskC: { value: new THREE.Vector4(0, 0, 0, 0) },
     },
     vertexShader: `
       attribute vec2 aPrm;
@@ -42548,7 +43095,7 @@ function _wxMakeClouds() {
       }`,
     fragmentShader: `
       uniform vec3 uFogC, uSunC, uSunDir;
-      uniform vec4 uCloudLit;
+      uniform vec4 uCloudLit, uDuskC;
       uniform float uFogD;
       varying vec2 vUv; varying float vRnd; varying float vDist; varying float vEdge;
       varying vec3 vRight; varying vec3 vUp;
@@ -42583,6 +43130,7 @@ function _wxMakeClouds() {
         col *= mix(1.0, cLit * cBel, sUp);
         float cFwd = pow(max(0.0, dot(-vwF, sL)), 6.0);
         col += uSunC * (cFwd * (1.0 - smoothstep(0.15, 0.55, a)) * uCloudLit.z * sUp);
+        col = mix(col, uDuskC.rgb * (0.65 + 0.55 * n) * mix(0.8, 1.15, smoothstep(-0.6, 0.4, -dir.y)), uDuskC.w);
         col = mix(col, uFogC, fogK);
         a *= 0.52 * (1.0 - fogK * 0.85);
         a *= 1.0 - smoothstep(0.74, 0.96, vEdge);
@@ -42718,34 +43266,40 @@ function _wxUpdateTerrProxy() {
   mesh.geometry.computeBoundingSphere();
 }
 
+function _wxDayEnvTexels(data, w, h) {
+  const sd = _WX.sunDir;
+  if (!sd) return null;
+  const lobe = _wxTrueSun().lobe;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const phi = ((x + 0.5) / w) * Math.PI * 2 - Math.PI;
+      const theta = ((y + 0.5) / h - 0.5) * Math.PI;
+      const dy = Math.sin(theta), ch = Math.cos(theta);
+      const dxx = ch * Math.cos(phi), dzz = ch * Math.sin(phi);
+      let r, g, b;
+      if (dy >= 0.0) {
+        const t = Math.pow(dy, 0.55);
+        r = 0.72 + (0.20 - 0.72) * t;
+        g = 0.83 + (0.42 - 0.83) * t;
+        b = 0.92 + (0.80 - 0.92) * t;
+        const s = Math.max(0, dxx * sd.x + dy * sd.y + dzz * sd.z);
+        const sun = (Math.pow(s, 24) * 6.0 + Math.pow(s, 6) * 0.35) * lobe;
+        r += sun * 1.0; g += sun * 0.9; b += sun * 0.68;
+      } else {
+        const t = Math.min(1, -dy * 2.2);
+        r = 0.30 - 0.14 * t; g = 0.38 - 0.12 * t; b = 0.24 - 0.10 * t;
+      }
+      const i = (y * w + x) * 4;
+      data[i] = r; data[i + 1] = g; data[i + 2] = b; data[i + 3] = 1;
+    }
+  }
+  return data;
+}
 function _wxMakeDayEnv() {
   try {
     const w = 64, h = 32;
-    const data = new Float32Array(w * h * 4);
-    const sd = _WX.sunDir;
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        const phi = ((x + 0.5) / w) * Math.PI * 2 - Math.PI;
-        const theta = ((y + 0.5) / h - 0.5) * Math.PI;
-        const dy = Math.sin(theta), ch = Math.cos(theta);
-        const dxx = ch * Math.cos(phi), dzz = ch * Math.sin(phi);
-        let r, g, b;
-        if (dy >= 0.0) {
-          const t = Math.pow(dy, 0.55);
-          r = 0.72 + (0.20 - 0.72) * t;
-          g = 0.83 + (0.42 - 0.83) * t;
-          b = 0.92 + (0.80 - 0.92) * t;
-          const s = Math.max(0, dxx * sd.x + dy * sd.y + dzz * sd.z);
-          const sun = (Math.pow(s, 24) * 6.0 + Math.pow(s, 6) * 0.35) * _wxTrueSun().lobe;
-          r += sun * 1.0; g += sun * 0.9; b += sun * 0.68;
-        } else {
-          const t = Math.min(1, -dy * 2.2);
-          r = 0.30 - 0.14 * t; g = 0.38 - 0.12 * t; b = 0.24 - 0.10 * t;
-        }
-        const i = (y * w + x) * 4;
-        data[i] = r; data[i + 1] = g; data[i + 2] = b; data[i + 3] = 1;
-      }
-    }
+    const data = _wxDayEnvTexels(new Float32Array(w * h * 4), w, h);
+    if (!data) return null;
     const tex = new THREE.DataTexture(data, w, h, THREE.RGBAFormat, THREE.FloatType);
     tex.mapping = THREE.EquirectangularReflectionMapping;
     tex.needsUpdate = true;
@@ -44267,9 +44821,17 @@ void main(){ wxMain(); gl_FragColor${pm === 'P' ? '' : '.a'}*=wxVeil(); }
     const st = S.sims[3], sOn = !!(S.storm && st && st.live && st.storm && +KN('storm')), cxS = S.cxStorm;
     let pres = 1; if (+KN('stormDusk')) { let cw = 0; try { cw = (typeof _HUB_ZONES !== 'undefined' && _HUB_ZONES.DUSK) ? (_HUB_ZONES.DUSK._cw || 0) : 0; } catch (_) {} pres = Math.min(1, Math.max(0, (cw - 0.02) / 0.6)); pres = pres * pres * (3 - 2 * pres); }
     const sk = sOn ? H / cxS.H : 1, sbt = sOn ? (st.band ? st.band[1] : cxS.H) / (H / 2) - 1 : 0, kmU = 1000 * upm() / U_;
-    let dk = 0, dKey = 0.14, dHor = 0x5b3a86;
-    try { const D = _HUB_ZONES.DUSK; if (D && D.ON !== false) { dk = D._cw || 0; if (D.key != null) dKey = D.key; if (D.hor != null) dHor = D.hor; } } catch (_) {}
-    const sunK = 1 + (dKey - 1) * dk, ambD = [0.05, 0.07, 0.18], gH = [((dHor >> 16) & 255) / 255, ((dHor >> 8) & 255) / 255, (dHor & 255) / 255];
+    let dk = 0, dKey = 0.14, dHor = 0x5b3a86, ambD = [0.05, 0.07, 0.18], dHaze = null, dHazeK = 0;
+    try {
+      const D = _HUB_ZONES.DUSK;
+      if (D && D.ON !== false) {
+        dk = D._cw || 0; if (D.key != null) dKey = D.key; if (D.hor != null) dHor = D.hor;
+        if (Array.isArray(D.cloudAmb) && D.cloudAmb.length >= 3) ambD = D.cloudAmb;
+        if (D.cloudHaze != null && +D.cloudHazeK > 0) { dHaze = (S._dHazeC || (S._dHazeC = new THREE.Color())).setHex(D.cloudHaze); dHazeK = Math.min(1, +D.cloudHazeK); }
+      }
+    } catch (_) {}
+    if (dHaze && dk > 0) { const kk = dk * dHazeK; hz[0] += (dHaze.r - hz[0]) * kk; hz[1] += (dHaze.g - hz[1]) * kk; hz[2] += (dHaze.b - hz[2]) * kk; }
+    const sunK = 1 + (dKey - 1) * dk, gH = [((dHor >> 16) & 255) / 255, ((dHor >> 8) & 255) / 255, (dHor & 255) / 255];
     const fu = flashUniforms(sOn, pres); if (!eye) { S.flI = fu.I; S.flS = fu.scene; }   // (51.80) what the shader got, for __wx2Info
     const f = +KN('windFrom') * Math.PI / 180, dm = (typeof _WX !== 'undefined' && _WX && _WX.distMul > 0) ? _WX.distMul : 1;
     let dO = [0, 0, 0];                                             // the mirror: this eye from the sky dome's centre (u)
@@ -44865,6 +45427,21 @@ function _wxFrame(dt) {
     _WX.dome.material.uniforms.uHaze.value.copy(scene.fog.color);
     if (scene.fog.density) cu.uFogD.value = scene.fog.density * 1.35;
   }
+  try {
+    const D = (typeof _HUB_ZONES !== 'undefined') ? _HUB_ZONES.DUSK : null;
+    const dw = (D && D.ON !== false) ? (D._cw || 0) : 0;
+    if (cu.uDuskC) {
+      if (dw > 0 && D.cloudDusk != null) {
+        const c = _WX._duskC || (_WX._duskC = new THREE.Color());
+        c.setHex(D.cloudDusk);
+        cu.uDuskC.value.set(c.r, c.g, c.b, Math.min(1, dw * ((D.cloudDuskK != null) ? +D.cloudDuskK : 0.75)));
+      } else if (cu.uDuskC.value.w !== 0) cu.uDuskC.value.w = 0;
+    }
+    if (dw > 0 && scene.fog && scene.fog.color && D.cloudHaze != null && +D.cloudHazeK > 0) {   // (re-copied above every frame, so never compounds)
+      const h = _WX._duskH || (_WX._duskH = new THREE.Color());
+      cu.uFogC.value.lerp(h.setHex(D.cloudHaze), Math.min(1, dw * +D.cloudHazeK));
+    }
+  } catch (_) {}
   if (_WX.shadowsOn && player && player.position) {
     _wxUpdateTerrProxy();
     const p = player.position;
@@ -54354,6 +54931,7 @@ class Bot {
 
     const wantsToMove = !!(this.aiTarget || this.combatTarget);
     if (!wantsToMove) { this._stuckAcc = 0; return; }
+    if (this._wingHolding && this._formationActive) { this._stuckAcc = 0; this._stuckT = 0; if (this._stuckPos) this._stuckPos.copy(this.position); return; }
 
     if (this._stuckT == null) { this._stuckT = 0; this._stuckAcc = 0; this._stuckPos = this.position.clone(); }
     this._stuckT += dt;
@@ -54465,6 +55043,7 @@ class Bot {
       if (!b || b === this || !b.alive || b.team === _side) continue;
       if (b.isHubTraffic && this._owCity != null) continue;   // (v38.78) a city fleet leaves the freighters alone
       if (b.isEarthLife) continue;
+      if (b._owSum && !_owSumAngry()) continue;   // (v52.84) the Summoners at peace are nobody's target (your own fleet's included)
       let d2 = this.position.distanceToSquared(b.position);
       if (b.isOwCarrier && this._owCity != null) d2 *= 6.25;   // (v38.81) a carrier counts as 2.5x farther: fighters pick fighters and pilots first
       if (b.isCarrier && this._cyberAttacker === false && game._cyber && game._cyber.armed) {
@@ -55161,6 +55740,7 @@ const isChaingunBot = (weapon.fireRate <= 0.10);
 
     this.damageTaken = (this.damageTaken || 0) + amount;   // (v38.60) match-report stat
     if (this._owCity != null && typeof _owBotHit === 'function') { try { _owBotHit(this, attacker); } catch (_) {} }   // (v38.85) the city fleet remembers who shot it
+    if (this._owSum && typeof _owSumHit === 'function') { try { _owSumHit(this, attacker); } catch (_) {} }   // (v52.84) ...and the Summoners wake
     if (this.shield > 0) {
       if (amount <= this.shield) { this.shield -= amount; }
       else { const overflow = amount - this.shield; this.shield = 0; this.health -= overflow; }
@@ -74597,6 +75177,7 @@ function _botSendRoster(toPeerId) {
     bots.push({ i: b.id, k: b.loadoutKey, t: (b.team === LSS.TEAM_FLEET_B) ? 'B' : 'A', h: b.hoardModelKey || null, n: b.isNemesis ? 1 : 0,
       a: b.alive ? 1 : 0,   // (v47.45) so a late joiner builds a dead bot as a dead shell, not a ghost
       rs: b._rosterShip ? 1 : 0,   // (v47.50) a match pilot (wears the radar diamond), not city/wave filler
+      sm: b._owSum || 0,           // (v52.84) the Summoners' watch: 2 = their flagship (name, rim, hull), 1 = an escort
 
       tm: b.team, c: (b._owCity != null) ? b._owCity : -1 });   // (v38.79) numeric team + overworld city
   }
@@ -74641,6 +75222,7 @@ function _botApplyRoster(rows) {
       if (r.h && typeof _campSetShipName === 'function') { try { _campSetShipName(b, r.h); } catch (_) {} }
       if (r.c != null && r.c >= 0) b._owCity = r.c;   // (v38.79) an overworld city fleet proxy
       if (r.rs) b._rosterShip = true;   // (v47.50) so a peer's radar draws it as a match pilot too
+      if (r.sm) { b._owSum = r.sm; if (r.sm === 2 && typeof _owSumDressLead === 'function') { try { _owSumDressLead(b); } catch (_) {} } }
       if (r.n) { try { b.isNemesis = true; } catch (_) {} }
       if (r.a === 0) {
         try { b.alive = false; b.doomed = false; b.shipState = 'dead'; if (b.mesh) b.mesh.visible = false; } catch (_) {}
@@ -91262,6 +91844,7 @@ function _lssClearModeSetup() {
     if (typeof game !== 'undefined' && game) {
       game.testMode = false; game.raceNoTimer = false; game.currentRound = 1;
       game._campJourney = false;
+      game._exhib = false;   // (v52.84) _applyModeClientSetup sets it again if the room is in EXHIBITION
     }
     if (typeof player !== 'undefined' && player && typeof LSS !== 'undefined') player.team = LSS.TEAM_FLEET_A;
     try { _lssPostEndlessInFlight('mode-change'); } catch (_) {}
@@ -93348,7 +93931,8 @@ function buildSettingsPage() {
       </div>
       <div class="setting-row">
         <!-- (v52.70) Xorzo's text tips in the campaign: every one in the first leg, now and then after -->
-        <label>Campaign Tips</label>
+        <!-- (v52.84) ...and in Exhibition (EX_TIPS), so the switch is named for him, not the mode -->
+        <label>Xorzo Tips</label>
         <input type="checkbox" id="set-camp-tips" ${input.campTips !== false ? 'checked' : ''}>
       </div>
       <div class="setting-row">
@@ -103832,7 +104416,8 @@ const CAMP_PROLOGUE = {
     dark: 4.5,                  // seconds for the sky to go black
     walk: 7,                    // Xorzo's last stretch to work, seconds
     sky: { R0: 30000, R1: 42000, fog: 0x0a0b14, zen: 0x020206, hor: 0x1b1030, tint: 0x0e1018, tintK: 0.9, fogMul: 1.5,
-           amb: 4.4, key: 0.14, fill: 0.3, rim: 0.4, hemi: 1.0, ambColor: 0x24306e, hemiSky: 0x2c3466, hemiGnd: 0x0a0b12 },
+           amb: 4.4, key: 0.14, fill: 0.3, rim: 0.4, hemi: 1.0, ambColor: 0x24306e, hemiSky: 0x2c3466, hemiGnd: 0x0a0b12,
+           cloudAmb: [0.05, 0.07, 0.18], cloudDuskK: 0, cloudHazeK: 0 },
     flash: 0xc4d0ff,            // the sky in a lightning flash
     flashK: 0.22,               // how far a flash lifts the sky toward it (0.55, then 0.35, turned the sky daylight blue)
     deckY: 2300,                // the storm's cloud deck, this far over the tallest roof
@@ -104850,8 +105435,8 @@ const CAMP_PROLOGUE = {
     return C;
   }
   function _hkEnvBuild(H) {
-    const es = new THREE.Scene(), eg = new THREE.SphereGeometry(50, 48, 24), col = [];
-    const top = new THREE.Color(0x45366e), band = new THREE.Color(0x9a6ad0), low = new THREE.Color(0x1d6878), c = new THREE.Color();
+    const es = new THREE.Scene(), eg = new THREE.SphereGeometry(50, 48, 24), col = [], SN = _STORM_NIGHT_ENV;
+    const top = new THREE.Color(SN.top), band = new THREE.Color(SN.band), low = new THREE.Color(SN.low), c = new THREE.Color();
     const pa = eg.attributes.position;
     for (let i = 0; i < pa.count; i++) {
       const y = pa.getY(i) / 50;
@@ -104861,7 +105446,7 @@ const CAMP_PROLOGUE = {
     }
     eg.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
     es.add(new THREE.Mesh(eg, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide })));
-    for (const [x, y, z, hex, s] of [[30, -12, 18, 0xff3ec8, 7], [-26, -10, -24, 0x2ef2ff, 8], [6, -16, -34, 0x58ff8f, 5], [0, 46, 0, 0xffd27a, 9]]) {
+    for (const [x, y, z, hex, s] of SN.blobs) {
       const b = new THREE.Mesh(new THREE.SphereGeometry(s, 12, 8), new THREE.MeshBasicMaterial({ color: hex }));
       b.position.set(x, y, z); es.add(b);
     }
@@ -107537,8 +108122,9 @@ function _gameLoopBody(timestamp) {
   game.deltaTime = Math.max(0, Math.min(0.05, _dtRaw));
   if (_dtRaw > 0 || _dtRaw < -1) game.lastTime = timestamp;
   game.time += game.deltaTime;
-  __pmark(); 
+  __pmark();
   if (typeof _tickFlatCombatPerf === 'function') _tickFlatCombatPerf(game.deltaTime);
+  try { _duskShipsTick(game.deltaTime); } catch (e) { if (!_dsk._err) { _dsk._err = true; console.warn('[dusk ships]', e); } }
 
   try { _lssSupersampleTick(timestamp); } catch (_) {}   // (v38.71) adaptive supersample
   if (input.showFps) {
