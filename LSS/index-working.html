@@ -7550,7 +7550,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "52.96";
+const LSS_BUILD = "52.98";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -12812,6 +12812,8 @@ const CampaignMode = {
           // Cleared when the boss AND the regular hoard are dead. The Nemesis is
           // EXCLUDED — it survives to open the portal and flee through it first
           // ('cleared' phase), so it can return next leg (recurring-Nemesis arc).
+          // (v52.98) ...or, usually first, when the Summoners slip through (_campArenaTick -> _campRingOpen, by
+          // CAMP_ARENA.openOn): one straggler lost in the rock no longer holds the leg.
           const bossDead = !c._boss.alive;
           const grunts = (game.entities || []).some((e) => e && e.hoardModelKey && e.alive && !e.isNemesis);
           if (bossDead && !grunts) {
@@ -12828,8 +12830,8 @@ const CampaignMode = {
       case 'cleared': {
         // (2.4/2.5) The portal and the flee used to START here. (v49.48) The Summoners have been opening
         // the ring since the leg began and have usually gone through by now (_campArenaTick, which also
-        // turns the ring); it steadies once they are through and this fight is over, and only a
-        // STEADY ring takes you after them.
+        // turns the ring); it steadies once they are through (v52.98: on that frame - CAMP_ARENA.openOn;
+        // it used to wait for this fight to be over too), and only a STEADY ring takes you after them.
         if (game.bossPortal) {
           if (_ca) {
           if (!c._advancing && game.bossPortal.stable !== false && player && player.position &&
@@ -15643,13 +15645,23 @@ function _campMarkNemesis(bot) {
 // spark: the faster you get there, the less of it you find formed (travel caps it at `travelCap`).
 // Your arrival forces their hand - they summon the ghost leviathan and a hoard wing to hold you, and
 // the ring finishes over `openAfter` seconds whatever it had left. Then the flagship slips through and
-// the ring STAYS (owner: "they can't close the portal that easily"); it steadies once the leviathan
-// and the hoard are down, and only then does flying into it follow them.
+// the ring STAYS (owner: "they can't close the portal that easily"), and flying into it follows them.
+// (v49.48-52.97 it only steadied once the leviathan and the hoard were down - see `openOn` below.)
 // Authority-only, like all the campaign PvE; the ring's form and steadiness ride camp_state.
 // The flagship is story-armoured in every cavern (_campNemesisMortal): the kill is the overworld chase.
 // Knobs: window.__campArena (positions relative to the ring at the arena centre; seconds).
+// ⭐ (v52.98) `openOn`: WHAT OPENS THE RING ONCE THEY ARE THROUGH. Owner: "one of the bots got stuck somewhere at the end
+// after the summoner left through the portal, and i couldn't find the bot and the portal wouldn't open for me to clear the
+// stage / let's have it so when the summoners go through the portal, it stays open you can just go through without having
+// to clear all the hoard ships". The ring used to wait for the leg's 'cleared' (the leviathan AND every hoard ship dead),
+// and the 'boss' phase only pulls back stragglers more than 5,000 out - so one ship wedged in the rock closer than that,
+// out of sight, held the door shut for good. Now (`'leave'`) their slipping through IS the leg's clear: the ring steadies
+// on that frame and the phase goes to 'cleared' (_campRingOpen). Whatever is still alive stays and fights - the leviathan
+// in front of the ring included - and none of it can follow: the advance retires the leviathan, the next leg's
+// _campStartScene recycles the hoard, and bots fire only in 'playing', so nothing shoots through the 2 s roundEnd.
+// Live: 'leave' (this) · 'boss' (also the leviathan down; the hoard never holds it) · 'clear' (the v49.48 rule).
 const CAMP_ARENA = { travelFull: 150, travelCap: 0.8, openAfter: 20, chanEvery: 0.38,
-                     holdBack: 230, holdUp: 170, summonBack: 380, summonUp: -40 };
+                     holdBack: 230, holdUp: 170, summonBack: 380, summonUp: -40, openOn: 'leave' };
 try { if (typeof window !== 'undefined') window.__campArena = CAMP_ARENA; } catch (_) {}
 const _campArenaV = new THREE.Vector3(), _campArenaV2 = new THREE.Vector3();
 function _campPortalPos(out) { return (out || new THREE.Vector3()).set(0, 0, CAMPAIGN_LEG_HALF_Z); }
@@ -15666,6 +15678,18 @@ function _campSpawnSummoner(c, at) {
     c._nemesisBot = bot; c.nemesis.seen = true; c.nemesis.alive = true;
     game.entities.push(bot);
   }).catch(() => {});
+}
+// (v52.98) may the ring open now that they are through? (CAMP_ARENA.openOn - see there)
+function _campRingMayOpen(c) {
+  const k = CAMP_ARENA.openOn;
+  if (k === 'clear') return c.phase === 'cleared';
+  if (k === 'boss') return c.phase === 'cleared' || !(c._boss && c._boss.alive);
+  return true;   // 'leave'
+}
+// ...and open it: steady, and the leg is cleared (the 'cleared' case's advance takes you through it)
+function _campRingOpen(c, P) {
+  if (P) P.stable = true;
+  if (c.phase === 'boss') { c.phase = 'cleared'; c.bossActive = false; }
 }
 function _campArenaTick(c, dt, auth) {
   if (!auth) { if (game.bossPortal) { try { game.bossPortal.update(dt); } catch (_) {} } return; }
@@ -15724,13 +15748,17 @@ function _campArenaTick(c, dt, auth) {
   }
   if (!c._summonerLeft && c._portalForm >= 1 && !(c._nemesisBot && c._nemesisBot.alive)) {
     c._summonerLeft = true;
-    try { if (window.Overlays) Overlays.banner('THEY SLIPPED THROUGH', 'The portal is still open'); } catch (_) {}
-    try { if (window.CampDialogue) window.CampDialogue.interject(['sum_escape']); } catch (_) {}   // (v52.13) heard when it happens
+    // (v52.98) when their leaving opens it (openOn 'leave', the default) it is ONE beat: the banner says both, and
+    // Xorzo's "after them!" answers their taunt straight away instead of waiting for a clear
+    const _open = _campRingMayOpen(c);
+    try { if (window.Overlays) Overlays.banner('THEY SLIPPED THROUGH', _open ? 'The portal is still open - fly through after them' : 'The portal is still open'); } catch (_) {}
+    try { if (window.CampDialogue) window.CampDialogue.interject(_open ? ['sum_escape', 'xz_follow'] : ['sum_escape']); } catch (_) {}   // (v52.13) heard when it happens
+    if (_open) _campRingOpen(c, P);
     _campBroadcastState();
   }
-  // it steadies once they are through AND the leviathan and the hoard are down
-  if (P && P.stable === false && c._summonerLeft && c.phase === 'cleared') {
-    P.stable = true;
+  // under a stricter openOn ('boss' / 'clear') it steadies later, with its own beat
+  if (P && P.stable === false && c._summonerLeft && _campRingMayOpen(c)) {
+    _campRingOpen(c, P);
     try { if (window.Overlays) Overlays.banner('PORTAL OPEN', 'Fly through the ring - after them'); } catch (_) {}
     try { if (window.CampDialogue) window.CampDialogue.interject(['xz_follow']); } catch (_) {}   // (v52.13) heard when it happens
     _campBroadcastState();
@@ -77805,6 +77833,12 @@ function _lssSeatFrame() {
       if (++r.gone > 900) { _lssSeatDrop(r); continue; }   // a parked bot hull keeps its seat ~15 s, then lets it go
     } else r.gone = 0;
     if (vis && r.who === 'pilot' && seatView && typeof player !== 'undefined' && player && r.ship === player.mesh && !_lssSeatKnob('fp', false)) vis = false;
+    // ⭐ (v52.97) ...and not while the ship is CLOAKED. Owner: "during auto cloak, the pilot glb and xorzo glb need to cloak as
+    // well". The body is a scene child placed here, not under the ship, so the cloak's traverse (_setShipMeshOpacity) never
+    // reached it: a pilot sat in mid-air in an invisible hull. Hidden rather than faded: the live cloak is 1 % opacity
+    // (invisible), and a transparent skinned body would link new programs on the first cloak - the v39.37 hitch. The ship
+    // carries the cloak as userData._cloakOp (the Summoners' seat follows its own ship the same way, though bots never cloak).
+    if (vis && r.ship && r.ship.userData && r.ship.userData._cloakOp != null && r.ship.userData._cloakOp < 0.99) vis = false;
     r.body.visible = vis;
     // the clock runs while he is hidden in your seat too (28 bones, CPU only), so a cheer begun in first person
     // is over by the time you look from outside instead of starting then
@@ -116121,6 +116155,12 @@ function _clearHullHugShieldsOn(ship) {
 // reuse it.)
 function _setShipMeshOpacity(root, opacity) {
   if (!root || typeof root.traverse !== 'function') return;
+  // (v52.97) the ship SAYS it is cloaked: what rides with it but is not a material under it reads this - the seated
+  // pilot / Summoners (_lssSeatFrame hides them) and Xorzo's running light (_navLightSeatDim stands aside).
+  // Who cloaks: YOUR ship (_setPlayerShipOpacity) and a peer's (NetworkPlayer, on its broadcast flag); bots never do.
+  // The replay recorder's wrapper (_rplInstallTaps) stamps the same number as `_rplOp` - that one is the recorder's own
+  // and exists only once its taps install, so the game reads this one.
+  try { if (root.userData) root.userData._cloakOp = opacity; } catch (_) {}
   // (v39.41) THE ENGINE LIGHTS AND THE TEAM-COLOURED GLOW CLOAK TOO. Owner: "the engine lights,
   // and the red/green sphere should also cloak". They never did, and the reason is that they are
   // LayeredFX ShaderMaterials (`_makeFXMaterial('engine_disc')`, collected on
@@ -118764,6 +118804,14 @@ window.__ghostHullRefresh = function () {
 function _navLightSeatDim(mesh, on) {
   const ud = mesh && mesh.userData;
   if (!ud) return;
+  // ⭐ (v52.97) A CLOAKED SHIP'S XORZO CLOAKS WITH IT. Owner: "during auto cloak, the pilot glb and xorzo glb need to cloak
+  // as well". Xorzo IS the running light (_xorzoMount puts his one material on runningLightPortMat/StarMat), so the
+  // cloak's traverse did fade him to 1 % - and then this, on the very next frame, found that material transparent and
+  // put it back to opaque at full opacity (in the seat view, back to its 16 % dim): a bright Xorzo under an invisible
+  // hull for the whole cloak. While the ship is cloaked (_setShipMeshOpacity's _cloakOp) the cloak owns these materials;
+  // on the uncloak it puts back what it found and this resumes on the next frame (re-dimming him if the seat is the view).
+  // Offline proof, real code, both views: node tools/cloak_seat_sim.mjs (a 52.96 backup fails it).
+  if (ud._cloakOp != null && ud._cloakOp < 0.99) return;
   const K = (typeof window !== 'undefined' && window.__cockpit) ? window.__cockpit : {};
   const dim = (typeof K.navDim === 'number') ? K.navDim : 0.16;
   for (const m of [ud.runningLightPortMat, ud.runningLightStarMat]) {

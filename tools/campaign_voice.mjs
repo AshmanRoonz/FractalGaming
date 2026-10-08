@@ -89,6 +89,18 @@ const SAY = {
 const PRON = {
   xorzo: { AIs: "AI's" },
 };
+// ...and per LINE, where a voice misreads a word in some lines and not in others. (2026-10-08) Gerald read "AIs" as "A is"
+// in hk_circle (owner: '"looking at the glitching frozen AIs" became "frozen A is" / the other times gerald said "AIs"
+// sounded fine') and then in the caverns battle's narration ("there's a few times other that in the battle scene, keeps
+// saying A is"): those lines send "AI's". His prologue "AIs" (pr_real, pr_dad, hk_glitch, hk_yellow) were fine and keep
+// their takes. Applied after PRON; the box still shows the line's own text, and a script edit still flows through.
+const PRON_LINE = {
+  hk_circle:  { AIs: "AI's" },
+  cv_ensl:    { AIs: "AI's" },
+  cv_sims:    { AIs: "AI's" },
+  cv_trapped: { AIs: "AI's" },
+  cv_tell:    { AIs: "AI's" },
+};
 
 const argv = process.argv.slice(2);
 const has = (k) => argv.includes(k);
@@ -110,6 +122,7 @@ function spoken(id, line) {
   if (SAY[id]) return SAY[id];
   let t = String(line.text).replace(/~/g, '');
   for (const [w, r] of Object.entries(PRON[line.who] || {})) t = t.replace(new RegExp('\\b' + w + '\\b', 'g'), r);
+  for (const [w, r] of Object.entries(PRON_LINE[id] || {})) t = t.replace(new RegExp('\\b' + w + '\\b', 'g'), r);
   const tags = Object.keys(STYLE_TAGS).filter((k) => line[k]).map((k) => STYLE_TAGS[k]);
   return (tags.length ? tags.join(' ') + ' ' : '') + t;
 }

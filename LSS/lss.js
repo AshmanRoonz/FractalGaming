@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "52.96";
+const LSS_BUILD = "52.98";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -5532,7 +5532,7 @@ function _campMarkNemesis(bot) {
 }
 
 const CAMP_ARENA = { travelFull: 150, travelCap: 0.8, openAfter: 20, chanEvery: 0.38,
-                     holdBack: 230, holdUp: 170, summonBack: 380, summonUp: -40 };
+                     holdBack: 230, holdUp: 170, summonBack: 380, summonUp: -40, openOn: 'leave' };
 try { if (typeof window !== 'undefined') window.__campArena = CAMP_ARENA; } catch (_) {}
 const _campArenaV = new THREE.Vector3(), _campArenaV2 = new THREE.Vector3();
 function _campPortalPos(out) { return (out || new THREE.Vector3()).set(0, 0, CAMPAIGN_LEG_HALF_Z); }
@@ -5549,6 +5549,16 @@ function _campSpawnSummoner(c, at) {
     c._nemesisBot = bot; c.nemesis.seen = true; c.nemesis.alive = true;
     game.entities.push(bot);
   }).catch(() => {});
+}
+function _campRingMayOpen(c) {
+  const k = CAMP_ARENA.openOn;
+  if (k === 'clear') return c.phase === 'cleared';
+  if (k === 'boss') return c.phase === 'cleared' || !(c._boss && c._boss.alive);
+  return true;   // 'leave'
+}
+function _campRingOpen(c, P) {
+  if (P) P.stable = true;
+  if (c.phase === 'boss') { c.phase = 'cleared'; c.bossActive = false; }
 }
 function _campArenaTick(c, dt, auth) {
   if (!auth) { if (game.bossPortal) { try { game.bossPortal.update(dt); } catch (_) {} } return; }
@@ -5598,12 +5608,14 @@ function _campArenaTick(c, dt, auth) {
   }
   if (!c._summonerLeft && c._portalForm >= 1 && !(c._nemesisBot && c._nemesisBot.alive)) {
     c._summonerLeft = true;
-    try { if (window.Overlays) Overlays.banner('THEY SLIPPED THROUGH', 'The portal is still open'); } catch (_) {}
-    try { if (window.CampDialogue) window.CampDialogue.interject(['sum_escape']); } catch (_) {}   // (v52.13) heard when it happens
+    const _open = _campRingMayOpen(c);
+    try { if (window.Overlays) Overlays.banner('THEY SLIPPED THROUGH', _open ? 'The portal is still open - fly through after them' : 'The portal is still open'); } catch (_) {}
+    try { if (window.CampDialogue) window.CampDialogue.interject(_open ? ['sum_escape', 'xz_follow'] : ['sum_escape']); } catch (_) {}   // (v52.13) heard when it happens
+    if (_open) _campRingOpen(c, P);
     _campBroadcastState();
   }
-  if (P && P.stable === false && c._summonerLeft && c.phase === 'cleared') {
-    P.stable = true;
+  if (P && P.stable === false && c._summonerLeft && _campRingMayOpen(c)) {
+    _campRingOpen(c, P);
     try { if (window.Overlays) Overlays.banner('PORTAL OPEN', 'Fly through the ring - after them'); } catch (_) {}
     try { if (window.CampDialogue) window.CampDialogue.interject(['xz_follow']); } catch (_) {}   // (v52.13) heard when it happens
     _campBroadcastState();
@@ -49217,6 +49229,7 @@ function _lssSeatFrame() {
       if (++r.gone > 900) { _lssSeatDrop(r); continue; }   // a parked bot hull keeps its seat ~15 s, then lets it go
     } else r.gone = 0;
     if (vis && r.who === 'pilot' && seatView && typeof player !== 'undefined' && player && r.ship === player.mesh && !_lssSeatKnob('fp', false)) vis = false;
+    if (vis && r.ship && r.ship.userData && r.ship.userData._cloakOp != null && r.ship.userData._cloakOp < 0.99) vis = false;
     r.body.visible = vis;
     if (inScene) r.mixer.update(dt);
     if (vis) _lssSeatPlace(r);
@@ -75933,6 +75946,7 @@ function _clearHullHugShieldsOn(ship) {
 
 function _setShipMeshOpacity(root, opacity) {
   if (!root || typeof root.traverse !== 'function') return;
+  try { if (root.userData) root.userData._cloakOp = opacity; } catch (_) {}
   try {
     const _fx = root.userData && root.userData.shaderEngineMats;
     if (_fx && _fx.length) {
@@ -77411,6 +77425,7 @@ window.__ghostHullRefresh = function () {
 function _navLightSeatDim(mesh, on) {
   const ud = mesh && mesh.userData;
   if (!ud) return;
+  if (ud._cloakOp != null && ud._cloakOp < 0.99) return;
   const K = (typeof window !== 'undefined' && window.__cockpit) ? window.__cockpit : {};
   const dim = (typeof K.navDim === 'number') ? K.navDim : 0.16;
   for (const m of [ud.runningLightPortMat, ud.runningLightStarMat]) {
