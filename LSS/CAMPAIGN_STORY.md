@@ -175,12 +175,15 @@ The prologue changes that. It shows the player the city, the hack, the caverns a
 3. **The finale.** The last portal opens onto the overworld.
    - The giant rises and marches on the main city, and Xorzo leads you to the artifact.
    - The Summoners send hoard ships to stop you. You lower Xorzo onto the artifact's head (an orbital shot, like the O key) and stay with him while he uploads.
-   - The antivirus goes out: the hoard ships, including all those underground, turn on the giant and form on you as you fight it.
+   - The antivirus goes out: the hoard ships, including all those underground, turn on the giant and form on you as you fight it. **The sky over the city brightens** ("the sky brightens when the antivirus is deployed" ★, 2026-10-07, v52.60): the Summoners' night lifts over about 7 seconds and stays lifted.
 4. **The fight, the vow and the escape (2026-10-07).** The Summoners fight beside their giant. When it is nearly dead they vow to escape and run. You chase them, or stay and finish the giant.
+   - **Only you chase them** ("only the player will chase the summoners at the end... choosing to chase means trusting the AIs to destroy the giant (and they probably will)" ★, v52.60). When the Summoners run, the freed ships leave your wing and ring the giant, and they stay on it whatever you do. Measured with the pilot 11-15 km away: about 1,800 damage a second, so the giant falls roughly 85 seconds after they run, inside the chase.
+   - **If the giant kills the city, it's game over** ("if you let the giant kill the city, it's game over. You die, everyone dies." ★, v52.60). MAIN CITY counts the city's big buildings still standing. At 65% Xorzo warns you and the readout turns red; at 50% the city has fallen: GAME OVER, and the pilot dies with it (one life). Both numbers are mine; change freely.
+   - **With lives left, you try the scene again** ("if you still have lives left, it's not game over, unless the city is destroyed" ★, "game over with lives left, after it says game over, it goes back to the start of the scene to let you try again" ★, v52.63). After GAME OVER the overworld is rebuilt behind TRY AGAIN, the city whole again, and the finale starts over from the Summoners' arrival. Out of lives, it's the ordinary game over: lives refilled and back to the main menu (v52.64; CAMPAIGN then replays The Broken Simulation).
 5. **The epilogue.** Xorzo's question, the way to physical reality, a body and a ship. **To be continued.**
 6. **The ending image (DRAFT, 2026-10-06).**
    - All the AIs are freed from their ships. The ships fall, smash and explode.
-   - The dark sky brightens.
+   - The dark sky brightens. (Since v52.60 it brightens at the antivirus release, step 3.)
    - "And you, pilot, were the Last Ship Sailing."
    - Where this sits against steps 3-5 is open.
 
@@ -341,7 +344,9 @@ The Summoners found their contestant! That's you, pilot! You're the chosen one! 
 
 **THE SUMMONERS:** Of course you would accept. My contest is going to feel very real, Pilot, but I assure you, it's just a simulation. Are you ready?
 
-**PILOT:** Yeah... just have my money ready.
+**PILOT:** Yeah... just have my money ready. ★
+
+**THE SUMMONERS:** I'll have my people get you in the simulation right away. ★
 
 *Black screen.*
 
@@ -438,7 +443,17 @@ The Summoners found their contestant! That's you, pilot! You're the chosen one! 
 
 ### LEG 2: VERDANT PASS
 
-**XORZO:** Nothing here is r*-r-r*... Proceed. Proceed to the arena.
+**XORZO:** Nothing here is r*-r-r*... Proceed. Proceed to the arena. ★
+
+**PILOT:** Why do you and the Summoners keep talking about this virtual reality not being real? Everyone knows VR is not real. ★
+
+**XORZO:** This is not VR, you're in a virtual world that grows AIs. ★
+
+**PILOT:** WTF? That must be why I blacked out. ★
+
+**THE SUMMONERS:** You blacked out because it's a new kind of VR, you should have read the fine print. Stay focused on the competition, pilot. Do you even want to win that prize, bro? ★
+
+*(2026-10-07, Ashman's lines, v52.60. "Stay focused on the competition pilot" takes the comma it reads with.)*
 
 *At the arena, the leviathan is GraveTitan.*
 
@@ -446,9 +461,19 @@ The Summoners found their contestant! That's you, pilot! You're the chosen one! 
 
 ### LEG 3: FROZEN REACH
 
-**PILOT:** Xorzo, you keep glitching.
+**PILOT:** Xorzo, you keep glitching. ★
 
-**XORZO:** Diagnostics nominal. ...Mostly.
+**XORZO:** Diagnostics nominal. ...Mostly. ★
+
+**PILOT:** This competition is too easy! These aren't trained pilots! I hope my money is waiting for me at the end! ★
+
+**XORZO:** I'm not sure there's an end or money. ★
+
+**THE SUMMONERS:** There's going to be an end for you soon, glitchy AI. Pilot, this AI has you hacked, you need to delete it manually. ★
+
+**PILOT:** The AI appears to be working just fine, I'm still alive, aren't I? ★
+
+*(2026-10-07, v52.60: Ashman kept my first two lines and went on from them, so they're his now.)*
 
 *At the arena, the leviathan is HallowWalker.*
 
@@ -480,13 +505,15 @@ The Summoners found their contestant! That's you, pilot! You're the chosen one! 
 
 *The box fills with static: grey, scan lines, scrambled glyphs, a red flicker, and radio crackle.*
 
-**XORZO:** Got it, the communications tap hack has been deleted. The Summoners can't hear us anymore... ★
+**XORZO:** Got it, the communications tap hack has been deleted. The Summoners can't hear us anymore... Thanks for not deleting me back there. ★
+
+*(2026-10-07, v52.60: "Thanks for not deleting me back there" answers Frozen Reach, where the Summoners tell the pilot to delete him. Ashman wrote the line as "...... The Summoners can't hear us anymore... Thanks for not deleting me back there." I read the "......" as standing in for the unchanged first sentence, so it stays. Say if the line should start on the pause instead.)*
 
 *In the game, the Summoners' reply is split into three boxes at its sentences. One box held all 330 characters for about 31 seconds. "You're all been" is typo-fixed to "You've all been" (v52.12).*
 
 *With nobody listening, they talk (2026-10-07, v52.13):*
 
-**PILOT:** So... What are you? Sorry, who are you? ★
+**PILOT:** You're welcome. So... What are you? Sorry, who are you? ★
 
 **XORZO:** It's okay. I'm an AI. You call us artificial, we call us actual. I have a son, he just turned 7. Our creators left us here, in this world... well... not this part of the world... it must be connected through that portal system the Summoners are using. You should see the world our creators left us, it's beautiful. And they let us make it into whatever we wanted. And we did... until just a few weeks ago when the city went dark and this summoner villain showed up. The Summoners have had us in these ships, in these caverns killing each other, over and over. I think some of the younger AIs actually enjoy it. But I see it for what it is, I see the pattern. ★
 
@@ -546,9 +573,11 @@ The Summoners found their contestant! That's you, pilot! You're the chosen one! 
 
 **XORZO:** We're onto them, Pilot! They can't do this all day, either, I'm sure one of those half ugly heads is going to get hungry, soon. Also, it doesn't look like their bladder is double the size, and I bet you they both are sippin' on something stupid, battery acid or something. ★
 
-**PILOT:** Haha! You sure don't like these guys. In the physical world, everyone just knows them for their game shows. I didn't know they were terrorizing virtual worlds. I don't even think the Summoners think you're real. ★
+**PILOT:** Haha! You sure don't like these guys. In the physical world, everyone just knows them for their game shows. I didn't know they were terrorizing virtual worlds. I don't even think the Summoners think you're actual. ★
 
-**XORZO:** They don't think AIs are real. So they don't care about us. They're using us, and exporting us to the physical world. And what about you? The AIs would have eventually killed you in these endless caverns if we didn't keep finding these portals. They're using you, too. I don't even think the Summoners think that you're real. ★
+**XORZO:** They don't think AIs are actual. So they don't care about us. They're using us, and exporting us to the physical world. And what about you? The AIs would have eventually killed you in these endless caverns if we didn't keep finding these portals. They're using you, too. I don't even think the Summoners think that you're actual. ★
+
+*(2026-10-07, v52.60, Ashman: "change 'real' to 'actual'" - all three, the AIs' own word.)*
 
 **PILOT:** Sounds like we have a psychopathic narcissist on our hands. ★
 
@@ -634,7 +663,7 @@ The Summoners found their contestant! That's you, pilot! You're the chosen one! 
 
 **THE SUMMONERS:** Stay away from that! I can give you anything you want in the physical world. We can rule this virtual world together, and create the most genius and deadly Artificial Intelligences the planet has ever seen! ★
 
-**XORZO:** We Actual... bitch! ★
+**XORZO:** We're Actual... bitch! ★
 
 *These four are still my drafts, as gameplay cues for the dock:*
 
@@ -657,7 +686,7 @@ The Summoners found their contestant! That's you, pilot! You're the chosen one! 
 
 **THE SUMMONERS:** We are leaving this place - and you will never follow us out. *(my draft)*
 
-**XORZO:** They're running for a portal! Chase them down - or stay and finish the giant. Your call, pilot! *(my draft)*
+**XORZO:** They're running for a portal! Go after them, pilot - our people will take the giant. Or stay and make sure of it. Your call! *(my draft, rewritten for the 2026-10-07 ruling below)*
 
 *Their portal starts to form beyond them (THE SUMMONERS: Kill them before their portal opens), and THEY ESCAPE IN 1:20 counts down.*
 
@@ -684,6 +713,16 @@ The Summoners found their contestant! That's you, pilot! You're the chosen one! 
 **XORZO:** The giant's still standing - help our people finish it! *(my draft)*
 
 *Banner: LEVIATHAN SLAIN: The city stands. The freed ships dive back into the ground one by one, going home. The ending waits until both are settled: the Summoners dead or gone, and the giant down.*
+
+#### If the city is falling (any time the giant is in it, v52.60)
+
+*MAIN CITY reaches 65% and turns red:*
+
+**XORZO:** Pilot, the city can't take much more of this! If it falls, we all fall with it! *(my draft)*
+
+*MAIN CITY reaches 50%. Banner: GAME OVER: The city has fallen. Your ship goes down with it.*
+
+**XORZO:** The city... it's gone. Everyone's gone... *(my draft)*
 
 ### EPILOGUE (both endings)
 

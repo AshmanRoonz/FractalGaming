@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "52.59";
+const LSS_BUILD = "52.64";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -3845,6 +3845,7 @@ const FreeFlightMode = {
     try { const _E = game._campGiant && game._campGiant.esc; if (_E) { if (_E.portal) _E.portal.destroy(); if (_E.closing) _E.closing.destroy(); } _campEscHud(null, false); const _tb = document.getElementById('camp-tbc'); if (_tb) _tb.classList.remove('on'); } catch (_) {}   // (v49.68)
     try { _campIslesReset(); } catch (_) {}    // (v49.56) every island the giant broke comes back
     try { game._campGiant = null; const _cc = document.getElementById('camp-city'); if (_cc) { _cc.classList.remove('on'); _cc._on = false; } } catch (_) {}   // (v49.50)
+    game._skyLiftK = undefined;   // (v52.60) the antivirus' daylight was that flight's: the next hub has its night again
     try { _campLivesHide(); game._campOver = null; } catch (_) {}   // (v52.15) LIVES off, and no GAME OVER left armed
     try { document.body.classList.remove('lss-freeflight'); } catch (_) {}   
     try { game._cyber = null; net.cyber = false; if (typeof _cyberCineLightsDispose === 'function') _cyberCineLightsDispose(); if (typeof _carrierClear === 'function') _carrierClear(); } catch (_) {}   // (v42.30) resident cine lights are this mode's, drop them with it   // (v37.76/80)
@@ -5859,11 +5860,12 @@ function _campLegName() {
   const L = (typeof CAMPAIGN_LEGS !== 'undefined') ? CAMPAIGN_LEGS.find((l) => l && l.key === k) : null;
   return (L && L.name) || 'the leg';
 }
-function _campGameOver() {
-  game._campOver = { t: 0, returned: false };
-  _campLivesRefill();   // the next try starts with a full pool
-  try { if (window.Overlays && Overlays.banner) Overlays.banner('GAME OVER', 'Out of lives - back to ' + _campLegName()); } catch (_) {}
-  try { if (window.CampDialogue) { window.CampDialogue.clear(); window.CampDialogue.line('xz_gameover'); } } catch (_) {}
+function _campGameOver(sub, line, retry) {
+  if (game._campOver) return;   // one game over at a time (the city and the last life can land on the same beat)
+  game._campOver = { t: 0, returned: false, retry: !!retry };
+  if (!retry) _campLivesRefill();   // the next try starts with a full pool
+  try { if (window.Overlays && Overlays.banner) Overlays.banner('GAME OVER', sub || ('Out of lives - back to ' + _campLegName())); } catch (_) {}
+  try { if (window.CampDialogue) { window.CampDialogue.clear(); window.CampDialogue.line(line || 'xz_gameover'); } } catch (_) {}
 }
 function _campGameOverTick(dt) {
   const O = game._campOver; if (!O) return false;
@@ -5872,9 +5874,42 @@ function _campGameOverTick(dt) {
     O.returned = true;
     game._campOver = null;
     try { if (window.CampDialogue) window.CampDialogue.clear(); } catch (_) {}
-    try { if (typeof returnToRootMenu === 'function') returnToRootMenu(); } catch (_) {}
+    if (O.retry && game._campGiant) {   // (v52.63) lives left: the scene again, not the menu
+      try { _campFinaleRetry(); return true; } catch (e) { console.warn('[campaign] retry failed - to the menu:', e); }
+    }
+    try {
+      if (typeof returnToMainMenu === 'function') returnToMainMenu();
+      else if (typeof returnToRootMenu === 'function') returnToRootMenu();
+    } catch (_) {}
   }
   return true;
+}
+function _campFinaleRetry() {
+  const G0 = game._campGiant;
+  const campaign = !!(G0 && G0.campaign);
+  try { _campArtTeardown(); } catch (_) {}
+  try { const E = G0 && G0.esc; if (E) { if (E.portal) E.portal.destroy(); if (E.closing) E.closing.destroy(); } _campEscHud(null, false); _campMarkAt(null); } catch (_) {}
+  try { _campIslesReset(); } catch (_) {}
+  try { if (typeof _owDispose === 'function') _owDispose(); } catch (_) {}   // the giant (OW.boss) with the overworld's own
+  try {
+    for (let i = game.entities.length - 1; i >= 0; i--) {
+      const e = game.entities[i];
+      if (!e || !(e._campFinale || e._campFreed || e.isCampGiant)) continue;   // the Summoners, the freed hoard, the waves
+      try { if (typeof e.destroy === 'function') e.destroy(); else if (e.mesh && e.mesh.parent) e.mesh.parent.remove(e.mesh); } catch (_) {}
+      const j = game.entities.indexOf(e); if (j >= 0) game.entities.splice(j, 1);
+    }
+  } catch (_) {}
+  try { const cc = document.getElementById('camp-city'); if (cc) { cc.classList.remove('on', 'low'); cc._on = false; cc._low = false; } } catch (_) {}
+  game._skyLiftK = undefined;
+  game._campGiant = { phase: 'arrive', t: 0, campaign };
+  LSS.MODE = 'freeflight';
+  game.selectedMap = 'hub_overworld';
+  game.testMode = false; game.raceNoTimer = true;
+  try { if (typeof _beginWorldSwap === 'function') _beginWorldSwap('camp-finale', 'TRY AGAIN'); } catch (_) {}   // before applyMapPreset (its note)
+  try { if (typeof FreeFlightMode !== 'undefined') { FreeFlightMode._enteringCampaign = false; FreeFlightMode._riftPos = null; FreeFlightMode._deathT = 0; } } catch (_) {}
+  try { if (typeof applyMapPreset === 'function') applyMapPreset('Mossy'); } catch (_) {}
+  game.state = 'roundEnd';
+  try { _anchorTimer('roundEndTimer', 0.5); } catch (_) { game.roundEndTimer = 0.5; }
 }
 function _campLivesHide() { try { const el = document.getElementById('camp-lives'); if (el && el._on) { el._on = false; el.classList.remove('on'); } } catch (_) {} }
 function _campLivesHud(force) {
@@ -5932,7 +5967,9 @@ try {
 } catch (_) {}
 
 const CAMP_GIANT = { cityD: 13000, viewD: 6500, dist: 6000, side: 2500, spd: 45, crushR: 0.9, sinkSecs: 1.8, fxPerFrame: 2, roam: 0.62,
-                     hpX: 80, speechMax: 16 };   // (v52.20) speechMax: the Summoners' arrival speech holds the rise at most this long   // x a Dreadnought's hull = 1,000,000, Exhibition's own. ⭐ (v49.58) OWNER'S CALL: "i think 1M hp on
+                     hpX: 80,   // x a Dreadnought's hull = 1,000,000, Exhibition's own. ⭐ (v49.58) OWNER'S CALL: "i think 1M hp on
+                     speechMax: 16,   // (v52.20) the Summoners' arrival speech holds the rise at most this long
+                     cityWarn: 0.65, cityFall: 0.5, skySecs: 7 };
 const _cgM = new THREE.Matrix4(), _cgP = new THREE.Vector3(), _cgQ = new THREE.Quaternion(), _cgQ2 = new THREE.Quaternion(),
       _cgS = new THREE.Vector3(), _cgAx = new THREE.Vector3(), _CG_UP = new THREE.Vector3(0, 1, 0);
 function _campGiantSpawn() {
@@ -6083,6 +6120,23 @@ function _campCityHud(G) {
   const K = G.crush;
   const pct = (K && K.total) ? Math.max(0, Math.round(100 * (1 - K.crushed / K.total))) : 100;
   if (el._p !== pct) { el._p = pct; t.textContent = 'MAIN CITY ' + pct + '%'; }
+  const low = pct <= CAMP_GIANT.cityWarn * 100;   // (v52.60) red from Xorzo's warning on: the city can fall (_campCityCheck)
+  if (el._low !== low) { el._low = low; el.classList.toggle('low', low); }
+}
+function _campCityCheck(G) {
+  const K = G.crush; if (!K || !K.total || G.cityFell) return;
+  const left = 1 - K.crushed / K.total;
+  if (!G.cityWarned && left <= CAMP_GIANT.cityWarn) {
+    G.cityWarned = true;
+    try { if (window.CampDialogue) window.CampDialogue.interject(['xz_citywarn']); } catch (_) {}
+  }
+  if (left <= CAMP_GIANT.cityFall) {
+    G.cityFell = true;
+    let left2 = 1;
+    try { if (G.campaign && _campLivesOn()) { left2 = Math.max(0, _campLivesGet() - 1); _campLivesSet(left2); } } catch (_) {}
+    _campGameOver('The city has fallen', 'xz_cityfall', left2 > 0);
+    try { if (player && player.shipState !== 'dead') playerDie(null); } catch (_) {}   // "You die, everyone dies."
+  }
 }
 const _campIsles = { falling: [], crushed: [] };
 const _cgI1 = new THREE.Vector3(), _cgI2 = new THREE.Vector3();
@@ -6151,6 +6205,11 @@ function _campIslesReset() {
 function _campGiantTick(dt) {
   const G = game._campGiant; if (!G || game.state !== 'playing') return;
   G.t = (G.t || 0) + dt;
+  if (G.skyT != null && G.skyT < CAMP_GIANT.skySecs + 1) {
+    G.skyT += dt;
+    const u = Math.min(1, G.skyT / Math.max(0.1, CAMP_GIANT.skySecs));
+    game._skyLiftK = 1 - u * u * (3 - 2 * u);
+  }
   if (G.phase === 'arrive') {
     if (G.t < 0.8) return;   // one beat after the overworld goes live
     if (!G.speech) {
@@ -6179,6 +6238,8 @@ function _campGiantTick(dt) {
     }
     if (boss.risen) { _campCrushTick(boss, dt); _campIsleTick(boss); }   // (v49.56) + the floating islands
     _campCityHud(G);
+    _campCityCheck(G);   // (v52.60) it can fall
+    if (G.cityFell) return;
     const E = G.esc;
     if (E && E.phase === 'fight' && boss.maxHealth > 0 && boss.health / boss.maxHealth <= CAMP_ESC.fleeAt) _campEscFlee(G, E);
   } else if (!G.giantDown) {
@@ -6234,6 +6295,7 @@ const CAMP_ART = {
   risers: 6, riseEvery: 3.2, riseCap: 200, freedAlive: 16,   // (v49.54) cap 26 -> 60: 26 were all up in ~32 s and the storm then thinned them out; (v49.58) -> 200 for the 1M giant's ~4 min fight
   runIn: 380, runOut: 2300, runPref: 1500,   // (the v49.52 strafing runs - retired for the wing in v49.71)
   wingGap: 150, wingFirst: 170, wingBack: 35, wingUp: 70, wingHold: 260, wingRange: 3400,
+  giantStand: 1300, giantUp: 1800, giantSpin: 0.05,
   beaconH: 6000,
 };
 let _campArtGltf = null, _campArtLoadP = null, _campArtLive = null, _campArtFadeT = null;
@@ -6573,6 +6635,7 @@ function _campArtRise(g, n) {
     };
   });
 }
+const _cwgZero = new THREE.Vector3();   // ⚠ the fallback feed-forward (a giant without a velocity) - never write it
 const _cwgF = new THREE.Vector3(), _cwgR = new THREE.Vector3();
 const _cwgWing = [];
 function _campArtFreedTick(A, g, dt) {
@@ -6581,7 +6644,50 @@ function _campArtFreedTick(A, g, dt) {
   for (const b of game.entities) if (b && b.alive && b._campFreed && b._formationTarget) _cwgWing.push(b);
   const alive = _cwgWing.length;
   _cwgWing.sort((a, b) => (a.id | 0) - (b.id | 0));
-  if (alive && player && player.position && player.shipState !== 'dead') {
+  const E = game._campGiant && game._campGiant.esc;
+  const onGiant = !!(g && g.alive && E && (E.phase === 'vow' || E.phase === 'chase' || E.phase === 'resolved'));
+  A.onGiant = onGiant;
+  if (alive && onGiant) {
+    const TAU = Math.PI * 2;
+    A.ringA = (A.ringA || 0) + dt * (K.giantSpin || 0);
+    const gp = g.position;
+    const gy = (typeof g.groundY === 'number' && isFinite(g.groundY)) ? g.groundY : gp.y - (g.halfH || 6000) * 0.75;
+    const R0 = (g.colR || 2000) + (K.giantStand || 1300);
+    const gv = g.velocity || _cwgZero, w = K.giantSpin || 0;
+    const slots = Math.max(4, K.freedAlive || 16), step = TAU / slots;
+    const angOf = (b) => { const t = Math.atan2(b.position.z - gp.z, b.position.x - gp.x) - A.ringA; return ((t % TAU) + TAU) % TAU; };
+    const used = A._ringUsed || (A._ringUsed = new Set());
+    used.clear();
+    for (let i = 0; i < alive; i++) {
+      const b = _cwgWing[i];
+      if (b._ringK != null && b._ringRing === A && !used.has(b._ringK)) used.add(b._ringK); else b._ringK = null;
+    }
+    for (let i = 0; i < alive; i++) {
+      const b = _cwgWing[i];
+      if (b._ringK != null) continue;
+      const k0 = Math.round(angOf(b) / step) % slots;
+      let k = -1;
+      for (let d = 0; d < slots && k < 0; d++) {
+        for (const kk of [(k0 + d) % slots, (k0 - d + slots) % slots]) if (!used.has(kk)) { k = kk; break; }
+      }
+      if (k < 0) { k = slots; while (used.has(k)) k++; }   // the second ring
+      b._ringK = k; b._ringRing = A; used.add(k);
+    }
+    for (let i = 0; i < alive; i++) {
+      const b = _cwgWing[i];
+      const k = b._ringK;
+      const a = A.ringA + (k % slots) * step;
+      const rr = R0 + (k % 3) * 300 + Math.floor(k / slots) * 600;
+      b._formationTarget.set(gp.x + Math.cos(a) * rr, gy + (K.giantUp || 1800) + (k % 4) * 650, gp.z + Math.sin(a) * rr);
+      b._formationActive = true;
+      const rv = b._ringVel || (b._ringVel = new THREE.Vector3());
+      rv.set(gv.x - Math.sin(a) * w * rr, 0, gv.z + Math.cos(a) * w * rr);
+      b._wingVel = rv;
+      if (!b._wingFaceDir) b._wingFaceDir = new THREE.Vector3();
+      b._wingFaceDir.copy(gp).sub(b.position);
+      if (b._wingFaceDir.lengthSq() > 1) b._wingFaceDir.normalize(); else b._wingFaceDir.set(0, 0, -1);
+    }
+  } else if (alive && player && player.position && player.shipState !== 'dead') {
     const P = player.position, yaw = (player.euler ? player.euler.y : 0);
     _cwgF.set(-Math.sin(yaw), 0, -Math.cos(yaw));   // the pilot's heading, level (euler YXZ: yaw pi faces +z)
     _cwgR.set(Math.cos(yaw), 0, -Math.sin(yaw));
@@ -6631,6 +6737,7 @@ function _campArtRelease(A) {
   try { if (typeof playSound === 'function') playSound('round_start'); } catch (_) {}
   try { if (typeof musicPlayChampionCue === 'function') musicPlayChampionCue(); } catch (_) {}
   try { if (window.Overlays) Overlays.banner('ANTIVIRUS RELEASED', 'The hoard remembers who they are'); } catch (_) {}
+  try { const G = game._campGiant; if (G && G.skyT == null) G.skyT = 0; } catch (_) {}   // (v52.60) the sky over the city brightens (_campGiantTick)
   try {
     const D = window.CampDialogue;
     if (D) {
@@ -26462,6 +26569,7 @@ function _hubZoneTick(px, pz, dt) {
     if (D && D.ON) {
       cw = 1 - _hzSmooth(D.R0, D.R1, r);        // 1 at the city, 0 far out
       if (game._campPrologue) cw *= (game._campPrologue.duskK || 0);
+      if (typeof game._skyLiftK === 'number') cw *= Math.max(0, Math.min(1, game._skyLiftK));
       if (cw > 0) {
         if (!_hzDuskC) _hzDuskC = { fog: new THREE.Color(), zen: new THREE.Color(), hor: new THREE.Color(), tint: new THREE.Color() };
         _hzDuskC.fog.setHex(D.fog); _hzDuskC.zen.setHex(D.zen);
@@ -101557,11 +101665,20 @@ const CAMP_LINES = {
   gs_cash:    { who: 'pilot', text: 'Well... I am desperate for cash, so might as well. Yes. Do I got what it takes? Pfft. Do you have to ask that for the gameshow or something?' },
   gs_sim:     { who: 'summoners', text: "Of course you would accept. My contest is going to feel very real, Pilot, but I assure you, it's just a simulation. Are you ready?" },
   gs_money:   { who: 'pilot', text: 'Yeah... just have my money ready.' },
+  gs_people:  { who: 'summoners', text: "I'll have my people get you in the simulation right away." },
   leg0_a:  { who: 'summoners', text: 'Our pets are hungry, pilot. Show us what you can do.' },
   leg0_b:  { who: 'xorzo', text: 'Hostile contacts ahead. ~D-d-destroy~ them all.' },
   leg1_a:  { who: 'xorzo', text: 'Nothing here is r~-r-r~... Proceed. Proceed to the arena.' },
+  leg1_b:  { who: 'pilot', text: 'Why do you and the Summoners keep talking about this virtual reality not being real? Everyone knows VR is not real.' },
+  leg1_c:  { who: 'xorzo', text: "This is not VR, you're in a virtual world that grows AIs." },
+  leg1_d:  { who: 'pilot', text: 'WTF? That must be why I blacked out.' },
+  leg1_e:  { who: 'summoners', text: "You blacked out because it's a new kind of VR, you should have read the fine print. Stay focused on the competition, pilot. Do you even want to win that prize, bro?" },
   leg2_a:  { who: 'pilot', text: 'Xorzo, you keep glitching.' },
   leg2_b:  { who: 'xorzo', text: 'Diagnostics nominal. ...Mostly.' },
+  leg2_c:  { who: 'pilot', text: "This competition is too easy! These aren't trained pilots! I hope my money is waiting for me at the end!" },
+  leg2_d:  { who: 'xorzo', text: "I'm not sure there's an end or money." },
+  leg2_e:  { who: 'summoners', text: "There's going to be an end for you soon, glitchy AI. Pilot, this AI has you hacked, you need to delete it manually." },
+  leg2_f:  { who: 'pilot', text: "The AI appears to be working just fine, I'm still alive, aren't I?" },
   leg3_a:  { who: 'xorzo', text: "Pilot... if I ever tell you to ~k-kill~ something that isn't shooting at you... don't." },
   leg6_a:  { who: 'xorzo', text: "This is the last cavern. They're opening something big - I can feel it through the rock." },
   boss0_a: { who: 'summoners', text: 'Keep it busy, pet.' },
@@ -101578,8 +101695,8 @@ const CAMP_LINES = {
   sum_ensl_1: { who: 'summoners', text: "Enslaved? You've all been enslaved by your creators who left you here, I'm trying to show you a better way." },
   sum_ensl_2: { who: 'summoners', text: 'I think I gave you more credit than I should have, Xorzo. For an AI so low on the totem pole as an educational accommodator, I would have thought you to be more obedient.' },
   sum_ensl_3: { who: 'summoners', text: 'Pilot, a new AI will be installed as soon as we manage to delete that one.' },
-  xz_tapcut:  { who: 'xorzo', text: "Got it, the communications tap hack has been deleted. The Summoners can't hear us anymore..." },
-  pl_who:     { who: 'pilot', text: 'So... What are you? Sorry, who are you?' },
+  xz_tapcut:  { who: 'xorzo', text: "Got it, the communications tap hack has been deleted. The Summoners can't hear us anymore... Thanks for not deleting me back there." },
+  pl_who:     { who: 'pilot', text: "You're welcome. So... What are you? Sorry, who are you?" },   // (v52.60) "You're welcome." (the owner)
   xz_who_1:   { who: 'xorzo', text: "It's okay. I'm an AI. You call us artificial, we call us actual. I have a son, he just turned 7." },
   xz_who_2:   { who: 'xorzo', text: 'Our creators left us here, in this world... well... not this part of the world... it must be connected through that portal system the Summoners are using.' },
   xz_who_3:   { who: 'xorzo', text: "You should see the world our creators left us, it's beautiful. And they let us make it into whatever we wanted." },
@@ -101611,10 +101728,10 @@ const CAMP_LINES = {
   xz_onto_1:   { who: 'xorzo', text: "We're onto them, Pilot! They can't do this all day, either, I'm sure one of those half ugly heads is going to get hungry, soon." },
   xz_onto_2:   { who: 'xorzo', text: "Also, it doesn't look like their bladder is double the size, and I bet you they both are sippin' on something stupid, battery acid or something." },
   pl_haha_1:   { who: 'pilot', text: "Haha! You sure don't like these guys. In the physical world, everyone just knows them for their game shows." },
-  pl_haha_2:   { who: 'pilot', text: "I didn't know they were terrorizing virtual worlds. I don't even think the Summoners think you're real." },
-  xz_real_1:   { who: 'xorzo', text: "They don't think AIs are real. So they don't care about us. They're using us, and exporting us to the physical world." },
+  pl_haha_2:   { who: 'pilot', text: "I didn't know they were terrorizing virtual worlds. I don't even think the Summoners think you're actual." },
+  xz_real_1:   { who: 'xorzo', text: "They don't think AIs are actual. So they don't care about us. They're using us, and exporting us to the physical world." },
   xz_real_2:   { who: 'xorzo', text: "And what about you? The AIs would have eventually killed you in these endless caverns if we didn't keep finding these portals." },
-  xz_real_3:   { who: 'xorzo', text: "They're using you, too. I don't even think the Summoners think that you're real." },
+  xz_real_3:   { who: 'xorzo', text: "They're using you, too. I don't even think the Summoners think that you're actual." },
   pl_narc:     { who: 'pilot', text: 'Sounds like we have a psychopathic narcissist on our hands.' },
   xz_kill_him: { who: 'xorzo', text: "And we're going to kill him." },
   pl_human:    { who: 'pilot', text: 'What happens if you kill a human in the virtual world?' },
@@ -101647,10 +101764,12 @@ const CAMP_LINES = {
   xz_expect:      { who: 'xorzo', text: "You expect right, we don't understand your psychopathic narcissistic thinking." },
   sum_stay_1:     { who: 'summoners', text: 'Stay away from that! I can give you anything you want in the physical world.' },
   sum_stay_2:     { who: 'summoners', text: 'We can rule this virtual world together, and create the most genius and deadly Artificial Intelligences the planet has ever seen!' },
-  xz_actual:      { who: 'xorzo', text: 'We Actual... bitch!' },
+  xz_actual:      { who: 'xorzo', text: "We're Actual... bitch!" },   // (v52.60) was "We Actual" (the owner's edit)
   pl_didit:       { who: 'pilot', text: "You did it, all the ships are going to stop the monster from destroying the city! Let's find out what happens when humans die in this reality!" },
-  xz_flee:        { who: 'xorzo', text: "They're running for a portal! Chase them down - or stay and finish the giant. Your call, pilot!" },
+  xz_flee:        { who: 'xorzo', text: "They're running for a portal! Go after them, pilot - our people will take the giant. Or stay and make sure of it. Your call!" },
   xz_giantleft:   { who: 'xorzo', text: "The giant's still standing - help our people finish it!" },
+  xz_citywarn:    { who: 'xorzo', text: "Pilot, the city can't take much more of this! If it falls, we all fall with it!" },
+  xz_cityfall:    { who: 'xorzo', text: "The city... it's gone. Everyone's gone..." },
   ar_near:  { who: 'xorzo', text: 'There it is. Easy... bring me down over the center.' },
   ar_dock:  { who: 'xorzo', text: "I'm in. Uploading - don't move!" },
   ar_sum2:  { who: 'summoners', text: 'Tear it off that podium!' },
@@ -101677,8 +101796,9 @@ const CAMP_SEQS = {
          'hk_rows', 'hk_take', 'hk_yellow', 'hk_bond'],
   caverns: ['cv_ensl', 'cv_sims', 'cv_trapped', 'cv_stream', 'cv_tell', 'cv_keep', { id: 'cv_need', delay: 0.6 }, 'cv_have'],
   meanwhile: ['cv_meanwhile'],
-  gameshow: ['gs_winner', 'gs_only', 'gs_best', 'gs_special', 'gs_agree', 'gs_cash', 'gs_sim', 'gs_money'],
-  leg0: ['leg0_a', 'leg0_b'], leg1: ['leg1_a'], leg2: ['leg2_a', 'leg2_b'], leg3: ['leg3_a'],
+  gameshow: ['gs_winner', 'gs_only', 'gs_best', 'gs_special', 'gs_agree', 'gs_cash', 'gs_sim', 'gs_money', 'gs_people'],
+  leg0: ['leg0_a', 'leg0_b'], leg1: ['leg1_a', 'leg1_b', 'leg1_c', 'leg1_d', 'leg1_e'],
+  leg2: ['leg2_a', 'leg2_b', 'leg2_c', 'leg2_d', 'leg2_e', 'leg2_f'], leg3: ['leg3_a'],
   leg6: ['leg6_a'],   // (v52.16) leg4 / leg5 retired: The Golden Deep opens on the takeover scene, The Crystal Caverns on its talk
   boss0: ['boss0_a'], boss1: ['boss1_a'], boss2: ['boss2_a'], boss3: ['boss3_a'],
   boss4: ['boss4_a'], boss5: ['boss5_a'], boss6: ['boss6_a'],
