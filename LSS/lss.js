@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "52.76";
+const LSS_BUILD = "52.83";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -25938,6 +25938,10 @@ function _swTreeVisTick(cx, cz) {
     return;
   }
   try { window.__treeVisCullShown = undefined; } catch (_) {}
+  {
+    const ev = (typeof window !== 'undefined' && window.__treeVisEvery != null) ? Math.max(1, Math.round(+window.__treeVisEvery) || 1) : 2;
+    if (ev > 1 && ((_swTreeVisTick._n = (_swTreeVisTick._n | 0) + 1) % ev) !== 0) return;
+  }
   if (game.bendWorld) return;                       // the chunk grid is FLAT, uCam is BENT - they cannot agree
   if (game._worldPrebaking || game._swPreloading || game._swapStaging || game._rrStaging) return;
   try { if (window.__lssWarmDraw) return; } catch (_) {}
@@ -29845,6 +29849,10 @@ function _swRippleMaskJobTick(cine) {
   })();
   const budget = (window.__water && window.__water.bakeMs)
     || (_lsLoading ? 10.0 : ((cine || (J && J.fast) || (F && F.fast)) ? 4.0 : 1.0));
+  if (budget <= 1.0 && !(window.__water && window.__water.bakeMs)) {
+    const ev = (window.__water && window.__water.maskEvery != null) ? Math.max(1, Math.round(+window.__water.maskEvery) || 1) : 2;
+    if (ev > 1 && ((R._jobTick = (R._jobTick | 0) + 1) % ev) !== 0) return;
+  }
   const t0 = performance.now();
   if (J) {
     if (!R.maskData) { R._maskJob = null; return; }
@@ -33370,7 +33378,7 @@ function _swBuildHubWater(T) {
         }
         if (!_go && this._reflGap >= _gMin) {
           cam.matrixWorld.decompose(_reflNowP, _reflNowQ, _reflNowS);
-          if (_reflNowP.distanceToSquared(_reflEyeP) > ((_WK.reflMove != null ? _WK.reflMove : 6) ** 2)) _go = true;
+          if (_reflNowP.distanceToSquared(_reflEyeP) > ((_WK.reflMove != null ? _WK.reflMove : 40) ** 2)) _go = true;
           else if (1 - Math.abs(_reflNowQ.dot(_reflEyeQ)) > (_WK.reflTurn != null ? _WK.reflTurn : 3e-5)) _go = true;
         }
         if (!_go) return;
@@ -42861,23 +42869,30 @@ const _WX2 = (function () {
     speed: 20,          // sim seconds per real second (cumulus live ~20 min: ~1 min of play at 20)
     sims: 3,            // 1 = the main sim scrambled; up to 4 (each extra sim ~1.5-2 ms of GPU per sim-step)
     res: 0.5,           // the cloud pass's size against the scene's active rect, per axis
+    resNative: 1,       // (v52.77) ...against at most the NATIVE canvas: a supersampled scene (ULTRA / MEGA) no longer multiplies
+    gpuBudget: 1.5,     // (v52.79) ms of GPU the main view's cloud pass may take: the march lengthens its steps (uStepK) until it
+    reproj: 1,          // (v52.80) THE CHECKERBOARD (owner: "do the temporal reprojection on the clouds"): the main view marches half
+    step: 1,            // the main view's step length x this at least (the governor only ever goes ABOVE it)
+    stepMax: 2.5,       // ...and never past this (the mirror's 51.73 coarseness, which nobody could see through the water)
     mirror: 1,          // (51.71) the clouds in the water's reflection too (0 = the 51.70 mirror: a cloudless sky in the lake)
     mirrorRes: 0.5,     // the mirror's cloud pass against the MIRROR's own target (itself 0.5 / 0.4 / 0.25 of the canvas by tier)
     mirrorStep: 2.5,    // the mirror's march takes steps this many times longer, and skips the fractal detail (51.73, see draw)
+    mirrorEvery: 2,     // (v52.78) the mirror re-marches every Nth of ITS renders and composites its last image in between (1 = every one)
     gpuT: 0,            // 1 = time each view's cloud pass on the GPU (TIME_ELAPSED, never waited on) -> __wx2Info().gpu
     distKm: 30, visKm: 40,
-    detail: 0.6, detQref: 1.0, detVref: 1.0,   // Milestone 2's fractal sub-grid detail (0 = off): strength, the edge band (q_c g/kg),
+    detail: 0, detQref: 1.0, detVref: 1.0,     // Milestone 2's fractal sub-grid detail (0 = off): strength, the edge band (q_c g/kg),
     bright: 0.5,        // cloud radiance into the scene target (linear, before the composite's ACES; 0.85 blew out to white, 51.67)
     ext: 1.55, smooth: 0.15,
     shadow: 0.35,       // how much of the light a cloud shadow takes off the ground it falls on (0.5 read near-black on cliffs)
     wind: 0, windFrom: 90,
-    passes: 40,         // sim passes per frame at most (~25-30 us each at 512^2)
+    passes: 24,         // sim passes per frame at most (~25-30 us each at 512^2). (v52.78) was 40: the sim sat at its debt cap
     spinPasses: 160,    // per frame while the sky spins up from the bare sounding
     spinMin: 35,        // sim minutes of spin-up before the sky is shown as grown and the far field is cloned
     simSunEl: 43,       // the sun the GROUND feels, in degrees (the lab's reference; the hub's 25-degree sun only lights)
     storm: 1,           // (51.77) the city thunderstorm: a second sim (the lab's v6) anchored on the hub city. 0 hides it
     stormR: 3, stormFade: 3,   // km from the city centre: the storm at full strength inside stormR, gone by stormR + stormFade
     stormDusk: 1,       // 1 = it shows as the city dusk sets in (the dusk weight, DUSK._cw); 0 = always there
+    stormStepMin: 0.02, // (v52.78) under this presence the storm sim holds still (nobody can see it); it resumes where it was
     stormSpinMin: 30,   // sim minutes it grows behind the loading curtain (a first cell from WK82's warm bubble)
     lightning: 1,       // (51.79) x the storm's flash rate (Price & Rind 1992 for its top, gated on charging-zone graupel). 0 = none
     thunder: 1,         // thunder through the SFX bus, distance / 343 m/s after each flash
@@ -43423,6 +43438,7 @@ uniform float uMaxT, uHaze, uExt, uSmooth, uM, uTime, uBright, uShadow, uDbg;
 uniform int uK; uniform float uBand; uniform vec2 uFlipN;
 uniform float uObl, uDomeR; uniform vec4 uZRow; uniform vec3 uDomeO;   // (51.71) the water's mirror only: see the depth below
 uniform float uStepK;                                          // (51.73) step length x this: 1 in the main view, __wx2.mirrorStep in the mirror
+uniform vec2 uCB;                                              // (v52.80) the checkerboard: (this frame's parity, on) - see main()
 // (51.77) the city storm (slot 3): uStorm = (centre x, full radius, centre z, fade width) in fair-sim units, w 0 = none;
 // uStormP its presence (the city dusk); uStormK = (fair units -> storm units, its band top in fair units, -); the storm's 0 C
 // and -38 C levels (fair y), and skylight occlusion on (1) or off
@@ -43521,7 +43537,11 @@ vec3 rainbow(float mu){ float a=degrees(acos(clamp(-mu,-1.0,1.0))); vec3 c=vec3(
 vec3 glory(float mu){ float a=degrees(acos(clamp(-mu,-1.0,1.0))); if (a>9.0) return vec3(0);
   vec3 r=0.5+0.5*cos(6.2832*a/(2.3*vec3(0.65,0.55,0.45)/0.55)); return r*r*exp(-a/2.6)*smoothstep(9.0,6.0,a); }
 void main(){
-  vec2 uv=gl_FragCoord.xy/uRes;
+  // (v52.80) THE CHECKERBOARD: with uCB on this pass is HALF as wide as the cloud image and marches the pixels whose x + y +
+  // parity is even, two to a row of the image: full x = 2 x' + ((y + parity) & 1). F_RESOLVE rebuilds the other half
+  vec2 fc=gl_FragCoord.xy;
+  if (uCB.y>0.5) fc.x=floor(fc.x)*2.0+mod(floor(fc.y)+uCB.x, 2.0)+0.5;
+  vec2 uv=fc/uRes;
   vec4 vh=uInvProj*vec4(uv*2.0-1.0, 1.0, 1.0); vec3 vd=normalize(vh.xyz/vh.w);   // view space: the camera looks down -z
   vec3 rd=normalize(mat3(uCamWorld)*vd), ro=uCamW;
   // the opaque scene under this pixel, as a distance along the ray in sim units. The sky dome is opaque and writes depth at
@@ -43558,7 +43578,7 @@ void main(){
   float tF=-1.0, tB=-1.0;                                      // (51.84) where this ray's cloud begins and ends (sim units)
   if (tA1>tA0){
     float mu=dot(rd,uSunDir); vec3 bow=rainbow(mu), glo=glory(mu);
-    uvec2 pq=uvec2(gl_FragCoord.xy);
+    uvec2 pq=uvec2(fc);                                         // (v52.80) the image's pixel, not this pass's
     uint hv=pq.x*1973u+pq.y*9277u; hv=hv*747796405u+2891336453u; hv=((hv>>((hv>>28u)+4u))^hv)*277803737u; hv=(hv>>22u)^hv;
     float t=tA0+(float(hv)/4294967295.0)*stepAt(tA0);
     for (int k=0;k<400;k++){
@@ -43694,6 +43714,32 @@ void main(){
 const F_COMP = `#version 300 es
 precision highp float; uniform sampler2D tCld; uniform vec2 uInv; out vec4 o;
 void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
+const F_RESOLVE = `#version 300 es
+precision highp float; precision highp int; precision highp sampler2D;
+uniform sampler2D tFresh, tHist, tDepth;
+uniform mat4 uInvProj, uCamWorld, uPrevVP;
+uniform vec2 uRes, uDepthSize;
+uniform float uNear, uFar, uSkyT, uParity, uHistOk;
+out vec4 o;
+vec4 fresh(ivec2 p){ p=clamp(p, ivec2(0), ivec2(uRes)-1); return texelFetch(tFresh, ivec2(p.x>>1, p.y), 0); }
+void main(){
+  ivec2 p=ivec2(gl_FragCoord.xy);
+  if (((p.x+p.y+int(uParity))&1)==0){ o=texelFetch(tFresh, ivec2(p.x>>1, p.y), 0); return; }
+  vec4 n0=fresh(p+ivec2(1,0)), n1=fresh(p-ivec2(1,0)), n2=fresh(p+ivec2(0,1)), n3=fresh(p-ivec2(0,1));
+  vec4 avg=0.25*(n0+n1+n2+n3);
+  if (uHistOk<0.5){ o=avg; return; }
+  vec2 uv=(vec2(p)+0.5)/uRes;
+  vec4 vh=uInvProj*vec4(uv*2.0-1.0, 1.0, 1.0); vec3 vd=normalize(vh.xyz/vh.w);
+  vec3 rd=normalize(mat3(uCamWorld)*vd);
+  vec4 pc=uPrevVP*vec4(rd, 0.0);
+  float dz=texelFetch(tDepth, ivec2(uv*uDepthSize), 0).r;
+  if (dz<1.0){ float zn=dz*2.0-1.0, vz=2.0*uNear*uFar/(uFar+uNear-zn*(uFar-uNear)), tu=vz/max(-vd.z,1e-4);
+    if (tu<uSkyT) pc=uPrevVP*vec4(uCamWorld[3].xyz+rd*tu, 1.0); }
+  if (pc.w<=1e-6){ o=avg; return; }
+  vec2 q=pc.xy/pc.w*0.5+0.5;
+  if (q.x<0.0 || q.y<0.0 || q.x>1.0 || q.y>1.0){ o=avg; return; }
+  o=clamp(texture(tHist, q), min(min(n0,n1),min(n2,n3)), max(max(n0,n1),max(n2,n3)));
+}`;
 
   let gl = null, PX = null, S = null;
   function mkProg(fs, vs) {
@@ -43970,7 +44016,19 @@ void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
       const ns = gl.getQueryParameter(q, gl.QUERY_RESULT); gl.deleteQuery(q); S.tqP.shift();
       if (disj) continue;                                           // the GPU clock jumped: this one is meaningless
       const a = (S.tq || (S.tq = { main: [], mirror: [] }))[k]; a.push(ns / 1e6); if (a.length > 240) a.shift();
+      if (k === 'main') (S.gov || (S.gov = { k: 1, acc: [], at: 0, med: 0 })).acc.push(ns / 1e6);   // (v52.79) govTick's feed
     }
+  }
+  function govTick() {
+    const G = S.gov; if (!G || !G.acc.length) return;
+    const now = performance.now(); if (now < G.at) return;
+    G.at = now + 400;
+    const a = G.acc.splice(0).sort((x, y) => x - y), med = a[a.length >> 1];
+    G.med = med;
+    const B = +KN('gpuBudget'), lo = Math.max(0.5, +KN('step') || 1), hi = Math.max(lo, +KN('stepMax') || 2.5);
+    if (!(B > 0)) { G.k = lo; return; }
+    if (med > B * 1.08) G.k = Math.min(hi, G.k * Math.min(1.3, Math.max(1.05, Math.pow(med / B, 0.75))));
+    else if (med < B * 0.75) G.k = Math.max(lo, G.k / 1.08);
   }
   function tqStat(a) {
     if (!a || !a.length) return null;
@@ -44038,46 +44096,58 @@ void main(){ wxMain(); gl_FragColor${pm === 'P' ? '' : '.a'}*=wxVeil(); }
     if (aw < 16 || ah < 16) return;
     const st = {
       dr: gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING), rd: gl.getParameter(gl.READ_FRAMEBUFFER_BINDING),
-      vp: gl.getParameter(gl.VIEWPORT), sb: gl.getParameter(gl.SCISSOR_BOX), sc: gl.isEnabled(gl.SCISSOR_TEST),
+      vp: gl.getParameter(gl.VIEWPORT), sc: gl.isEnabled(gl.SCISSOR_TEST),
       prog: gl.getParameter(gl.CURRENT_PROGRAM), vao: gl.getParameter(gl.VERTEX_ARRAY_BINDING),
-      bl: gl.isEnabled(gl.BLEND), bsr: gl.getParameter(gl.BLEND_SRC_RGB), bdr: gl.getParameter(gl.BLEND_DST_RGB),
-      bsa: gl.getParameter(gl.BLEND_SRC_ALPHA), bda: gl.getParameter(gl.BLEND_DST_ALPHA),
-      ber: gl.getParameter(gl.BLEND_EQUATION_RGB), bea: gl.getParameter(gl.BLEND_EQUATION_ALPHA),
-      dt: gl.isEnabled(gl.DEPTH_TEST), dm: gl.getParameter(gl.DEPTH_WRITEMASK), cf: gl.isEnabled(gl.CULL_FACE),
-      stn: gl.isEnabled(gl.STENCIL_TEST), cm: gl.getParameter(gl.COLOR_WRITEMASK),
-      a2c: gl.isEnabled(gl.SAMPLE_ALPHA_TO_COVERAGE), po: gl.isEnabled(gl.POLYGON_OFFSET_FILL),
       act: gl.getParameter(gl.ACTIVE_TEXTURE), units: [],
     };
+    const TS = renderer.state;
     for (let u = 0; u < _hookUnits; u++) { gl.activeTexture(gl.TEXTURE0 + S.unit0 + u);
       st.units.push([gl.getParameter(gl.TEXTURE_BINDING_2D), gl.getParameter(gl.TEXTURE_BINDING_3D)]); }
-    const tq = +KN('gpuT') ? tqBegin() : null;
+    const tq = (+KN('gpuT') || (!eye && +KN('gpuBudget') > 0)) ? tqBegin() : null;   // (v52.79) the budget needs the main pass timed
     try {
-      ensureDepth(V, rt.width, rt.height, st.dr);
-      gl.disable(gl.SCISSOR_TEST);
-      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, st.dr); gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, V.depthFbo);
-      gl.blitFramebuffer(0, 0, aw, ah, 0, 0, aw, ah, gl.DEPTH_BUFFER_BIT, gl.NEAREST);
-      const res = Math.max(0.2, Math.min(1, +KN(eye ? 'mirrorRes' : 'res')));
-      const lw = Math.max(16, Math.round(aw * res)), lh = Math.max(16, Math.round(ah * res));
-      ensureCld(V, lw, lh);
-      gl.bindFramebuffer(gl.FRAMEBUFFER, V.cld.fbo); gl.viewport(0, 0, lw, lh);
-      gl.disable(gl.BLEND); gl.disable(gl.DEPTH_TEST); gl.depthMask(false); gl.disable(gl.CULL_FACE); gl.disable(gl.STENCIL_TEST);
-      gl.disable(gl.SAMPLE_ALPHA_TO_COVERAGE); gl.disable(gl.POLYGON_OFFSET_FILL); gl.colorMask(true, true, true, true);
-      gl.bindVertexArray(S.vao);
-      const m = S.sims[0], t = i => (S.sims[i] && S.sims[i].live) ? S.sims[i] : m;
-      gl.useProgram(PR.cloud.p);
-      bindTex(PR.cloud, { tCloud: m.cloud3, tC1: t(1).cloud3, tC2: t(2).cloud3, tC3: t(3).cloud3, tDepth: V.depthTex, tWarp: S.warpTex,
-        tS0: m.sunMap, tS1: t(1).sunMap, tS2: t(2).sunMap, tS3: t(3).sunMap,
-        tNoise: S.noise3, tV0: m.vel3, tV1: t(1).vel3, tV2: t(2).vel3, tV3: t(3).vel3 }, S.unit0);
-      setU(PR.cloud, cloudUniforms(cam, aw, ah, lw, lh, eye));
-      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      const every = Math.max(1, Math.round(+KN('mirrorEvery') || 1));
+      const fresh = !eye || !V.cld || every <= 1 || ((V.mirN = (V.mirN | 0) + 1) % every) === 0;
+      if (fresh) {
+        ensureDepth(V, rt.width, rt.height, st.dr);
+        TS.setScissorTest(false);                                   // (v52.81) through three's tracker - see the note at st
+        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, st.dr); gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, V.depthFbo);
+        gl.blitFramebuffer(0, 0, aw, ah, 0, 0, aw, ah, gl.DEPTH_BUFFER_BIT, gl.NEAREST);
+        const res = Math.max(0.2, Math.min(1, +KN(eye ? 'mirrorRes' : 'res')));
+        let bw = aw, bh = ah;
+        if (!eye && +KN('resNative')) {
+          const cv = (typeof renderer !== 'undefined' && renderer) ? renderer.domElement : null;
+          if (cv && cv.width > 0 && aw > cv.width) { bw = cv.width; bh = Math.round(ah * cv.width / aw); }
+        }
+        V.aw = aw; V.ah = ah;                                         // for __wx2Info().scenePx
+        const lw = Math.max(16, Math.round(bw * res)), lh = Math.max(16, Math.round(bh * res));
+        const cb = !eye && !!+KN('reproj') && !+KN('dbg'), mw = cb ? ((lw + 1) >> 1) : lw;
+        ensureCld(V, mw, lh);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, V.cld.fbo); gl.viewport(0, 0, mw, lh);
+        plainState(TS);                                             // (v52.81) through three's tracker - see the note at st
+        gl.bindVertexArray(S.vao);
+        const m = S.sims[0], t = i => (S.sims[i] && S.sims[i].live) ? S.sims[i] : m;
+        gl.useProgram(PR.cloud.p);
+        bindTex(PR.cloud, { tCloud: m.cloud3, tC1: t(1).cloud3, tC2: t(2).cloud3, tC3: t(3).cloud3, tDepth: V.depthTex, tWarp: S.warpTex,
+          tS0: m.sunMap, tS1: t(1).sunMap, tS2: t(2).sunMap, tS3: t(3).sunMap,
+          tNoise: S.noise3, tV0: m.vel3, tV1: t(1).vel3, tV2: t(2).vel3, tV3: t(3).vel3 }, S.unit0);
+        if (cb) V.cbPar = (V.cbPar | 0) ^ 1;                         // the other half of the pixels this frame
+        const cu = cloudUniforms(cam, aw, ah, lw, lh, eye);
+        cu.uCB = [cb ? V.cbPar : 0, cb ? 1 : 0];                   // ALWAYS set: the mirror shares this program
+        setU(PR.cloud, cu);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+        V.out = cb ? resolveCB(cam, V, aw, ah, lw, lh, cu) : V.cld;   // (v52.80) the image the composite draws
+      } else {
+        plainState(TS);
+        gl.bindVertexArray(S.vao);
+      }
       veilSet(cam, V, aw, ah, eye);                                 // (51.84) the cities' glow drawn after this reads it
       if (+KN('dbg')) { if (!eye) S.drawn++; return; }            // diagnostic: leave the raw terms for __wx2Dbg() (main view)
       gl.bindFramebuffer(gl.FRAMEBUFFER, st.dr);
       gl.viewport(0, 0, aw, ah);
-      if (st.sc) { gl.enable(gl.SCISSOR_TEST); gl.scissor(st.sb[0], st.sb[1], st.sb[2], st.sb[3]); }
-      gl.enable(gl.BLEND); gl.blendEquation(gl.FUNC_ADD); gl.blendFuncSeparate(gl.ONE, gl.SRC_ALPHA, gl.ZERO, gl.ONE);
+      if (st.sc) TS.setScissorTest(true);                           // (v52.81) three's own box, never changed here
+      TS.setBlending(THREE.CustomBlending, THREE.AddEquation, THREE.OneFactor, THREE.SrcAlphaFactor, THREE.AddEquation, THREE.ZeroFactor, THREE.OneFactor, blendC0(), 0);
       gl.useProgram(PR.comp.p);
-      bindTex(PR.comp, { tCld: V.cld }, S.unit0);
+      bindTex(PR.comp, { tCld: V.out || V.cld }, S.unit0);         // (v52.80) the resolved checkerboard, or the march itself
       setU(PR.comp, { uInv: [1 / aw, 1 / ah] });
       gl.drawArrays(gl.TRIANGLES, 0, 3);
       if (eye) { S.drawnM++; drawBolt(cam, aw, ah, V, eye); }       // (51.83) owner: "bolts should appear in the water/reflections"
@@ -44089,13 +44159,21 @@ void main(){ wxMain(); gl_FragColor${pm === 'P' ? '' : '.a'}*=wxVeil(); }
       gl.activeTexture(st.act);
       gl.useProgram(st.prog); gl.bindVertexArray(st.vao);
       gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, st.dr); gl.bindFramebuffer(gl.READ_FRAMEBUFFER, st.rd);
-      gl.viewport(st.vp[0], st.vp[1], st.vp[2], st.vp[3]); gl.scissor(st.sb[0], st.sb[1], st.sb[2], st.sb[3]);
-      const en = (cap, on) => { if (on) gl.enable(cap); else gl.disable(cap); };
-      en(gl.SCISSOR_TEST, st.sc); en(gl.BLEND, st.bl); en(gl.DEPTH_TEST, st.dt); en(gl.CULL_FACE, st.cf); en(gl.STENCIL_TEST, st.stn);
-      en(gl.SAMPLE_ALPHA_TO_COVERAGE, st.a2c); en(gl.POLYGON_OFFSET_FILL, st.po);
-      gl.blendFuncSeparate(st.bsr, st.bdr, st.bsa, st.bda); gl.blendEquationSeparate(st.ber, st.bea);
-      gl.depthMask(st.dm); gl.colorMask(st.cm[0], st.cm[1], st.cm[2], st.cm[3]);
+      gl.viewport(st.vp[0], st.vp[1], st.vp[2], st.vp[3]);
+      TS.setScissorTest(st.sc);
     }
+  }
+  let _blendC0 = null;
+  function blendC0() { return _blendC0 || (_blendC0 = new THREE.Color(0, 0, 0)); }
+  function plainState(TS) {
+    TS.setBlending(THREE.NoBlending);
+    TS.buffers.depth.setTest(false); TS.buffers.depth.setMask(false);
+    TS.setCullFace(THREE.CullFaceNone);
+    TS.buffers.stencil.setTest(false);
+    TS.disable(gl.SAMPLE_ALPHA_TO_COVERAGE);
+    TS.setPolygonOffset(false);
+    TS.buffers.color.setMask(true);
+    TS.setScissorTest(false);
   }
   function ensureDepth(V, w, h, srcFb) {
     let fmt = V.fmtFor === srcFb ? V.fmt : null;
@@ -44115,6 +44193,7 @@ void main(){ wxMain(); gl_FragColor${pm === 'P' ? '' : '.a'}*=wxVeil(); }
                 d32f: [gl.DEPTH_COMPONENT32F, gl.DEPTH_COMPONENT, gl.FLOAT, gl.DEPTH_ATTACHMENT],
                 d24s8: [gl.DEPTH24_STENCIL8, gl.DEPTH_STENCIL, gl.UNSIGNED_INT_24_8, gl.DEPTH_STENCIL_ATTACHMENT],
                 d32fs8: [gl.DEPTH32F_STENCIL8, gl.DEPTH_STENCIL, gl.FLOAT_32_UNSIGNED_INT_24_8_REV, gl.DEPTH_STENCIL_ATTACHMENT] }[fmt];
+    gl.activeTexture(gl.TEXTURE0 + S.unit0);                       // (v52.81) a unit the hook restores, never one of three's
     const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.texImage2D(gl.TEXTURE_2D, 0, F[0], w, h, 0, F[1], F[2], null);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
@@ -44124,6 +44203,8 @@ void main(){ wxMain(); gl_FragColor${pm === 'P' ? '' : '.a'}*=wxVeil(); }
   }
   function ensureCld(V, w, h) {
     if (V.cld && V.cldW === w && V.cldH === h) return;
+    V.reallocs = (V.reallocs | 0) + 1;                              // (v52.77) __wx2Info().cloudReallocs: a re-size per frame is churn
+    gl.activeTexture(gl.TEXTURE0 + S.unit0);                       // (v52.81) a unit the hook restores, never one of three's
     if (V.cld) { gl.deleteTexture(V.cld.tex); gl.deleteFramebuffer(V.cld.fbo); }
     if (V.cldZ) { gl.deleteTexture(V.cldZ.tex); V.cldZ = null; }
     const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
@@ -44138,6 +44219,39 @@ void main(){ wxMain(); gl_FragColor${pm === 'P' ? '' : '.a'}*=wxVeil(); }
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, tz, 0);
     gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);   // per framebuffer: only F_CLOUD ever draws into this one
     V.cld = { tex: t, fbo: f }; V.cldZ = { tex: tz }; V.cldW = w; V.cldH = h;
+  }
+  function ensureHist(V, w, h) {
+    if (V.hist && V.histW === w && V.histH === h) return;
+    gl.activeTexture(gl.TEXTURE0 + S.unit0);                       // a unit the hook restores, never one of three's
+    if (V.hist) for (const x of V.hist) { gl.deleteTexture(x.tex); gl.deleteFramebuffer(x.fbo); }
+    V.hist = [0, 1].map(() => {
+      const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      const f = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, f); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+      return { tex: t, fbo: f };
+    });
+    V.histW = w; V.histH = h; V.histOk = false;
+  }
+  let _cbM = null;
+  function resolveCB(cam, V, aw, ah, lw, lh, cu) {
+    ensureHist(V, lw, lh);
+    const e = cam.matrixWorld.elements, now = performance.now();
+    const moved = V.prevPos ? Math.hypot(e[12] - V.prevPos[0], e[13] - V.prevPos[1], e[14] - V.prevPos[2]) : 1e9;
+    const ok = !!(V.histOk && V.prevVP && now - (V.histT || 0) < 150 && moved < 2000);
+    const cur = V.histI = (V.histI | 0) ^ 1;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, V.hist[cur].fbo); gl.viewport(0, 0, lw, lh);
+    gl.useProgram(PR.resolve.p);
+    bindTex(PR.resolve, { tFresh: V.cld, tHist: V.hist[cur ^ 1], tDepth: V.depthTex }, S.unit0);
+    setU(PR.resolve, { uInvProj: cu.uInvProj, uCamWorld: cu.uCamWorld, uPrevVP: { m4: V.prevVP || cu.uCamWorld.m4 }, uRes: [lw, lh],
+      uDepthSize: [aw, ah], uNear: cu.uNear, uFar: cu.uFar, uSkyT: cu.uSkyT, uParity: V.cbPar | 0, uHistOk: ok ? 1 : 0 });
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    if (!_cbM) _cbM = new THREE.Matrix4();
+    _cbM.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+    if (!V.prevVP) V.prevVP = new Float32Array(16);
+    V.prevVP.set(_cbM.elements); V.prevPos = [e[12], e[13], e[14]]; V.histT = now; V.histOk = true; V.cbOk = ok;
+    return V.hist[cur];
   }
   function cloudUniforms(cam, aw, ah, lw, lh, eye) {
     if (S.cxFair) useCtx(S.cxFair);                               // (51.77) the render's frame is the far field's (whichever sim stepped last)
@@ -44168,7 +44282,7 @@ void main(){ wxMain(); gl_FragColor${pm === 'P' ? '' : '.a'}*=wxVeil(); }
       uYBand: [lo / (H / 2) - 1, hi / (H / 2) - 1],
       uMaxT: +KN('distKm') * 1000 / (H / 2), uHaze: 3.912 / (+KN('visKm') * 1000) * (H / 2), uExt: +KN('ext'), uSmooth: +KN('smooth'),
       uM: H / 2, uTime: (performance.now() / 1000) % 1000, uBright: +KN('bright'), uShadow: +KN('shadow'), uDbg: +KN('dbg') || 0,
-      uStepK: eye ? Math.max(1, +KN('mirrorStep')) : 1,
+      uStepK: eye ? Math.max(1, +KN('mirrorStep')) : Math.max(Math.max(0.5, +KN('step') || 1), (+KN('gpuBudget') > 0 && S.gov) ? S.gov.k : 1),
       uDetAmp: eye ? 0 : +KN('detail'), uDetTime: S.tDet || 0, uDetPer: 40, uDetQref: +KN('detQref'), uDetDx: DX, uDetVref: +KN('detVref'),
       uK: { i: 1 + satLive() }, uBand: REG.band, uRegR: REG.R, uWarpAmp: REG.amp, uWarpK: 1 / REG.period,
       uRegRot: [Math.cos(REG.rot), Math.sin(REG.rot)], uRegOff: REG.off, uFlipN: [Math.cos(f), -Math.sin(f)],
@@ -44307,7 +44421,7 @@ void main(){ wxMain(); gl_FragColor${pm === 'P' ? '' : '.a'}*=wxVeil(); }
       uBoltC: [1.7, 1.8, 2.2], uI: I, uNear: cam.near, uFar: cam.far, uSkyT: 20500 * dm * 0.96, uTanHV: [1 / pe[0], 1 / pe[5]],
       uObl: eye ? 1 : 0, uZRow: [pz[2], pz[6], pz[10], pz[14]], uDomeO: dO, uDomeR: 20500 * dm, uCamWorld: { m4: cam.matrixWorld.elements } });
     gl.viewport(0, 0, aw, ah);
-    gl.enable(gl.BLEND); gl.blendEquation(gl.FUNC_ADD); gl.blendFuncSeparate(gl.ONE, gl.ONE, gl.ZERO, gl.ONE);
+    renderer.state.setBlending(THREE.CustomBlending, THREE.AddEquation, THREE.OneFactor, THREE.OneFactor, THREE.AddEquation, THREE.ZeroFactor, THREE.OneFactor, blendC0(), 0);
     gl.disableVertexAttribArray(0);
     gl.drawArrays(gl.TRIANGLES, 0, f.nv);
     gl.enableVertexAttribArray(0);
@@ -44363,7 +44477,7 @@ void main(){ wxMain(); gl_FragColor${pm === 'P' ? '' : '.a'}*=wxVeil(); }
       drawn: 0, drawnM: 0, vMain: {}, vMirror: {}, passes: 0, spinLeft: 0, bandAt: 0, drawable: false, scenKey: null };
     const src = { init: F_INIT, scal: F_SCAL, adP: F_ADV_P, adC: F_ADV_C, keddy: F_KEDDY, diff: F_DIFF, mean1: F_MEAN1, mean2: F_MEAN2,
       qmax1: F_QMAX1, qmax2: F_QMAX2, phys: F_PHYS, surf: F_SURF, shade: F_SHADE, vort: F_VORT, vfilt: F_VFILT, div: F_DIV, pois: F_POIS,
-      prs: F_PRS, pack2: F_PACK2, noise3: F_NOISE3, shift: F_SHIFT, shade2: F_SHADE2, cloud: F_CLOUD, comp: F_COMP,
+      prs: F_PRS, pack2: F_PACK2, noise3: F_NOISE3, shift: F_SHIFT, shade2: F_SHADE2, cloud: F_CLOUD, comp: F_COMP, resolve: F_RESOLVE,
       bub: F_BUB, elec: F_ELEC, bolt: [F_BOLT, V_BOLT] };
     PR = {}; for (const k in src) PR[k] = Array.isArray(src[k]) ? mkProg(src[k][0], src[k][1]) : mkProg(src[k]);
     try {
@@ -44438,7 +44552,8 @@ void main(){ wxMain(); gl_FragColor${pm === 'P' ? '' : '.a'}*=wxVeil(); }
     }
     if (S.debt < S.dt) return null;
     S.debt -= S.dt;
-    for (let i = 1; i < S.sims.length; i++) { const s = S.sims[i]; if (s && s.live) { S.queue.push({ sim: s, gen: stepJob(s) }); S.queue.push({ sim: s, gen: packG(s) }); } }
+    const stormIdle = !!(S.storm && stormPresence() < +KN('stormStepMin'));
+    for (let i = 1; i < S.sims.length; i++) { const s = S.sims[i]; if (s && s.live && !(stormIdle && i === 3)) { S.queue.push({ sim: s, gen: stepJob(s) }); S.queue.push({ sim: s, gen: packG(s) }); } }
     S.queue.unshift({ sim: m, gen: packG(m) });
     return { sim: m, gen: stepJob(m) };
   }
@@ -44485,10 +44600,12 @@ void main(){ wxMain(); gl_FragColor${pm === 'P' ? '' : '.a'}*=wxVeil(); }
       useCtx(S.cxFair);
       pollBands();
       try { tqPoll(); } catch (_) {}
+      try { govTick(); } catch (_) {}                               // (v52.79) the cloud pass's GPU budget
       try { pollElec(); } catch (_) {}
       let budget = +KN('passes');
       if (S.phase === 'spin') {
-        budget = +KN('spinPasses');
+        let cover = false; try { cover = !!_loadingAudioHold; } catch (_) {}
+        budget = (S.spinLeft > 0 || cover) ? +KN('spinPasses') : +KN('passes');
         if (S.spinLeft <= 0 && !S.job && !S.queue.length && !(S.storm && S.storm.spinLeft > 0)) { S.phase = 'run'; console.log('[wx2] sky grown at ' + Math.round(S.simTime / 60) + ' sim-min'); }
       } else {
         S.debt = Math.min(S.debt + Math.max(0, dt) * (+KN('speed')), S.dt * 6);   // behind by more than 6 steps: run slow, never catch up in a burst
@@ -44538,6 +44655,7 @@ void main(){ wxMain(); gl_FragColor${pm === 'P' ? '' : '.a'}*=wxVeil(); }
       for (const V of [S.vMain, S.vMirror]) { if (!V) continue;
         if (V.cld) { gl.deleteTexture(V.cld.tex); gl.deleteFramebuffer(V.cld.fbo); }
         if (V.cldZ) gl.deleteTexture(V.cldZ.tex);
+        if (V.hist) for (const x of V.hist) { gl.deleteTexture(x.tex); gl.deleteFramebuffer(x.fbo); }   // (v52.80)
         if (V.depthTex) { gl.deleteTexture(V.depthTex.tex); gl.deleteFramebuffer(V.depthFbo); } }
       veilDrop();
       if (S.vao) { gl.deleteVertexArray(S.vao); gl.deleteBuffer(S.vbo); }
@@ -44551,6 +44669,9 @@ void main(){ wxMain(); gl_FragColor${pm === 'P' ? '' : '.a'}*=wxVeil(); }
     return { phase: S.phase, scen: S.scenKey, label: SC.label, boxKm: H / 1000, dt: S.dt, simMin: +(S.simTime / 60).toFixed(1), spinLeft: S.spinLeft,
       sats: S.sims.length ? satLive() : 0, passesLastFrame: S.passes, debtSteps: +(S.debt / (S.dt || 1)).toFixed(2), drawn: S.drawn,
       bands: S.sims.map(s => s && s.live ? s.band : null), unit0: S.unit0, depthFmt: S.vMain.fmt || null, cloudPass: S.vMain.cld ? [S.vMain.cldW, S.vMain.cldH] : null,
+      scenePx: S.vMain.aw ? [S.vMain.aw, S.vMain.ah] : null, cloudReallocs: S.vMain.reallocs | 0,   // (v52.77)
+      gov: S.gov ? { stepK: +S.gov.k.toFixed(2), gpuMed: +S.gov.med.toFixed(2), budget: +KN('gpuBudget') } : null,   // (v52.79)
+      reproj: S.vMain.hist ? { on: !!+KN('reproj'), image: [S.vMain.histW, S.vMain.histH], historyUsed: !!S.vMain.cbOk } : null,   // (v52.80)
       mirror: { drawn: S.drawnM, pass: S.vMirror.cld ? [S.vMirror.cldW, S.vMirror.cldH] : null, depthFmt: S.vMirror.fmt || null },
       gpu: S.tq ? { main: tqStat(S.tq.main), mirror: tqStat(S.tq.mirror) } : null,
       storm: S.storm ? { live: !!(S.sims[3] && S.sims[3].live), spinLeft: S.storm.spinLeft, band: S.sims[3] && S.sims[3].band, zT: S.cxStorm && S.cxStorm.zT,
@@ -44647,8 +44768,22 @@ function _wxInit(T) {
   try { _WX2.init(T); } catch (e) { console.warn('[wx2] init failed:', e); }
 }
 
+function _wxShadowCadence(off) {
+  try {
+    const sm = renderer.shadowMap; if (!sm) return;
+    if (off) { if (_WX.shCad) { sm.autoUpdate = true; _WX.shCad = false; } return; }
+    let warm = false; try { warm = !!(game._worldPrebaking || (typeof _PREBAKE !== 'undefined' && _PREBAKE && _PREBAKE.on) || window.__lssWarmDraw); } catch (_) {}
+    if (warm || !sm.enabled) return;
+    const v = (typeof window !== 'undefined' && window.__shadowEvery != null) ? +window.__shadowEvery : 2;
+    const N = Math.max(1, Math.round(v) || 1);
+    if (N <= 1) { if (_WX.shCad) { sm.autoUpdate = true; _WX.shCad = false; } return; }
+    sm.autoUpdate = false; _WX.shCad = true;
+    sm.needsUpdate = ((_WX.shTick = (_WX.shTick | 0) + 1) % N) === 0;   // three clears it once the map is drawn
+  } catch (_) {}
+}
 function _wxDispose() {
   try { _WX2.dispose(); } catch (_) {}   // (v51.62) the volumetric weather goes with the hub's sky
+  _wxShadowCadence(true);                                           // (v52.82) three's every-frame shadow map back
   if (!_WX.on) { game.hubWeather = false; return; }
   _WX.on = false;
   game.hubWeather = false;
@@ -44747,7 +44882,9 @@ function _wxFrame(dt) {
     dirLight.position.set(tx + sd.x * 9000, ty + sd.y * 9000, tz + sd.z * 9000);
     dirLight.target.position.set(tx, ty, tz);
     dirLight.target.updateMatrixWorld();
+    _wxShadowCadence();                                             // (v52.82) the map every other frame
   } else if (typeof dirLight !== 'undefined' && dirLight) {
+    _wxShadowCadence(true);                                         // (v52.82) no rig: three's own every-frame update
     if (!_WX._aimD || _WX._aimD.x !== sd.x || _WX._aimD.y !== sd.y || _WX._aimD.z !== sd.z) {
       dirLight.position.set(sd.x * 3500, sd.y * 3500, sd.z * 3500);
       dirLight.target.position.set(0, 0, 0);
