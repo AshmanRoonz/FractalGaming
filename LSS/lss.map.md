@@ -527,6 +527,7 @@ Mode descriptors + full single-player campaign: waves, bosses, escorts, hoard-bo
   - **Known gap, stated rather than papered over:** between 900px wide and the landscape-phone block there is now no bot control at all in portrait (there was an ADD BOTS box). The fleet cards were already unreachable there since v45.43; bots default ON, so a portrait player gets a full match and cannot thin it.
 - **(v34.68) ASSAULT mode** (`LSS.MODE==='assault'`, `#btn-assault`): Protect/Attack the Champion Field on `assault_` maps (side-'A' rooms = defender/champion end). The field + shell spawn at round start; only the ATTACKING fleet can claim/charge (`LSS.ASSAULT_CHARGE_TIME` hold, decays when vacated); timer expiry (`LSS.ASSAULT_ROUND_TIME`) = defender round win; roles swap each round (`_assaultAttackerFleet()` = pure function of currentRound, zero sync). Unlimited respawns: fleet-wipe round end disabled + bot reinforcements top fleets back up (authority-side, roster rebroadcast). Match end: `_assaultMatchWinner()` net-capture spread (2*caps−attackRounds ≥ `ASSAULT_NET_SPREAD`, higher net, evaluated only at equal attack rounds) via `game.assaultLedger` (booked by the round-end authority AND `round_end` receivers, BEFORE currentRound increments). Spawn sides role-mapped via `_assaultSpawnSide` at all five `getValidSpawnPoint` call sites. Defender bots hold a guard post off the field when unengaged (waypoint shortcut skips dogfight AI — only used when idle); attacker bots keep the champion beeline.
 - **(v36.14) ASYMMETRIC ASSAULT RESPAWNS — defenders wait +3s** (owner: "in assault mode, there should be a 3s delay for the defenders when they die/respawn"). The v34.68/69 respawn machinery was symmetric 4s for both sides, so killing a defender bought you nothing; now the DEFENDING role waits `LSS.ASSAULT_RESPAWN_DELAY + LSS.ASSAULT_DEFENDER_RESPAWN_EXTRA` (4+3 = **7s**) while the ATTACKING role keeps **4s**. **Jump:** `ASSAULT_RESPAWN_DELAY` (the `const LSS = {` block, beside `ASSAULT_CHARGE_TIME`) · the two assault respawn blocks in `updateRoundSystem` (grep `_asltReinforceTD` and `_asltPlayerRespawnT`). **Local player:** the hold is `ASSAULT_RESPAWN_DELAY + (player.team !== _assaultAttackerFleet() ? EXTRA : 0)`, recomputed per frame — role is a pure function of `currentRound`, so a round-boundary swap is picked up with zero stored state and zero sync. **Bots:** the single 4s reinforcement timer split into TWO role clocks — `game._asltReinforceT` (attackers, 4s) and `game._asltReinforceTD` (defenders, 7s) — and the `for (const _fl of [B, A])` top-up loop now `continue`s unless *that fleet's* role clock fired this pass, so the fleets refill out of phase. Everything else in the block (the `eliminationBots !== false` gate, the openSolo/`amStasisOwner` authority gate, `_needB`/`_needA` seat math, `_assaultSpawnSide` placement, `_botSendRoster()` rebroadcast) is untouched. **⚠ The clocks are bound to the ROLE, not the fleet** — a role swap hands each clock the *other* interval, so all three assault timers (`_asltReinforceT`, `_asltReinforceTD`, `_asltPlayerRespawnT`) are now zeroed at the warmup→playing transition (right after the CAPTURE/DEFEND role banner) — without that, a defender clock carrying 6s of accumulation fires instantly the moment its fleet becomes the 4s attacker. Verified live (solo assault, real round transitions forced via `roundTimerTotal`/`roundTimerAnchorMs`, per-frame rAF recorder on `shipState` + per-fleet alive counts): player DEFENDER hold **7.073s** (r1) and **7.064s** (r3) vs ATTACKER **4.063s** (r2); reinforcement clock gaps measured 4.001-4.004s and 7.002-7.004s over 43s; bot top-up attribution flipped with the role — r2 (attacker=A) restored Fleet A at t=3.999 / Fleet B at t=7.003, r3 (attacker=B) restored Fleet B at t=3.999 / Fleet A at t=7.000; both clocks equal at each round start (proves the boundary zeroing); 144fps, zero console errors. **⚠ harness note:** `LSS` is NOT on `window` — read roles as `attacker = (currentRound % 2 === 1) ? 3 : 2` (TEAM_FLEET_B=3 / TEAM_FLEET_A=2) from `window.game` / `window.player`. Headless assault entry is just `startAssault()` → click `#ship-preview-confirm` (solo, no room code); `player.spawnProtection = 0` before `__playerTakeDamage`.
+- **(v52.90) TEAM DEATHPUSH** (`LSS.MODE === 'push'`, `#btn-push` under ASSAULT, `startPush()`, carousel = `push_` maps only): five champion fields down one generated 30 km cavern, one round = the match (hold all five), 10 s wave respawns, a spawn tier that follows point 3. Built on assault's seams plus the overworld cities' multi-field pattern. **Full entry: `### v52.90-52.94 - TEAM DEATHPUSH`** (near the end of this file). **Jump:** `const PUSH = {`.
 
 #### ⭐⭐⭐ (v46.88) THE EARTH CURTAIN HAS TO STOP THE WORLD, NOT JUST THE PICTURE — and the load's big frame, profiled
 **Jump:** `function _lssEarthWarmOnce` (the v46.88 MEASURED-AND-REVERTED note in it) · the F8 recorder (`?pbhud`, `window.__f8log`).
@@ -8310,6 +8311,109 @@ good to stay low, unless we are going to go up buildings or into floating island
   rooftop height reads 2,600-3,900 AGL against raw ground while the pilot is skimming the towers.
   Do not "fix" those.
 
+
+### v52.90-52.94 - TEAM DEATHPUSH (`LSS.MODE === 'push'`, map `push_deep` "The Long Push")
+
+Owner's brief (2026-10-08): *"unlimited respawns, timed wave respawns every 10s / 5 capture points between 2 spawns,
+point 3 is the middle, points 1 and 5 are the spawns / capture and hold point 3 and your team spawn moves to point 2 or
+4 ... capture and hold point 3 and 4 or 2 (the further number from your team spawn), and you spawn at 3 / capture points
+are champion fields, the shell is self healing, if the shell is destroyed, it will respawn after 5s if nobody is
+capturing ... if you capture a point, that stasis field gets a shell after 5s and changes to your team's color / you
+can capture points out of order, but you must capture all 5 to win"*. Setting: *"like shifting deep will change every
+match, a long narrow stretch of caverns (like in endless but more narrow) ... open the ceiling-floor clamp slightly ...
+some corridors that raise the clamp in some straight and some curved paths / the distance between 1 and 5 will be like
+from the center city to an outer city"*.
+
+**Jump:** `const PUSH = {` (the whole module, just above the Shifting Deep generator) · `function _lssGenPushDeep` ·
+`class PushShell extends ChampionShell` · `function _pushAuthTick` · `function _pushBotWaypoint` · `const PushMode =` ·
+`function startPush` · `#btn-push`. Knobs `window.__push` (merged over `PUSH` on every read); probes
+`window.__pushInfo()`, `window.__pushSet(n, team, shell)` (authority only).
+
+- **ONE ROUND IS THE MATCH.** The round ends only through the champion channel (`game.championResult` + the 2 s
+  `championEndTimer`) when a fleet holds all five; the endByChampion branch then gives that fleet `ROUNDS_TO_WIN`, so the
+  roundEnd -> matchEnd gate, the VICTORY banner, `FLEET X WINS`, `_teamMatchScore` and the backend post all read it with
+  no push branch. Timer end and fleet-wipe end are gated off (`!_isPush()` / `!_push`); the round clock is anchored at
+  3600 s so the music's last-30 s ramp and the replay's `timer` tag never fire.
+- **THE MAP** is route data only - critical rule 9's four terrain-math copies are untouched. A strip along X,
+  `PUSH.len` 30,000 u point 1 -> 5 (OW.DIST puts the outer cities 27.5-36.5k from the hub city). Three-sine meander
+  pinned to the axis at both bases (rescaled into `maxLat` 3200), 32 lane cylinders r 230-470 at w 0.2 (endless: 280-780
+  at 0.15), five full-carve halls (bases r 1500, points r 1150, `pushPt` so `spawnDynamicObjects` leaves them clear), a
+  gallery per leg, and six SIGHTLINE CORRIDORS (3 straight-in-plan chords with a lifted middle node, 3 parabolic arcs
+  bulging 1.3-2.3k) at w 0.45 whose centre line rides `corrLift` ~380 above the lane - the carve pulls the roof toward
+  `ty + ARENA_RISE`, so a lifted ty IS a raised clamp. The clamp everywhere else: `terrain: { wallPinch: 0.17, gapHalf:
+  720 }` - **`gapHalf` is a NEW per-map override** in buildRoomGraphLevel's sandwich config (was the literal 600; YFLOOR /
+  YCEIL / WL all derive from it). Seed = worldSeed (rooms) + `game._pushSalt` (solo: drawn per `startPush`, because a
+  solo worldSeed is null -> 0x5EED and every solo match would be the same cavern). `noMonsters: true` (the archipelago's
+  reason - the open crack between lanes reads as "outside the carve" to the summoner).
+  **Measured (52.91, one seed):** lane gap min 344 / p10 955 / median 1,342 over 192 samples, 0 sealed; corridors
+  790-1,083 tall with ceilings up to 1,153 vs the 741 base YCEIL. FOOT 33.1 x 7.7 km.
+  **⚠ (52.93) THE CLAMP CAME HALFWAY BACK: 0.17 / 720 -> 0.20 / 660.** Owner, after flying it: *"the clamp opened a
+  little too wide"*. Measured on one seed by swapping T inside a single synchronous call (no frame drawn with a
+  test value): mean floor-to-ceiling gap across the open strip 0.17/720 = **1013**, 0.20/660 = **926** (-9 %),
+  0.22/640 = 891, 0.24/600 (endless) = 841; the lane's narrowest squeeze 373 -> 289 (all >= 98 % open). **Live dial
+  `window.__pushClamp({ pinch, gap })`**: writes T, re-levels the cavern water (`_swApplyAtmosphere` - it sits at
+  floor + 16 % of the relief), stale-marks every chunk of the strip (old shells stay up until each rebake lands),
+  drops the player's / bots' cached carved heights, and keeps the pair in `window.__push` so the NEXT match generates
+  with it (`_lssGenPushDeep` reads `K.pinch` / `K.gapHalf` over the map's terrain). No argument reads the live pair.
+  ⚠ Collision follows at once, the mesh over the rebake. ⚠ Not yet exercised in a live match (the owner's tab).
+- **THE POINTS** are `StasisField(pos, true, { noShell: true })` with `pushIdx`, skipped by updateStasisFields' champion
+  branch exactly like the overworld cities' `cityIdx`, and excluded from the shield-pickup cap (five of them would hold
+  the max-3 cap shut) - pickups also keep 650 u off a point. Each wears a `PushShell`: ChampionShell + ownership (a fleet
+  cannot damage its own - for players in takeDamage, for bots in `_botMayDamageMonster`), self-heal 5 %/s after 3 s
+  untouched, and the authority split. Every peer builds all five from the level (deterministic, nothing spawned over
+  the wire). ⚠ **(52.94) THE SHELLS WERE NOT SOLID UNTIL 52.94.** Owner: *"the shells need to prevent capturing, so
+  they need collision"*. A shell is solid only through `resolveCollision`'s step 5, which asked the one classic
+  `game.championShell`; the push shells lived in `game.monsters` alone (the WEAPON list), so ships flew through to
+  the dot. Step 5 now also walks `game._push.pts[].shell` (`collideEntity`, the classic bounce; player and bots both
+  come through it). Capture was never possible under a shell (`_pushAuthTick` charges only `!shellUp`), and a
+  regrow now also zeroes `prog`/`chg` so no half-charge decays on the HUD under a fresh shell. ⚠ A regrow around the
+  OWNER's own ships (enemies inside block it) expels them radially - the classic shell's push-out, by design. Tints are FRIEND-OR-FOE from the viewer's seat (blue `#4fb6ff` / red `#ff4040` / neutral violet), on the
+  core's `uBaseColor`, the beacon and the shell (lighter `#9ad4ff` / `#ff9a9a`, because the shell's tint multiplies its
+  texture).
+- **AUTHORITY = `amStasisOwner()`** (the champion field's owner). `_pushAuthTick`: who is inside `holdR` 230 (player +
+  game.entities on A/B), charge = shell down + exactly one non-owner side inside (contested charges nobody), decay 0.5/s,
+  capture at `capture` 6 s, regrow after `regrow` 5 s with no non-owner inside (reset, not paused, by anyone trying).
+  Streams `push_st` (owners, shell HP/1000, progress, charger, regrow) at 5 Hz while anything moves, 1 Hz heartbeat
+  otherwise. Peers forward shell damage as batched `push_dmg` claims (the mon_dmg shape) and floor their local HP at 1 -
+  a proxy never breaks a shell. Hook: `_pushNetEvent` at the top of handleNetEvent.
+- **WAVES:** `P.T0` = the first playing frame. A death rides the first `wave` (10 s) tick at least `waveMin` 2 s after
+  it - the countdown is written into `#ov-respawn .rs-wait`. Bots REVIVE in place on the bot authority
+  (`_cyberReviveBots`' shape), so ids, kill counts and the peers' proxies (bot_state's revive arm) carry over and a long
+  match leaves no corpse pile. **Measured:** player died 71.3 -> back at 80.0; TRACKER killed 221.4 -> revived 230.0,
+  same object, full hull.
+- **SPAWNS:** `getValidSpawnPoint('A' | 'B')` is INTERCEPTED while push is live (`_pushSpawnPos`), so all seven call
+  sites follow the tier rule (`_pushSpawnIdx`: A holds 3 -> 2, 3+4 -> 3; B mirrors). The spot is in the tier hall's REAR
+  (toward the fleet's base), 0.40-0.64 r back, SDF + `_spawnClearanceScore` checked. ⚠ **The launch's `_spawnPick`
+  latch is dropped before every wave respawn** - push has one round, so nothing else consumed it, and the first death
+  came back on the exact launch coordinates (harmless at the base, wrong once the tier has moved).
+- **BOTS:** `_pushBotWaypoint` (a branch beside cyber's in Bot.update): odd ids answer a threatened point of their own
+  first, everyone else takes the fleet's FRONT (the next non-owned point out from its base). Far away they aim 900 u
+  along the spine (never straight through the rock); a live shell = stand off its skin (v41.97); an even-id BREAKER keeps
+  the objective whatever is near (v48.53). ⚠ **52.90 -> 52.91: AN OPEN DOT OUTRANKS A DOGFIGHT.** First live run: Fleet A
+  broke point 4's shell, every attacker turned on the nearest defender at 1,800 u, nobody sat on the dot and the shell
+  regrew - twice; and defenders held a ring OUTSIDE the 230 u zone, so they could never contest. Claiming / contesting
+  bots now only break off for a fight inside 650 u and take a slot INSIDE the zone. After: point 3 went back and forth
+  (A charge, B contest, regrow, A break, A capture at ~106 s). `_campHoardTerrainNav` (the crack's vertical nav) is on
+  for push; the objective-fire block's `_sh` is the bot's goal shell (`_pushBotShell`).
+- **HUD:** the strip of five (own base on the LEFT, the map's numbers kept; ring = shell HP, dashed = open, outer arc =
+  charge in the charger's colour, a blue caret under your spawn tier) BORROWS `#endless-hud` - the mode-status slot every
+  hide / pin list already knows (orbit, HIDE HUD, replay, `_hudPinTopBand`, the touch CORE button); the `push-hud` class
+  says whose it is. ⚠ **(52.92) A global `canvas { position: fixed }` rule** pulled its canvas out of flow (wrapper 0 x 0,
+  strip 150 px right of centre at every viewport) - the canvas is `position: static !important`; measured centred after,
+  409-709 in a 1118 viewport and 220-520 at the 740x360 phone size, under the score line (#round-info bottom 95 -> 99).
+- **Win flow, measured (52.91, solo):** A took point 5 at 263.4 s (all five) -> `roundEnd` 4-0 at 265.4 -> `matchEnd`
+  FLEET A WINS at 270.4 -> the menu at 280.4 with `game._push` torn down. Scores read `FLEET A: n/5` (points held), the
+  ROUND line is `NEXT WAVE n` (written plain - `_hudDigi` would re-scramble it every second), the timer counts the match
+  UP. The capture ring (`_champCaptureState` -> `_pushCaptureState`) = the nearest point with charge on it, friend/foe by
+  charger. Radar: owner-coloured discs, white ring = shelled, an arrow only for the front point; the gold route chevron
+  points at the front. Scoreboard: `POINTS` instead of `ROUNDS`.
+- **Banners** use the objective-banner channel only (no new callout type - see the no-screen-callouts rule): POINT n
+  CAPTURED / LOST / ENEMY TOOK, SHELL DOWN (owner side only), SPAWN MOVED, and PUSH THE LINE at the fight. 3 s per-point
+  throttle.
+- **Open / not done:** the backend's `GAME_MODES` set (backend/src/worker.js) does not know `'push'` - a posted match
+  files as `classic` by its map-key fallback until the Worker is taught it. A room replaying push on the same worldSeed
+  gets the same cavern (solo re-rolls). Not tested: two peers (the authority split, `push_dmg`, a late drop-in's state
+  catch-up) - only solo vs bots. No Custom Location for push (a streamed Earth has no strip).
 
 ### v52.89 - the first three tag slots lost their NAME span on every launch after the first
 

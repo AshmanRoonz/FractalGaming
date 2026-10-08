@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "52.89";
+const LSS_BUILD = "52.95";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -7500,6 +7500,8 @@ function _applyModeClientSetup(mode) {
     try { if (typeof _preloadChampionShellModel === 'function') _preloadChampionShellModel(); } catch (_) {}
   } else if (mode === 'assault') {
     try { if (typeof _preloadChampionShellModel === 'function') _preloadChampionShellModel(); } catch (_) {}
+  } else if (mode === 'push') {
+    try { if (typeof _preloadChampionShellModel === 'function') _preloadChampionShellModel(); } catch (_) {}
   } else if (mode === 'campaign') {
     net.campaign = true;
     try { if (typeof _campInitState === 'function') _campInitState(); } catch (_) {}
@@ -7571,6 +7573,10 @@ function _assaultAttackerFleet() { return (((game.currentRound || 1) % 2) === 1)
 function _botMayDamageMonster(shooter, mon) {
   if (!shooter || typeof shooter !== 'object') return false;   // 'bot' string / unowned: no monster damage
   if (!mon) return true;                                       // pre-check only
+  if (mon._pushIdx != null) {
+    const _pp = game._push && game._push.pts[mon._pushIdx];
+    return !!_pp && shooter.team !== _pp.owner;
+  }
   if (mon.name !== 'ChampionShell') return true;               // leviathans etc: always fair game
   try {
     if (_isAssault()) return shooter.team === _assaultAttackerFleet();
@@ -7665,6 +7671,7 @@ function _ssModeName() {
     const M = (typeof LSS !== 'undefined') ? LSS.MODE : '';
     if (M === 'race') return 'RACE MODE';
     if (M === 'assault') return 'ASSAULT';
+    if (M === 'push') return 'TEAM DEATHPUSH';   // (v52.90)
     if (M === 'campaign') return 'CAMPAIGN';
     if (M === 'endless') return 'ENDLESS';
     if (M === 'freeflight') return 'EXHIBITION';
@@ -7944,6 +7951,9 @@ function _visibleMapKeys() {
     const isAssaultMap = k.startsWith('assault_');
     const isGmapsSlot = k === 'gmaps_user';
     if (LSS.MODE === 'assault') return isAssaultMap || isGmapsSlot;
+    const isPushMap = k.startsWith('push_');
+    if (LSS.MODE === 'push') return isPushMap;
+    if (isPushMap) return false;
     if (isGmapsSlot) return true;
     if (isAssaultMap) return false;
     return isRace ? isRaceMap : !isRaceMap;
@@ -9599,6 +9609,7 @@ function handleHitVote(vote, fromPeerId) {
 
 function handleNetEvent(evt, fromPeerId) {
   try { if (typeof _raceCircuitNetEvent === 'function' && _raceCircuitNetEvent(evt, fromPeerId)) return; } catch (_) {}
+  try { if (typeof _pushNetEvent === 'function' && _pushNetEvent(evt, fromPeerId)) return; } catch (_) {}
   if (evt.type === 'kill') {
     addKillFeed(evt.killerName || 'Peer', evt.victimName || 'Peer');
     if (evt.killerBotId != null && evt.killerBotOwner === net.myPeerId && typeof _botAuthority === 'function' && _botAuthority()) {
@@ -48649,6 +48660,13 @@ function resolveCollision(pos, velocity, radius, entity) {
   if (game.championShell && game.championShell.alive) {
     game.championShell.collideEntity(pos, velocity, radius, entity);
   }
+  const _ppush = game._push;
+  if (_ppush && _ppush.pts) {
+    for (let i = 0; i < _ppush.pts.length; i++) {
+      const _ps = _ppush.pts[i].shell;
+      if (_ps && _ps.alive) _ps.collideEntity(pos, velocity, radius, entity);
+    }
+  }
 }
 
 const _shipCollisionShips = [];
@@ -53691,6 +53709,15 @@ class Bot {
         this.aiRole = 'engage';
         _raceWaypoint = this.aiTarget;
       }
+    } else if (_isPush() && game.state === 'playing') {
+      const _wp = _pushBotWaypoint(this);
+      if (_wp) {
+        if (!this.aiTarget) this.aiTarget = new THREE.Vector3();
+        this.aiTarget.copy(_wp);   // _wp is a shared scratch - copied, never held
+        this.aiRetreating = false;
+        this.aiRole = 'engage';
+        _raceWaypoint = this.aiTarget;
+      }
     } else if (LSS.MODE !== 'race' && game.state === 'playing' &&
         game.championField && game.championField.alive && game.championField.position) {
       if (game.championField.claimedBy !== this) {
@@ -54005,7 +54032,7 @@ class Bot {
     if ((this.hoardModelKey && LSS.MODE === 'campaign') ||
         (this.hoardModelKey && (this._cavernBot || this._riftGuard)) ||
         (LSS.MODE === 'race' && game.selectedMap === 'race_straightaway') ||
-        LSS.MODE === 'endless') _campHoardTerrainNav(this, dt);
+        LSS.MODE === 'endless' || LSS.MODE === 'push') _campHoardTerrainNav(this, dt);   // (v52.90) the long push is endless's crack too
 
     const botCollR = this.chassis.hullLength * 0.5;
     const botMoveLen = this.velocity.length() * dt;
@@ -54033,7 +54060,7 @@ class Bot {
     let _fireTgt = _ctAlive ? _ct : null;
     if (_fireTgt && _fireTgt.team != null && this.team != null && _fireTgt.team === this.team) _fireTgt = null;
     if (game.state === 'playing') {
-      const _sh = game.championShell;
+      const _sh = _isPush() ? _pushBotShell(this) : game.championShell;
       if (_sh && _sh.alive && _sh.position && _botMayDamageMonster(this, _sh)) {
         const _shD = this.position.distanceTo(_sh.position) - (_sh.collisionRadius || 0) * 0.85;
         const _ctD = _ctAlive ? this.position.distanceTo(_ct.position) : Infinity;
@@ -62633,7 +62660,7 @@ function spawnDynamicObjects(rooms) {
     }
     return true;
   };
-  const nonSpawnRooms = _lssHubWorld() ? [] : rooms.filter(r => !r.team && !_setpClaimsRoom(r));   // (51.86) not in a set piece's room   // (v46.82) no obstacle clusters in the open overworld, race or free flight   
+  const nonSpawnRooms = _lssHubWorld() ? [] : rooms.filter(r => !r.team && !r.pushPt && !_setpClaimsRoom(r));   // (51.86) not in a set piece's room   // (v46.82) no obstacle clusters in the open overworld, race or free flight   
   for (const rm of nonSpawnRooms) {
     const count = rm.bend ? 1 : 2 + Math.floor(Math.random() * 2);
     for (let i = 0; i < count; i++) {
@@ -83764,7 +83791,11 @@ function updateRoundSystem(dt) {
           _clipStop(true); _clipStart();
         }
       } catch (_) {}
-      _anchorTimer('roundTimer', _isAssault() ? LSS.ASSAULT_ROUND_TIME : LSS.ROUND_TIME);
+      _anchorTimer('roundTimer', _isAssault() ? LSS.ASSAULT_ROUND_TIME : (_isPush() ? 3600 : LSS.ROUND_TIME));
+      if (_isPush() && window.Overlays && player &&
+          (player.team === LSS.TEAM_FLEET_A || player.team === LSS.TEAM_FLEET_B)) {
+        Overlays.banner('PUSH THE LINE', 'Break the shells, hold the fields - all five to win');
+      }
       if (_isAssault() && window.Overlays && player &&
           (player.team === LSS.TEAM_FLEET_A || player.team === LSS.TEAM_FLEET_B)) {
         const _atkF = _assaultAttackerFleet();
@@ -83909,12 +83940,13 @@ function updateRoundSystem(dt) {
     if (game.state !== 'playing') return;
     const endByChampion = (game.championResult === 'A' || game.championResult === 'B')
       && (!game.championEndTimer || game.championEndTimer <= 0);
-    const endByTimer = !game.raceNoTimer && !game.testMode && game.roundTimer <= 0;
+    const endByTimer = !game.raceNoTimer && !game.testMode && game.roundTimer <= 0 && !_isPush();   // (v52.90) push: no clock
     const isResolutionAuthority = !net.active || amStasisOwner();
     const championPending = (game.championResult === 'A' || game.championResult === 'B');
     const _aslt = _isAssault();
     const _rcirc = (typeof _isCircuitRace === 'function' && _isCircuitRace() && !(typeof _raceFinishExposed === 'function' && _raceFinishExposed()));
-    if (!game.testMode && !game._campBattle && !(typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || LSS.MODE === 'endless')) && (endByChampion || (!championPending && ((!_aslt && !_rcirc && (aliveB === 0 || aliveA === 0)) || endByTimer))) && isResolutionAuthority) {
+    const _push = _isPush();
+    if (!game.testMode && !game._campBattle && !(typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || LSS.MODE === 'endless')) && (endByChampion || (!championPending && ((!_aslt && !_rcirc && !_push && (aliveB === 0 || aliveA === 0)) || endByTimer))) && isResolutionAuthority) {
       let winnerLabel = '';
       let winnerTeam = LSS.TEAM_FLEET_A;
       if (endByChampion) {
@@ -83922,6 +83954,11 @@ function updateRoundSystem(dt) {
         else                              { game.scoreB++; winnerTeam = LSS.TEAM_FLEET_B; }
         winnerLabel = game.championResult === 'A' ? 'FLEET A CLAIMED CHAMPION' : 'FLEET B CLAIMED CHAMPION';
         if (_aslt) winnerLabel = (game.championResult === 'A' ? 'FLEET A' : 'FLEET B') + ' CAPTURED THE FIELD';
+        if (_push) {
+          if (winnerTeam === LSS.TEAM_FLEET_A) game.scoreA = Math.max(game.scoreA, LSS.ROUNDS_TO_WIN);
+          else game.scoreB = Math.max(game.scoreB, LSS.ROUNDS_TO_WIN);
+          winnerLabel = (winnerTeam === LSS.TEAM_FLEET_A ? 'FLEET A' : 'FLEET B') + ' HOLDS ALL FIVE';
+        }
       } else if (_aslt && endByTimer) {
         const _defF = _assaultDefenderFleet();
         if (_defF === LSS.TEAM_FLEET_A) { game.scoreA++; winnerTeam = LSS.TEAM_FLEET_A; }
@@ -87600,6 +87637,7 @@ try {
 
 function _champCaptureState() {
   try {
+    if (typeof _isPush === 'function' && _isPush() && game._push) return _pushCaptureState();   // (v52.90) five points
     const _cf = game.championField;
     if (!_cf || !_cf.alive || !_cf.teamProgress) return null;
     const _pa = _cf.teamProgress[LSS.TEAM_FLEET_A] || 0;
@@ -88690,21 +88728,40 @@ function updateHUD() {
   const minutes = Math.floor(Math.max(0, timerValue) / 60);
   const seconds = Math.floor(Math.max(0, timerValue) % 60);
   const _hideTimer = !!game.raceNoTimer && game.state !== 'warmup';
+  const _pshH = (typeof _isPush === 'function' && _isPush() && game._push && game._push.T0 && game.state === 'playing');
+  let _pshEl = 0;
+  if (_pshH) _pshEl = (performance.now() - game._push.T0) / 1000;
   _hudText(_hudEl('round-timer'), 'round-timer:t',
+    _pshH ? (Math.floor(_pshEl / 60) + ':' + String(Math.floor(_pshEl % 60)).padStart(2, '0')) :
     _hideTimer ? '--' : (minutes + ':' + String(seconds).padStart(2, '0')));
 
   const stateText = game.state === 'warmup' ? 'WARMUP' :
+    (game.state === 'playing' && _pshH) ? 'NEXT WAVE ' + Math.max(1, Math.ceil(_pushK().wave - (_pshEl % _pushK().wave))) :
     game.state === 'playing' ? 'ROUND ' + game.currentRound :
     game.state === 'roundEnd' ? 'ROUND OVER' :
     game.state === 'matchEnd' ? (game.scoreA >= LSS.ROUNDS_TO_WIN ? 'FLEET A WINS' : 'FLEET B WINS') : '';
-  _hudDigi(_hudEl('round-state'), 'round-state:t', stateText);   // (v44.38)
+  if (_pshH) {
+    const _rsEl = _hudEl('round-state');
+    if (_rsEl && _hudLast['round-state:t'] !== stateText) {
+      _hudLast['round-state:t'] = stateText;
+      _rsEl._digiTok = (_rsEl._digiTok || 0) + 1;
+      _rsEl.textContent = stateText;
+    }
+  } else _hudDigi(_hudEl('round-state'), 'round-state:t', stateText);   // (v44.38)
 
   const teamA = _hudLast['team-a:el'] || (_hudLast['team-a:el'] = document.querySelector('.team-a'));
   const teamB = _hudLast['team-b:el'] || (_hudLast['team-b:el'] = document.querySelector('.team-b'));
   const nmA = _hudLast['team-a:nm'] || (_hudLast['team-a:nm'] = (teamA && teamA.querySelector('.ts-nm')) || teamA);
   const nmB = _hudLast['team-b:nm'] || (_hudLast['team-b:nm'] = (teamB && teamB.querySelector('.ts-nm')) || teamB);
+  if (typeof _isPush === 'function' && _isPush() && game._push && game._push.pts.length && game.state !== 'matchEnd') {
+    let _hA = 0, _hB = 0;
+    for (const _pp of game._push.pts) { if (_pp.owner === LSS.TEAM_FLEET_A) _hA++; else if (_pp.owner === LSS.TEAM_FLEET_B) _hB++; }
+    _hudDigi(nmA, 'team-a:t', 'FLEET A: ' + _hA + '/5');
+    _hudDigi(nmB, 'team-b:t', 'FLEET B: ' + _hB + '/5');
+  } else {
   _hudDigi(nmA, 'team-a:t', 'FLEET A: ' + game.scoreA);
   _hudDigi(nmB, 'team-b:t', 'FLEET B: ' + game.scoreB);
+  }
   const _palKey = (player && player.team === LSS.TEAM_FLEET_B) ? 'B' : 'A';
   if (_hudLast['team:pal'] !== _palKey) {
     _hudLast['team:pal'] = _palKey;
@@ -89070,6 +89127,19 @@ function updateMinimap() {
   for (const field of game.stasisFields) {
     if (!field.alive) continue;
     const p = _plot(field.position.x, field.position.z);
+    if (field.pushIdx != null) {
+      try {
+        const _pp = game._push && game._push.pts[field.pushIdx];
+        if (_pp) {
+          const _pc = _pushOwnerColor(_pp.owner);
+          if (p.off) { if (field.pushIdx === _pushFrontIdx(player.team)) _mmArrow(p, _pc); continue; }
+          ctx.fillStyle = _pc;
+          ctx.beginPath(); ctx.arc(p.x, p.y, 4.5, 0, Math.PI * 2); ctx.fill();
+          if (_pp.shell && _pp.shell.alive) { ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = 1.4; ctx.beginPath(); ctx.arc(p.x, p.y, 6.5, 0, Math.PI * 2); ctx.stroke(); }
+        }
+      } catch (_) {}
+      continue;
+    }
     const pulse = 0.5 + Math.sin(game.time * 4) * 0.3;
     const fcol = `rgba(0,200,255,${pulse})`;
     if (p.off && field.championMode && typeof LSS !== 'undefined' && LSS.MODE === 'race') continue;
@@ -89123,6 +89193,9 @@ function updateMinimap() {
                typeof CAMPAIGN_LEG_HALF_Z !== 'undefined') {
       const _cdx = 0 - ccx, _cdz = CAMPAIGN_LEG_HALF_Z - ccz;
       if (_cdx * _cdx + _cdz * _cdz > 2200 * 2200) { _etx = 0; _etz = CAMPAIGN_LEG_HALF_Z; }
+    } else if (_navMode === 'push' && game._push && typeof _pushFrontIdx === 'function') {
+      const _fi = _pushFrontIdx(player.team), _fp = (_fi >= 0) ? game._push.pts[_fi] : null;
+      if (_fp) { const _ddx = _fp.x - ccx, _ddz = _fp.z - ccz; if (_ddx * _ddx + _ddz * _ddz > 600 * 600) { _etx = _fp.x; _etz = _fp.z; } }
     } else if (_navMode === 'race') {
       let _tx = null, _tz = null;
       const _C = game.raceCircuit;
@@ -91425,10 +91498,11 @@ function _lssSyncEarthToTag(tag) {
     game._earth = want ? { armed: true, origin: null, warps: 0 } : null;
   } catch (_) {}
 }
-const _LSS_PICKABLE_MODES = ['classic', 'freeflight', 'cyberpunk', 'earth', 'endless', 'race', 'assault'];
+const _LSS_PICKABLE_MODES = ['classic', 'freeflight', 'cyberpunk', 'earth', 'endless', 'race', 'assault', 'push'];   // (v52.90) + TEAM DEATHPUSH
 function _lssModeDisplayName(m) {
   if (m === 'race') return 'RACE MODE';
   if (m === 'assault') return 'ASSAULT';
+  if (m === 'push') return 'TEAM DEATHPUSH';   // (v52.90)
   if (m === 'endless') return 'ENDLESS';
   if (m === 'freeflight') return 'EXHIBITION';
   if (m === 'cyberpunk') return 'CYBERPUNK CITY';   // (v44.11)
@@ -91439,6 +91513,7 @@ function _lssModeDisplayName(m) {
 function _lssModeBlurb(m) {
   if (m === 'race') return 'Sprint the track, or lap a real city.';
   if (m === 'assault') return 'Storm or hold the field.';
+  if (m === 'push') return 'Take all five fields down the cavern.';   // (v52.90)
   if (m === 'endless') return 'A cavern without end.';
   if (m === 'freeflight') return 'Patrol the open overworld.';
   if (m === 'cyberpunk') return 'Storm the carrier, or hold the city.';   // (v44.11)
@@ -98808,7 +98883,7 @@ function _lssEndlessStasisSpot(aliveFields) {
 function spawnStasisField() {
   if (net.active && !amStasisOwner()) return;
 
-  const aliveFields = game.stasisFields.filter(f => f.alive);
+  const aliveFields = game.stasisFields.filter(f => f.alive && f.pushIdx == null);
   if (aliveFields.length >= 3) return;
 
   if (typeof LSS !== 'undefined' && LSS.MODE === 'endless') {
@@ -98843,6 +98918,7 @@ function spawnStasisField() {
       if (pos.distanceTo(f.position) < minDist) { tooClose = true; break; }
     }
     if (tooClose) continue;
+    if (typeof _isPush === 'function' && _isPush() && _pushNearPoint(pos, 650)) continue;
 
     const fieldId = ++net.stasisIdCounter;
     instantiateStasisField(pos, fieldId);
@@ -98887,7 +98963,7 @@ function updateStasisFields(dt) {
   if (game.state === 'playing' && !(typeof LSS !== 'undefined' && LSS.MODE === 'freeflight')) {   
     let aliveCount = 0;
     for (let _si = 0; _si < game.stasisFields.length; _si++) {
-      if (game.stasisFields[_si] && game.stasisFields[_si].alive) aliveCount++;
+      if (game.stasisFields[_si] && game.stasisFields[_si].alive && game.stasisFields[_si].pushIdx == null) aliveCount++;
     }
     if (aliveCount < 3) {
       game.stasisSpawnTimer -= dt;
@@ -98905,7 +98981,7 @@ function updateStasisFields(dt) {
     }
   }
 
-  const _championDue = (LSS.MODE === 'campaign' || LSS.MODE === 'freeflight' || LSS.MODE === 'endless')
+  const _championDue = (LSS.MODE === 'campaign' || LSS.MODE === 'freeflight' || LSS.MODE === 'endless' || LSS.MODE === 'push')
     ? false
     : (LSS.MODE === 'race')
       ? (game.state === 'playing' && _raceFinishUnlocked())
@@ -98935,6 +99011,7 @@ function updateStasisFields(dt) {
     field.update(dt);
 
     if (field.championMode && field.cityIdx != null) continue;   // (v38.79) an overworld city field: _owFieldTick owns it
+    if (field.pushIdx != null) continue;                         // (v52.90) a TEAM DEATHPUSH point: _pushAuthTick owns it
     if (field.championMode) {
       if (game.championShell && game.championShell.alive) {
         if (field.claimedBy) _releaseChampionClaim(field,  true, field.claimedBy);
@@ -100462,6 +100539,946 @@ const CAMPAIGN_LEGS = [
   { key: 'camp_brokensim', name: 'The Broken Simulation' },
   { locked: true, name: 'More legs unlock as you journey on' },
 ];
+const PUSH = {
+  len: 30000,              // point 1 -> point 5 in a straight line (hub city -> an outer city)
+  step: 940,               // spine node spacing = lane segment length
+  meander: 2400,           // the long sweep's amplitude; the mid bend and the wiggle scale off it
+  maxLat: 3200,            // the meander is rescaled to stay inside +-maxLat (the strip's half-width)
+  laneR: [230, 470],       // lane footprint radius (endless: 280-780 - "more narrow")
+  laneW: 0.2,              // lane carve weight (endless: 0.15); halls are full carves
+  hallR: 1150, baseR: 1500, galleryR: [650, 1000],
+  straight: 3, curved: 3,  // sightline corridors
+  corrR: [520, 760], corrW: 0.45, corrLift: 380, bulge: [1300, 2300],
+  wave: 10, waveMin: 2,    // respawn wave period, and the shortest wait a death can get
+  capture: 6,              // seconds of uncontested hold (assault's ASSAULT_CHARGE_TIME)
+  holdR: 230,              // capture radius (the dot is 50; this is a zone you can fight in)
+  decay: 0.5,              // progress lost per second while nobody is charging (assault's rate)
+  shellHp: 4000, shellRegen: 0.05, shellRegenDelay: 3,   // self-heal: 5%/s after 3 s untouched
+  regrow: 5,               // a broken shell regrows after this many seconds with nobody capturing
+  pinch: null, gapHalf: null,   // the clamp: null = MAP_DATA.push_deep.terrain's; __pushClamp writes these
+};
+function _pushK() {
+  const o = (typeof window !== 'undefined') ? window.__push : null;
+  return (o && typeof o === 'object') ? Object.assign({}, PUSH, o) : PUSH;
+}
+function _isPush() { return typeof LSS !== 'undefined' && LSS.MODE === 'push'; }
+function _pushAuthority() {
+  if (!(typeof net !== 'undefined' && net && net.active)) return true;
+  return (typeof amStasisOwner === 'function') ? !!amStasisOwner() : true;
+}
+
+function _lssGenPushDeep(base) {
+  const K = _pushK();
+  const salt = (net && net.active) ? 0 : ((game._pushSalt >>> 0) || 0);
+  const seed = (((((net && typeof net.worldSeed === 'number') ? net.worldSeed : 0x5EED) >>> 0) ^ 0x9C5A11D7) + salt) >>> 0;
+  const rnd = mulberry32(seed);
+  const R = (a, b) => a + (b - a) * rnd();
+  const L = K.len, TAU = Math.PI * 2;
+  const dir = (rnd() < 0.5) ? 1 : -1;
+  const W = [
+    { a: K.meander * R(0.55, 1.0),  f: R(1.0, 2.0), p: R(0, TAU) },
+    { a: K.meander * R(0.20, 0.45), f: R(2.4, 4.2), p: R(0, TAU) },
+    { a: K.meander * R(0.06, 0.16), f: R(6.0, 9.0), p: R(0, TAU) },
+  ];
+  const V = [{ a: R(160, 360), f: R(1.3, 3.0), p: R(0, TAU) }];
+  const sum = (t, list) => { let s = 0; for (let i = 0; i < list.length; i++) s += list[i].a * Math.sin(TAU * list[i].f * t + list[i].p); return s; };
+  const l0 = sum(0, W), l1 = sum(1, W), v0 = sum(0, V), v1 = sum(1, V);
+  const latRaw = (t) => sum(t, W) - (l0 + (l1 - l0) * t);
+  let mx = 1;
+  for (let i = 0; i <= 200; i++) mx = Math.max(mx, Math.abs(latRaw(i / 200)));
+  const latK = Math.min(1, K.maxLat / mx);
+  const at = (t) => ({ x: Math.round(dir * (t - 0.5) * L),
+                       y: Math.round(sum(t, V) - (v0 + (v1 - v0) * t)),
+                       z: Math.round(latRaw(t) * latK) });
+  const N = Math.max(8, 4 * Math.round(L / K.step / 4));
+  const spine = [];
+  let s = 0;
+  for (let i = 0; i <= N; i++) {
+    const p = at(i / N);
+    if (i) { const q = spine[i - 1]; s += Math.hypot(p.x - q.x, p.y - q.y, p.z - q.z); }
+    p.s = Math.round(s);
+    spine.push(p);
+  }
+  const rooms = [], tunnels = [], pts = [];
+  for (let k = 0; k < 5; k++) {
+    const ni = k * N / 4, n = spine[ni];
+    const r = (k === 0 || k === 4) ? K.baseR : K.hallR;
+    const prev = spine[Math.max(0, ni - 1)], next = spine[Math.min(N, ni + 1)];
+    let ax = prev.x - n.x, az = prev.z - n.z, bx = next.x - n.x, bz = next.z - n.z;
+    if (ni === 0) { ax = -bx; az = -bz; }
+    if (ni === N) { bx = -ax; bz = -az; }
+    const nA = Math.hypot(ax, az) || 1, nB = Math.hypot(bx, bz) || 1;
+    rooms.push({ id: 'push_p' + (k + 1), team: (k === 0) ? 'A' : ((k === 4) ? 'B' : null),
+                 x: n.x, y: n.y, z: n.z, r: r, pushPt: k + 1 });
+    pts.push({ x: n.x, y: n.y, z: n.z, r: r, node: ni, s: n.s,
+               rearA: { x: ax / nA, z: az / nA }, rearB: { x: bx / nB, z: bz / nB } });
+  }
+  for (let k = 0; k < 4; k++) {
+    const ni = Math.round((k + R(0.36, 0.64)) * N / 4), n = spine[ni];
+    rooms.push({ id: 'push_g' + (k + 1), team: null, x: n.x, y: n.y + Math.round(R(-120, 120)), z: n.z,
+                 r: Math.round(R(K.galleryR[0], K.galleryR[1])) });
+  }
+  for (let i = 0; i < N; i++) {
+    tunnels.push({ r: Math.round(R(K.laneR[0], K.laneR[1])), w: K.laneW, path: [spine[i], spine[i + 1]] });
+  }
+  const kinds = [];
+  for (let i = 0; i < K.straight; i++) kinds.push('s');
+  for (let i = 0; i < K.curved; i++) kinds.push('c');
+  for (let i = kinds.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); const tk = kinds[i]; kinds[i] = kinds[j]; kinds[j] = tk; }
+  const nC = kinds.length;
+  for (let k = 0; k < nC; k++) {
+    const span = R(0.09, 0.15);
+    const t0 = Math.min(0.97 - span, 0.03 + (k + R(0.05, 0.55)) * (0.94 / nC));
+    const A = at(t0), B = at(t0 + span);
+    const dx = B.x - A.x, dz = B.z - A.z, dl = Math.hypot(dx, dz) || 1;
+    const px = -dz / dl, pz = dx / dl;   // plan-view perpendicular
+    const lift = K.corrLift * R(0.75, 1.25);
+    const path = [];
+    if (kinds[k] === 's') {
+      const off = R(-500, 500);
+      path.push(A, { x: Math.round((A.x + B.x) / 2 + px * off), y: Math.round((A.y + B.y) / 2 + lift),
+                     z: Math.round((A.z + B.z) / 2 + pz * off) }, B);
+    } else {
+      const bul = R(K.bulge[0], K.bulge[1]) * ((rnd() < 0.5) ? -1 : 1);
+      const SEG = 7;
+      for (let j = 0; j <= SEG; j++) {
+        const u = j / SEG, h = 4 * u * (1 - u);   // 0 at both ends, 1 at mid-arc
+        path.push({ x: Math.round(A.x + dx * u + px * bul * h),
+                    y: Math.round(A.y + (B.y - A.y) * u + lift * Math.sin(Math.PI * u)),
+                    z: Math.round(A.z + dz * u + pz * bul * h) });
+      }
+    }
+    tunnels.push({ r: Math.round(R(K.corrR[0], K.corrR[1])), w: K.corrW, path: path, corr: kinds[k] });
+  }
+  const BIOMES = ['rocky', 'crystalcave', 'volcanic', 'snow', 'goldmine', 'grassy', 'brokensim'];
+  const biome = BIOMES[Math.floor(rnd() * BIOMES.length) % BIOMES.length];
+  const terrain = Object.assign({}, base.terrain);
+  if (typeof K.pinch === 'number') terrain.wallPinch = K.pinch;
+  if (typeof K.gapHalf === 'number') terrain.gapHalf = K.gapHalf;
+  return {
+    name: base.name, description: base.description, defaultTheme: base.defaultTheme,
+    procedural: 'push', terrain: terrain, palette: base.palette, noMonsters: true,
+    _biomeOverride: biome,
+    rooms: rooms, tunnels: tunnels,
+    _push: { seed: seed, dir: dir, len: L, spine: spine, pts: pts },
+  };
+}
+MAP_DATA.push_deep = {
+  name: 'The Long Push',
+  thumb: 'map_thumbs/shifting_deep.webp',   // the deep's reel: honest for a cavern re-rolled every match
+  procedural: 'push',
+  description: 'Five champion fields down one long cavern, re-rolled every match. Take the middle and your spawn moves up. Hold all five to win.',
+  defaultTheme: 'Broken Simulation',
+  terrain: { wallPinch: 0.20, gapHalf: 660 },
+  noMonsters: true,
+  palette: [0x2a2838, 0x282a40, 0x303040, 0x242235, 0x2c2a3a, 0x282a40, 0x303040, 0x242838],
+  rooms: [
+    { id: 'push_p1', team: 'A', x: -15000, y: 0, z: 0, r: 1500, pushPt: 1 },
+    { id: 'push_p2', team: null, x: -7500, y: 0, z: 1200, r: 1150, pushPt: 2 },
+    { id: 'push_p3', team: null, x: 0, y: 0, z: 0, r: 1150, pushPt: 3 },
+    { id: 'push_p4', team: null, x: 7500, y: 0, z: -1200, r: 1150, pushPt: 4 },
+    { id: 'push_p5', team: 'B', x: 15000, y: 0, z: 0, r: 1500, pushPt: 5 },
+  ],
+  tunnels: [
+    { r: 360, w: 0.2, path: [{ x: -15000, y: 0, z: 0 }, { x: -7500, y: 0, z: 1200 }, { x: 0, y: 0, z: 0 },
+                             { x: 7500, y: 0, z: -1200 }, { x: 15000, y: 0, z: 0 }] },
+  ],
+};
+
+const _PUSH_FRIEND = '#4fb6ff', _PUSH_ENEMY = '#ff4040', _PUSH_NEUTRAL = '#b46bff';   // updateHUD's FRIEND_HEX / ENEMY_HEX
+const _PUSH_SHELL_FRIEND = '#9ad4ff', _PUSH_SHELL_ENEMY = '#ff9a9a', _PUSH_SHELL_NEUTRAL = '#ffffff';
+const _pushV1 = new THREE.Vector3(), _pushWp = new THREE.Vector3();
+function _pushViewerTeam() {
+  const t = (typeof player !== 'undefined' && player) ? player.team : null;
+  return (t === LSS.TEAM_FLEET_A || t === LSS.TEAM_FLEET_B) ? t : null;
+}
+function _pushIsFriend(owner) {
+  const me = _pushViewerTeam();
+  return (me == null) ? (owner === LSS.TEAM_FLEET_A) : (owner === me);
+}
+function _pushOwnerColor(owner) { return !owner ? _PUSH_NEUTRAL : (_pushIsFriend(owner) ? _PUSH_FRIEND : _PUSH_ENEMY); }
+function _pushTintField(pt) {
+  const f = pt && pt.field; if (!f) return;
+  const col = _pushOwnerColor(pt.owner);
+  if (pt._fTint === col) return;
+  pt._fTint = col;
+  try {
+    const m = f.core && f.core.material, u = m && m.uniforms;
+    if (u && u.uBaseColor && u.uBaseColor.value) u.uBaseColor.value.set(col);   // LayeredFX: the hue rides the base colour
+    else if (m && m.color) m.color.set(col);                                      // potato's flat additive core
+    if (f.beacon && f.beacon.material && f.beacon.material.color) f.beacon.material.color.set(col);
+  } catch (_) {}
+}
+function _pushTintShell(sh, force) {
+  if (!sh || !sh.mesh || !game._push) return;
+  const pt = game._push.pts[sh._pushIdx]; if (!pt) return;
+  const col = !pt.owner ? _PUSH_SHELL_NEUTRAL : (_pushIsFriend(pt.owner) ? _PUSH_SHELL_FRIEND : _PUSH_SHELL_ENEMY);
+  if (!force && sh._tint === col) return;
+  sh._tint = col;
+  try {
+    sh.mesh.traverse((n) => {
+      if (!n.isMesh || !n.material) return;
+      const ms = Array.isArray(n.material) ? n.material : [n.material];
+      for (let i = 0; i < ms.length; i++) if (ms[i] && ms[i].color) ms[i].color.set(col);
+    });
+  } catch (_) {}
+}
+function _pushAttackerTeam(a) {
+  try {
+    if (a === 'player' || (typeof player !== 'undefined' && a === player)) return player.team;
+    if (a && typeof a === 'object' && a.team != null) return a.team;
+    if (typeof a === 'string' && a.indexOf('peer:') === 0 && net && Array.isArray(net.networkPlayers)) {
+      const id = a.slice(5);
+      const np = net.networkPlayers.find((x) => x && x.peerId === id);
+      if (np) return np.team;
+    }
+  } catch (_) {}
+  return null;
+}
+
+class PushShell extends ChampionShell {
+  constructor(pt) {
+    super(new THREE.Vector3(pt.x, pt.y, pt.z));
+    const K = _pushK();
+    this.maxHealth = K.shellHp; this.health = K.shellHp;
+    this._pushIdx = pt.idx;
+    this._lastHitT = -1e9;
+    this._tint = null;
+    _pushTintShell(this, true);
+  }
+  takeDamage(dmg, attacker, hitPoint) {
+    if (!this.alive) return 0;
+    const P = game._push, pt = P && P.pts[this._pushIdx];
+    if (!pt) return 0;
+    if (attacker !== 'pushclaim') {
+      const at = _pushAttackerTeam(attacker);
+      if (at != null && pt.owner && at === pt.owner) return 0;
+    }
+    if (attacker === player && typeof _aegisDmgOut === 'function') { try { dmg = _aegisDmgOut(dmg, this); } catch (_) {} }
+    this._lastHitT = (game.time || 0);
+    if (this._hitFxTimer <= 0) {
+      this._hitFxTimer = 0.1;
+      const at = hitPoint || this.position;
+      try {
+        const c = parseInt((this._tint || '#aa55ff').slice(1), 16);
+        if (typeof v8SpawnSparks === 'function') v8SpawnSparks(at, 6, 1.3, 300, c, 0xffffff);
+        if (typeof spawnDynamicLight === 'function') spawnDynamicLight(at, c, 2.2, 420, 0.12);
+      } catch (_) {}
+    }
+    if (!_pushAuthority()) {
+      P.dmgOut[this._pushIdx] = (P.dmgOut[this._pushIdx] || 0) + dmg;
+      this.health = Math.max(1, this.health - dmg);
+      try { _hitMarkFor(attacker, dmg); } catch (_) {}
+      return dmg;
+    }
+    this.health -= dmg;
+    if (this.health <= 0) _pushShellBroken(pt);
+    try { _hitMarkFor(attacker, dmg); } catch (_) {}
+    return dmg;
+  }
+  die() { const pt = game._push && game._push.pts[this._pushIdx]; if (pt && _pushAuthority()) _pushShellBroken(pt); }
+  update(dt) {
+    const was = this._usedProto;
+    super.update(dt);
+    if (!was && this._usedProto) _pushTintShell(this, true);   // the late GLB swap rebuilt the mesh: re-tint it
+  }
+}
+function _pushShellUp(pt, frac) {
+  if (pt.shell && pt.shell.alive) return pt.shell;
+  try { _preloadChampionShellModel(); } catch (_) {}
+  const sh = new PushShell(pt);
+  if (frac != null) sh.health = Math.max(1, sh.maxHealth * Math.min(1, frac));
+  if (!game.monsters) game.monsters = [];
+  game.monsters.push(sh);
+  pt.shell = sh;
+  return sh;
+}
+function _pushShellRemove(pt, fx) {
+  const sh = pt.shell;
+  pt.shell = null;
+  if (!sh) return;
+  if (fx && sh.alive) {
+    try {
+      const c = parseInt((sh._tint || '#aa55ff').slice(1), 16);
+      spawnExplosion(sh.position, 50);
+      if (typeof v8SpawnSparks === 'function') v8SpawnSparks(sh.position, 30, 1.6, 700, c, 0xffffff);
+      if (typeof spawnFXBurst === 'function') spawnFXBurst('fireball_purple', sh.position, CHAMP_SHELL_SIZE * 0.9, 0.8, { startScale: 0.3, endScale: 1.2 });
+      if (typeof spawnDynamicLight === 'function') spawnDynamicLight(sh.position, c, 6.0, 1500, 0.6);
+    } catch (_) {}
+  }
+  sh.alive = false;
+  if (sh.mesh) {
+    try { scene.remove(sh.mesh); } catch (_) {}
+    _disposeMeshTreeDeep(sh.mesh, false);   // materials only - the geometry is the shared Sphere.glb proto's
+    sh.mesh = null;
+  }
+  const i = game.monsters ? game.monsters.indexOf(sh) : -1;
+  if (i >= 0) game.monsters.splice(i, 1);
+}
+function _pushShellBroken(pt) {
+  if (!pt.shell || !pt.shell.alive) return;
+  _pushShellRemove(pt, true);
+  pt.regrowT = 0;
+  _pushSay('open', pt, 0);
+  if (game._push) game._push.dirty = true;
+}
+function _pushClearSpot(pos) {
+  if (typeof worldSDF !== 'function') return pos;
+  try {
+    const CLEAR = -150;
+    if (worldSDF(pos.x, pos.y, pos.z) <= CLEAR) return pos;
+    for (const dy of [200, -200, 400, -400, 650, -650]) {
+      if (worldSDF(pos.x, pos.y + dy, pos.z) < CLEAR) { pos.y += dy; return pos; }
+    }
+    for (let r = 250; r <= 1000; r += 250) {
+      for (let a = 0; a < 8; a++) {
+        const ang = (a / 8) * Math.PI * 2;
+        const x = pos.x + Math.cos(ang) * r, z = pos.z + Math.sin(ang) * r;
+        if (worldSDF(x, pos.y, z) < CLEAR) { pos.set(x, pos.y, z); return pos; }
+      }
+    }
+  } catch (_) {}
+  return pos;
+}
+function _pushClear() {
+  const P = game._push;
+  if (P && Array.isArray(P.pts)) {
+    for (const pt of P.pts) {
+      _pushShellRemove(pt, false);
+      const f = pt.field; pt.field = null;
+      if (f) {
+        try { f.destroy(true); } catch (_) {}   // quiet: a teardown is not a pickup
+        const i = game.stasisFields ? game.stasisFields.indexOf(f) : -1;
+        if (i >= 0) game.stasisFields.splice(i, 1);
+      }
+    }
+  }
+  try { const el = document.getElementById('endless-hud'); if (el && el.classList.contains('push-hud') && el.parentNode) el.parentNode.removeChild(el); } catch (_) {}
+  _pushRespawnLabel(null);
+}
+function _pushBuildPoints() {
+  _pushClear();
+  const meta = game.currentLevel && game.currentLevel._push;
+  if (!meta || !Array.isArray(meta.pts)) { game._push = null; return; }
+  const K = _pushK();
+  const P = game._push = { pts: [], spine: meta.spine, T0: 0, dirty: true, sendT: 0, hbT: 0,
+                           dmgOut: [0, 0, 0, 0, 0], dmgT: 0, won: 0, hudT: 0, spawnIdx: -1, pDeadAt: null, pRespawnAt: 0,
+                           _sayT: {} };
+  for (let i = 0; i < meta.pts.length; i++) {
+    const m = meta.pts[i];
+    const pos = _pushClearSpot(new THREE.Vector3(m.x, m.y, m.z));
+    const pt = { idx: i, x: pos.x, y: pos.y, z: pos.z, r: m.r, node: m.node, s: m.s, rearA: m.rearA, rearB: m.rearB,
+                 owner: (i === 0) ? LSS.TEAM_FLEET_A : ((i === meta.pts.length - 1) ? LSS.TEAM_FLEET_B : 0),
+                 field: null, shell: null, prog: {}, chg: 0, regrowT: 0, inA: 0, inB: 0, _fTint: null };
+    const f = new StasisField(pos, true, { noShell: true });
+    f.holdRadius = K.holdR;
+    f.pushIdx = i;
+    if (!game.stasisFields) game.stasisFields = [];
+    game.stasisFields.push(f);
+    pt.field = f;
+    P.pts.push(pt);
+    _pushShellUp(pt, 1);
+    _pushTintField(pt);
+  }
+  P.spawnIdx = _pushSpawnIdx(_pushViewerTeam());
+}
+
+function _pushSpawnIdx(team) {
+  const A = LSS.TEAM_FLEET_A, B = LSS.TEAM_FLEET_B;
+  const P = game._push, o = (P && P.pts.length === 5) ? P.pts : null;
+  if (team === B) {
+    if (!o) return 4;
+    if (o[2].owner === B && o[1].owner === B) return 2;
+    if (o[2].owner === B) return 3;
+    return 4;
+  }
+  if (!o) return 0;
+  if (o[2].owner === A && o[3].owner === A) return 2;
+  if (o[2].owner === A) return 1;
+  return 0;
+}
+function _pushSpawnPos(team) {
+  const meta = game.currentLevel && game.currentLevel._push;
+  if (!meta || !Array.isArray(meta.pts) || meta.pts.length !== 5) return null;
+  const idx = _pushSpawnIdx(team);
+  const m = meta.pts[idx];
+  const pt = (game._push && game._push.pts[idx]) || m;
+  const rear = (team === LSS.TEAM_FLEET_B) ? m.rearB : m.rearA;
+  for (let a = 0; a < 24; a++) {
+    const back = m.r * (0.40 + 0.24 * Math.random());
+    const lat = (Math.random() - 0.5) * m.r * 0.55;
+    const x = pt.x + rear.x * back - rear.z * lat;
+    const z = pt.z + rear.z * back + rear.x * lat;
+    const y = pt.y + (Math.random() - 0.5) * 260;
+    let ok = true;
+    try { if (typeof worldSDF === 'function' && worldSDF(x, y, z) > -90) ok = false; } catch (_) {}
+    try { if (ok && typeof _spawnClearanceScore === 'function' && _spawnClearanceScore(x, y, z).score < 0) ok = false; } catch (_) {}
+    if (ok) return new THREE.Vector3(x, y, z);
+  }
+  return null;   // getValidSpawnPoint falls through to the room's own corridor points
+}
+function _pushFrontIdx(team) {
+  const P = game._push; if (!P || !P.pts.length) return -1;
+  if (team === LSS.TEAM_FLEET_B) { for (let i = P.pts.length - 1; i >= 0; i--) if (P.pts[i].owner !== team) return i; return -1; }
+  for (let i = 0; i < P.pts.length; i++) if (P.pts[i].owner !== team) return i;
+  return -1;
+}
+function _pushSpineS(x, z) {
+  const sp = game._push && game._push.spine; if (!sp || sp.length < 2) return 0;
+  let best = Infinity, bs = 0;
+  for (let i = 0; i < sp.length - 1; i++) {
+    const a = sp[i], b = sp[i + 1];
+    const dx = b.x - a.x, dz = b.z - a.z, l2 = dx * dx + dz * dz;
+    let t = l2 > 0 ? ((x - a.x) * dx + (z - a.z) * dz) / l2 : 0;
+    t = t < 0 ? 0 : (t > 1 ? 1 : t);
+    const qx = a.x + dx * t - x, qz = a.z + dz * t - z, d2 = qx * qx + qz * qz;
+    if (d2 < best) { best = d2; bs = a.s + (b.s - a.s) * t; }
+  }
+  return bs;
+}
+function _pushSpineAt(s, out) {
+  const sp = game._push.spine;
+  if (s <= sp[0].s) return out.set(sp[0].x, sp[0].y, sp[0].z);
+  for (let i = 0; i < sp.length - 1; i++) {
+    const a = sp[i], b = sp[i + 1];
+    if (s <= b.s) {
+      const t = (b.s > a.s) ? (s - a.s) / (b.s - a.s) : 0;
+      return out.set(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t);
+    }
+  }
+  const z = sp[sp.length - 1];
+  return out.set(z.x, z.y, z.z);
+}
+function _pushFaceFront() {
+  try {
+    const P = game._push;
+    if (!P || typeof player === 'undefined' || !player || !player.euler || !player.position) return;
+    const fi = _pushFrontIdx(player.team); if (fi < 0) return;
+    const s0 = _pushSpineS(player.position.x, player.position.z), gs = P.pts[fi].s;
+    const tgt = (Math.abs(gs - s0) < 1500) ? _pushWp.set(P.pts[fi].x, P.pts[fi].y, P.pts[fi].z)
+                                          : _pushSpineAt(s0 + Math.sign(gs - s0) * 1500, _pushWp);
+    const dx = player.position.x - tgt.x, dz = player.position.z - tgt.z;
+    if (dx * dx + dz * dz > 1) {
+      player.euler.y = Math.atan2(dx, dz);
+      player.euler.x = 0;
+      game._parPrevYaw = player.euler.y;
+      game._parPrevPitch = player.euler.x;
+    }
+  } catch (_) {}
+}
+
+function _pushSay(kind, pt, team, old) {
+  try {
+    if (!window.Overlays || !Overlays.banner || !pt) return;
+    const P = game._push; if (!P) return;
+    const me = _pushViewerTeam(), n = pt.idx + 1;
+    const key = kind + n, now = game.time || 0;
+    if (P._sayT[key] && now - P._sayT[key] < 3) return;   // one shell flickering must not spam
+    P._sayT[key] = now;
+    if (kind === 'cap') {
+      if (me != null && team === me) Overlays.banner('POINT ' + n + ' CAPTURED', 'Its shell grows back in your colour');
+      else if (me != null && old === me) Overlays.banner('POINT ' + n + ' LOST', 'The enemy holds it now');
+      else Overlays.banner('ENEMY TOOK POINT ' + n);
+    } else if (kind === 'open') {
+      if (me != null && pt.owner === me) Overlays.banner('POINT ' + n + ' SHELL DOWN', 'Hold the field or lose it');
+    } else if (kind === 'spawn') {
+      Overlays.banner('SPAWN MOVED', 'Your fleet now launches from point ' + n);
+    }
+  } catch (_) {}
+}
+function _pushOnOwner(pt, old) {
+  _pushTintField(pt);
+  if (pt.shell) _pushTintShell(pt.shell, true);
+  if (pt.owner) _pushSay('cap', pt, pt.owner, old);
+  try { if (typeof playSound === 'function') playSound((pt.owner && _pushIsFriend(pt.owner)) ? 'round_start' : 'hit'); } catch (_) {}
+}
+
+const _pushShipBuf = [];
+function _pushShips() {
+  const out = _pushShipBuf; out.length = 0;
+  const A = LSS.TEAM_FLEET_A, B = LSS.TEAM_FLEET_B;
+  if (typeof player !== 'undefined' && player && player.position && player.shipState !== 'dead' && player.shipState !== 'spawning' &&
+      (player.team === A || player.team === B)) out.push(player);
+  const E = game.entities || [];
+  for (let i = 0; i < E.length; i++) {
+    const e = E[i];
+    if (!e || !e.alive || !e.position || (e.team !== A && e.team !== B)) continue;
+    out.push(e);
+  }
+  return out;
+}
+function _pushAuthTick(dt) {
+  const P = game._push, K = _pushK();
+  const A = LSS.TEAM_FLEET_A, B = LSS.TEAM_FLEET_B;
+  const ships = _pushShips();
+  for (let k = 0; k < P.pts.length; k++) {
+    const pt = P.pts[k];
+    const hr = (pt.field && pt.field.holdRadius) || K.holdR, hr2 = hr * hr;
+    let inA = 0, inB = 0;
+    for (let i = 0; i < ships.length; i++) {
+      const q = ships[i].position, dx = q.x - pt.x, dy = q.y - pt.y, dz = q.z - pt.z;
+      if (dx * dx + dy * dy + dz * dz < hr2) { if (ships[i].team === A) inA++; else inB++; }
+    }
+    pt.inA = inA; pt.inB = inB;
+    const sh = pt.shell, shellUp = !!(sh && sh.alive);
+    if (shellUp && sh.health < sh.maxHealth && ((game.time || 0) - sh._lastHitT) > K.shellRegenDelay) {
+      sh.health = Math.min(sh.maxHealth, sh.health + sh.maxHealth * K.shellRegen * dt);
+    }
+    const capA = inA > 0 && pt.owner !== A, capB = inB > 0 && pt.owner !== B;
+    let active = 0;
+    if (!shellUp) {
+      if (capA && !inB) active = A;
+      else if (capB && !inA) active = B;
+    }
+    if (active !== pt.chg) { pt.chg = active; P.dirty = true; }
+    if (pt.prog[A] > 0 && active !== A) pt.prog[A] = Math.max(0, pt.prog[A] - dt * K.decay);
+    if (pt.prog[B] > 0 && active !== B) pt.prog[B] = Math.max(0, pt.prog[B] - dt * K.decay);
+    if (active) {
+      pt.prog[active] = (pt.prog[active] || 0) + dt;
+      if (pt.prog[active] >= K.capture) {
+        const old = pt.owner;
+        pt.owner = active; pt.prog = {}; pt.chg = 0; pt.regrowT = 0;
+        P.dirty = true;
+        _pushOnOwner(pt, old);
+        continue;
+      }
+    }
+    if (!shellUp) {
+      if (capA || capB) pt.regrowT = 0;
+      else {
+        pt.regrowT += dt;
+        if (pt.regrowT >= K.regrow) { pt.regrowT = 0; pt.prog = {}; pt.chg = 0; _pushShellUp(pt, 1); P.dirty = true; }
+      }
+    }
+  }
+  if (!P.won && P.pts.length) {
+    const o0 = P.pts[0].owner;
+    if (o0 && P.pts.every((p) => p.owner === o0)) {
+      P.won = o0;
+      game.championResult = (o0 === A) ? 'A' : 'B';
+      game.championEndTimer = 2.0;
+      P.dirty = true;
+    }
+  }
+}
+function _pushActive() {
+  const P = game._push;
+  for (let i = 0; i < P.pts.length; i++) {
+    const pt = P.pts[i];
+    if (pt.chg || pt.prog[LSS.TEAM_FLEET_A] > 0 || pt.prog[LSS.TEAM_FLEET_B] > 0) return true;
+    if (pt.shell && pt.shell.alive && pt.shell.health < pt.shell.maxHealth) return true;
+    if (!pt.shell) return true;   // the regrow clock is running
+  }
+  return false;
+}
+function _pushSendState() {
+  const P = game._push;
+  const o = [], h = [], pa = [], pb = [], c = [], g = [];
+  for (const pt of P.pts) {
+    o.push(pt.owner | 0);
+    h.push((pt.shell && pt.shell.alive) ? Math.max(1, Math.round(1000 * pt.shell.health / pt.shell.maxHealth)) : -1);
+    pa.push(Math.round(100 * (pt.prog[LSS.TEAM_FLEET_A] || 0)));
+    pb.push(Math.round(100 * (pt.prog[LSS.TEAM_FLEET_B] || 0)));
+    c.push(pt.chg | 0);
+    g.push(Math.round(10 * (pt.regrowT || 0)));
+  }
+  try { net.sendEvent({ type: 'push_st', o: o, h: h, pa: pa, pb: pb, c: c, g: g, w: P.won | 0 }); } catch (_) {}
+  P.dirty = false;
+}
+function _pushApplyState(evt) {
+  const P = game._push; if (!P || !Array.isArray(evt.o) || evt.o.length !== P.pts.length) return;
+  if (_pushAuthority()) return;   // two authorities for one frame during a hand-over: keep our own
+  for (let i = 0; i < P.pts.length; i++) {
+    const pt = P.pts[i];
+    const o = evt.o[i] | 0;
+    if (o !== pt.owner) { const old = pt.owner; pt.owner = o; _pushOnOwner(pt, old); }
+    const h = Array.isArray(evt.h) ? +evt.h[i] : -1;
+    if (h >= 0) {
+      if (!pt.shell || !pt.shell.alive) _pushShellUp(pt, h / 1000);
+      else pt.shell.health = Math.max(1, pt.shell.maxHealth * h / 1000 - (P.dmgOut[i] || 0));
+    } else if (pt.shell && pt.shell.alive) {
+      _pushShellRemove(pt, true);
+      _pushSay('open', pt, 0);
+    }
+    pt.prog[LSS.TEAM_FLEET_A] = (Array.isArray(evt.pa) ? +evt.pa[i] : 0) / 100;
+    pt.prog[LSS.TEAM_FLEET_B] = (Array.isArray(evt.pb) ? +evt.pb[i] : 0) / 100;
+    pt.chg = Array.isArray(evt.c) ? (evt.c[i] | 0) : 0;
+    pt.regrowT = (Array.isArray(evt.g) ? +evt.g[i] : 0) / 10;
+  }
+  if (evt.w) P.won = evt.w | 0;
+}
+function _pushNetEvent(evt, fromPeerId) {
+  if (!evt || typeof evt.type !== 'string' || evt.type.indexOf('push_') !== 0) return false;
+  if (!_isPush() || !game._push) return true;
+  if (evt.type === 'push_st') { _pushApplyState(evt); return true; }
+  if (evt.type === 'push_dmg' && Array.isArray(evt.d) && _pushAuthority()) {
+    const P = game._push;
+    for (let i = 0; i < P.pts.length && i < evt.d.length; i++) {
+      const d = Math.max(0, +evt.d[i] || 0);
+      if (d > 0 && P.pts[i].shell && P.pts[i].shell.alive) P.pts[i].shell.takeDamage(d, 'pushclaim', null);
+    }
+    P.dirty = true;
+    return true;
+  }
+  return true;
+}
+
+function _pushWaveAt(deadAt) {   // seconds from the fight start of the wave this death rides
+  const K = _pushK();
+  return Math.ceil((deadAt + K.waveMin) / K.wave) * K.wave;
+}
+function _pushRespawnLabel(text) {
+  try {
+    const el = document.querySelector('#ov-respawn .rs-wait');
+    if (!el) return;
+    const v = (text == null) ? 'GHOST MODE' : text;
+    if (el.textContent !== v) el.textContent = v;
+  } catch (_) {}
+}
+function _pushPlayerWave(now) {
+  const P = game._push;
+  if (typeof player === 'undefined' || !player) return;
+  if (player.shipState === 'dead') {
+    if (P.pDeadAt == null) { P.pDeadAt = now; P.pRespawnAt = _pushWaveAt(now); }
+    const left = P.pRespawnAt - now;
+    _pushRespawnLabel('NEXT WAVE IN ' + Math.max(1, Math.ceil(left)));
+    if (left <= 0) {
+      P.pDeadAt = null;
+      _pushRespawnLabel(null);
+      try { _spawnPickTake(); } catch (_) {}
+      try { respawnPlayer(); } catch (e) { console.warn('[push] respawn failed:', e); }
+      _pushFaceFront();
+    }
+  } else if (P.pDeadAt != null) { P.pDeadAt = null; _pushRespawnLabel(null); }
+}
+function _pushBotWave(now) {
+  const E = game.entities || [];
+  const A = LSS.TEAM_FLEET_A, B = LSS.TEAM_FLEET_B;
+  for (let i = 0; i < E.length; i++) {
+    const b = E[i];
+    if (!(b instanceof Bot) || b.isProxy || (b.team !== A && b.team !== B)) continue;
+    if (b.alive) { b._pushRespawnAt = null; continue; }
+    if (b._pushRespawnAt == null) b._pushRespawnAt = _pushWaveAt(now);
+    if (now < b._pushRespawnAt) continue;
+    const sp = _pushSpawnPos(b.team) || getValidSpawnPoint(b.team === A ? 'A' : 'B');
+    if (!sp) continue;
+    b._pushRespawnAt = null;
+    b.alive = true;
+    b.health = b.maxHealth;
+    if (b.shield != null && b.maxShield != null) b.shield = b.maxShield;
+    b.doomed = false; b.doomTimer = 0; b.aiRetreating = false;   // (v40.45's lesson: a revive is a fresh hull)
+    b.spawnProtection = LSS.SPAWN_PROTECTION || 3;
+    b.combatTarget = null; b._pushGoal = null; b._pushPickT = 0;
+    if (b.velocity) b.velocity.set(0, 0, 0);
+    b.position.copy(sp);
+    if (b.mesh) { b.mesh.position.copy(sp); if (!b.mesh.parent) scene.add(b.mesh); b.mesh.visible = true; }
+  }
+}
+
+function _pushBotPick(bot) {
+  const P = game._push, team = bot.team;
+  if (((bot.id | 0) % 2) === 1) {
+    let best = -1, bd = Infinity;
+    for (const pt of P.pts) {
+      if (pt.owner !== team) continue;
+      const foes = (team === LSS.TEAM_FLEET_A) ? pt.inB : pt.inA;
+      const threat = (pt.chg && pt.chg !== team) || (!(pt.shell && pt.shell.alive) && foes > 0);
+      if (!threat) continue;
+      const d = bot.position.distanceToSquared(_pushV1.set(pt.x, pt.y, pt.z));
+      if (d < bd) { bd = d; best = pt.idx; }
+    }
+    if (best >= 0) return best;
+  }
+  return _pushFrontIdx(team);
+}
+function _pushBotWaypoint(bot) {
+  const P = game._push;
+  if (!P || !P.pts.length || !bot || !bot.position) return null;
+  const team = bot.team;
+  if (team !== LSS.TEAM_FLEET_A && team !== LSS.TEAM_FLEET_B) return null;
+  const now = game.time || 0;
+  if (bot._pushGoal == null || !(now < bot._pushPickT)) {
+    bot._pushPickT = now + 1.5 + Math.random();
+    bot._pushGoal = _pushBotPick(bot);
+  }
+  const gi = bot._pushGoal;
+  if (gi == null || gi < 0) return null;
+  const pt = P.pts[gi];
+  const shellUp = !!(pt.shell && pt.shell.alive);
+  const mine = (pt.owner === team);
+  const breaker = !mine && shellUp && (((bot.id | 0) % 2) === 0);
+  const contest = mine && !!pt.chg && pt.chg !== team;
+  const claim = !mine && !shellUp;
+  const t = bot.combatTarget;
+  const fightR = (contest || claim) ? 650 : 1800;
+  if (!breaker && t && t.alive !== false && t.position && bot.position.distanceTo(t.position) < fightR) return null;
+  const dx = pt.x - bot.position.x, dy = pt.y - bot.position.y, dz = pt.z - bot.position.z;
+  const dGoal = Math.sqrt(dx * dx + dy * dy + dz * dz);
+  if (dGoal > 1500) {
+    if (bot._pushST == null || now > bot._pushST) { bot._pushST = now + 0.3; bot._pushS = _pushSpineS(bot.position.x, bot.position.z); }
+    const s0 = bot._pushS, gs = pt.s;
+    return (Math.abs(gs - s0) < 900) ? _pushWp.set(pt.x, pt.y, pt.z) : _pushSpineAt(s0 + Math.sign(gs - s0) * 900, _pushWp);
+  }
+  const hr = (pt.field && pt.field.holdRadius) || 230;
+  const ang = (bot.id | 0) * 2.39996;   // a per-bot bearing (golden angle), so a pack fans out instead of stacking
+  if (claim || contest) {
+    const rr = hr * 0.35;
+    return _pushWp.set(pt.x + Math.cos(ang) * rr, pt.y, pt.z + Math.sin(ang) * rr);
+  }
+  if (mine) {
+    const rr = shellUp ? ((pt.shell.collisionRadius || 170) + 140) : hr * 0.55;
+    return _pushWp.set(pt.x + Math.cos(ang) * rr, pt.y + 60, pt.z + Math.sin(ang) * rr);
+  }
+  if (shellUp) {
+    const sh = pt.shell;
+    _pushV1.subVectors(bot.position, sh.position);
+    if (_pushV1.lengthSq() < 1) _pushV1.set(1, 0.2, 0);
+    _pushV1.normalize();
+    return _pushWp.copy(sh.position).addScaledVector(_pushV1, (sh.collisionRadius || 170) + 260);
+  }
+  return _pushWp.set(pt.x, pt.y, pt.z);   // the shell is down: onto the dot
+}
+function _pushBotShell(bot) {
+  const P = game._push; if (!P || !bot) return null;
+  const gi = bot._pushGoal;
+  const pt = (gi != null && gi >= 0) ? P.pts[gi] : null;
+  if (!pt || pt.owner === bot.team || !(pt.shell && pt.shell.alive)) return null;
+  return pt.shell;
+}
+function _pushNearPoint(pos, r) {
+  const P = game._push; if (!P || !pos) return false;
+  for (const pt of P.pts) { const dx = pos.x - pt.x, dy = pos.y - pt.y, dz = pos.z - pt.z; if (dx * dx + dy * dy + dz * dz < r * r) return true; }
+  return false;
+}
+
+function _pushCaptureState() {
+  const P = game._push;
+  if (!P || typeof player === 'undefined' || !player || !player.position) return null;
+  const K = _pushK();
+  let best = null, bd = Infinity;
+  for (const pt of P.pts) {
+    const dx = player.position.x - pt.x, dy = player.position.y - pt.y, dz = player.position.z - pt.z;
+    const d2 = dx * dx + dy * dy + dz * dz, lim = K.holdR + 700;
+    if (d2 > lim * lim) continue;
+    const pa = pt.prog[LSS.TEAM_FLEET_A] || 0, pb = pt.prog[LSS.TEAM_FLEET_B] || 0;
+    const team = pt.chg || ((pa >= pb) ? LSS.TEAM_FLEET_A : LSS.TEAM_FLEET_B);
+    const lead = (team === LSS.TEAM_FLEET_A) ? pa : pb;
+    if (!(lead > 0) || d2 >= bd) continue;
+    bd = d2;
+    best = { frac: Math.min(1, lead / K.capture), isA: team === LSS.TEAM_FLEET_A, mine: team === player.team };
+  }
+  return best;
+}
+function _pushLocalUI(dt) {
+  const P = game._push;
+  if (typeof player === 'undefined' || !player || !player.position || !player.velocity || player.shipState === 'dead') return;
+  const K = _pushK();
+  for (const pt of P.pts) {
+    if (pt.owner === player.team || (pt.shell && pt.shell.alive)) continue;
+    const R = (pt.field && pt.field.holdRadius) || K.holdR;
+    _pushV1.set(pt.x - player.position.x, pt.y - player.position.y, pt.z - player.position.z);
+    const d = _pushV1.length();
+    if (d < 1 || d > R + 700) continue;
+    const u = (d >= R) ? (1 - (d - R) / 700) : 1;
+    player.velocity.addScaledVector(_pushV1.multiplyScalar(1 / d), ((d >= R) ? 34 : 90) * u * u * dt);
+  }
+  const si = _pushSpawnIdx(_pushViewerTeam());
+  if (P.spawnIdx >= 0 && si !== P.spawnIdx && _pushViewerTeam() != null) _pushSay('spawn', P.pts[si], 0);
+  P.spawnIdx = si;
+}
+
+function _pushHudEl() {
+  let el = document.getElementById('endless-hud');
+  if (el && !el.classList.contains('push-hud')) return null;
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'endless-hud';
+    el.className = 'push-hud';
+    el.style.cssText = 'position:fixed;top:108px;left:50%;transform:translateX(-50%);z-index:60;pointer-events:none;';
+    const cv = document.createElement('canvas');
+    cv.style.setProperty('position', 'static', 'important');
+    cv.style.setProperty('display', 'block', 'important');
+    el.appendChild(cv);
+    document.body.appendChild(el);
+  }
+  return el;
+}
+function _pushHudDraw() {
+  const P = game._push; if (!P || P.pts.length !== 5) return;
+  const el = _pushHudEl(); if (!el) return;
+  const vp = innerWidth * 100000 + innerHeight;
+  if (P._vp !== vp) {
+    P._vp = vp;
+    let top = 108;
+    try { const ri = document.getElementById('round-info'); if (ri) { const r = ri.getBoundingClientRect(); if (r.height > 0) top = Math.round(r.bottom + 4); } } catch (_) {}
+    el.style.top = top + 'px';
+  }
+  const c = el.firstChild; if (!c) return;
+  const dpr = Math.min(2, window.devicePixelRatio || 1), W = 300, H = 48;
+  if (c.width !== Math.round(W * dpr)) { c.width = Math.round(W * dpr); c.height = Math.round(H * dpr); c.style.width = W + 'px'; c.style.height = H + 'px'; }
+  const ctx = c.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  const K = _pushK(), TAU = Math.PI * 2, me = _pushViewerTeam();
+  const order = (me === LSS.TEAM_FLEET_B) ? [4, 3, 2, 1, 0] : [0, 1, 2, 3, 4];
+  const gap = 56, x0 = W / 2 - gap * 2, cy = 21, R = 12;
+  ctx.strokeStyle = 'rgba(150,180,220,0.35)'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(x0, cy); ctx.lineTo(x0 + gap * 4, cy); ctx.stroke();
+  const spawnIdx = _pushSpawnIdx(me);
+  for (let k = 0; k < 5; k++) {
+    const i = order[k], pt = P.pts[i], x = x0 + k * gap;
+    const col = _pushOwnerColor(pt.owner);
+    const shellUp = !!(pt.shell && pt.shell.alive);
+    ctx.globalAlpha = 0.30; ctx.fillStyle = col;
+    ctx.beginPath(); ctx.arc(x, cy, R, 0, TAU); ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = col;
+    if (shellUp) {
+      const hp = Math.max(0, Math.min(1, pt.shell.health / pt.shell.maxHealth));
+      ctx.lineWidth = 1; ctx.globalAlpha = 0.35; ctx.beginPath(); ctx.arc(x, cy, R, 0, TAU); ctx.stroke();
+      ctx.globalAlpha = 1; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(x, cy, R, -Math.PI / 2, -Math.PI / 2 + TAU * hp); ctx.stroke();
+    } else {
+      ctx.lineWidth = 1.4; ctx.setLineDash([3, 3]); ctx.beginPath(); ctx.arc(x, cy, R, 0, TAU); ctx.stroke(); ctx.setLineDash([]);
+    }
+    const pa = pt.prog[LSS.TEAM_FLEET_A] || 0, pb = pt.prog[LSS.TEAM_FLEET_B] || 0;
+    const ct = pt.chg || ((pa >= pb) ? LSS.TEAM_FLEET_A : LSS.TEAM_FLEET_B);
+    const frac = Math.min(1, ((ct === LSS.TEAM_FLEET_A) ? pa : pb) / K.capture);
+    if (frac > 0.005) {
+      ctx.strokeStyle = _pushOwnerColor(ct); ctx.lineWidth = 3;
+      ctx.globalAlpha = pt.chg ? 1 : 0.5;
+      ctx.beginPath(); ctx.arc(x, cy, R + 5, -Math.PI / 2, -Math.PI / 2 + TAU * frac); ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    ctx.fillStyle = '#eaf4ff';
+    ctx.font = 'bold 12px Orbitron, Rajdhani, sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(String(i + 1), x, cy + 1);
+    if (i === spawnIdx && me != null) {   // your fleet launches from here
+      ctx.fillStyle = _PUSH_FRIEND;
+      ctx.beginPath(); ctx.moveTo(x, cy + R + 5); ctx.lineTo(x - 5, cy + R + 12); ctx.lineTo(x + 5, cy + R + 12); ctx.closePath(); ctx.fill();
+    }
+  }
+}
+function _pushFrame(dt) {
+  const P = game._push; if (!P) return;
+  if (!game.monsters) game.monsters = [];
+  for (let i = 0; i < P.pts.length; i++) {
+    const pt = P.pts[i], sh = pt.shell;
+    _pushTintField(pt);
+    if (!sh || !sh.alive) continue;
+    const wasIn = game.monsters.indexOf(sh) >= 0;
+    if (!wasIn) game.monsters.push(sh);
+    if (!wasIn || !updateMonsters._ticked) { try { sh.update(dt); } catch (_) {} }
+    _pushTintShell(sh);
+  }
+  P.hudT -= dt;
+  if (P.hudT <= 0) { P.hudT = 0.1; try { _pushHudDraw(); } catch (_) {} }
+}
+function _pushUpdate(dt) {
+  const P = game._push;
+  if (!P || game.state !== 'playing') return;
+  if (!P.T0) P.T0 = performance.now();
+  const now = (performance.now() - P.T0) / 1000;
+  const auth = _pushAuthority();
+  if (auth) _pushAuthTick(dt);
+  if (typeof net !== 'undefined' && net && net.active && net.sendEvent) {
+    if (auth) {
+      P.sendT -= dt; P.hbT -= dt;
+      if (P.sendT <= 0 && (P.dirty || P.hbT <= 0 || _pushActive())) {
+        P.sendT = 0.2;
+        if (P.hbT <= 0) P.hbT = 1.0;
+        _pushSendState();
+      }
+    } else {
+      P.dmgT -= dt;
+      if (P.dmgT <= 0) {
+        P.dmgT = 0.12;
+        if (P.dmgOut.some((d) => d > 0)) {
+          try { net.sendEvent({ type: 'push_dmg', d: P.dmgOut.map((d) => Math.round(d)) }); } catch (_) {}
+          for (let i = 0; i < P.dmgOut.length; i++) P.dmgOut[i] = 0;
+        }
+      }
+    }
+  }
+  _pushPlayerWave(now);
+  if (typeof _botAuthority === 'function' && _botAuthority()) _pushBotWave(now);
+  _pushLocalUI(dt);
+}
+const PushMode = {
+  onStart() { _pushClear(); game._push = null; },
+  onBuildWorld() {
+    try { _pushBuildPoints(); } catch (e) { console.warn('[push] build failed:', e); }
+    _pushFaceFront();
+  },
+  update(dt) { _pushUpdate(dt); },
+  shouldEndRound() { return undefined; },
+  onWaveStart() {},
+  onTeardown() { _pushClear(); game._push = null; },
+};
+GameModes.push = PushMode;
+function startPush() {
+  game.testMode = false;
+  LSS.MODE = _lssRoomModeChoose('push');   // (v43.19) a room has one mode
+  game._pushSalt = (Math.random() * 0xffffffff) >>> 0;
+  try { if (typeof _preloadChampionShellModel === 'function') _preloadChampionShellModel(); } catch (_) {}
+  let _code = '';
+  try { const el = document.getElementById('room-code'); _code = el && el.value ? el.value.trim() : ''; } catch (_) {}
+  if ((net.active && net.room) || _code) {
+    _startHostedMode().then(function (ok) {
+      if (!ok) { _cancelRoomForLocalPlay(); net.active = false; net.solo = true; enterShipSelect(); }
+    });
+    return;
+  }
+  net.solo = true;
+  enterShipSelect();
+}
+if (typeof window !== 'undefined') {
+  window.startPush = startPush;
+  window.__pushInfo = function () {
+    const P = game._push;
+    if (!P) return { live: false, mode: (typeof LSS !== 'undefined') ? LSS.MODE : null };
+    const now = P.T0 ? (performance.now() - P.T0) / 1000 : 0;
+    return {
+      live: true, auth: _pushAuthority(), botAuth: (typeof _botAuthority === 'function') ? _botAuthority() : null,
+      t: Math.round(now * 10) / 10, nextWave: P.T0 ? Math.ceil(now / _pushK().wave) * _pushK().wave : null,
+      mySpawn: _pushSpawnIdx(_pushViewerTeam()) + 1, won: P.won,
+      pts: P.pts.map((pt) => ({ n: pt.idx + 1, owner: pt.owner, shell: (pt.shell && pt.shell.alive) ? Math.round(pt.shell.health) : null,
+                                chg: pt.chg, pA: +(pt.prog[LSS.TEAM_FLEET_A] || 0).toFixed(2), pB: +(pt.prog[LSS.TEAM_FLEET_B] || 0).toFixed(2),
+                                regrow: +(pt.regrowT || 0).toFixed(1), inA: pt.inA, inB: pt.inB,
+                                at: [Math.round(pt.x), Math.round(pt.y), Math.round(pt.z)] })),
+    };
+  };
+  window.__pushSet = function (n, team, shell) {
+    const P = game._push; if (!P || !_pushAuthority()) return false;
+    const pt = P.pts[(n | 0) - 1]; if (!pt) return false;
+    const old = pt.owner; pt.owner = team | 0; pt.prog = {}; pt.chg = 0; pt.regrowT = 0;
+    if (shell === false) _pushShellRemove(pt, true); else if (shell === true) _pushShellUp(pt, 1);
+    _pushOnOwner(pt, old);
+    P.dirty = true;
+    return window.__pushInfo();
+  };
+  window.__pushClamp = function (o) {
+    const T = game.sandwichTerrain;
+    if (!_isPush() || !T || !T.ON || T.YMID == null) return null;
+    const read = () => ({ pinch: T.WALL_PINCH, gap: Math.round((T.YCEIL - T.YFLOOR) / 2) });
+    if (!o) return read();
+    const K = (window.__push = window.__push || {});
+    if (typeof o.pinch === 'number') { T.WALL_PINCH = Math.max(0, Math.min(0.9, o.pinch)); K.pinch = T.WALL_PINCH; }
+    if (typeof o.gap === 'number') {
+      const g = Math.max(200, Math.min(2000, o.gap));
+      T.YFLOOR = T.YMID - g; T.YCEIL = T.YMID + g;
+      T.WL = T.YFLOOR - 120;   // the dry-cavern level (the config's own rule); the water re-derives below
+      K.gapHalf = g;
+    }
+    try { _swApplyAtmosphere(); _swSyncFX(); } catch (e) { console.warn('[push] clamp atmosphere:', e); }
+    const F = T.FOOT;
+    let n = 0;
+    try { n = F ? _swInvalidateChunksInRect(F.minX - 4000, F.maxX + 4000, F.minZ - 4000, F.maxZ + 4000) : 0; } catch (_) {}
+    try { if (player) player._swYClampCache = null; } catch (_) {}
+    try { for (const e of (game.entities || [])) if (e && e._tnav) e._tnav.x = 1e9; } catch (_) {}
+    return Object.assign(read(), { rebaking: n });
+  };
+}
 function _lssGenShiftingDeep(base, opts) {
   opts = opts || {};
   const seed = ((((((net && typeof net.worldSeed === 'number') ? net.worldSeed : 0x5EED) >>> 0) ^ 0x51F7C0DE) +
@@ -100818,6 +101835,10 @@ function buildRoomGraphLevel(level) {
     try { level = _lssGenRaceTrack(MAP_DATA.race_shifting || level); }
     catch (e) { console.warn('[race-shifting] generate failed, using static fallback:', e); }
   }
+  if (level && level.procedural === 'push' && typeof _lssGenPushDeep === 'function') {
+    try { level = _lssGenPushDeep(MAP_DATA.push_deep || level); }
+    catch (e) { console.warn('[push] generate failed, using static fallback:', e); }
+  }
   if (level && level.procedural === 'endless' && typeof _lssGenEndlessLevel === 'function') {
     try { level = _lssGenEndlessLevel((level && level.bend) ? level : (MAP_DATA.endless_caverns || level)); }
     catch (e) { console.warn('[endless] generate failed, using static fallback:', e); game.endlessRun = null; }
@@ -100962,8 +101983,8 @@ function buildRoomGraphLevel(level) {
   }
   else if (game.sandwichTerrainEnabled) {
     const yMid = (bMinY + bMaxY) * 0.5;
-    const SPACING = 670;    
-    const GAP_HALF = 600;   
+    const SPACING = 670;
+    const GAP_HALF = (level && level.terrain && typeof level.terrain.gapHalf === 'number') ? level.terrain.gapHalf : 600;
     const AMP = 1120;       
     
     
@@ -101160,6 +102181,9 @@ function _spawnPickSet(v) { try { _spawnPick = v ? v.clone() : null; } catch (_)
 function _spawnPickTake() { const v = _spawnPick; _spawnPick = null; return v; }
 function getValidSpawnPoint(team, spread) {
   spread = spread || 80;
+  if ((team === 'A' || team === 'B') && typeof _isPush === 'function' && _isPush()) {
+    try { const _pp = _pushSpawnPos(team === 'A' ? LSS.TEAM_FLEET_A : LSS.TEAM_FLEET_B); if (_pp) return _pp; } catch (_) {}
+  }
   const pts = game.corridorPoints;
   if (!pts || pts.length === 0) return new THREE.Vector3(0, 0, 0);
 
@@ -108664,6 +109688,7 @@ function _gameLoopBody(timestamp) {
       if (typeof _sh.update === 'function') { try { _sh.update(dt); } catch (_) {} }
     }
   }
+  if (typeof _isPush === 'function' && _isPush() && game._push) { try { _pushFrame(dt); } catch (_) {} }
   updateOrganics(dt);
   __pmark('dynObj+monsters+organics'); 
 
@@ -118229,6 +119254,11 @@ function updateScoreboard() {
       const _youIn = (team) => (team === LSS.TEAM_FLEET_B) ? (player.team === LSS.TEAM_FLEET_B) : (player.team !== LSS.TEAM_FLEET_B);
       for (const [team, letter, score] of [[LSS.TEAM_FLEET_A, 'A', game.scoreA], [LSS.TEAM_FLEET_B, 'B', game.scoreB]]) {
         const s = _youIn(team) ? ['mine', 'YOUR FLEET'] : ['foe', 'ENEMY FLEET'];
+        if (_sbMode === 'push' && game._push && game._push.pts.length) {
+          let _held = 0;
+          for (const _pp of game._push.pts) if (_pp.owner === team) _held++;
+          html += fleetH(s[0], s[1], 'FLEET ' + letter, '', scoreH(_held, 'POINTS'));
+        } else
         html += fleetH(s[0], s[1], 'FLEET ' + letter, tag(team), scoreH(score, 'ROUNDS'));
         const rows = [];
         if (_youIn(team)) rows.push(meRow());
