@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "52.73";
+const LSS_BUILD = "52.76";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -15487,7 +15487,7 @@ setTimeout(() => {
   let _stored = null;
   try { _stored = localStorage.getItem('lss_quality'); } catch (_) {}
   if (!_stored) {
-    _stored = _isMobileGPU ? 'low' : 'high';
+    _stored = _isMobileGPU ? 'low' : (_LSS_LITE ? 'high' : 'mega');
     try { localStorage.setItem('lss_quality', _stored); } catch (_) {}
   }
   if (_stored === 'potato') {
@@ -92911,7 +92911,9 @@ function _refreshSettingsValues() {
       '<br><span style="opacity:0.6">' + (window.__v8GPU.vendor || '') + '</span>';
   }
 
-  setSel('set-quality', (typeof QUALITY !== 'undefined' && QUALITY.level) || 'high');
+  let _qShown = (typeof QUALITY !== 'undefined' && QUALITY.level) || 'high';
+  try { if (_LSS_LITE) _qShown = 'lite'; } catch (_) {}
+  setSel('set-quality', _qShown);
   const fov = (typeof input.fovDeg === 'number') ? input.fovDeg : 90;
   setRange('set-fov', null, fov);
   const fovVal = $('#val-fov');
@@ -92981,15 +92983,24 @@ function buildSettingsPage() {
   _settingsBuilt = true;
   const overlay = document.getElementById('settings-overlay');
   overlay.innerHTML = `
-    <h1>SETTINGS</h1>
-    <!-- (v19+) Tabbed settings. Persist active tab in localStorage as
-         lss_settings_tab. Buttons have data-tab-button matching panels'
-         data-tab-panel. CSS does show/hide via data-active="1". -->
-    <div class="settings-tabs">
-      <button class="settings-tab" data-tab-button="controls"    data-active="1">Controls</button>
-      <button class="settings-tab" data-tab-button="performance">Performance</button>
-      <button class="settings-tab" data-tab-button="sound">Sound</button>
-      <button class="settings-tab" data-tab-button="theme">Theme</button>
+    <!-- (v52.74) THE HEAD: the title, the tabs, EXIT TO MAIN MENU where the Theme tab was, and the X - sticky (CSS), so
+         closing or leaving never takes a scroll. DOM order is tabs, EXIT, X ON PURPOSE: the gamepad walks every button
+         in DOM order from index 0 (_settingsFocusables), so an X first would make the pad's first A press close
+         Settings. CSS lifts the X into the corner. Both keep their ids: they are bound by id further down. -->
+    <div id="settings-head">
+      <h1><span class="lss-tag"><span class="lt-text">SETTINGS</span></span></h1>
+      <!-- (v19+) Tabbed settings. Persist active tab in localStorage as
+           lss_settings_tab. Buttons have data-tab-button matching panels'
+           data-tab-panel. CSS does show/hide via data-active="1". -->
+      <div class="settings-tabs">
+        <button class="settings-tab" data-tab-button="controls"    data-active="1">Controls</button>
+        <button class="settings-tab" data-tab-button="performance">Performance</button>
+        <button class="settings-tab" data-tab-button="sound">Sound</button>
+        <!-- (v10 Phase 6) Exit-to-main-menu. Hidden on the main menu itself (_refreshSettingsValues); a HARD
+             reload that closes the room, so its click confirms first. -->
+        <button id="settings-exit-to-menu">EXIT TO MAIN MENU</button>
+      </div>
+      <button id="settings-close" title="Close (Esc)" aria-label="Close settings">&#x2715;</button>
     </div>
 
     <div class="settings-tab-panel" data-tab-panel="controls" data-active="1">
@@ -93147,21 +93158,17 @@ function buildSettingsPage() {
                had something to display, real options do that better, and it carried a live bug -
                it had no stamp test, so EVERY phone on its first-run LOW default was shown
                "set automatically after a GPU crash" having never crashed. -->
-          <option value="low" ${QUALITY.level === 'low' ? 'selected' : ''}>Low (no bloom, 1-octave smoke, fewer particles, 0.65× render, shorter view, slower reflections)</option>
-          <option value="medium" ${QUALITY.level === 'medium' ? 'selected' : ''}>Medium (no bloom, 2-octave smoke, 0.85× render, shorter view)</option>
-          <option value="high" ${QUALITY.level === 'high' ? 'selected' : ''}>High (full bloom + 3-octave smoke) — recommended, incl. phones</option>
-          <option value="ultra" ${QUALITY.level === 'ultra' ? 'selected' : ''}>Ultra (4-octave smoke, 1.5× particles, dense basin pools, 1.5× bloom RT)</option>
-          <option value="mega" ${QUALITY.level === 'mega' ? 'selected' : ''}>Mega Ultra (2.5x supersample, 8-octave smoke, max particles - high-end GPUs)</option>
-        </select>
-      </div>
-      <!-- (v49.45) LITE MODE - phone-class graphics on a non-touch device. Boot-time, so a change that
-           flips the effective mode reloads. Hidden on touch phones: they are always on this budget. -->
-      <div class="setting-row" id="set-lite-row" style="${(typeof _LSS_TOUCH_PHONE !== 'undefined' && _LSS_TOUCH_PHONE) ? 'display:none;' : ''}">
-        <label>Lite mode</label>
-        <select id="set-lite" style="flex:1;">
-          <option value="auto" ${_lssLiteStored() === 'auto' ? 'selected' : ''}>Auto (on for Xbox, or after a crash at Low)</option>
-          <option value="1" ${_lssLiteStored() === '1' ? 'selected' : ''}>On - phone-class graphics (lighter ships, simpler terrain, no shadows)</option>
-          <option value="0" ${_lssLiteStored() === '0' ? 'selected' : ''}>Off - full desktop graphics</option>
+          <!-- (v52.75) LITE IS A PRESET NOW, the entry right above LOW. Owner: "put the lite mode as one setting in
+               the preset dropdown menu right above low". It was its own row (v49.45: Auto / On / Off). Lite = the
+               boot-time phone-class BUDGET (_lssLiteDecide, localStorage lss_lite) at LOW quality - exactly the
+               crash ladder's rung below LOW - so it is shown selected whenever that budget is in effect, however
+               it got there (an Xbox, the ladder, ?lite=1). Not offered on touch phones: they are always on it. -->
+          ${(typeof _LSS_TOUCH_PHONE !== 'undefined' && _LSS_TOUCH_PHONE) ? '' : '<option value="lite"' + (_LSS_LITE ? ' selected' : '') + '>Lite (phone-class graphics: lighter ships, simpler terrain, no shadows)</option>'}
+          <option value="low" ${!_LSS_LITE && QUALITY.level === 'low' ? 'selected' : ''}>Low (no bloom, 1-octave smoke, fewer particles, 0.65× render, shorter view, slower reflections)</option>
+          <option value="medium" ${!_LSS_LITE && QUALITY.level === 'medium' ? 'selected' : ''}>Medium (no bloom, 2-octave smoke, 0.85× render, shorter view)</option>
+          <option value="high" ${!_LSS_LITE && QUALITY.level === 'high' ? 'selected' : ''}>High (full bloom + 3-octave smoke) — recommended on phones</option>
+          <option value="ultra" ${!_LSS_LITE && QUALITY.level === 'ultra' ? 'selected' : ''}>Ultra (4-octave smoke, 1.5× particles, dense basin pools, 1.5× bloom RT)</option>
+          <option value="mega" ${!_LSS_LITE && QUALITY.level === 'mega' ? 'selected' : ''}>Mega Ultra (2.5x supersample, 8-octave smoke, max particles - high-end GPUs)</option>
         </select>
       </div>
       <!-- (51.83) the volumetric sky (_WX2) - owner: "this new weather could be a toggle in the performance settings (weather
@@ -93280,205 +93287,10 @@ function buildSettingsPage() {
 
     </div><!-- /tab-panel: performance -->
 
-    <div class="settings-tab-panel" data-tab-panel="theme">
-    <div class="settings-section">
-      <h3>Test Mode</h3>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Fly the map with passive bots (they maneuver but never fire) and live theme controls. For tuning themes, walls, and clouds without getting shot.</label>
-      </div>
-      <div class="setting-row" style="margin-top:6px;">
-        <button id="set-test-mode-btn" style="flex:1; padding:10px 14px; background:rgba(15,30,40,0.8); border:1px solid rgba(120,200,255,0.45); color:#cce8ff; cursor:pointer; border-radius:6px; font-family:'Rajdhani','Orbitron',sans-serif; letter-spacing:3px; font-weight:bold;"
-          onclick="try { closeSettings(); } catch (_) {} try { startTest(); } catch (_) {}">ENTER TEST MODE</button>
-      </div>
-    </div>
-    <div class="settings-section">
-      <h3>Engines</h3>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Each ship's engine style is part of its look: set it per ship in ship select's SKIN panel (ENGINES), where it is saved with the livery - other pilots see the one you set. Or show the classic orbs on every ship.</label>
-      </div>
-      <div class="setting-row" style="margin-top:6px;">
-        <label>Engine style</label>
-        <select id="set-engine-style" style="flex:1;">
-          ${(function() {
-            // (v50.97) the list lives in _engineStyleLabels, beside the engine FX
-            let cur = 'ship', opts = [['ship', 'Each ship its own'], ['orb', 'Classic orbs on every ship']];
-            try { cur = _engineStyleNow(); opts = _engineGlobalLabels(); } catch (_) {}   // (v51.07) the per-ship pick is in the SKIN panel
-            return opts.map(([k, lbl]) => '<option value="' + k + '"' + (k === cur ? ' selected' : '') + '>' + lbl + '</option>').join('');
-          })()}
-        </select>
-      </div>
-    </div>
-    <div class="settings-section">
-      <h3>Cloud Colors</h3>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Color theme for the gas clouds drifting around cluster rocks. "Auto" inherits each cloud's color from its parent rock (current default). Other themes pick from a fixed palette. Pyro gameplay clouds keep their identity colors regardless. Changes apply live to existing clouds (no respawn needed).</label>
-      </div>
-      <div class="setting-row" style="margin-top:6px;">
-        <label>Theme</label>
-        <select id="set-cloud-theme" style="flex:1;">
-          ${(function() {
-            const cur = (typeof game !== 'undefined' && typeof game.cloudTheme === 'string') ? game.cloudTheme : 'auto';
-            const keys = Object.keys(CLOUD_THEMES);
-            let out = '';
-            for (const k of keys) {
-              const t = CLOUD_THEMES[k];
-              const sel = (k === cur) ? ' selected' : '';
-              out += '<option value="' + k + '"' + sel + '>' + (t.label || k) + '</option>';
-            }
-            return out;
-          })()}
-        </select>
-      </div>
-      <div class="setting-row" style="margin-top:14px; opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">How clouds composite against bright walls. <b>Additive</b> (legacy) makes dense puffs glow ; against the brighter wall patterns this washes the scene out. <b>Soft (occlude)</b> uses normal alpha so the cloud sits in front of the wall like fog. <b>Absorb (darken)</b> multiplies, so dense regions actually dim the wall behind them — clouds read as light-absorbing volume instead of light-emitting.</label>
-      </div>
-      <div class="setting-row" style="margin-top:6px;">
-        <label>Blending</label>
-        <select id="set-cloud-blend" style="flex:1;">
-          ${(function() {
-            const cur = (typeof game !== 'undefined' && typeof game.cloudBlend === 'string') ? game.cloudBlend : 'additive';
-            const opts = [
-              ['additive', 'Additive (legacy bright)'],
-              ['normal',   'Soft (occlude with alpha)'],
-              ['multiply', 'Absorb (darken background)'],
-            ];
-            return opts.map(([k, lbl]) => '<option value="' + k + '"' + (k === cur ? ' selected' : '') + '>' + lbl + '</option>').join('');
-          })()}
-        </select>
-      </div>
-      <div class="setting-row" style="margin-top:6px;">
-        <label>Brightness</label>
-        <input type="range" id="set-cloud-brightness" min="0.10" max="1.50" step="0.05" value="${(typeof game !== 'undefined' && typeof game.cloudBrightness === 'number') ? game.cloudBrightness.toFixed(2) : '1.00'}">
-        <div class="value-display" id="val-cloud-brightness">${(typeof game !== 'undefined' && typeof game.cloudBrightness === 'number') ? game.cloudBrightness.toFixed(2) : '1.00'}</div>
-      </div>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Scales per-sprite alpha across the whole ambient cloud system. Lower values thin the clouds without changing their color or density distribution. Live ; no respawn needed.</label>
-      </div>
-      <div class="setting-row" style="margin-top:8px; flex-direction:column; align-items:stretch; gap:6px;">
-        <div style="font-size:0.85em; color:#9ac; letter-spacing:1px;">PREVIEW</div>
-        <div id="cloud-theme-preview" style="display:flex; gap:3px;">
-          ${(function() {
-            const cur = (typeof game !== 'undefined' && typeof game.cloudTheme === 'string') ? game.cloudTheme : 'auto';
-            const theme = CLOUD_THEMES[cur] || CLOUD_THEMES.auto;
-            const hex = (n) => '#' + ((n | 0) & 0xffffff).toString(16).padStart(6, '0');
-            // For auto / match-walls we don't have a static palette ; show
-            // greyscale fallback for auto, wall-theme colors for match-walls.
-            let palette;
-            if (theme.kind === 'fixed') {
-              palette = theme.colors.slice();
-            } else if (theme.kind === 'match-walls') {
-              const z = (typeof _ensureZoneColors === 'function') ? _ensureZoneColors() : null;
-              palette = [];
-              if (z && Array.isArray(z.walls)) {
-                for (let i = 0; i < z.walls.length; i++) {
-                  if (typeof z.walls[i] === 'number') palette.push(z.walls[i]);
-                }
-              }
-              if (palette.length === 0) palette = ZONE_COLOR_DEFAULTS.walls.slice(0, 5);
-            } else if (theme.kind === 'custom') {
-              // Custom palette : show the user\'s 8 chosen
-              // colors directly. The pickers row below lets them edit each
-              // slot ; this preview reflects whatever they\'ve set.
-              palette = (Array.isArray(game.cloudCustomColors))
-                ? game.cloudCustomColors.slice()
-                : ((typeof CLOUD_CUSTOM_DEFAULTS !== 'undefined') ? CLOUD_CUSTOM_DEFAULTS.slice() : []);
-            } else {
-              // Auto : show the default obstacle palette as a stand-in,
-              // run through _smokeColorFromRock so the preview reflects
-              // what the cloud will actually look like.
-              palette = [];
-              for (const rockHex of OBSTACLE_COLORS) {
-                const c = (typeof _smokeColorFromRock === 'function')
-                  ? _smokeColorFromRock(rockHex) : new THREE.Color(rockHex);
-                palette.push(((Math.round(c.r * 255) << 16) | (Math.round(c.g * 255) << 8) | Math.round(c.b * 255)) | 0);
-              }
-            }
-            // Cap preview to 8 swatches max so the row stays compact.
-            if (palette.length > 8) palette = palette.slice(0, 8);
-            let out = '';
-            for (const c of palette) {
-              out += '<div style="flex:1; height:26px; background:' + hex(c) + '; border:1px solid rgba(255,255,255,0.15); border-radius:3px;" title="' + hex(c).toUpperCase() + '"></div>';
-            }
-            return out;
-          })()}
-        </div>
-      </div>
-      <!-- (v21 2026-05-23) Custom-palette pickers. Hidden when the active
-           theme is not 'custom' ; the dropdown handler toggles display so
-           switching themes shows / hides the row in place. Each picker
-           writes to game.cloudCustomColors[i] and live-recolors. -->
-      <div class="setting-row" id="cloud-custom-row" style="margin-top:8px; flex-direction:column; align-items:stretch; gap:6px; display:${((typeof game !== 'undefined' && game.cloudTheme === 'custom') ? 'flex' : 'none')};">
-        <div style="font-size:0.85em; color:#9ac; letter-spacing:1px;">CUSTOM PALETTE</div>
-        <div id="cloud-custom-pickers" style="display:flex; gap:3px; flex-wrap:wrap;">
-          ${(function() {
-            const pal = (typeof game !== 'undefined' && Array.isArray(game.cloudCustomColors))
-              ? game.cloudCustomColors : ((typeof CLOUD_CUSTOM_DEFAULTS !== 'undefined') ? CLOUD_CUSTOM_DEFAULTS : []);
-            const hex = (n) => '#' + ((n | 0) & 0xffffff).toString(16).padStart(6, '0');
-            let out = '';
-            for (let i = 0; i < 8; i++) {
-              const v = (typeof pal[i] === 'number') ? pal[i] : 0x808080;
-              // Make the input itself fill the swatch ; the browser draws
-              // the picker chrome on top of our chosen background.
-              out += '<input type="color" data-slot="' + i + '" value="' + hex(v) + '" '
-                  +  'style="flex:1; min-width:32px; height:30px; border:1px solid rgba(255,255,255,0.15); border-radius:3px; background:' + hex(v) + '; padding:0; cursor:pointer;" '
-                  +  'title="Slot ' + (i+1) + ': ' + hex(v).toUpperCase() + '">';
-            }
-            return out;
-          })()}
-        </div>
-        <div style="opacity:0.7; font-size:0.85em;">Each picker contributes one color. New ambient clouds (and existing ones, live) randomly pick from these 8 slots. Independent of rock and wall colors.</div>
-      </div>
-    </div>
-
-    <!-- (v25 round 20) Voxel Caves section removed ; voxel system retired
-         in favor of smooth-shaded walls + interior parallax wallpaper. -->
-
-    <div class="settings-section">
-      <h3>Background</h3>
-      <div class="setting-row">
-        <label>Skybox</label>
-        <select id="set-skybox" style="flex:1;">
-          ${(typeof _skyboxLabels !== 'undefined' ? _skyboxLabels : []).map(([k, lbl]) => {
-            const sel = (game.skyboxChoice || '') === k ? ' selected' : '';
-            return '<option value="' + k + '"' + sel + '>' + lbl + '</option>';
-          }).join('')}
-        </select>
-      </div>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">3D backdrop visible through transparent walls. Drop your own equirectangular .jpg / .png / .hdr files into <code>skybox/</code> and either edit the presets list or use the Custom row below.</label>
-      </div>
-      <!-- (v16c Phase K) "Show stars in front" option removed. The
-           foreground starfield is permanently off ; skybox backdrops
-           are the only stellar layer now. Removing the foreground
-           render path drops one full-scene Points draw plus saves the
-           cost of compositing it through the wall depth pre-pass. -->
-
-      <div class="setting-row">
-        <label>Custom path</label>
-        <input type="text" id="set-skybox-custom" placeholder="./skybox/your_file.jpg" style="flex:1;" value="${(game.skyboxChoice && game.skyboxChoice.indexOf('/') !== -1) ? game.skyboxChoice : ''}">
-        <button id="skybox-custom-load">Load</button>
-      </div>
-      <div class="setting-row">
-        <label>Load from disk</label>
-        <button id="skybox-file-btn">Choose File</button>
-        <input type="file" id="skybox-file-input" accept="image/png,image/jpeg,image/jpg,.hdr" style="display:none;">
-      </div>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;" id="skybox-status"></div>
-    </div>
-
-    <div class="settings-section">
-      <h3>Theme Preset</h3>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Save the current full theme (zone colors, cloud blend/theme/custom, voxel rooms, wall pattern, skybox) as a JSON preset you can re-import later. Useful in TEST MODE for capturing themes you like as you tune them live.</label>
-      </div>
-      <div class="setting-row" style="gap:6px; flex-wrap:wrap;">
-        <button id="theme-preset-export">Export Theme</button>
-        <button id="theme-preset-import-btn">Import Theme</button>
-        <input type="file" id="theme-preset-import-file" accept="application/json,.json" style="display:none;">
-      </div>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;" id="theme-preset-status"></div>
-    </div>
-    </div><!-- /tab-panel: theme -->
+    <!-- (v52.74) The THEME tab is gone - owner: "yeah we can get rid of the theme section". It held a dead
+         TEST MODE button (no handler), the global engine style (now forced to each ship's own in loadSettings),
+         cloud colours, the skybox and theme preset import / export - dev tuning the map presets own. Every
+         handler that bound to it null-checks its element, so they are simply inert. -->
 
     <div class="settings-tab-panel" data-tab-panel="sound">
     <div class="settings-section">
@@ -93645,19 +93457,17 @@ function buildSettingsPage() {
 
     </div><!-- /tab-panel: sound -->
 
-    <button id="settings-close">CLOSE</button>
-    <button id="settings-export">EXPORT SETTINGS</button>
-    <button id="settings-import">IMPORT SETTINGS</button>
-    <input type="file" id="settings-import-file" accept="application/json,.json" style="display:none;">
-    <button id="settings-reset">RESET TO DEFAULTS</button>
-    <!-- (v10 Phase 6) Exit-to-main-menu. Hidden when already on the
-         main menu / lobby. Cleans up the active multiplayer room
-         and returns to the lobby screen. -->
-    <button id="settings-exit-to-menu" style="background:rgba(255,68,68,0.18);border-color:rgba(255,100,100,0.6);color:#ff8080;">EXIT TO MAIN MENU</button>
+    <!-- (v52.74) CLOSE and EXIT TO MAIN MENU moved up into #settings-head; this is what is left of the old foot -->
+    <div id="settings-foot">
+      <button id="settings-export">EXPORT SETTINGS</button>
+      <button id="settings-import">IMPORT SETTINGS</button>
+      <input type="file" id="settings-import-file" accept="application/json,.json" style="display:none;">
+      <button id="settings-reset">RESET TO DEFAULTS</button>
+    </div>
   `;
 
   (function _initSettingsTabs() {
-    const VALID = ['controls', 'performance', 'sound', 'theme'];
+    const VALID = ['controls', 'performance', 'sound'];   // (v52.74) 'theme' is gone: a saved 'theme' opens on controls
     let activeTab = 'controls';
     try {
       const saved = localStorage.getItem('lss_settings_tab');
@@ -93884,19 +93694,15 @@ function buildSettingsPage() {
   const qSel = overlay.querySelector('#set-quality');
   if (qSel) {
     qSel.addEventListener('change', e => {
-      _qByUser = true;            // (v44.08) a deliberate pick - applyQualityPreset stamps it
-      try { applyQualityPreset(e.target.value); } finally { _qByUser = false; }
-    });
-  }
-  const liteSel = overlay.querySelector('#set-lite');
-  if (liteSel) {
-    liteSel.addEventListener('change', e => {
-      const v = e.target.value;
+      const v = e.target.value, lite = (v === 'lite');
+      let now = false; try { now = !!_LSS_LITE; } catch (_) {}
       try {
-        if (v === 'auto') localStorage.removeItem('lss_lite'); else localStorage.setItem('lss_lite', v);
+        if (lite) localStorage.setItem('lss_lite', '1');
+        else if (now) localStorage.setItem('lss_lite', '0');
         localStorage.removeItem('lss_lite_ctx');
       } catch (_) {}
-      let now = false; try { now = !!_LSS_LITE; } catch (_) {}
+      _qByUser = true;            // (v44.08) a deliberate pick - applyQualityPreset stamps it
+      try { applyQualityPreset(lite ? 'low' : v); } finally { _qByUser = false; }
       if ((_lssLiteDecide() !== '') !== now) { try { location.reload(); } catch (_) {} }
     });
   }
@@ -94918,7 +94724,12 @@ function openSettings() {
   overlay.style.display = '';
   document.exitPointerLock();
   _settingsFocusIdx = 0;
-  setTimeout(_settingsApplyFocus, 0);
+  try {
+    const _fl = _settingsFocusables();
+    const _fa = _fl.findIndex((el) => el.classList && el.classList.contains('settings-tab') && el.getAttribute('data-active') === '1');
+    if (_fa >= 0) _settingsFocusIdx = _fa;
+  } catch (_) {}
+  if (input && input.gpConnected) setTimeout(_settingsApplyFocus, 0);
 }
 
 function closeSettings() {
@@ -97255,7 +97066,7 @@ function loadSettings() {
       if (typeof game !== 'undefined' && game) {
         game.cloudTheme = (typeof CLOUD_THEMES !== 'undefined' && (_ct in CLOUD_THEMES)) ? _ct : 'auto';
       }
-      if (data.engineStyle === 'ship' || data.engineStyle === 'orb') game.engineStyle = data.engineStyle;
+      game.engineStyle = 'ship';
       if (typeof game !== 'undefined' && game) {
         let _cc = null;
         if (Array.isArray(data.cloudCustomColors) && data.cloudCustomColors.length === 8) {
