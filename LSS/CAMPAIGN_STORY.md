@@ -260,6 +260,8 @@ The prologue changes that. It shows the player the city, the hack, the caverns a
 | `voice/<line id>.mp3` | A voiced version of any dialogue line. List the id in `campaign_media/media.json`. |
 | `fractal_frame.png` | The flicker of fractals in the opening. Not supplied yet; a generated pink-and-blue fractal stands in. |
 
+**The voice cast** (ElevenLabs, Ashman's picks, 2026-10-07): the narrator **Quentin**, Xorzo **Cybertronic** (Ashman's own designed voice, "like the Transformers"), the Summoners **Victor** (one voice for both heads), the pilot **Grainger**, Jimmy **Joe**. The ship's AI keeps its own voice ("Adam", `audio/`). Every line is baked by `tools/campaign_voice.mjs` (see `campaign_media/README.md`); the auditions are in `voice_casting.html`.
+
 ---
 
 ## The script
@@ -447,7 +449,7 @@ The Summoners found their contestant! That's you, pilot! You're the chosen one! 
 
 **PILOT:** Why do you and the Summoners keep talking about this virtual reality not being real? Everyone knows VR is not real. ★
 
-**XORZO:** This is not VR, you're in a virtual world that grows AIs. ★
+**XORZO:** This is not VR, you're in a virtual world that grows AI. ★ *(v52.65: was "AIs" - voiced, Xorzo's voice read it "A is"; Ashman: "maybe make him say 'AI' instead of 'AIs'")*
 
 **PILOT:** WTF? That must be why I blacked out. ★
 

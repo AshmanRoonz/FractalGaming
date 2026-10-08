@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "52.64";
+const LSS_BUILD = "52.66";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -101670,7 +101670,7 @@ const CAMP_LINES = {
   leg0_b:  { who: 'xorzo', text: 'Hostile contacts ahead. ~D-d-destroy~ them all.' },
   leg1_a:  { who: 'xorzo', text: 'Nothing here is r~-r-r~... Proceed. Proceed to the arena.' },
   leg1_b:  { who: 'pilot', text: 'Why do you and the Summoners keep talking about this virtual reality not being real? Everyone knows VR is not real.' },
-  leg1_c:  { who: 'xorzo', text: "This is not VR, you're in a virtual world that grows AIs." },
+  leg1_c:  { who: 'xorzo', text: "This is not VR, you're in a virtual world that grows AI." },
   leg1_d:  { who: 'pilot', text: 'WTF? That must be why I blacked out.' },
   leg1_e:  { who: 'summoners', text: "You blacked out because it's a new kind of VR, you should have read the fine print. Stay focused on the competition, pilot. Do you even want to win that prize, bro?" },
   leg2_a:  { who: 'pilot', text: 'Xorzo, you keep glitching.' },
@@ -101816,7 +101816,8 @@ const CAMP_SEQS = {
 (function () {
   const NAMES = { xorzo: 'XORZO', summoners: 'THE SUMMONERS', pilot: 'PILOT', narrator: 'NARRATOR', jimmy: 'JIMMY' };
   const cfg = { cps: 42, holdMin: 1.6, readCps: 15, gap: 0.35, fadeIn: 0.18, fadeOut: 0.32,
-                beatDelay: { leg: 1.5, boss: 0.5 }, voiceVol: 0.95, flickHack: 0.55, flickIdle: 0.07, whisperCps: 0.6 };
+                beatDelay: { leg: 1.5, boss: 0.5 }, voiceVol: 0.95, flickHack: 0.55, flickIdle: 0.07, whisperCps: 0.6,
+                voiceHold: 'clip', voiceTail: 0.5 };
   const D = { q: [], busy: false, cur: null, tok: 0, raf: 0, flick: 0, ft: 0, inHack: false, idle: [] };
   const _idleNow = () => { const w = D.idle.splice(0); for (const f of w) { try { f(); } catch (_) {} } };
   const $root = () => document.getElementById('camp-dialogue');
@@ -101971,7 +101972,10 @@ const CAMP_SEQS = {
       voiceP.then(() => {
         if (tok !== D.tok) return;
         const spent = (performance.now() - t0) / 1000;
-        const want = Math.max(typeDur + cfg.holdMin + total / cfg.readCps, voiceLen > 0 ? voiceLen + 0.5 : 0);
+        const readHold = typeDur + cfg.holdMin + total / cfg.readCps;
+        const want = voiceLen > 0
+          ? (cfg.voiceHold === 'max' ? Math.max(readHold, voiceLen + cfg.voiceTail) : Math.max(typeDur + 0.3, voiceLen + cfg.voiceTail))
+          : readHold;
         setTimeout(() => _finish(tok), Math.max(0, want - spent) * 1000);
       });
     };

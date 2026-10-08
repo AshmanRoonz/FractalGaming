@@ -55,6 +55,30 @@ shows up as an error:
   Record a line as `voice/<id>.mp3` and add its id here. A voiced line stays on screen for
   its clip's length; an unvoiced one for its reading time.
 
+## Baking the dialogue voices (ElevenLabs, 2026-10-08)
+
+The cast: narrator **Quentin** · Xorzo **Cybertronic** · the Summoners **Victor** · pilot
+**Grainger** · Jimmy **Joe** (`../voice_casting.html` has the auditions). From the repo root:
+
+```bash
+node tools/campaign_voice.mjs --dry            # every line's voice, spoken text, credits, state
+node tools/campaign_voice.mjs --dry --seq gameshow   # just one scene (any CAMP_SEQS name)
+```
+
+With an ElevenLabs API key set in your own shell (`$env:ELEVENLABS_API_KEY = "..."` in
+PowerShell; never paste it anywhere else), `node tools/campaign_voice.mjs` bakes every missing
+or changed line into `voice/<id>.mp3` and fills `media.json` `lines`. Edit a line in
+`CAMP_LINES`, run it again, and only that line is re-baked. A clip you record yourself (an mp3
+the baker didn't make) is never overwritten. The whole campaign is ~12,600 credits: more than
+the free plan's monthly 10,000, and free-plan audio is non-commercial, so bake the shipping set
+on a paid plan. (All 171 were baked on Starter, 2026-10-08, through the ElevenLabs connector:
+`--plan`, generate, `node tools/campaign_voice_fetch.mjs`, `--ingest`.)
+
+Every clip is **levelled to -17 LUFS** on the way in (`tools/campaign_voice_level.py`, run inside
+Blender): the voices come out of ElevenLabs at very different levels (the narrator 10-15 dB
+quieter than the rest). The raw takes are kept in `assets_base/campaign_voice_raw/` (local only),
+so `node tools/campaign_voice.mjs --level --force` re-levels everything without spending credits.
+
 ## Notes
 - Keep videos reasonably small (web-friendly H.264 `.mp4`); they stream from this folder.
 - Filenames are case-sensitive on some hosts — use lowercase exactly as above.
