@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "52.56";
+const LSS_BUILD = "52.59";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -5648,7 +5648,7 @@ function _campScanTick(c, dt) {
 
 const CAMP_PING = { on: true, firstAt: 3.5, everyFar: 7, everyNear: 2.4, farD: 30000, nearD: 3600,
                     errMin: 110, arcMin: 4, arcMax: 32, arcPow: 0.7, ring: 0.9, hold: 4.2,
-                    revealD: 3600, sound: true };
+                    revealD: 3600, sound: false };
 const _campPingV = new THREE.Vector3();
 let _campPingSaid = false;   // "Follow my pings" once per page session, not once per leg
 function _campPingHides(c) {
@@ -48087,7 +48087,7 @@ const SHIP_MODELS = {
 
 const shipModelCache = { loaded: {}, ready: null };
 
-const _LSS_SEAT_ART = '52.05';
+const _LSS_SEAT_ART = '52.59';
 const _LSS_SEATS = {
   pilot: {
     url: 'objects/characters/pilot_ashman_seat.glb',
@@ -101516,7 +101516,7 @@ const CAMP_LINES = {
   op_perk:     { who: 'xorzo', text: "Every pilot flies a little differently. What's your edge? Pick a perk." },   // (v49.67) Claude's draft
   op_view:     { who: 'xorzo', text: 'Which perspective do you prefer? First person or third - you can switch any time.' },
   op_remember: { who: 'summoners', text: 'Remember, pilot... nothing here is real...' },
-  op_hear:     { who: 'pilot', text: 'Did you hear that voice?' },
+  op_hear:     { who: 'pilot', text: 'Yeah, okay there, buddy.' },
   op_train:    { who: 'xorzo', text: '~A-access den-denied.~ This is your training ground. You can do whatever you want here. Go ahead... ~K-k-kill~ something.' },   // (v49.72) the owner's rewrite
   pr_home:   { who: 'narrator', text: 'In the new world of Artificial Intelligence, a home was created.' },
   pr_real:   { who: 'narrator', text: 'Even though it was a virtual world, it was still real to them, the AIs.' },

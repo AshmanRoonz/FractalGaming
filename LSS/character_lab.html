@@ -36,6 +36,9 @@
   #hud { position:fixed; right:12px; bottom:12px; background:var(--panel); border:1px solid var(--line); border-radius:8px;
          padding:6px 10px; font:12px ui-monospace, Consolas, monospace; color:var(--dim); white-space:pre; }
   #msg { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%); color:var(--dim); }
+  .tag { position:fixed; transform:translate(-50%, 0); pointer-events:none; font:11px/1.2 ui-monospace, Consolas, monospace;
+         color:var(--ink); background:rgba(14,18,26,.72); border:1px solid var(--line); border-radius:5px; padding:2px 6px; white-space:nowrap; }
+  .tag.old { color:#ffb27a; border-color:#5a3a22; }
   @media (max-width:640px) { #ui { width:auto; right:12px; max-height:45%; } }
 </style>
 <script type="importmap">
@@ -58,6 +61,8 @@
   <div class="row"><label>time</label><input id="scrub" type="range" min="0" max="1" step="0.001" value="0"></div>
   <h2>Inspect</h2>
   <div class="row"><button id="clay">CLAY</button><button id="skel">SKELETON</button><button id="inplace" class="on">IN PLACE</button><button id="wire">WIRE</button></div>
+  <div class="row"><button id="compare">COMPARE WITH ARM PASS</button></div>
+  <div class="meta">the hand cut only (now) beside the arm-pass build (before), same clip, same time</div>
   <h2>Seated</h2>
   <div class="meta">the pilot in your hulls, the Summoners in their ship</div>
   <div class="clips" id="seats"></div>
@@ -72,11 +77,20 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
 // the characters' art stamp - the same number as `_LSS_SEAT_ART` in index-working.html; bump both when a file
 // under objects/characters/ is rebuilt, or the browser hands back the old one
-const ART = '52.05';
+// (52.59) the files are the HAND CUT ONLY now - the arm pass undone (owner: "when you cut under their arm, you cut into
+// their chest... we should undo that step if possible, and see how the animations look")
+const ART = '52.59';
 const FILES = [
   { key: 'pilot', name: 'PILOT - ASHMAN ROONZ', url: 'objects/characters/pilot_ashman.glb', x: -0.75 },
   { key: 'summoners', name: 'THE SUMMONERS', url: 'objects/characters/summoners.glb', x: 0.75 },
 ];
+// (52.59) COMPARE: the arm-pass builds (2026-10-06, before the undo) stand beside the current ones, each playing its
+// twin's clip in step. They live in old_files/ - served here, never deployed (tools/deploy_cf.py EXCLUDE_DIRS).
+const AB = [
+  { key: 'pilot_arm', twin: 'pilot', name: 'PILOT - ARM PASS (before)', url: 'old_files/characters_armpass/pilot_ashman.glb' },
+  { key: 'summoners_arm', twin: 'summoners', name: 'SUMMONERS - ARM PASS (before)', url: 'old_files/characters_armpass/summoners.glb' },
+];
+const AB_X = { pilot: -1.2, pilot_arm: -0.4, summoners: 0.4, summoners_arm: 1.2 };
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -107,7 +121,7 @@ const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(0, 0.95, 0); controls.enableDamping = true; controls.update();
 
 const clayMat = new THREE.MeshStandardMaterial({ color: 0x80858f, roughness: 0.8, metalness: 0.0 });
-const S = { playing: true, speed: 1, sync: false, clay: false, skel: false, inplace: true, wire: false, focus: 'pilot' };
+const S = { playing: true, speed: 1, sync: false, clay: false, skel: false, inplace: true, wire: false, focus: 'pilot', compare: false };
 const chars = {};
 
 function stripRootXZ(clip) {
@@ -129,6 +143,16 @@ function playClip(k, name) {
   C.mixer.stopAllAction();
   C.action = C.mixer.clipAction(use); C.action.reset().play();
   C.clip = clip.name; C.duration = clip.duration;
+  // (52.59) COMPARE: its arm-pass twin plays the same clip from the same instant
+  const T = chars[k + '_arm'];
+  if (T && !C.twinOf) {
+    const tc = T.clips.find((c) => c.name === clip.name);
+    if (tc) {
+      T.mixer.stopAllAction();
+      T.action = T.mixer.clipAction(S.inplace ? stripRootXZ(tc) : tc); T.action.reset().play();
+      T.clip = tc.name; T.duration = tc.duration;
+    }
+  }
   renderUI();
 }
 
@@ -168,7 +192,7 @@ async function load(f) {
   const res = await fetch(f.url + '?v=' + ART); const bytes = Number(res.headers.get('content-length')) || 0;
   const buf = await res.arrayBuffer();
   const g = await loader.parseAsync(buf, '');
-  const root = g.scene; root.position.x = f.x;
+  const root = g.scene; root.position.x = (f.x != null) ? f.x : (AB_X[f.key] || 0);
   let mesh = null, tris = 0, bones = 0;
   root.traverse((o) => {
     if (o.isSkinnedMesh) { mesh = o; o.castShadow = true; o.receiveShadow = true; o.frustumCulled = false;
@@ -177,9 +201,34 @@ async function load(f) {
   scene.add(root);
   const helper = new THREE.SkeletonHelper(root); helper.visible = false; scene.add(helper);
   const mixer = new THREE.AnimationMixer(root);
-  chars[f.key] = { root, mesh, mat: mesh.material, mixer, helper, clips: g.animations, tris, bones, bytes: bytes || buf.byteLength, clip: null, action: null, duration: 1 };
+  chars[f.key] = { root, mesh, mat: mesh.material, mixer, helper, clips: g.animations, tris, bones, bytes: bytes || buf.byteLength, clip: null, action: null, duration: 1,
+                   twinOf: f.twin || null, name: f.name };
+  if (f.twin) {   // (52.59) a COMPARE twin: on its twin's clip, at its twin's time
+    const M = chars[f.twin];
+    playClip(f.twin, (M && M.clip) || g.animations[0].name);
+    if (M && M.action && chars[f.key].action) { chars[f.key].action.time = M.action.time; }
+    return;
+  }
   const walk = g.animations.find((c) => /Walking/.test(c.name)) || g.animations[0];
   playClip(f.key, walk.name);
+}
+// (52.59) COMPARE WITH ARM PASS: the twins load on first use; four figures in a row (now, before, now, before), each
+// with a tag under its feet, the camera pulled back to fit them
+const tags = {};
+async function setCompare(on) {
+  S.compare = !!on;
+  const b = document.getElementById('compare'); if (b) b.classList.toggle('on', S.compare);
+  if (S.compare) {
+    try { await Promise.all(AB.filter((f) => !chars[f.key]).map(load)); }
+    catch (e) { console.error(e); document.getElementById('hud').textContent = 'compare load failed: ' + e.message; }
+    applyLooks();
+  }
+  const standing = !seatState.hull;
+  for (const [k, C] of Object.entries(chars)) {
+    C.root.position.x = S.compare ? (AB_X[k] != null ? AB_X[k] : C.root.position.x) : ((FILES.find((f) => f.key === k) || { x: C.root.position.x }).x);
+    if (C.twinOf) C.root.visible = S.compare && standing;
+  }
+  if (standing) { controls.target.set(0, 0.95, 0); camera.position.set(0, 1.4, S.compare ? 6.4 : 4.6); controls.update(); }
 }
 
 Promise.all(FILES.map(load)).then(() => {
@@ -188,6 +237,7 @@ Promise.all(FILES.map(load)).then(() => {
 
 const tog = (id, k, after) => { const b = document.getElementById(id); b.onclick = () => { S[k] = !S[k]; b.classList.toggle('on', S[k]); if (after) after(); }; };
 tog('clay', 'clay', applyLooks); tog('skel', 'skel', applyLooks); tog('wire', 'wire', applyLooks); tog('sync', 'sync');
+document.getElementById('compare').onclick = () => setCompare(!S.compare);
 tog('inplace', 'inplace', () => { for (const k of Object.keys(chars)) if (chars[k].clip) playClip(k, chars[k].clip); });
 const playB = document.getElementById('play');
 playB.onclick = () => { S.playing = !S.playing; playB.classList.toggle('on', S.playing); playB.textContent = S.playing ? 'PLAYING' : 'PAUSED'; };
@@ -213,7 +263,7 @@ const SEATS = {
     vortex: { s: 0.1092, x: -0.4572, y: -0.0581, z: -0.0005 },
   } },
   summoners: { url: 'objects/characters/summoners.glb', clip: 'Sitting_Answering_Questions', hulls: {
-    summoners_ship: { s: 0.17, x: -0.3498, y: -0.0788, z: -0.0235 },
+    summoners_ship: { s: 0.17, x: -0.3498, y: -0.0788, z: 0 },   // (v52.49) centred, as the game: "it fits"
   } },
 };
 const hullUrl = (h) => (h === 'summoners_ship' ? 'objects/summoners_ship.glb' : `ships/${h}.glb`);
@@ -247,8 +297,8 @@ async function seat(hull) {
 }
 function stand(show = true) {
   if (seatState.root) { scene.remove(seatState.root); seatState.root = null; seatState.mixer = null; seatState.hull = null; }
-  for (const C of Object.values(chars)) C.root.visible = show;
-  if (show) { controls.target.set(0, 0.95, 0); camera.position.set(0, 1.35, 4.6); controls.update(); }
+  for (const C of Object.values(chars)) C.root.visible = show && (!C.twinOf || S.compare);
+  if (show) { controls.target.set(0, 0.95, 0); camera.position.set(0, 1.35, S.compare ? 6.4 : 4.6); controls.update(); }
   renderSeats();
 }
 function renderSeats() {
@@ -261,6 +311,7 @@ function renderSeats() {
 renderSeats();
 
 const clock = new THREE.Clock(); let fpsT = 0, fpsN = 0, fps = 0;
+const _tagV = new THREE.Vector3();
 function frame() {
   const dt = Math.min(clock.getDelta(), 0.1);
   if (S.playing) for (const C of Object.values(chars)) C.mixer.update(dt * S.speed);
@@ -269,6 +320,22 @@ function frame() {
   if (F && F.action && S.playing) scrub.value = (F.action.time % F.duration) / F.duration;
   controls.update();
   renderer.render(scene, camera);
+  // (52.59) COMPARE tags under each figure's feet
+  for (const [k, C] of Object.entries(chars)) {
+    let el = tags[k];
+    const show = S.compare && C.root.visible;
+    if (!show) { if (el) el.style.display = 'none'; continue; }
+    if (!el) {
+      el = tags[k] = document.createElement('div');
+      el.className = 'tag' + (C.twinOf ? ' old' : '');
+      el.textContent = C.twinOf ? 'ARM PASS (before)' : 'HAND CUT ONLY (now)';
+      document.body.appendChild(el);
+    }
+    _tagV.set(C.root.position.x, 0, 0.25).project(camera);
+    el.style.display = (_tagV.z < 1) ? 'block' : 'none';
+    el.style.left = ((_tagV.x * 0.5 + 0.5) * innerWidth).toFixed(0) + 'px';
+    el.style.top = ((-_tagV.y * 0.5 + 0.5) * innerHeight + 6).toFixed(0) + 'px';
+  }
   fpsN++; fpsT += dt; if (fpsT > 0.5) { fps = fpsN / fpsT; fpsN = 0; fpsT = 0; }
   const ri = renderer.info.render;
   document.getElementById('hud').textContent = `${fps.toFixed(0)} fps  draws ${ri.calls}  tris ${ri.triangles.toLocaleString()}` +
@@ -281,7 +348,8 @@ addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; cam
 // ---- hooks for headless checks (no UI needed) ----
 window.CL = {
   THREE, scene, camera, renderer, controls, chars, S,
-  ready: () => Object.keys(chars).length === FILES.length,
+  ready: () => FILES.every((f) => chars[f.key]),
+  compare: (on) => setCompare(on !== false),   // (52.59) the arm-pass twins beside the current builds
   play: (k, name) => playClip(k, name),
   // pose every character at clip time t (seconds) and stop the clock there
   at: (t) => { S.playing = false; for (const C of Object.values(chars)) if (C.action) { C.action.time = t; C.mixer.update(0); } },

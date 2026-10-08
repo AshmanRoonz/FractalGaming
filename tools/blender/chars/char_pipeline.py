@@ -27,6 +27,11 @@ STEPS (each is a step script beside this file, the same scripts the live session
   8. export.py: GLB with only this character's clips, each a named animation (NLA tracks)
 
 Refuses to run inside a GUI session (it starts from an empty scene).
+
+--upper 0 skips handfix's ARM PASS (the cut up the inner upper arm + the torso-side re-weight) and cuts the hands
+only. (2026-10-07, owner, looking at the shipped files: "when you cut under their arm, you cut into their chest...
+you cut the hand, away from the legs, good... but then you did the arm after, we should undo that step if possible,
+and see how the animations look".) Default stays 1 so the README commands rebuild what they always built.
 """
 import bpy, sys, os, glob, json
 import numpy as np
@@ -100,7 +105,8 @@ report['own_islands'] = len(keep)
 # 4-5. the cut, then the fragments it freed
 if 'stretch' in opt.get('report_before', ''):
     report['stretch_before'] = step('stretch.py', arm=NAME, prefix=PREFIX, step='3')
-report['handfix'] = step('handfix.py', arm=NAME, mode='apply', capcol='0')
+report['upper'] = opt.get('upper', '1')
+report['handfix'] = step('handfix.py', arm=NAME, mode='apply', capcol='0', upper=report['upper'])
 report['islands'] = step('islands.py', arm=NAME, delete_below='40', keep=keep)
 
 # 6. the number

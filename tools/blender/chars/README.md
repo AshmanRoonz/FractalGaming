@@ -49,7 +49,17 @@ end. After restore they are within 0.6°.
 Hand edges now peak at 3.7–4.1×, which is ordinary wrist bending. The pilot's running clip falls from a 31.7×
 worst stretch to 7.8×, and the cheer from 76× to 19.6×.
 
-**The arm pass** (`upper=1`, on by default). The pilot's inner upper arm and elbow were fused to the torso and
+**⛔ The shipped files are built WITHOUT the arm pass since 2026-10-07 (game v52.59), `--upper 0`.** Ashman, looking at
+the arm-pass build: "when you cut under their arm, you cut into their chest... you cut the hand, away from the legs,
+good... but then you did the arm after, we should undo that step if possible, and see how the animations look". The
+arm-pass cut leaves a dark slash down the side of the chest (worst on the Summoners) when the arms go up; without it
+the side of the suit stretches up with a raised arm instead (pilot cheer 76×, angry talk 52× worst). Rebuild what
+ships now with `--upper 0` added to the commands above (and `--alert Sit_and_Doze_Off:Sit_Alert` for the pilot). The
+arm-pass builds are kept: sources `tools/blender/work/chars/arm_summoners.glb` / `alert_pilot_ashman.glb`, shipped
+copies `LSS/old_files/characters_armpass/` (local only; `character_lab.html` → COMPARE WITH ARM PASS shows them
+beside the current files, same clip, same time).
+
+**The arm pass** (`upper=1`, the script's default). The pilot's inner upper arm and elbow were fused to the torso and
 waist too. On top of that, Meshy's arms-down auto-rig weights the side of the torso about 45% to the upper-arm
 bone, so any raised arm dragged the side of the suit up with it. The cut now climbs the arm to `t0` (0.35 of the
 way from shoulder to elbow, just below the armpit), and the torso side loses its arm weight. That weight change

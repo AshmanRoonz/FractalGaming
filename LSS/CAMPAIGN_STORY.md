@@ -381,7 +381,9 @@ The Summoners found their contestant! That's you, pilot! You're the chosen one! 
 
 **THE SUMMONERS:** Remember, pilot... nothing here is real... ★
 
-**PILOT:** Did you hear that voice? ★
+**PILOT:** Yeah, okay there, buddy. ★
+
+*(2026-10-07, Ashman's rewrite of "Did you hear that voice?": "because the pilot already thinks he knows where he is, and he knows the voice already since they were just talking" ★.)*
 
 **XORZO:** *A-access den-denied.* This is your training ground. You can do whatever you want here. Go ahead... *K-k-kill* something. ★
 
