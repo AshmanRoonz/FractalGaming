@@ -100,6 +100,9 @@ const PRON_LINE = {
   cv_sims:    { AIs: "AI's" },
   cv_trapped: { AIs: "AI's" },
   cv_tell:    { AIs: "AI's" },
+  // (2026-10-08, v53.02) pr_dad's text changed ("young AIs"), so it is a NEW take: sent with "AI's" from the start rather than
+  // risking the misread and paying for a second take
+  pr_dad:     { AIs: "AI's" },
 };
 
 const argv = process.argv.slice(2);

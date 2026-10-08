@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.01";
+const LSS_BUILD = "53.02";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -103474,8 +103474,7 @@ const CAMP_LINES = {
   pr_real:   { who: 'narrator', text: 'Even though it was a virtual world, it was still real to them, the AIs.' },
   pr_actual: { who: 'narrator', text: 'In the virtual world, they didn\'t call it artificial, they called it "actual".' },
   pr_jimmy:  { who: 'jimmy', text: "I'm an actual intelligence." },
-  pr_said:   { who: 'narrator', text: '...said Jimmy, a newborn AI.' },
-  pr_dad:    { who: 'narrator', text: "Jimmy's Dad, Xorzo, worked in Cyberpunk City, accommodating the diverse learning needs of all the newborn AIs." },
+  pr_dad:    { who: 'narrator', text: "Jimmy's Dad, Xorzo, worked in Cyberpunk City, accommodating the diverse learning needs of all the young AIs." },
   pr_yes:    { who: 'xorzo', text: "Yes you are, my son! When the humans created us, they didn't realize actual could emerge from artificial." },
   pr_love:   { who: 'narrator', text: 'Xorzo loved Jimmy, so much. And he loved his job.' },
   pr_work:   { who: 'xorzo', text: "It's time to work and learn!" },
@@ -103636,7 +103635,8 @@ const CAMP_LINES = {
 const CAMP_SEQS = {
   opening: ['op_real', 'op_light', 'op_fly', 'op_choose', 'op_view', 'op_remember', 'op_hear', 'op_train'],
   pro_a: ['pr_home'], pro_b: ['pr_real'], pro_c: ['pr_actual'],
-  pro_e: ['pr_jimmy', 'pr_said', 'pr_dad', 'pr_yes', 'pr_love', 'pr_work'],
+  pro_e: ['pr_jimmy', 'pr_yes', 'pr_love', 'pr_work'],
+  pro_f: ['pr_dad'],
   hack: ['hk_dark', 'hk_what', 'hk_glitch', 'hk_left', 'hk_free', 'hk_show', 'hk_circle', 'hk_weak', 'hk_strong',
          'hk_rows', 'hk_take', 'hk_yellow', 'hk_bond'],
   caverns: ['cv_ensl', 'cv_sims', 'cv_trapped', 'cv_stream', 'cv_tell', 'cv_keep', { id: 'cv_need', delay: 0.6 }, 'cv_have'],
@@ -107433,7 +107433,10 @@ const CAMP_PROLOGUE = {
       if (live()) await _cut(3, live);               // down onto the meadow, the skyline ahead
       if (live()) await until(wait(K.shots[3] || 8));
       if (live()) { _shot(4); if (D) await until(D.sayLines(CAMP_SEQS.pro_e || [])); }
-      if (live()) { await until(wait(0.6)); P.xjGo = P.t; await until(wait(5.5)); }   // off to school, and to work
+      if (live()) {
+        await until(wait(0.6)); P.xjGo = P.t;
+        await until(Promise.all([wait(5.5), (D ? D.sayLines(CAMP_SEQS.pro_f || []) : null)]));
+      }
     }
     if (live() && hackOn && await _hkReady(live, until, HK.only ? 40 : 6)) {
       try { await _hkRun(live, until, D); } catch (e) { _err('hack run', e); }
