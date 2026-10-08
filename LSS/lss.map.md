@@ -8311,6 +8311,29 @@ good to stay low, unless we are going to go up buildings or into floating island
   Do not "fix" those.
 
 
+### v52.89 - the first three tag slots lost their NAME span on every launch after the first
+
+Owner: *"the summoners callout tag name text disappeared from the tag, when i was in exhibition and i fought him... i
+started by sniping him from far so he'd come out of the city"*.
+
+**Jump:** `THE NAME GOES IN .cl-nm, NEVER IN .cl-text` (the overlay rehearsal's label group, in the launch prebake) ·
+`function _lblTextHeal` (by `_lblClaimSlot`) · `if (div._nm && !div._nm.isConnected)` (the tag writer).
+
+- The overlay rehearsal (v40.41) shows three pool labels with sample text behind the loading cover. It wrote
+  `nl._text.textContent = 'BOT-n'` - on `.cl-text`, which v43.03 had since made the PARENT of the name span `.cl-nm`
+  (and the avatar `.cl-av`). `textContent` replaces children, so the span was detached; the undo put the old text
+  back as a bare text node. From then on the tag writer typed into a detached `div._nm`: those slots showed the
+  bracket, the line and the range readout, and no name, for the rest of the page.
+- **Who it hit:** slots are claimed lowest-free-first (`_lblClaimSlot`), so slots 0-2 = the first tags on screen. On a
+  page's FIRST launch the pool does not exist yet when the rehearsal runs (it is built by the first in-play
+  `updateEnemyHealthBars`), so it began from the second launch. The Summoners' tag: lost sight in the fight, came back
+  into a low slot, nameless.
+- **Fix:** the rehearsal types into `.cl-nm` and restores it; the writer rebuilds a slot whose span is no longer
+  connected (`_lblTextHeal`), whoever detaches it next.
+- **Verified** (52.89, a bare page - the owner was flying): the old write left the visible text `""` with the span
+  detached; the shipped `_lblTextHeal` (lifted out of `lss.js`) brought back "THE SUMMONERS" and the avatar slot; the
+  new rehearsal leaves the name. ⚠ **Any HUD element that WRAPS another must never take a `textContent` write.**
+
 ### v47.69 - a proxy wears the right hull and the wrong name
 
 Owner: *"the city ships in the hub race had 'puncture' on their callout tag"*.

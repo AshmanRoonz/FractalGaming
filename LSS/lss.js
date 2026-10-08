@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "52.88";
+const LSS_BUILD = "52.89";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -69386,11 +69386,12 @@ async function _prebakeOverlayRehearsal(rep) {
           const labels = Array.from(document.querySelectorAll('#enemy-healthbars .ship-name-label')).slice(0, 3);
           const variants = ['ship-name-label ship-name-label--enemy', 'ship-name-label ship-name-label--friendly', 'ship-name-label ship-name-label--enemy flip-left'];
           labels.forEach((nl, i) => {
-            const pd = nl.style.display, pl = nl.style.left, pt = nl.style.top, pc = nl.className, ptx = nl._text ? nl._text.textContent : null;
+            const nm = nl._nm;
+            const pd = nl.style.display, pl = nl.style.left, pt = nl.style.top, pc = nl.className, ptx = nm ? nm.textContent : null;
             nl.className = variants[i] || variants[0];
             nl.style.display = ''; nl.style.left = Math.round(vw * (0.3 + i * 0.2)) + 'px'; nl.style.top = Math.round(vh * (0.45 + i * 0.1)) + 'px';
-            try { if (nl._text) nl._text.textContent = 'BOT-' + (i + 1); } catch (_) {}
-            undo.push(() => { try { nl.className = pc; nl._lc = pc; nl.style.display = pd; nl.style.left = pl; nl.style.top = pt; nl._lx = nl._ly = undefined; if (nl._text && ptx != null) { nl._text.textContent = ptx; nl._lt = ptx; } } catch (_) {} });
+            try { if (nm) nm.textContent = 'BOT-' + (i + 1); } catch (_) {}
+            undo.push(() => { try { nl.className = pc; nl._lc = pc; nl.style.display = pd; nl.style.left = pl; nl.style.top = pt; nl._lx = nl._ly = undefined; if (nm && ptx != null) { nm.textContent = ptx; nl._lt = ptx; } } catch (_) {} });
             out.n++;
           });
           for (const sid of ['stasis-warning', 'stasis-vignette']) {   // (v40.43) shown by style.display in play
@@ -106997,6 +106998,13 @@ function _lblSoftGate(ent, ok, now) {
   ent._lblDown = true;                                     // (v40.58) the tag really is down now
   return false;
 }
+function _lblTextHeal(div) {
+  if (!div || !div._text || !div._nm || div._nm.isConnected) return;
+  div._text.innerHTML = '<span class="cl-nm"></span><img class="cl-av" alt="" style="display:none">';
+  div._nm = div._text.querySelector('.cl-nm');
+  div._av = div._text.querySelector('.cl-av');
+  div._lt = null; div._avUrl = undefined;   // both re-written on this frame
+}
 function _lblClaimSlot(ent, now, n) {
   const s = ent._labelSlot;
   if (s != null && s >= 0 && s < n && _lblOwner[s] === ent && _lblStamp[s] !== _lblFrameId) {
@@ -107214,6 +107222,7 @@ function updateEnemyHealthBars() {
     const _lxi = sx | 0, _lyi = sy | 0;
     if (div._lx !== _lxi) { div.style.left = _lxi + 'px'; div._lx = _lxi; }
     if (div._ly !== _lyi) { div.style.top  = _lyi + 'px'; div._ly = _lyi; }
+    if (div._nm && !div._nm.isConnected) _lblTextHeal(div);   // (v52.89) ...and a slot it happened to anyway is rebuilt
     if (div._nm && div._lt !== visText) { div._nm.textContent = visText; div._lt = visText; }
     if (div._av) {
       let _avUrl = null;
