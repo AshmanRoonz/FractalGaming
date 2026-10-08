@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "52.66";
+const LSS_BUILD = "52.73";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -962,6 +962,7 @@ const input = {
   cockpitVR: true,     // (v37.67) ON by default: the ghost shell IS the VR seat view now
   headlight: true,
   hudGaugeLabels: true,
+  campTips: true,
   clipRec: false,
   fovDeg: 120,
   kbBindings: {
@@ -3476,6 +3477,7 @@ const CampaignMode = {
     c._summonerSpawned = false; c._summonerLeft = false; c._chanT = 0; c._bcT = 0;
     c._pings = []; c._pingT = null; c._pingRevealed = false;   // (v52.10) Xorzo's pings
     c._sceneDone = false; c._scenePend = false; c._scenePendT = 0; c._sceneHoldPrev = false;   // (v52.14) the leg's scene
+    c._tips = null;   // (v52.71) a leg start decides its tips anew (_campTipsTick): a replayed first leg teaches again
     if (typeof _clearBossPortal === 'function') _clearBossPortal();
     try { FormationDirector.clear(); } catch (_) {}
     if (game.entities) {
@@ -3517,6 +3519,7 @@ const CampaignMode = {
     try { _campScanTick(c, dt); } catch (e) { if (!c._scanErr) { c._scanErr = true; console.warn('[campaign] scan', e); } }   // (v49.49)
     try { _campPingTick(c, dt); } catch (e) { if (!c._pingErr) { c._pingErr = true; console.warn('[campaign] ping', e); } }   // (v52.10)
     try { _campSceneTick(c, dt); } catch (e) { if (!c._whErr) { c._whErr = true; console.warn('[campaign] scene', e); } }   // (v52.10 whisper -> v52.14 scenes)
+    try { _campTipsTick(c, dt); } catch (e) { if (!c._tipErr) { c._tipErr = true; console.warn('[campaign] tips', e); } }   // (v52.70) Xorzo's tips
     
     
     if (game._campJourney && !c._legIntroShown) {
@@ -3814,6 +3817,7 @@ const FreeFlightMode = {
       const _curKey = (player && player.loadoutKey) ? player.loadoutKey : null;
       const _forceKey = (_curKey && _roster.indexOf(_curKey) >= 0) ? _curKey
                       : ((_roster.indexOf('VORTEX') >= 0) ? 'VORTEX' : _roster[0]);
+      try { _shipMemClear(); } catch (_) {}
       if (_forceKey && typeof LOADOUTS !== 'undefined' && LOADOUTS[_forceKey] && typeof commitLoadout === 'function') {
         game._liveSwap = true;
         try { commitLoadout(_forceKey); } catch (_) {}
@@ -5772,6 +5776,82 @@ function _campSceneHold(c) {
   if (c._scenePend) return true;
   try { return !!(window.CampDialogue && window.CampDialogue.sceneActive && window.CampDialogue.sceneActive()); } catch (_) { return false; }
 }
+const CAMP_TIPS = { on: true, firstLeg: 0, firstDelay: 10, every: [22, 34], idleMin: 5, coreIdle: 1.5,
+                    otherChance: 0.6, otherWindow: [35, 110], coreChance: 0.3, cutRead: 0.6 };
+const CAMP_TIP_LINES = {   // the owner's words; functions, so the key names are read when the tip shows
+  ships:   () => 'You can switch ships at any time by pressing ' + _tipShipKeys() + '.',
+  kit:     () => 'Each ship has a defensive ability, an offensive ability, and a utility.',
+  dashram: () => 'Dashes recharge, and you can damage and destroy other ships by ramming with it.',
+  doomed:  () => 'If you ram a doomed ship, you destroy it and get full shields.',
+  dashdir: () => 'You can dash in any direction.',
+};
+function _tipCoreText() { return 'Use your core, press ' + _tipKey('core', 'your core button') + '.'; }
+function _tipScheme() {
+  try { if (renderer && renderer.xr && renderer.xr.isPresenting) return 'vr'; } catch (_) {}
+  try { if (input.gpConnected) return 'gp'; } catch (_) {}
+  try { if (input.touchActive || document.documentElement.classList.contains('lss-touch')) return 'touch'; } catch (_) {}
+  return 'kb';
+}
+function _tipKey(action, fallback) {
+  const s = _tipScheme();
+  let k = '';
+  try { k = String(_howtoBindLabel(s, action) || ''); } catch (_) {}
+  if (!k || k === '(unbound)') return fallback;
+  if (s === 'gp') k = k.replace(/^D-/, 'D-pad ');   // GAMEPAD_BUTTON_NAMES 'D-Up' -> 'D-pad Up'
+  if (s === 'touch') k = 'the ' + k + ' button';
+  return k;
+}
+function _tipShipKeys() {
+  const a = _tipKey('shipPrev', ''), b = _tipKey('shipNext', '');
+  if (a && b && a !== b) return a + ' or ' + b;
+  return a || b || 'your ship-switch keys';
+}
+function _tipRetry(T, id, frac) {
+  if (!(frac < CAMP_TIPS.cutRead) || T.retried[id]) return;
+  T.retried[id] = true; T.shown.push('cut:' + id);
+  if (id === 'core') { T.coreWant = true; return; }   // still dropped if the core gets used first
+  T.order.unshift(id); T.left++; T.nextAt = Math.min(T.nextAt, T.t);   // due now: it still waits idleMin of quiet
+}
+function _campTipsTick(c, dt) {
+  if (!CAMP_TIPS.on || !c) return;
+  try { if (typeof input !== 'undefined' && input && input.campTips === false) return; } catch (_) {}
+  const D = window.CampDialogue; if (!D || !D.tip || !D.idleFor) return;
+  const leg = c.sceneIndex | 0;
+  let T = c._tips;
+  if (!T || T.leg !== leg) {
+    const first = leg === CAMP_TIPS.firstLeg, ids = Object.keys(CAMP_TIP_LINES), w = CAMP_TIPS.otherWindow;
+    if (!first) for (let i = ids.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; const x = ids[i]; ids[i] = ids[j]; ids[j] = x; }
+    T = c._tips = { leg, first, t: 0, order: ids, left: first ? ids.length : (Math.random() < CAMP_TIPS.otherChance ? 1 : 0),
+                    nextAt: first ? CAMP_TIPS.firstDelay : w[0] + Math.random() * (w[1] - w[0]),
+                    coreDone: false, coreWant: false, wasCore: !!(player && player.coreReady), shown: [], retried: {} };
+  }
+  T.t += dt;
+  const coreNow = !!(player && player.coreReady && !player.coreActive);
+  if (coreNow && !T.wasCore && !T.coreDone) { T.coreDone = true; T.coreWant = T.first || Math.random() < CAMP_TIPS.coreChance; }
+  T.wasCore = coreNow;
+  if (c._scenePend || (D.sceneActive && D.sceneActive()) || game._campOpenArrive) return;   // a scene / the arrival owns the box
+  const idle = D.idleFor();
+  if (T.coreWant) {
+    if (!coreNow) T.coreWant = false;                                   // they used it - nothing left to say
+    else if (idle >= CAMP_TIPS.coreIdle && D.tip(_tipCoreText(), (fr) => _tipRetry(T, 'core', fr))) { T.coreWant = false; T.shown.push('core'); }
+    return;
+  }
+  if (T.left > 0 && T.order.length && T.t >= T.nextAt && idle >= CAMP_TIPS.idleMin) {
+    const id = T.order[0], f = CAMP_TIP_LINES[id];
+    if (f && D.tip(f(), (fr) => _tipRetry(T, id, fr))) {
+      T.order.shift(); T.left--; T.shown.push(id);
+      const e = CAMP_TIPS.every; T.nextAt = T.t + e[0] + Math.random() * (e[1] - e[0]);
+    }
+  }
+}
+try {
+  window.__campTips = {
+    cfg: CAMP_TIPS, lines: CAMP_TIP_LINES,
+    next() { const D = window.CampDialogue, ids = Object.keys(CAMP_TIP_LINES), id = ids[(Math.random() * ids.length) | 0]; return !!(D && D.tip(CAMP_TIP_LINES[id]())); },
+    core() { const D = window.CampDialogue; return !!(D && D.tip(_tipCoreText())); },
+    state() { const c = game && game.campaign; const T = c && c._tips; return { scheme: _tipScheme(), ships: _tipShipKeys(), core: _tipCoreText(), leg: T ? T.leg : null, t: T ? +T.t.toFixed(1) : 0, nextAt: T ? +T.nextAt.toFixed(1) : null, left: T ? T.left : null, shown: T ? T.shown.slice() : [] }; },
+  };
+} catch (_) {}
 function _campSceneTick(c, dt) {
   const S = _campSceneFor(c);
   if (!S || c._sceneDone || c.phase !== 'travel') { c._scenePend = false; return; }
@@ -44252,7 +44332,8 @@ void main(){ wxMain(); gl_FragColor${pm === 'P' ? '' : '.a'}*=wxVeil(); }
     const buf = A_.ctx.createBuffer(1, n, sr); buf.copyToChannel(out, 0);
     const src = A_.ctx.createBufferSource(); src.buffer = buf;
     const lp = A_.ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 300 + 4000 * Math.exp(-dmin / 2500);
-    src.connect(lp); lp.connect(A_.sfxBus || A_.masterGain);
+    let bus = null; try { bus = _lssStormBus(A_); } catch (_) {}
+    src.connect(lp); lp.connect(bus || A_.sfxBus || A_.masterGain);
     src.start(A_.ctx.currentTime + dmin / c);
     return { delay: dmin / c, seconds: n / sr };
   }
@@ -72933,7 +73014,7 @@ function tickGunLayer() {
   const cycleLen = cycle.length;
   if (cycleLen === 0) return;
 
-  const fireRate = (player.loadout && player.loadout.weapon && player.loadout.weapon.fireRate) || 0.5;
+  const fireRate = (player.weapon && player.weapon.fireRate) || (player.loadout && player.loadout.weapon && player.loadout.weapon.fireRate) || 0.5;
   const targetCycle = fireRate * 0.5;
   const RECOIL_HOLD_PER_FRAME = Math.max(0.015, Math.min(0.06, targetCycle / cycleLen));
 
@@ -73676,6 +73757,81 @@ function _v12mLobbyError(msg) {
   alert(msg);
 }
 
+function _shipMemSave() {
+  if (typeof player === 'undefined' || !player || !player.loadoutKey) return;
+  const mem = player._shipMem || (player._shipMem = {});
+  mem[player.loadoutKey] = {
+    health: player.health, shield: player.shield,
+    overShield: player.overShield || 0, osLocked: !!player._perkOsLocked,
+    coreMeter: player.coreMeter || 0,   // 0 while a core runs (activateCore spent it), so a core cut short by the swap stays spent
+    doomed: !!player.doomed,
+    syphonTier: (player.loadoutKey === 'SYPHON') ? (player.syphonTier | 0) : 0,
+  };
+}
+function _shipMemRestore(key) {
+  const m = (typeof player !== 'undefined' && player && player._shipMem) ? player._shipMem[key] : null;
+  if (!m) return false;
+  if (key === 'SYPHON' && m.syphonTier > 0) _syphonApplyTiers(m.syphonTier);
+  let cap = player.maxHealth;
+  try { const b = _perkEffectiveBag(); if (b && b.regenPerSec) cap *= (b.overhealMult || 1); } catch (_) {}   // Nano Repair over-heals
+  player.health = (m.health != null) ? Math.max(1, Math.min(cap, m.health)) : player.maxHealth;
+  player.shield = (m.shield != null) ? Math.max(0, Math.min(player.maxShield, m.shield)) : player.maxShield;
+  player.overShield = m.overShield || 0;
+  player._perkOsLocked = !!m.osLocked;
+  player.coreMeter = Math.max(0, Math.min(100, m.coreMeter || 0));
+  player._lastCorePctForCloak = player.coreMeter;   // a remembered charge is not a fresh 75% crossing: no Auto Cloak on boarding
+  if (m.doomed && m.health != null) { player.doomed = true; player.doomTimer = (LSS && LSS.DOOMED_TIMER) || 10; }
+  return true;
+}
+function _shipMemRefill() {
+  const mem = (typeof player !== 'undefined' && player) ? player._shipMem : null;
+  if (!mem) return;
+  for (const k in mem) { const m = mem[k]; m.health = null; m.shield = null; m.overShield = 0; m.osLocked = false; m.doomed = false; }
+}
+function _shipMemClear() { if (typeof player !== 'undefined' && player) player._shipMem = {}; }
+function _syphonApplyTiers(tier) {
+  const t = Math.max(0, Math.min(3, tier | 0));
+  if (t >= 1) { player.syphonArcRounds = true; player.maxClip = 50; player.clipAmmo = player.maxClip; }   // a swap boards with a full clip
+  if (t >= 2) { player.syphonShieldBonus = 500; player.maxShield += 500; player.syphonCooldownMult = 0.7; }
+  if (t >= 3) { player.syphonXO16Accel = true; player.syphonDmgMult = 1.25; _syphonFastGun(); }
+  player.syphonTier = t;
+}
+function _syphonFastGun() {
+  const base = player.loadout && player.loadout.weapon;
+  if (base) player.weapon = Object.assign({}, base, { fireRate: Math.max(0.06, base.fireRate * 0.75) });
+}
+function _blasterModeGun() {
+  const base = player.loadout && player.loadout.weapon;
+  if (!base) return;
+  player.weapon = (player.blasterMode === 'long')
+    ? Object.assign({}, base, { fireRate: 0.08, range: 4600, damage: 100, spread: 0.005 })   // long MODE; the long CHARGE SHOT is 10000
+    : base;
+}
+try {
+  window.__shipMem = {
+    state() {
+      const out = {}, mem = (player && player._shipMem) || {};
+      for (const k in mem) {
+        const m = mem[k];
+        out[k] = { hull: m.health == null ? 'full' : Math.round(m.health), shield: m.shield == null ? 'full' : Math.round(m.shield),
+                   over: Math.round(m.overShield || 0), core: Math.round(m.coreMeter || 0), doomed: !!m.doomed, tier: m.syphonTier || 0 };
+      }
+      return { mode: LSS.MODE, game: game.state, active: player.loadoutKey, ship: player.shipState,
+               hull: Math.round(player.health), shield: Math.round(player.shield), core: Math.round(player.coreMeter || 0),
+               max: [Math.round(player.maxHealth), Math.round(player.maxShield)], tier: player.syphonTier | 0,
+               rate: player.weapon ? player.weapon.fireRate : null, syphonTableRate: LOADOUTS.SYPHON.weapon.fireRate, ships: out };
+    },
+    set(o) {
+      o = o || {};
+      if (o.hull != null) player.health = +o.hull;
+      if (o.shield != null) player.shield = +o.shield;
+      if (o.core != null) player.coreMeter = Math.max(0, Math.min(100, +o.core));
+      return this.state();
+    },
+    save: _shipMemSave, refill: _shipMemRefill, clear: _shipMemClear,
+  };
+} catch (_) {}
+
 function _campSwapTo(nextKey) {
   if (typeof LSS === 'undefined' || LSS.MODE !== 'campaign' || !game.campaign || game.state !== 'playing') return false;
   if (!player || player.shipState === 'dead') return false;
@@ -73692,9 +73848,8 @@ function _campSwapTo(nextKey) {
   const _pos = player.position ? player.position.clone() : new THREE.Vector3();
   const _vel = player.velocity ? player.velocity.clone() : new THREE.Vector3();
   const _eul = player.euler ? player.euler.clone() : null;
-  const _hpFrac = (player.maxHealth > 0) ? (player.health / player.maxHealth) : 1;
-  const _shFrac = (player.maxShield > 0) ? (player.shield / player.maxShield) : 1;
   player._lastShipSwap = _now;
+  _shipMemSave();   // (v52.72) the ship we leave, as it is
   game._liveSwap = true;
   try { commitLoadout(nextKey); } catch (_) {}
   game._liveSwap = false;
@@ -73702,9 +73857,8 @@ function _campSwapTo(nextKey) {
   if (player.mesh) player.mesh.position.copy(_pos);
   if (player.velocity) player.velocity.copy(_vel);
   if (_eul && player.euler) player.euler.copy(_eul);
-  player.health = Math.max(1, Math.min(player.maxHealth, Math.round(player.maxHealth * _hpFrac)));
-  player.shield = Math.max(0, Math.min(player.maxShield, Math.round(player.maxShield * _shFrac)));
-  player.shipState = 'flying';
+  _shipMemRestore(nextKey);   // (v52.72) nothing remembered = not flown since the respawn = the full hull the commit built
+  player.shipState = player.doomed ? 'doomed' : 'flying';
   player.spawnProtection = 0;
   try { if (typeof _quickEquipRefresh === 'function') _quickEquipRefresh(); } catch (_) {}
   try { if (window.Overlays && Overlays.banner) Overlays.banner('SHIP', (LOADOUTS[nextKey] && LOADOUTS[nextKey].name) || nextKey); } catch (_) {}
@@ -73743,6 +73897,7 @@ function cycleHubShip(dir) {
   const _vel = player.velocity ? player.velocity.clone() : new THREE.Vector3();
   const _eul = player.euler ? player.euler.clone() : null;
   player._lastShipSwap = _now;
+  _shipMemSave();   // (v52.72) the ship we leave, as it is
   game._liveSwap = true;
   try { commitLoadout(nextKey); } catch (_) {}
   game._liveSwap = false;
@@ -73753,6 +73908,8 @@ function cycleHubShip(dir) {
   player.shipState = 'flying';
   player.spawnProtection = 0;
   try { if (typeof _aegisApply === 'function') _aegisApply(); } catch (_) {}
+  _shipMemRestore(nextKey);
+  if (player.doomed) player.shipState = 'doomed';
   try { if (typeof _quickEquipRefresh === 'function') _quickEquipRefresh(); } catch (_) {}
   try { if (window.Overlays && Overlays.banner) Overlays.banner('SHIP', (LOADOUTS[nextKey] && LOADOUTS[nextKey].name) || nextKey); } catch (_) {}
 }
@@ -73797,6 +73954,7 @@ function _lssAnnounceLoadout() {
 function commitLoadout(key) {
   if (_commitPending && !game._liveSwap) return;
   if (typeof game !== 'undefined' && game._swapPending && !game._swapStaging && !game._liveSwap) game._swapPending = null;
+  try { if (game._campReentry) _shipMemSave(); else if (!game._liveSwap) _shipMemClear(); } catch (_) {}
   try { _applyStartView(); } catch (_) {}
   if (typeof game !== 'undefined' && game._campPicker) {
     game._campPicker = false;   
@@ -74016,6 +74174,7 @@ function commitLoadout(key) {
     try { const _sel = document.getElementById('ship-select'); if (_sel) { _sel.classList.remove('active'); _sel.style.display = 'none'; } } catch (_) {}
     try { stopShipPreviewLoop(); } catch (_) {}
     try { _xrMenuForceHidden = true; } catch (_) {}
+    try { _shipMemRestore(key); } catch (_) {}
     try { if (typeof respawnPlayer === 'function') respawnPlayer(); } catch (_) {}
     try { _safeRequestPointerLock(); } catch (_) {}
     return;
@@ -74709,6 +74868,7 @@ function respawnPlayer() {
   game.playerInStasis = false;
   game.playerRootTimer = 0; 
   const ch = player.chassis;
+  try { _shipMemRefill(); } catch (_) {}
   player.health = player.maxHealth || ch.maxHealth;
   player.shield = (player.maxShield != null) ? player.maxShield : ch.maxShield;
   player.overShield = 0; // (v36.12) respawn starts without the stasis bonus layer
@@ -74727,6 +74887,11 @@ function respawnPlayer() {
   player.enemyToneLocks = {};
   player.enemyToneLockMax = 0;
   player.blasterMode = 'close';
+  if (player.loadoutKey === 'BLASTER') {
+    _blasterModeGun();
+    if (player.loadout && player.loadout.weapon) player.maxClip = player.loadout.weapon.clipSize;
+    player.clipAmmo = player.maxClip;
+  }
   player.powerShotCharging = false; player.powerShotCharge = 0;
   try { if (player._bcgOn) _blasterChargeGlowOff(); } catch (_) {}
   player.blasterSwitchTimer = 0;
@@ -80333,16 +80498,16 @@ function activateCore() {
         player.maxClip = 50;
         player.clipAmmo = Math.min(player.clipAmmo + 10, 50);
         break;
-      case 2: 
+      case 2:
         player.syphonShieldBonus = 500;
-        player.maxShield = player.chassis.maxShield + 500;
+        player.maxShield += 500;
         player.shield = Math.min(player.shield + 500, player.maxShield);
         player.syphonCooldownMult = 0.7;
         break;
       case 3: 
         player.syphonXO16Accel = true;
         player.syphonDmgMult = 1.25;
-        if (player.weapon) player.weapon.fireRate = Math.max(0.06, player.weapon.fireRate * 0.75);
+        _syphonFastGun();
         break;
     }
     }   // (v38.72) end of the tier ladder
@@ -82732,18 +82897,11 @@ function updateAbilities(dt) {
       player.blasterMode = player.blasterPendingMode;
       if (player.weapon) {
         const ammoPct = player.maxClip > 0 ? player.clipAmmo / player.maxClip : 1;
+        _blasterModeGun();
         if (player.blasterMode === 'close') {
-          player.weapon.fireRate = 0.05;
-          player.weapon.range = 2600;      // (v38.40) keep in step with the LOADOUTS entry
-          player.weapon.damage = 85;
-          player.weapon.spread = 0.04; 
           player.maxClip = 150;
           player.clipAmmo = Math.round(ammoPct * 150);
         } else {
-          player.weapon.fireRate = 0.08;
-          player.weapon.range = 4600;      // (v38.40) long MODE ; the long CHARGE SHOT is 10000
-          player.weapon.damage = 100;
-          player.weapon.spread = 0.005; 
           player.maxClip = 100;
           player.clipAmmo = Math.round(ammoPct * 100);
         }
@@ -92720,6 +92878,7 @@ function _refreshSettingsValues() {
     setSel('set-cockpit-solidity', String(_lssSolidityStep(input.cockpitSolidity)));
   }
   setChk('set-hud-gauge-labels', input.hudGaugeLabels !== false);
+  setChk('set-camp-tips', input.campTips !== false);   // (v52.70)
   {
     const _fs = (typeof input.hudScaleTP === 'number') ? input.hudScaleTP : HUD_SCALE_TP_DEFAULT;
     setRange('set-hud-scale-tp', null, _fs);
@@ -93042,6 +93201,11 @@ function buildSettingsPage() {
       <div class="setting-row">
         <label>HUD Gauge Labels</label>
         <input type="checkbox" id="set-hud-gauge-labels" ${input.hudGaugeLabels !== false ? 'checked' : ''}>
+      </div>
+      <div class="setting-row">
+        <!-- (v52.70) Xorzo's text tips in the campaign: every one in the first leg, now and then after -->
+        <label>Campaign Tips</label>
+        <input type="checkbox" id="set-camp-tips" ${input.campTips !== false ? 'checked' : ''}>
       </div>
       <div class="setting-row">
         <!-- (v50.29) the chase view's own HUD size, default 1.25 - see HUD_SCALE_TP_DEFAULT -->
@@ -94424,6 +94588,11 @@ function buildSettingsPage() {
     input.hudGaugeLabels = !!gaugeLabelChk.checked;
     saveSettings();
   });
+  const campTipsChk = overlay.querySelector('#set-camp-tips');
+  if (campTipsChk) campTipsChk.addEventListener('change', () => {
+    input.campTips = !!campTipsChk.checked;
+    saveSettings();
+  });
   const paniniSel = overlay.querySelector('#set-panini');
   const paniniVal = overlay.querySelector('#val-panini');
   if (paniniSel) {
@@ -95072,6 +95241,7 @@ function saveSettings() {
       cockpitVR: input.cockpitVR === true,
       cockpitVRv2: true,   // (v37.67) this save has seen the VR cockpit default flip
       hudGaugeLabels: input.hudGaugeLabels !== false,
+      campTips: input.campTips !== false,   // (v52.70)
       hudScale: (typeof input.hudScale === 'number') ? input.hudScale : HUD_SCALE_DEFAULT,
       hudScaleTP: (typeof input.hudScaleTP === 'number') ? input.hudScaleTP : HUD_SCALE_TP_DEFAULT,   // (v50.29)
       hudOpacity: (typeof input.hudOpacity === 'number') ? input.hudOpacity : 0.72,
@@ -96906,6 +97076,7 @@ function loadSettings() {
     input.cockpitVR = true;
     input.hudScale = HUD_SCALE_DEFAULT;
     if (typeof data.hudGaugeLabels === 'boolean') input.hudGaugeLabels = data.hudGaugeLabels;
+    if (typeof data.campTips === 'boolean') input.campTips = data.campTips;   // (v52.70)
     if (typeof data.cockpitSolidity === 'number' && isFinite(data.cockpitSolidity)) {
       input.cockpitSolidity = _lssSolidityStep(data.cockpitSolidity);   // (v50.43) snapped to X-ray Color / X-ray / Solid
     }
@@ -101138,6 +101309,32 @@ window.announcerAudition     = announcerAudition;
 window.ANN                   = ANN;
 window.announceMultikill     = announceMultikill;
 
+const STORM_DUCK = { on: true, level: 0.15, attack: 0.08, release: 0.5, tail: 0.3 };
+let _stormBusNode = null, _stormBusCtx = null, _stormDuckUntil = 0;
+function _lssStormBus(A) {
+  if (!A || !A.ctx) return null;
+  if (_stormBusNode && _stormBusCtx === A.ctx) return _stormBusNode;
+  const g = A.ctx.createGain(); g.gain.value = 1;
+  g.connect(A.sfxBus || A.masterGain || A.ctx.destination);
+  _stormBusNode = g; _stormBusCtx = A.ctx;
+  return g;
+}
+function _lssStormDuck(A, secs) {
+  const g = _lssStormBus(A); if (!g) return;
+  const t = A.ctx.currentTime, p = g.gain;
+  _stormDuckUntil = secs > 0 ? Math.max(_stormDuckUntil, t + secs) : t;
+  p.cancelScheduledValues(t); p.setValueAtTime(p.value, t);
+  if (_stormDuckUntil > t && STORM_DUCK.on) {
+    p.setTargetAtTime(STORM_DUCK.level, t, STORM_DUCK.attack);
+    p.setTargetAtTime(1, _stormDuckUntil + STORM_DUCK.tail, STORM_DUCK.release);
+  } else p.setTargetAtTime(1, t, STORM_DUCK.release);
+}
+STORM_DUCK.probe = function () {
+  return { gain: _stormBusNode ? +_stormBusNode.gain.value.toFixed(3) : null,
+           until: _stormBusCtx ? +(_stormDuckUntil - _stormBusCtx.currentTime).toFixed(2) : null };
+};
+try { window.__stormDuck = STORM_DUCK; } catch (_) {}
+
 (function () {
   const AUDIO_BASE_CANDIDATES = ['audio/', './audio/'];
   let _audioBase = AUDIO_BASE_CANDIDATES[0];
@@ -101284,6 +101481,7 @@ window.announceMultikill     = announceMultikill;
   }
 
   let _current = null;
+  let _curEnd = 0, _pending = 0;
   const _bufferCache = new Map();
   function _stopCurrent() {
     if (_current) {
@@ -101330,6 +101528,8 @@ window.announceMultikill     = announceMultikill;
     src.onended = () => { if (_current === src) _current = null; };
     _current = src;
     src.start(0);
+    _curEnd = ctx.currentTime + buf.duration;   // (v52.70) for announcerBusy()
+    try { _lssStormDuck(audio, buf.duration); } catch (_) {}   // (v52.67) the storm ducks under the ship AI too
     return true;
   }
 
@@ -101353,6 +101553,10 @@ window.announceMultikill     = announceMultikill;
 
   const _missLogged = {};
   async function _playLocal(text, volume) {
+    _pending++;
+    try { await _playLocalNow(text, volume); } finally { _pending = Math.max(0, _pending - 1); }
+  }
+  async function _playLocalNow(text, volume) {
     await _manifestPromise;
     let hash;
     try { hash = await _hash16(text); }
@@ -101409,6 +101613,20 @@ window.announceMultikill     = announceMultikill;
     } catch (_) {}
     return _manifestPromise;
   }
+
+  window.announcerBusy = function () {
+    let s = 0;
+    try {
+      if (_current) {
+        if (_current.stop && audio && audio.ctx) s = Math.max(s, _curEnd - audio.ctx.currentTime);
+        else if (_current.duration) s = Math.max(s, (_current.duration || 0) - (_current.currentTime || 0));
+        else s = Math.max(s, 0.4);
+      }
+      if (_pending > 0) s = Math.max(s, 0.4);
+      if (!_shouldUseLocal() && speechSynthesis.speaking) s = Math.max(s, 1);
+    } catch (_) {}
+    return Math.max(0, s);
+  };
 
   window.announcerBackend = {
     get audioBase() { return _audioBase; },
@@ -101553,7 +101771,10 @@ window.announceMultikill     = announceMultikill;
   }
   function _campStopVoice() {
     try {
-      if (_voiceSrc) { try { _voiceSrc.stop(); } catch (_) {} _voiceSrc = null; }
+      if (_voiceSrc) {
+        try { _voiceSrc.stop(); } catch (_) {} _voiceSrc = null;
+        try { _lssStormDuck(audio, 0); } catch (_) {}   // (v52.67) a line cut short lets the storm back up now
+      }
       if (_voiceEl) { try { _voiceEl.pause(); } catch (_) {} try { _voiceEl.src = ''; } catch (_) {} _voiceEl = null; }
     } catch (_) {}
   }
@@ -101600,6 +101821,7 @@ window.announceMultikill     = announceMultikill;
         src.onended = function () { if (_voiceSrc === src) _voiceSrc = null; };
         _voiceSrc = src;
         src.start(0);
+        try { _lssStormDuck(audio, buf.duration || 0); } catch (_) {}   // (v52.67) the storm goes quiet under the line
         return buf.duration || 0;
       }
       _campVoiceViaElement(url, volume);
@@ -101817,8 +102039,8 @@ const CAMP_SEQS = {
   const NAMES = { xorzo: 'XORZO', summoners: 'THE SUMMONERS', pilot: 'PILOT', narrator: 'NARRATOR', jimmy: 'JIMMY' };
   const cfg = { cps: 42, holdMin: 1.6, readCps: 15, gap: 0.35, fadeIn: 0.18, fadeOut: 0.32,
                 beatDelay: { leg: 1.5, boss: 0.5 }, voiceVol: 0.95, flickHack: 0.55, flickIdle: 0.07, whisperCps: 0.6,
-                voiceHold: 'clip', voiceTail: 0.5 };
-  const D = { q: [], busy: false, cur: null, tok: 0, raf: 0, flick: 0, ft: 0, inHack: false, idle: [] };
+                voiceHold: 'clip', voiceTail: 0.5, aiGap: 0.3, aiWaitMax: 4 };
+  const D = { q: [], busy: false, cur: null, tok: 0, raf: 0, flick: 0, ft: 0, inHack: false, idle: [], idleAt: 0, aiT0: 0, aiHeld: false };
   const _idleNow = () => { const w = D.idle.splice(0); for (const f of w) { try { f(); } catch (_) {} } };
   const $root = () => document.getElementById('camp-dialogue');
 
@@ -101878,13 +102100,25 @@ const CAMP_SEQS = {
     }, 70);
   }
 
+  function _shipAiBusy() {
+    let s = 0;
+    try { if (typeof window.announcerBusy === 'function') s = Math.max(s, +window.announcerBusy() || 0); } catch (_) {}
+    try { if (_welcomeAboardDeferred && _loadingAudioHold) s = Math.max(s, 0.5); } catch (_) {}   // runtime only: both declared later
+    return s;
+  }
   function _schedule(sec) {
     const tok = D.tok;
     setTimeout(() => {
       if (tok !== D.tok) return;
-      const it = D.q.shift();
-      if (!it) { D.busy = false; _fade(false); _idleNow(); return; }
-      _start(it);
+      if (!D.q.length) { D.busy = false; D.idleAt = performance.now(); _fade(false); _idleNow(); return; }
+      const ai = cfg.aiWaitMax > 0 ? _shipAiBusy() : 0;
+      if (ai > 0) {
+        if (!D.aiT0) D.aiT0 = performance.now();
+        if (performance.now() - D.aiT0 < cfg.aiWaitMax * 1000) { D.aiHeld = true; _schedule(Math.min(ai, 0.25)); return; }
+      }
+      if (D.aiHeld) { D.aiHeld = false; D.aiT0 = 0; if (ai <= 0) { _schedule(cfg.aiGap); return; } }   // a breath after it
+      D.aiT0 = 0;
+      _start(D.q.shift());
     }, Math.max(0, sec) * 1000);
   }
   function _kick() {
@@ -101937,13 +102171,14 @@ const CAMP_SEQS = {
     const tok = ++D.tok;   // every timer below belongs to THIS line; clear() or the next line voids them
     const el = $root(); if (!el) { D.busy = false; return; }
     D.cur = line;
+    line._at = performance.now();   // (v52.71) how long a cut tip was up (_tipCut)
     if (line.fx) { _startFx(line, tok, el); return; }   // (v52.12)
     el.classList.remove('cd-static');
     el.dataset.who = line.who || 'xorzo';
     el.classList.toggle('cd-whisper', !!line.whisper);
     el.classList.toggle('cd-think', !!line.think);
     el.classList.toggle('cd-angry', !!line.angry);
-    const nm = el.querySelector('.cd-name'); if (nm) nm.textContent = (NAMES[line.who] || String(line.who || '').toUpperCase()) + (line.whisper ? ' · WHISPERING' : (line.think ? ' · THINKING' : ''));
+    const nm = el.querySelector('.cd-name'); if (nm) nm.textContent = (NAMES[line.who] || String(line.who || '').toUpperCase()) + (line.whisper ? ' · WHISPERING' : (line.think ? ' · THINKING' : (line.tip ? ' · TIP' : '')));
     try { if (window.CampPortrait) window.CampPortrait.speak(line.who, line); } catch (_) {}   // (v52.31) the speaker, in person
     const txt = el.querySelector('.cd-text');
     const segs = _parse(String(line.text || ''));
@@ -101994,7 +102229,7 @@ const CAMP_SEQS = {
     if (tok !== D.tok) return;
     _stopFlicker();
     D.cur = null;
-    if (!D.q.length) { D.busy = false; _fade(false); _idleNow(); return; }
+    if (!D.q.length) { D.busy = false; D.idleAt = performance.now(); _fade(false); _idleNow(); return; }
     const d = D.q[0].delay || 0;
     if (d > 1.2) _fade(false);
     else { const t = $root() && $root().querySelector('.cd-text'); if (t) t.innerHTML = ''; }
@@ -102009,18 +102244,46 @@ const CAMP_SEQS = {
     return null;
   }
   function enqueue(list, extra) {
+    if (list.some((x) => !(x && x.tip))) _yieldTip();   // (v52.70) a story line never waits behind a tip
     for (const x of list) { const it = _item(x); if (it) { if (extra) Object.assign(it, extra); D.q.push(it); } }
     _kick();
   }
+  function _yieldTip() {
+    const dropped = D.q.filter((x) => x.tip);
+    D.q = D.q.filter((x) => !x.tip);
+    for (const x of dropped) _tipCut(x, 0);
+    if (D.cur && D.cur.tip) {
+      const x = D.cur;
+      D.tok++;
+      if (D.raf) { cancelAnimationFrame(D.raf); D.raf = 0; }
+      if (D.ft) { clearTimeout(D.ft); D.ft = 0; }
+      _stopFlicker();
+      D.cur = null; D.busy = false;
+      _fade(false);
+      _tipCut(x, (performance.now() - (x._at || performance.now())) / 1000);
+    }
+  }
+  function _tipCut(x, secs) {
+    if (!x || typeof x.onCut !== 'function') return;
+    const n = String(x.text || '').length, hold = n / cfg.cps + cfg.holdMin + n / cfg.readCps;
+    try { x.onCut(hold > 0 ? Math.max(0, secs) / hold : 1); } catch (_) {}
+  }
+  function tip(text, onCut) {
+    if (D.busy || D.q.length || !text) return false;
+    enqueue([{ who: 'xorzo', text: String(text), tip: true, onCut: (typeof onCut === 'function') ? onCut : null }]);
+    return true;
+  }
+  const idleFor = () => ((D.busy || D.q.length) ? 0 : (performance.now() - (D.idleAt || 0)) / 1000);
   function interject(list) {
     const items = [];
     for (const x of list) { const it = _item(x); if (it) items.push(it); }
     if (!items.length) return;
+    _yieldTip();   // (v52.70)
     D.q.unshift(...items);
     _kick();
   }
   function clear() {
-    D.tok++; D.q = []; D.busy = false; D.cur = null;
+    D.tok++; D.q = []; D.busy = false; D.cur = null; D.idleAt = performance.now(); D.aiT0 = 0; D.aiHeld = false;
     if (D.raf) { cancelAnimationFrame(D.raf); D.raf = 0; }
     if (D.ft) { clearTimeout(D.ft); D.ft = 0; }
     _stopFlicker();
@@ -102048,7 +102311,7 @@ const CAMP_SEQS = {
   const state = () => ({ busy: D.busy, cur: D.cur && (D.cur.id || D.cur.text), who: (D.cur && D.cur.who) || null, queued: D.q.length,
                          voices: _vset ? [..._vset] : null, lines: Object.keys(CAMP_LINES).length });
   const sceneActive = () => !!((D.cur && D.cur.keep) || D.q.some((x) => x.keep));
-  try { window.CampDialogue = window.__dlg = { say, line, play, beat, clear, state, cfg, whenIdle, sayLines, interject, sceneActive }; } catch (_) {}
+  try { window.CampDialogue = window.__dlg = { say, line, play, beat, clear, state, cfg, whenIdle, sayLines, interject, sceneActive, tip, idleFor }; } catch (_) {}
 })();
 
 (function () {
@@ -104886,7 +105149,8 @@ const CAMP_PROLOGUE = {
       src.playbackRate.value = 0.8 + Math.random() * 0.3;
       const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 500 + 5500 * Math.exp(-dist / 2400);
       const g = ctx.createGain(); g.gain.value = (big ? 1 : 0.72) * Math.min(1, Math.pow(2600 / Math.max(300, dist), 0.7));
-      src.connect(lp); lp.connect(g); g.connect(A.sfxBus || A.masterGain || ctx.destination);
+      let bus = null; try { bus = _lssStormBus(A); } catch (_) {}
+      src.connect(lp); lp.connect(g); g.connect(bus || A.sfxBus || A.masterGain || ctx.destination);
       src.start(ctx.currentTime + Math.min(2.4, dist / 1700));   // the sound after the light (sped up: a 5 s wait reads as a bug)
     } catch (_) {}
   }

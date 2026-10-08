@@ -6719,6 +6719,32 @@ body.lss-land-lobby #lss-version-badge {
    before the move: painted overlap with #ship-preview-info at EVERY size - 1920x1080 13.9k px2, 1366x768
    25.2k, 800x500 25.3k, 740x360 most of the grid. The panel now lives beside the band (see the markup). */
 
+/* ============ (v52.68) BIGGER PILOT PERK TEXT ============
+   Owner: "the pilot perk text on the ship selection screen is kinda hard to see... let's make it a bit bigger in
+   the whole game". It had shrunk to fit one row before the rail lost its label (v43.65: 12 -> 11px chips,
+   1px tracking) and the blurb had never left 10px (9px on short windows). Measured at 1600x900 before: chips
+   11px in 22px boxes spanning 570px of a 900px track, blurb 10px.
+   Now chips 14px / icons 15px / blurb 13px (short windows 12 / 13 / 11). ONE rule set for every mode that shows
+   the rail - ship select, campaign picker, the opening's perk beat - because they all are this same
+   #ship-preview-perks.
+   ⚠ THE TRACKING PAYS FOR THE SIZE. At 14px with the old 1px tracking / 5px padding / 7px gaps the five chips
+   wanted 693px; at 1280x720 the arrow-less track is 688 (the rail spans the ship buttons, 251..939), so they
+   missed by 5px and the arrows came on with a chip half hidden. 0.7px tracking + 4px padding + 6px gaps
+   brings the row to ~657px: one row, no arrows, down to ~1200px wide.
+   It fits because the v43.94 label removal gave the track ~164px back; where it still does not, the track
+   scrolls on its arrows (the owner's v43.66 rule: arrows, never a second line). The blurb's reserve needs no
+   number here: _ssSpreadRails measures the tallest PILOT_PERKS blurb in the blurb's own computed font.
+   ⚠ At the END of block 2, after every @media, and the chips keep the `#ship-preview-perks .perk-card`
+   specificity: v43.65's 11px rule (above) is !important at that same specificity, so only a later one wins. */
+#ship-preview-perks .perk-card { font-size: 14px !important; letter-spacing: 0.7px !important; padding: 4px 4px !important; gap: 6px !important; }
+#ship-preview-perks .perk-card-icon { font-size: 15px !important; }
+#perks-desc { font-size: 13px !important; line-height: 1.35 !important; }
+@media (max-height: 620px) {
+  #ship-preview-perks .perk-card { font-size: 12px !important; letter-spacing: 0.7px !important; padding: 4px 4px !important; gap: 5px !important; }
+  #ship-preview-perks .perk-card-icon { font-size: 13px !important; }
+  #perks-desc { font-size: 11px !important; }
+}
+
 </style>
 
 <div id="ship-select">
@@ -7445,7 +7471,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "52.66";
+const LSS_BUILD = "52.73";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -9070,6 +9096,8 @@ const input = {
   // HEALTH, CORE, AMMO. ON by default. Covers ONLY those: the ability names
   // riding the cooldown bars are how you tell Q/E/F apart and stay regardless.
   hudGaugeLabels: true,
+  // (v52.70) Xorzo's text tips in the campaign (CAMP_TIPS / _campTipsTick). Settings > Display > Campaign Tips.
+  campTips: true,
   // (v30.68) Round clip recorder (MediaRecorder on the game canvas).
   clipRec: false,
   // Camera field-of-view in flat-screen mode, degrees. Has no visible
@@ -12480,6 +12508,7 @@ const CampaignMode = {
     c._summonerSpawned = false; c._summonerLeft = false; c._chanT = 0; c._bcT = 0;
     c._pings = []; c._pingT = null; c._pingRevealed = false;   // (v52.10) Xorzo's pings
     c._sceneDone = false; c._scenePend = false; c._scenePendT = 0; c._sceneHoldPrev = false;   // (v52.14) the leg's scene
+    c._tips = null;   // (v52.71) a leg start decides its tips anew (_campTipsTick): a replayed first leg teaches again
     if (typeof _clearBossPortal === 'function') _clearBossPortal();
     try { FormationDirector.clear(); } catch (_) {}
     if (game.entities) {
@@ -12545,6 +12574,7 @@ const CampaignMode = {
     try { _campScanTick(c, dt); } catch (e) { if (!c._scanErr) { c._scanErr = true; console.warn('[campaign] scan', e); } }   // (v49.49)
     try { _campPingTick(c, dt); } catch (e) { if (!c._pingErr) { c._pingErr = true; console.warn('[campaign] ping', e); } }   // (v52.10)
     try { _campSceneTick(c, dt); } catch (e) { if (!c._whErr) { c._whErr = true; console.warn('[campaign] scene', e); } }   // (v52.10 whisper -> v52.14 scenes)
+    try { _campTipsTick(c, dt); } catch (e) { if (!c._tipErr) { c._tipErr = true; console.warn('[campaign] tips', e); } }   // (v52.70) Xorzo's tips
     
     
     if (game._campJourney && !c._legIntroShown) {
@@ -13027,6 +13057,8 @@ const FreeFlightMode = {
       // chassis-base (+perk) stats and _aegisApply/_aegisShipUpgrades stay inert.
       const _forceKey = (_curKey && _roster.indexOf(_curKey) >= 0) ? _curKey
                       : ((_roster.indexOf('VORTEX') >= 0) ? 'VORTEX' : _roster[0]);
+      // (v52.72) a live-swap commit does not clear the ship memory, but this one is a new mode: Exhibition's hulls stay there
+      try { _shipMemClear(); } catch (_) {}
       if (_forceKey && typeof LOADOUTS !== 'undefined' && LOADOUTS[_forceKey] && typeof commitLoadout === 'function') {
         game._liveSwap = true;
         try { commitLoadout(_forceKey); } catch (_) {}
@@ -15881,6 +15913,104 @@ function _campSceneHold(c) {
   if (c._scenePend) return true;
   try { return !!(window.CampDialogue && window.CampDialogue.sceneActive && window.CampDialogue.sceneActive()); } catch (_) { return false; }
 }
+// ⭐ (v52.70) XORZO'S TIPS. Owner: "here's also some things xorzo can text only in the first leg, and other legs randomly
+// (unless you turn tips off in the settings)" - the five below, plus "when the core is charged, 'Use your core, press (the
+// set button).'" TEXT ONLY: no clip (they name the player's own keys, which no recording could), so they are not in
+// CAMP_LINES and tools/campaign_voice.mjs never sees them. They go through CampDialogue.tip(): the lowest priority -
+// taken only once the box has been quiet idleMin s, never while a scene is pending or talking or the opening's arrival
+// owns the box, and cut on the spot by any story line that arrives (CampDialogue _yieldTip). Name plate "XORZO · TIP".
+//   FIRST LEG (firstLeg, sceneIndex 0): every tip, firstDelay s in and then one every `every` s, and the core tip on
+//   the leg's first full core. (v52.71) In the owner's order - CAMP_TIP_LINES as written: switching ships, the kit,
+//   then the dash (ramming before ramming a DOOMED ship) - it was a shuffle in v52.70.
+//   ANY OTHER LEG: otherChance of ONE tip (a random pick), at a random moment in otherWindow; coreChance of the core
+//   tip on its first full core. The core tip is dropped if the core is used before the box is free - nothing left to say.
+//   (v52.71) A tip a story line cuts before cutRead of its reading time has passed comes back ONCE, as soon as the box
+//   is quiet again (_tipRetry). Measured offline on the real tick (a model of the box, 240 s of leg 1): the boss's
+//   arrival cut "Each ship has a defensive ability..." 3.2 s into its 8.0 s, and it was gone for good.
+//   Each leg start clears c._tips (_campStartScene), so replaying the first leg shows them again.
+// The key names follow the device in hand (_tipScheme: VR, a connected pad, touch, else keyboard) and the player's own
+// bindings (_howtoBindLabel, the HOW TO PLAY guide's labels - so a rebind shows here too): "[ or ]" / "D-pad Left or
+// D-pad Right" / "the ⇄ button", and "G" / "D-pad Up" / "the CORE button".
+// Off: Settings > Display > Campaign Tips (input.campTips). Knobs: window.__campTips = { cfg, lines, next(), core(), state() }.
+const CAMP_TIPS = { on: true, firstLeg: 0, firstDelay: 10, every: [22, 34], idleMin: 5, coreIdle: 1.5,
+                    otherChance: 0.6, otherWindow: [35, 110], coreChance: 0.3, cutRead: 0.6 };
+const CAMP_TIP_LINES = {   // the owner's words; functions, so the key names are read when the tip shows
+  ships:   () => 'You can switch ships at any time by pressing ' + _tipShipKeys() + '.',
+  kit:     () => 'Each ship has a defensive ability, an offensive ability, and a utility.',
+  dashram: () => 'Dashes recharge, and you can damage and destroy other ships by ramming with it.',
+  doomed:  () => 'If you ram a doomed ship, you destroy it and get full shields.',
+  dashdir: () => 'You can dash in any direction.',
+};
+function _tipCoreText() { return 'Use your core, press ' + _tipKey('core', 'your core button') + '.'; }
+function _tipScheme() {
+  try { if (renderer && renderer.xr && renderer.xr.isPresenting) return 'vr'; } catch (_) {}
+  try { if (input.gpConnected) return 'gp'; } catch (_) {}
+  try { if (input.touchActive || document.documentElement.classList.contains('lss-touch')) return 'touch'; } catch (_) {}
+  return 'kb';
+}
+function _tipKey(action, fallback) {
+  const s = _tipScheme();
+  let k = '';
+  try { k = String(_howtoBindLabel(s, action) || ''); } catch (_) {}
+  if (!k || k === '(unbound)') return fallback;
+  if (s === 'gp') k = k.replace(/^D-/, 'D-pad ');   // GAMEPAD_BUTTON_NAMES 'D-Up' -> 'D-pad Up'
+  if (s === 'touch') k = 'the ' + k + ' button';
+  return k;
+}
+function _tipShipKeys() {
+  const a = _tipKey('shipPrev', ''), b = _tipKey('shipNext', '');
+  if (a && b && a !== b) return a + ' or ' + b;
+  return a || b || 'your ship-switch keys';
+}
+// (v52.71) CampDialogue calls this when a story line cuts one of our tips: frac = its time on screen over its reading
+// time (0 = dropped from the queue unseen). Under cutRead it comes back, once per tip per leg; `cut:<id>` in state().
+function _tipRetry(T, id, frac) {
+  if (!(frac < CAMP_TIPS.cutRead) || T.retried[id]) return;
+  T.retried[id] = true; T.shown.push('cut:' + id);
+  if (id === 'core') { T.coreWant = true; return; }   // still dropped if the core gets used first
+  T.order.unshift(id); T.left++; T.nextAt = Math.min(T.nextAt, T.t);   // due now: it still waits idleMin of quiet
+}
+function _campTipsTick(c, dt) {
+  if (!CAMP_TIPS.on || !c) return;
+  try { if (typeof input !== 'undefined' && input && input.campTips === false) return; } catch (_) {}
+  const D = window.CampDialogue; if (!D || !D.tip || !D.idleFor) return;
+  const leg = c.sceneIndex | 0;
+  let T = c._tips;
+  if (!T || T.leg !== leg) {
+    const first = leg === CAMP_TIPS.firstLeg, ids = Object.keys(CAMP_TIP_LINES), w = CAMP_TIPS.otherWindow;
+    if (!first) for (let i = ids.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; const x = ids[i]; ids[i] = ids[j]; ids[j] = x; }
+    T = c._tips = { leg, first, t: 0, order: ids, left: first ? ids.length : (Math.random() < CAMP_TIPS.otherChance ? 1 : 0),
+                    nextAt: first ? CAMP_TIPS.firstDelay : w[0] + Math.random() * (w[1] - w[0]),
+                    coreDone: false, coreWant: false, wasCore: !!(player && player.coreReady), shown: [], retried: {} };
+  }
+  T.t += dt;
+  // the core tip rides the meter's own rising edge (the one the ship AI's "Core charged and ready" uses)
+  const coreNow = !!(player && player.coreReady && !player.coreActive);
+  if (coreNow && !T.wasCore && !T.coreDone) { T.coreDone = true; T.coreWant = T.first || Math.random() < CAMP_TIPS.coreChance; }
+  T.wasCore = coreNow;
+  if (c._scenePend || (D.sceneActive && D.sceneActive()) || game._campOpenArrive) return;   // a scene / the arrival owns the box
+  const idle = D.idleFor();
+  if (T.coreWant) {
+    if (!coreNow) T.coreWant = false;                                   // they used it - nothing left to say
+    else if (idle >= CAMP_TIPS.coreIdle && D.tip(_tipCoreText(), (fr) => _tipRetry(T, 'core', fr))) { T.coreWant = false; T.shown.push('core'); }
+    return;
+  }
+  if (T.left > 0 && T.order.length && T.t >= T.nextAt && idle >= CAMP_TIPS.idleMin) {
+    const id = T.order[0], f = CAMP_TIP_LINES[id];
+    if (f && D.tip(f(), (fr) => _tipRetry(T, id, fr))) {
+      T.order.shift(); T.left--; T.shown.push(id);
+      const e = CAMP_TIPS.every; T.nextAt = T.t + e[0] + Math.random() * (e[1] - e[0]);
+    }
+  }
+}
+try {
+  window.__campTips = {
+    cfg: CAMP_TIPS, lines: CAMP_TIP_LINES,
+    next() { const D = window.CampDialogue, ids = Object.keys(CAMP_TIP_LINES), id = ids[(Math.random() * ids.length) | 0]; return !!(D && D.tip(CAMP_TIP_LINES[id]())); },
+    core() { const D = window.CampDialogue; return !!(D && D.tip(_tipCoreText())); },
+    state() { const c = game && game.campaign; const T = c && c._tips; return { scheme: _tipScheme(), ships: _tipShipKeys(), core: _tipCoreText(), leg: T ? T.leg : null, t: T ? +T.t.toFixed(1) : 0, nextAt: T ? +T.nextAt.toFixed(1) : null, left: T ? T.left : null, shown: T ? T.shown.slice() : [] }; },
+  };
+} catch (_) {}
 function _campSceneTick(c, dt) {
   const S = _campSceneFor(c);
   if (!S || c._sceneDone || c.phase !== 'travel') { c._scenePend = false; return; }
@@ -70731,7 +70861,9 @@ void main(){ wxMain(); gl_FragColor${pm === 'P' ? '' : '.a'}*=wxVeil(); }
     const buf = A_.ctx.createBuffer(1, n, sr); buf.copyToChannel(out, 0);
     const src = A_.ctx.createBufferSource(); src.buffer = buf;
     const lp = A_.ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 300 + 4000 * Math.exp(-dmin / 2500);
-    src.connect(lp); lp.connect(A_.sfxBus || A_.masterGain);
+    // (v52.67) through the storm bus, which ducks under every voice line (STORM_DUCK, beside the announcer bridge)
+    let bus = null; try { bus = _lssStormBus(A_); } catch (_) {}
+    src.connect(lp); lp.connect(bus || A_.sfxBus || A_.masterGain);
     src.start(A_.ctx.currentTime + dmin / c);
     return { delay: dmin / c, seconds: n / sr };
   }
@@ -111406,7 +111538,9 @@ function tickGunLayer() {
   // Adaptive hold time based on weapon fire rate. Floor 15 ms so very fast
   // cycles don't flicker imperceptibly ; ceiling 60 ms so very slow ones
   // don't drag.
-  const fireRate = (player.loadout && player.loadout.weapon && player.loadout.weapon.fireRate) || 0.5;
+  // (v52.72) player.weapon first: Syphon's tier-3 Zapper is the player's own copy now (_syphonFastGun), no longer
+  // written into the shared LOADOUTS entry this used to read it from.
+  const fireRate = (player.weapon && player.weapon.fireRate) || (player.loadout && player.loadout.weapon && player.loadout.weapon.fireRate) || 0.5;
   const targetCycle = fireRate * 0.5;
   const RECOIL_HOLD_PER_FRAME = Math.max(0.015, Math.min(0.06, targetCycle / cycleLen));
 
@@ -112384,6 +112518,123 @@ function _v12mLobbyError(msg) {
   alert(msg);
 }
 
+// ⭐⭐ (v52.72) EVERY SHIP KEEPS ITS OWN HULL. Owner: "a new mechanic for LSS modes that allow switching ships in game /
+// switching ships used to grant full health, but that ends now / now the ship's health and shield states will be
+// remembered, including core charge level (syphon will also remember his core upgrades) / the 5s free from enemy fire
+// switch rule still applies / if you die, respawn gets all ships full health and shield / if you have nano bots
+// repairing your ship, it only repairs the active ship, it does not repair the other ships in the background / if you
+// have the shield perk, it only charges the active ship's shields (so if you switch with low shields, it won't recharge
+// in the background)".
+// The two modes that switch in flight: EXHIBITION (cycleHubShip - it handed you a FRESH hull, a full heal on every swap)
+// and the CAMPAIGN (_campSwapTo - it carried the damage FRACTION onto the next ship). Both now run: _shipMemSave() the
+// ship you leave -> the live commit (chassis base, + Aegis in Exhibition) -> _shipMemRestore() the ship you board.
+// Remembered per ship (player._shipMem[loadoutKey]): hull (a Nano Repair over-heal included), shield, overshield + its
+// lock, core charge, the doomed latch, and SYPHON's nanobot tier (_syphonApplyTiers). A ship not flown since the last
+// respawn boards fresh (full).
+// The perks need nothing: Nano Repair and Emergency Recharge (_tickPerkEffects) only ever act on `player`, so a ship in
+// memory stays exactly as it was left - no repair, no recharge, no overshield decay. ⚠ With Emergency Recharge the
+// shield you leave is full anyway: the perk refills at the same 5 s without damage that unlocks a swap.
+// A RESPAWN (a death, a round / leg reset) refills every remembered ship's hull and shield (_shipMemRefill, called by
+// respawnPlayer); core charge and Syphon's tier survive it, as they always did for the ship you respawn in. A campaign
+// death re-picks a ship through commitLoadout (_campReentry): that commit saves the ship that died and restores the pick.
+// Any other commit (a new launch, the hub's rift into the campaign) starts a fresh set (_shipMemClear).
+// NOT remembered (every swap still boards with them fresh, as before): ammo, dashes, ability cooldowns, Vortex energy.
+// Probe: window.__shipMem.state().
+function _shipMemSave() {
+  if (typeof player === 'undefined' || !player || !player.loadoutKey) return;
+  const mem = player._shipMem || (player._shipMem = {});
+  mem[player.loadoutKey] = {
+    health: player.health, shield: player.shield,
+    overShield: player.overShield || 0, osLocked: !!player._perkOsLocked,
+    coreMeter: player.coreMeter || 0,   // 0 while a core runs (activateCore spent it), so a core cut short by the swap stays spent
+    doomed: !!player.doomed,
+    syphonTier: (player.loadoutKey === 'SYPHON') ? (player.syphonTier | 0) : 0,
+  };
+}
+function _shipMemRestore(key) {
+  const m = (typeof player !== 'undefined' && player && player._shipMem) ? player._shipMem[key] : null;
+  if (!m) return false;
+  // Syphon's tier FIRST: tier 2 raises maxShield, and the remembered shield has to fit under the raised cap.
+  if (key === 'SYPHON' && m.syphonTier > 0) _syphonApplyTiers(m.syphonTier);
+  let cap = player.maxHealth;
+  try { const b = _perkEffectiveBag(); if (b && b.regenPerSec) cap *= (b.overhealMult || 1); } catch (_) {}   // Nano Repair over-heals
+  // null = refilled by a respawn = full, at the FINAL caps (the commit filled to the shield cap before tier 2 raised it)
+  player.health = (m.health != null) ? Math.max(1, Math.min(cap, m.health)) : player.maxHealth;
+  player.shield = (m.shield != null) ? Math.max(0, Math.min(player.maxShield, m.shield)) : player.maxShield;
+  player.overShield = m.overShield || 0;
+  player._perkOsLocked = !!m.osLocked;
+  player.coreMeter = Math.max(0, Math.min(100, m.coreMeter || 0));
+  player._lastCorePctForCloak = player.coreMeter;   // a remembered charge is not a fresh 75% crossing: no Auto Cloak on boarding
+  // The player's doom never expires (see _playerUndoom), so a doomed ship you leave is still doomed when you come back.
+  if (m.doomed && m.health != null) { player.doomed = true; player.doomTimer = (LSS && LSS.DOOMED_TIMER) || 10; }
+  return true;
+}
+// A respawn: every remembered hull and shield back to full (null = full). Core charge and Syphon's tier stay.
+function _shipMemRefill() {
+  const mem = (typeof player !== 'undefined' && player) ? player._shipMem : null;
+  if (!mem) return;
+  for (const k in mem) { const m = mem[k]; m.health = null; m.shield = null; m.overShield = 0; m.osLocked = false; m.doomed = false; }
+}
+function _shipMemClear() { if (typeof player !== 'undefined' && player) player._shipMem = {}; }
+// (v52.72) SYPHON's nanobot ladder (activateCore, 'AI Nanobots') re-applied to a freshly committed hull, tier by tier,
+// so a remembered Syphon boards exactly as it left.
+function _syphonApplyTiers(tier) {
+  const t = Math.max(0, Math.min(3, tier | 0));
+  if (t >= 1) { player.syphonArcRounds = true; player.maxClip = 50; player.clipAmmo = player.maxClip; }   // a swap boards with a full clip
+  if (t >= 2) { player.syphonShieldBonus = 500; player.maxShield += 500; player.syphonCooldownMult = 0.7; }
+  if (t >= 3) { player.syphonXO16Accel = true; player.syphonDmgMult = 1.25; _syphonFastGun(); }
+  player.syphonTier = t;
+}
+// (v52.72) Tier 3's faster Zapper, on the PLAYER's own copy of the weapon. It used to scale player.weapon.fireRate in
+// place - and player.weapon IS LOADOUTS.SYPHON.weapon (commitLoadout hands the shared entry over), so every tier 3 made
+// every Syphon BOT fire faster too (Bot reads this.loadout.weapon.fireRate) for the rest of the page, and a second tier 3
+// in the session compounded it (0.09 -> 0.0675 -> the 0.06 floor). Re-applying it on every boarding would have stacked
+// it again. Always from the untouched base now, so it is the same number however often it runs.
+function _syphonFastGun() {
+  const base = player.loadout && player.loadout.weapon;
+  if (base) player.weapon = Object.assign({}, base, { fireRate: Math.max(0.06, base.fireRate * 0.75) });
+}
+// (v52.73) BLASTER's RANGE MODE IS THE PLAYER'S OWN GUN, the same leak as Syphon's above. Both modes were written INTO
+// player.weapon - which is LOADOUTS.BLASTER.weapon itself - so the pilot's long mode re-armed every Blaster BOT
+// (Bot reads this.loadout.weapon: fireRate for its fire timer, range x1.6 under its own _rangeModeT - 7360 instead of
+// 4160) and every peer's Blaster visuals (peerLoadout.weapon.fireRate) with the long gun for the rest of the page. And
+// commitLoadout / respawnPlayer reset blasterMode to 'close' without the gun, so a swap back or a death in long mode came
+// back 'close' still holding the long numbers. CLOSE = the table entry untouched (its numbers ARE close mode: 0.05 s /
+// 2600 / 85 / 0.04, as the old block's "keep in step with the LOADOUTS entry" said); LONG = a copy with the long ones.
+function _blasterModeGun() {
+  const base = player.loadout && player.loadout.weapon;
+  if (!base) return;
+  player.weapon = (player.blasterMode === 'long')
+    ? Object.assign({}, base, { fireRate: 0.08, range: 4600, damage: 100, spread: 0.005 })   // long MODE; the long CHARGE SHOT is 10000
+    : base;
+}
+try {
+  window.__shipMem = {
+    state() {
+      const out = {}, mem = (player && player._shipMem) || {};
+      for (const k in mem) {
+        const m = mem[k];
+        out[k] = { hull: m.health == null ? 'full' : Math.round(m.health), shield: m.shield == null ? 'full' : Math.round(m.shield),
+                   over: Math.round(m.overShield || 0), core: Math.round(m.coreMeter || 0), doomed: !!m.doomed, tier: m.syphonTier || 0 };
+      }
+      return { mode: LSS.MODE, game: game.state, active: player.loadoutKey, ship: player.shipState,
+               hull: Math.round(player.health), shield: Math.round(player.shield), core: Math.round(player.coreMeter || 0),
+               max: [Math.round(player.maxHealth), Math.round(player.maxShield)], tier: player.syphonTier | 0,
+               // the gun you fly vs the SHARED table the bots read (_syphonFastGun: tier 3 must never touch the second)
+               rate: player.weapon ? player.weapon.fireRate : null, syphonTableRate: LOADOUTS.SYPHON.weapon.fireRate, ships: out };
+    },
+    // a test drive on the ship you fly (say so before driving it): set({ hull, shield, core })
+    set(o) {
+      o = o || {};
+      if (o.hull != null) player.health = +o.hull;
+      if (o.shield != null) player.shield = +o.shield;
+      if (o.core != null) player.coreMeter = Math.max(0, Math.min(100, +o.core));
+      return this.state();
+    },
+    save: _shipMemSave, refill: _shipMemRefill, clear: _shipMemClear,
+  };
+} catch (_) {}
+
 // (v32.97) LIVE in-flight ship cycle for campaign : D-pad LEFT/RIGHT steps through the
 // campaign roster and applies the chosen one AT THE CURRENT POSITION, carrying damage forward (so
 // it's a tactical swap, not a free heal/respawn). Reuses the full commitLoadout player-side
@@ -112392,8 +112643,11 @@ function _v12mLobbyError(msg) {
 // (v49.46) The roster is all seven ships (_campLoadUnlocks), and the swap takes EXHIBITION'S COMBAT
 // LOCKOUT (cycleHubShip, v34.95): no switch until 5 s have passed without taking damage. Owner:
 // "change to any ship, just like in exhibition (the same 5s under-fire swap rule applies)".
-// ⚠ One deliberate difference from Exhibition: the damage still CARRIES OVER. cycleHubShip hands you
-//   a fresh hull, which in a campaign would make "back off for 5 s, swap twice" a full heal.
+// ⚠ (v49.46-52.71) One deliberate difference from Exhibition was that the damage CARRIED OVER, as a fraction onto the
+//   next ship: cycleHubShip handed you a fresh hull, which in a campaign would have made "back off for 5 s, swap twice"
+//   a full heal. Right for its time. (v52.72) Both modes now remember each ship's own hull (_shipMemSave /
+//   _shipMemRestore above), which closes that hole in both: swapping back finds the damaged ship still damaged. A ship
+//   not flown since the last respawn is a full hull - the owner's rule, each ship is its own.
 // The body is _campSwapTo(key) so quick-equip's number keys pick a ship through the same rules.
 function _campSwapTo(nextKey) {
   if (typeof LSS === 'undefined' || LSS.MODE !== 'campaign' || !game.campaign || game.state !== 'playing') return false;
@@ -112409,25 +112663,24 @@ function _campSwapTo(nextKey) {
   // Anti-spam : a mashed d-pad can't rapid-swap (each swap rebuilds the mesh + kit).
   const _now = (game && typeof game.time === 'number') ? game.time : 0;
   if (_now - (player._lastShipSwap || -9) < 0.6) return false;
-  // Preserve position / orientation / motion + the current damage fraction.
+  // Preserve position / orientation / motion. (v52.72) The hull is no longer carried over as a fraction: each ship
+  // keeps its own (_shipMemSave / _shipMemRestore).
   const _pos = player.position ? player.position.clone() : new THREE.Vector3();
   const _vel = player.velocity ? player.velocity.clone() : new THREE.Vector3();
   const _eul = player.euler ? player.euler.clone() : null;
-  const _hpFrac = (player.maxHealth > 0) ? (player.health / player.maxHealth) : 1;
-  const _shFrac = (player.maxShield > 0) ? (player.shield / player.maxShield) : 1;
   player._lastShipSwap = _now;
+  _shipMemSave();   // (v52.72) the ship we leave, as it is
   game._liveSwap = true;
   try { commitLoadout(nextKey); } catch (_) {}
   game._liveSwap = false;
   // commitLoadout full-healed + reset position to (0,0,0) + granted spawn-protection —
-  // undo all three so a swap can't be abused as a free respawn. Stay put, carry damage.
+  // undo all three so a swap can't be abused as a free respawn. Stay put, and board the ship as it was left.
   if (player.position) player.position.copy(_pos);
   if (player.mesh) player.mesh.position.copy(_pos);
   if (player.velocity) player.velocity.copy(_vel);
   if (_eul && player.euler) player.euler.copy(_eul);
-  player.health = Math.max(1, Math.min(player.maxHealth, Math.round(player.maxHealth * _hpFrac)));
-  player.shield = Math.max(0, Math.min(player.maxShield, Math.round(player.maxShield * _shFrac)));
-  player.shipState = 'flying';
+  _shipMemRestore(nextKey);   // (v52.72) nothing remembered = not flown since the respawn = the full hull the commit built
+  player.shipState = player.doomed ? 'doomed' : 'flying';
   player.spawnProtection = 0;
   try { if (typeof _quickEquipRefresh === 'function') _quickEquipRefresh(); } catch (_) {}
   try { if (window.Overlays && Overlays.banner) Overlays.banner('SHIP', (LOADOUTS[nextKey] && LOADOUTS[nextKey].name) || nextKey); } catch (_) {}
@@ -112475,6 +112728,7 @@ function cycleHubShip(dir) {
   const _vel = player.velocity ? player.velocity.clone() : new THREE.Vector3();
   const _eul = player.euler ? player.euler.clone() : null;
   player._lastShipSwap = _now;
+  _shipMemSave();   // (v52.72) the ship we leave, as it is
   game._liveSwap = true;
   try { commitLoadout(nextKey); } catch (_) {}
   game._liveSwap = false;
@@ -112488,6 +112742,10 @@ function cycleHubShip(dir) {
   // (v34.90) commitLoadout reset to base chassis stats — re-apply the NEW
   // ship's Aegis rank bonuses (each ship levels independently).
   try { if (typeof _aegisApply === 'function') _aegisApply(); } catch (_) {}
+  // (v52.72) ...then the ship as it was left - AFTER the Aegis maxes, so a remembered hull fits under them. This used to
+  // stop at the fresh hull commitLoadout built: a full heal on every swap ("switching ships used to grant full health").
+  _shipMemRestore(nextKey);
+  if (player.doomed) player.shipState = 'doomed';
   try { if (typeof _quickEquipRefresh === 'function') _quickEquipRefresh(); } catch (_) {}
   try { if (window.Overlays && Overlays.banner) Overlays.banner('SHIP', (LOADOUTS[nextKey] && LOADOUTS[nextKey].name) || nextKey); } catch (_) {}
 }
@@ -112594,6 +112852,10 @@ function commitLoadout(key) {
   // rift: measured, the campaign traverse fell back to the one-frame synchronous
   // rebuild with no loading overlay while the zone-rift path staged correctly.
   if (typeof game !== 'undefined' && game._swapPending && !game._swapStaging && !game._liveSwap) game._swapPending = null;
+  // (v52.72) THE SHIP MEMORY (_shipMemSave): a campaign death re-entry saves the ship that died (restored below if it
+  // is re-picked; respawnPlayer refills every hull); a live swap saves in its caller; any other commit is a new launch,
+  // which starts a fresh set of hulls. Before anything below resets the player.
+  try { if (game._campReentry) _shipMemSave(); else if (!game._liveSwap) _shipMemClear(); } catch (_) {}
   // (v38.68) the starting view, before any mode branch below can rely on it
   try { _applyStartView(); } catch (_) {}
   // (v34.22) PICKER CONFIRM ROUTING. When confirming from the campaign ship-select picker,
@@ -112942,6 +113204,8 @@ function commitLoadout(key) {
     try { const _sel = document.getElementById('ship-select'); if (_sel) { _sel.classList.remove('active'); _sel.style.display = 'none'; } } catch (_) {}
     try { stopShipPreviewLoop(); } catch (_) {}
     try { _xrMenuForceHidden = true; } catch (_) {}
+    // (v52.72) the pick as it was left - its core charge and Syphon's tier; respawnPlayer then refills every hull + shield
+    try { _shipMemRestore(key); } catch (_) {}
     try { if (typeof respawnPlayer === 'function') respawnPlayer(); } catch (_) {}
     try { _safeRequestPointerLock(); } catch (_) {}
     return;
@@ -114242,6 +114506,8 @@ function respawnPlayer() {
   game.playerInStasis = false;
   game.playerRootTimer = 0; 
   const ch = player.chassis;
+  // (v52.72) Owner: "if you die, respawn gets all ships full health and shield" - every remembered ship, not just this one.
+  try { _shipMemRefill(); } catch (_) {}
   // (v36.70) ⚠ Heal to the PLAYER's max, not the chassis'. Aegis rank 5 (+2500
   // hull) and rank 14 (+2500 shield) raise `player.maxHealth`/`maxShield` above
   // the chassis figures; healing to `ch.*` meant a ranked pilot respawned up to
@@ -114268,6 +114534,14 @@ function respawnPlayer() {
   player.enemyToneLocks = {};
   player.enemyToneLockMax = 0;
   player.blasterMode = 'close';
+  // (v52.73) ...and the close GUN and CLIP with it. This line reset the mode alone, so a death in long mode came back
+  // 'close' holding the long gun (0.08 s / 4600 / 100 / 0.005) and its 100-round clip - the clipAmmo refill above had
+  // already read the long maxClip. BLASTER only: a respawned Syphon keeps his tier-3 gun (_syphonFastGun).
+  if (player.loadoutKey === 'BLASTER') {
+    _blasterModeGun();
+    if (player.loadout && player.loadout.weapon) player.maxClip = player.loadout.weapon.clipSize;
+    player.clipAmmo = player.maxClip;
+  }
   player.powerShotCharging = false; player.powerShotCharge = 0;
   try { if (player._bcgOn) _blasterChargeGlowOff(); } catch (_) {}
   player.blasterSwitchTimer = 0;
@@ -123023,9 +123297,11 @@ function activateCore() {
         player.maxClip = 50;
         player.clipAmmo = Math.min(player.clipAmmo + 10, 50);
         break;
-      case 2: 
+      case 2:
         player.syphonShieldBonus = 500;
-        player.maxShield = player.chassis.maxShield + 500;
+        // (v52.72) +500 ON TOP of the current max, not chassis + 500: that reset dropped Exhibition's Aegis rank-14
+        // +2500 shield, and _syphonApplyTiers (a remembered Syphon boarding) has to land on the same number.
+        player.maxShield += 500;
         player.shield = Math.min(player.shield + 500, player.maxShield);
         // Also reset ability cooldowns (Inner Spark bonus at Tier 2)
         player.syphonCooldownMult = 0.7;
@@ -123033,8 +123309,9 @@ function activateCore() {
       case 3: 
         player.syphonXO16Accel = true;
         player.syphonDmgMult = 1.25;
-        // Increase fire rate by reducing interval
-        if (player.weapon) player.weapon.fireRate = Math.max(0.06, player.weapon.fireRate * 0.75);
+        // Increase fire rate by reducing interval. (v52.72) On the player's own copy (_syphonFastGun) - it scaled the
+        // shared LOADOUTS.SYPHON weapon in place, which sped up every Syphon bot too.
+        _syphonFastGun();
         break;
     }
     }   // (v38.72) end of the tier ladder
@@ -126335,18 +126612,13 @@ function updateAbilities(dt) {
       if (player.weapon) {
         // Scale ammo proportionally between modes (long = 2/3 of short)
         const ammoPct = player.maxClip > 0 ? player.clipAmmo / player.maxClip : 1;
+        // (v52.73) the mode's gun numbers live in _blasterModeGun: they were written into the SHARED LOADOUTS entry
+        // here (player.weapon IS it), which handed the pilot's mode to every Blaster bot and peer
+        _blasterModeGun();
         if (player.blasterMode === 'close') {
-          player.weapon.fireRate = 0.05;
-          player.weapon.range = 2600;      // (v38.40) keep in step with the LOADOUTS entry
-          player.weapon.damage = 85;
-          player.weapon.spread = 0.04; 
           player.maxClip = 150;
           player.clipAmmo = Math.round(ammoPct * 150);
         } else {
-          player.weapon.fireRate = 0.08;
-          player.weapon.range = 4600;      // (v38.40) long MODE ; the long CHARGE SHOT is 10000
-          player.weapon.damage = 100;
-          player.weapon.spread = 0.005; 
           player.maxClip = 100;
           player.clipAmmo = Math.round(ammoPct * 100);
         }
@@ -142097,6 +142369,7 @@ function _refreshSettingsValues() {
     setSel('set-cockpit-solidity', String(_lssSolidityStep(input.cockpitSolidity)));
   }
   setChk('set-hud-gauge-labels', input.hudGaugeLabels !== false);
+  setChk('set-camp-tips', input.campTips !== false);   // (v52.70)
   {
     // (v36.19) buildSettingsPage writes overlay.innerHTML once and is gated by
     // _settingsBuilt, so without this the slider shows its build-time value
@@ -142445,6 +142718,11 @@ function buildSettingsPage() {
       <div class="setting-row">
         <label>HUD Gauge Labels</label>
         <input type="checkbox" id="set-hud-gauge-labels" ${input.hudGaugeLabels !== false ? 'checked' : ''}>
+      </div>
+      <div class="setting-row">
+        <!-- (v52.70) Xorzo's text tips in the campaign: every one in the first leg, now and then after -->
+        <label>Campaign Tips</label>
+        <input type="checkbox" id="set-camp-tips" ${input.campTips !== false ? 'checked' : ''}>
       </div>
       <div class="setting-row">
         <!-- (v50.29) the chase view's own HUD size, default 1.25 - see HUD_SCALE_TP_DEFAULT -->
@@ -143954,6 +144232,12 @@ function buildSettingsPage() {
     input.hudGaugeLabels = !!gaugeLabelChk.checked;
     saveSettings();
   });
+  // (v52.70) Campaign Tips - _campTipsTick reads input.campTips every frame, so it is live
+  const campTipsChk = overlay.querySelector('#set-camp-tips');
+  if (campTipsChk) campTipsChk.addEventListener('change', () => {
+    input.campTips = !!campTipsChk.checked;
+    saveSettings();
+  });
   // (v36.19) Flat HUD size slider. Live like the VR one — drawCircumpunctHUD
   // reads _hlScale() every repaint, so there is nothing to invalidate except the
   // curved-label sprite cache, which is keyed on (radiusPx, fontPx). Without the
@@ -144726,6 +145010,7 @@ function saveSettings() {
       cockpitVR: input.cockpitVR === true,
       cockpitVRv2: true,   // (v37.67) this save has seen the VR cockpit default flip
       hudGaugeLabels: input.hudGaugeLabels !== false,
+      campTips: input.campTips !== false,   // (v52.70)
       hudScale: (typeof input.hudScale === 'number') ? input.hudScale : HUD_SCALE_DEFAULT,
       hudScaleTP: (typeof input.hudScaleTP === 'number') ? input.hudScaleTP : HUD_SCALE_TP_DEFAULT,   // (v50.29)
       hudOpacity: (typeof input.hudOpacity === 'number') ? input.hudOpacity : 0.72,
@@ -146655,6 +146940,7 @@ function loadSettings() {
     // Absent key keeps the `true` default — settings saved before v35.55 have
     // no entry for this, and those players should still see the captions.
     if (typeof data.hudGaugeLabels === 'boolean') input.hudGaugeLabels = data.hudGaugeLabels;
+    if (typeof data.campTips === 'boolean') input.campTips = data.campTips;   // (v52.70)
     // (v36.19) Absent key keeps the built-in default, so every pre-v36.19 save
     // falls back to it - which since v47.21 is 1.75, not the 1 this note used to
     // promise. A save that HAS the key still wins, which is every save written
@@ -152464,6 +152750,45 @@ window.ANN                   = ANN;
 window.announceMultikill     = announceMultikill;
 
 // =====================================================================
+// (v52.67) THE STORM DUCKS UNDER THE VOICES. Owner, on the newly voiced campaign: "the thunder storm goes over top of the
+// voices.... it should be timed to be quiet over voices". Every storm sound - the hack's _hkThunder and the city storm's
+// thunder() (_WX2) - goes through ONE GainNode on the SFX bus (_lssStormBus), and every voice that knows its length (a
+// campaign line, CampMedia's _campPlayVoiceUrl; a ship-AI line, the announcer bridge below) pulls that node down to
+// STORM_DUCK.level for the clip and lets it back up `tail` s after it (time constants attack / release). A roll already
+// sounding when a line starts is ducked too, and back-to-back lines (CampDialogue's 0.35 s gap) keep it down between them,
+// so the thunder comes back up only in the real pauses. Live knobs: window.__stormDuck (on, level, attack, release, tail;
+// probe() = the node's gain now).
+// ⚠ Runtime only (a voice starts, a thunderclap plays) - never at boot: `audio` is declared further down this scope.
+// =====================================================================
+const STORM_DUCK = { on: true, level: 0.15, attack: 0.08, release: 0.5, tail: 0.3 };
+let _stormBusNode = null, _stormBusCtx = null, _stormDuckUntil = 0;
+function _lssStormBus(A) {
+  if (!A || !A.ctx) return null;
+  if (_stormBusNode && _stormBusCtx === A.ctx) return _stormBusNode;
+  const g = A.ctx.createGain(); g.gain.value = 1;
+  g.connect(A.sfxBus || A.masterGain || A.ctx.destination);
+  _stormBusNode = g; _stormBusCtx = A.ctx;
+  return g;
+}
+// secs = the voice's length; 0 = that voice was cut short, let the storm back up now. Two voices at once (a campaign line
+// over a ship-AI callout) hold the duck until the later one ends.
+function _lssStormDuck(A, secs) {
+  const g = _lssStormBus(A); if (!g) return;
+  const t = A.ctx.currentTime, p = g.gain;
+  _stormDuckUntil = secs > 0 ? Math.max(_stormDuckUntil, t + secs) : t;
+  p.cancelScheduledValues(t); p.setValueAtTime(p.value, t);
+  if (_stormDuckUntil > t && STORM_DUCK.on) {
+    p.setTargetAtTime(STORM_DUCK.level, t, STORM_DUCK.attack);
+    p.setTargetAtTime(1, _stormDuckUntil + STORM_DUCK.tail, STORM_DUCK.release);
+  } else p.setTargetAtTime(1, t, STORM_DUCK.release);
+}
+STORM_DUCK.probe = function () {
+  return { gain: _stormBusNode ? +_stormBusNode.gain.value.toFixed(3) : null,
+           until: _stormBusCtx ? +(_stormDuckUntil - _stormBusCtx.currentTime).toFixed(2) : null };
+};
+try { window.__stormDuck = STORM_DUCK; } catch (_) {}
+
+// =====================================================================
 // LSS ANNOUNCER MP3 BRIDGE  (auto-inserted from audio/announcer-snippet.html)
 // Intercepts speechSynthesis.speak() and redirects to pre-baked MP3s.
 // Voice source is configured in the Ship AI Voice settings panel.
@@ -152616,6 +152941,10 @@ window.announceMultikill     = announceMultikill;
 
   // ---- Playback -----------------------------------------------------
   let _current = null;
+  // (v52.70) when the line playing ends (audio.ctx time) and how many lines are still being hashed / fetched / decoded
+  // (_playLocal is async: a line is "about to speak" for ~50-200 ms before anything plays). window.announcerBusy() reads
+  // both - CampDialogue waits for the ship AI before it starts a line.
+  let _curEnd = 0, _pending = 0;
   const _bufferCache = new Map();
   function _stopCurrent() {
     if (_current) {
@@ -152662,6 +152991,8 @@ window.announceMultikill     = announceMultikill;
     src.onended = () => { if (_current === src) _current = null; };
     _current = src;
     src.start(0);
+    _curEnd = ctx.currentTime + buf.duration;   // (v52.70) for announcerBusy()
+    try { _lssStormDuck(audio, buf.duration); } catch (_) {}   // (v52.67) the storm ducks under the ship AI too
     return true;
   }
 
@@ -152684,7 +153015,12 @@ window.announceMultikill     = announceMultikill;
   }
 
   const _missLogged = {};
+  // (v52.70) counted while in flight, so announcerBusy() covers the gap before the clip starts
   async function _playLocal(text, volume) {
+    _pending++;
+    try { await _playLocalNow(text, volume); } finally { _pending = Math.max(0, _pending - 1); }
+  }
+  async function _playLocalNow(text, volume) {
     await _manifestPromise;
     let hash;
     try { hash = await _hash16(text); }
@@ -152745,6 +153081,22 @@ window.announceMultikill     = announceMultikill;
     } catch (_) {}
     return _manifestPromise;
   }
+
+  // (v52.70) seconds of ship-AI speech still to come: the line playing (its real remainder), a line still being fetched
+  // or decoded (0.4 until it starts), or the browser's own voice talking (1, re-asked). 0 = quiet.
+  window.announcerBusy = function () {
+    let s = 0;
+    try {
+      if (_current) {
+        if (_current.stop && audio && audio.ctx) s = Math.max(s, _curEnd - audio.ctx.currentTime);
+        else if (_current.duration) s = Math.max(s, (_current.duration || 0) - (_current.currentTime || 0));
+        else s = Math.max(s, 0.4);
+      }
+      if (_pending > 0) s = Math.max(s, 0.4);
+      if (!_shouldUseLocal() && speechSynthesis.speaking) s = Math.max(s, 1);
+    } catch (_) {}
+    return Math.max(0, s);
+  };
 
   // ---- Public debug surface -----------------------------------------
   window.announcerBackend = {
@@ -152906,7 +153258,10 @@ window.announceMultikill     = announceMultikill;
   }
   function _campStopVoice() {
     try {
-      if (_voiceSrc) { try { _voiceSrc.stop(); } catch (_) {} _voiceSrc = null; }
+      if (_voiceSrc) {
+        try { _voiceSrc.stop(); } catch (_) {} _voiceSrc = null;
+        try { _lssStormDuck(audio, 0); } catch (_) {}   // (v52.67) a line cut short lets the storm back up now
+      }
       if (_voiceEl) { try { _voiceEl.pause(); } catch (_) {} try { _voiceEl.src = ''; } catch (_) {} _voiceEl = null; }
     } catch (_) {}
   }
@@ -152957,6 +153312,7 @@ window.announceMultikill     = announceMultikill;
         src.onended = function () { if (_voiceSrc === src) _voiceSrc = null; };
         _voiceSrc = src;
         src.start(0);
+        try { _lssStormDuck(audio, buf.duration || 0); } catch (_) {}   // (v52.67) the storm goes quiet under the line
         return buf.duration || 0;
       }
       _campVoiceViaElement(url, volume);
@@ -153290,10 +153646,12 @@ const CAMP_SEQS = {
   // inside / outside a ~hacked~ fragment of a Xorzo line.
   // (v52.10) whisperCps = the typing-speed factor for a `whisper: true` line.
   // (v52.66) voiceHold / voiceTail: how long a VOICED line stays - see `want` in _start.
+  // (v52.70) aiGap / aiWaitMax: a line waits for the ship AI to finish - see _schedule.
   const cfg = { cps: 42, holdMin: 1.6, readCps: 15, gap: 0.35, fadeIn: 0.18, fadeOut: 0.32,
                 beatDelay: { leg: 1.5, boss: 0.5 }, voiceVol: 0.95, flickHack: 0.55, flickIdle: 0.07, whisperCps: 0.6,
-                voiceHold: 'clip', voiceTail: 0.5 };
-  const D = { q: [], busy: false, cur: null, tok: 0, raf: 0, flick: 0, ft: 0, inHack: false, idle: [] };
+                voiceHold: 'clip', voiceTail: 0.5, aiGap: 0.3, aiWaitMax: 4 };
+  // (v52.70) idleAt = when the queue last drained (CampDialogue.idleFor, for the tips); aiT0 / aiHeld = _schedule's wait
+  const D = { q: [], busy: false, cur: null, tok: 0, raf: 0, flick: 0, ft: 0, inHack: false, idle: [], idleAt: 0, aiT0: 0, aiHeld: false };
   // (v49.47) waiters for "the queue has drained" (CampOpening sequences its beats on it)
   const _idleNow = () => { const w = D.idle.splice(0); for (const f of w) { try { f(); } catch (_) {} } };
   const $root = () => document.getElementById('camp-dialogue');
@@ -153360,13 +153718,32 @@ const CAMP_SEQS = {
     }, 70);
   }
 
+  // (v52.70) THE SHIP AI FINISHES FIRST. Owner: "the ship's ai voice when you start the legs, it interrupts the other
+  // voices, so maybe pause the dialogue until after the ship's ai is done that first line". A leg's lines start
+  // beatDelay.leg (1.5 s) after its first frame, while "Welcome aboard, <ship>. All systems online." is spoken as the
+  // loading cover lifts - so the two talked over each other. A line no longer STARTS while the ship AI is speaking,
+  // is about to (its clip still being fetched: announcerBusy), or still owes that welcome from behind the cover; it
+  // re-checks every 0.25 s and goes cfg.aiGap after the ship AI falls quiet. cfg.aiWaitMax caps the wait per line, so
+  // a stuck flag can never hold the story (aiWaitMax 0 = off). A line already talking is never cut.
+  function _shipAiBusy() {
+    let s = 0;
+    try { if (typeof window.announcerBusy === 'function') s = Math.max(s, +window.announcerBusy() || 0); } catch (_) {}
+    try { if (_welcomeAboardDeferred && _loadingAudioHold) s = Math.max(s, 0.5); } catch (_) {}   // runtime only: both declared later
+    return s;
+  }
   function _schedule(sec) {
     const tok = D.tok;
     setTimeout(() => {
       if (tok !== D.tok) return;
-      const it = D.q.shift();
-      if (!it) { D.busy = false; _fade(false); _idleNow(); return; }
-      _start(it);
+      if (!D.q.length) { D.busy = false; D.idleAt = performance.now(); _fade(false); _idleNow(); return; }
+      const ai = cfg.aiWaitMax > 0 ? _shipAiBusy() : 0;
+      if (ai > 0) {
+        if (!D.aiT0) D.aiT0 = performance.now();
+        if (performance.now() - D.aiT0 < cfg.aiWaitMax * 1000) { D.aiHeld = true; _schedule(Math.min(ai, 0.25)); return; }
+      }
+      if (D.aiHeld) { D.aiHeld = false; D.aiT0 = 0; if (ai <= 0) { _schedule(cfg.aiGap); return; } }   // a breath after it
+      D.aiT0 = 0;
+      _start(D.q.shift());
     }, Math.max(0, sec) * 1000);
   }
   function _kick() {
@@ -153424,6 +153801,7 @@ const CAMP_SEQS = {
     const tok = ++D.tok;   // every timer below belongs to THIS line; clear() or the next line voids them
     const el = $root(); if (!el) { D.busy = false; return; }
     D.cur = line;
+    line._at = performance.now();   // (v52.71) how long a cut tip was up (_tipCut)
     if (line.fx) { _startFx(line, tok, el); return; }   // (v52.12)
     el.classList.remove('cd-static');
     el.dataset.who = line.who || 'xorzo';
@@ -153434,7 +153812,7 @@ const CAMP_SEQS = {
     // = his "the Summoners said, angrily" - the prose attribution became the line's style
     el.classList.toggle('cd-think', !!line.think);
     el.classList.toggle('cd-angry', !!line.angry);
-    const nm = el.querySelector('.cd-name'); if (nm) nm.textContent = (NAMES[line.who] || String(line.who || '').toUpperCase()) + (line.whisper ? ' · WHISPERING' : (line.think ? ' · THINKING' : ''));
+    const nm = el.querySelector('.cd-name'); if (nm) nm.textContent = (NAMES[line.who] || String(line.who || '').toUpperCase()) + (line.whisper ? ' · WHISPERING' : (line.think ? ' · THINKING' : (line.tip ? ' · TIP' : '')));
     try { if (window.CampPortrait) window.CampPortrait.speak(line.who, line); } catch (_) {}   // (v52.31) the speaker, in person
     const txt = el.querySelector('.cd-text');
     const segs = _parse(String(line.text || ''));
@@ -153491,7 +153869,7 @@ const CAMP_SEQS = {
     if (tok !== D.tok) return;
     _stopFlicker();
     D.cur = null;
-    if (!D.q.length) { D.busy = false; _fade(false); _idleNow(); return; }
+    if (!D.q.length) { D.busy = false; D.idleAt = performance.now(); _fade(false); _idleNow(); return; }
     const d = D.q[0].delay || 0;
     if (d > 1.2) _fade(false);
     else { const t = $root() && $root().querySelector('.cd-text'); if (t) t.innerHTML = ''; }
@@ -153508,9 +153886,43 @@ const CAMP_SEQS = {
   // `extra` is merged into every item. (v52.13) `{ keep: true }` marks a SCENE that a new leg must not cut
   // (see beat).
   function enqueue(list, extra) {
+    if (list.some((x) => !(x && x.tip))) _yieldTip();   // (v52.70) a story line never waits behind a tip
     for (const x of list) { const it = _item(x); if (it) { if (extra) Object.assign(it, extra); D.q.push(it); } }
     _kick();
   }
+  // (v52.70) A TIP GIVES WAY. Queued tips are dropped, and the one on screen is cut: bumping D.tok kills its typing /
+  // hold / flicker timers (they all check it), and the queue restarts clean from whatever was just added.
+  function _yieldTip() {
+    const dropped = D.q.filter((x) => x.tip);
+    D.q = D.q.filter((x) => !x.tip);
+    for (const x of dropped) _tipCut(x, 0);
+    if (D.cur && D.cur.tip) {
+      const x = D.cur;
+      D.tok++;
+      if (D.raf) { cancelAnimationFrame(D.raf); D.raf = 0; }
+      if (D.ft) { clearTimeout(D.ft); D.ft = 0; }
+      _stopFlicker();
+      D.cur = null; D.busy = false;
+      _fade(false);
+      _tipCut(x, (performance.now() - (x._at || performance.now())) / 1000);
+    }
+  }
+  // (v52.71) tell a cut tip's owner how much of it could be read: seconds up over the hold _start gives an unvoiced line
+  function _tipCut(x, secs) {
+    if (!x || typeof x.onCut !== 'function') return;
+    const n = String(x.text || '').length, hold = n / cfg.cps + cfg.holdMin + n / cfg.readCps;
+    try { x.onCut(hold > 0 ? Math.max(0, secs) / hold : 1); } catch (_) {}
+  }
+  // (v52.70) A TIP: Xorzo, text only, lowest priority (window.__campTips drives them). Taken only when nothing is on
+  // screen or queued, and cut by any story line that arrives while it shows. Returns whether it was taken.
+  // (v52.71) onCut(frac) is called if a story line cuts it (frac = the share of its reading time it was up).
+  function tip(text, onCut) {
+    if (D.busy || D.q.length || !text) return false;
+    enqueue([{ who: 'xorzo', text: String(text), tip: true, onCut: (typeof onCut === 'function') ? onCut : null }]);
+    return true;
+  }
+  // seconds since the box last fell quiet (0 while anything is on screen or queued)
+  const idleFor = () => ((D.busy || D.q.length) ? 0 : (performance.now() - (D.idleAt || 0)) / 1000);
   // (v52.13) INTERJECT: the lines go to the FRONT of the queue, in order, after the line on screen. This is for
   // what the fight says - the arena's arrival, the Summoners slipping through, the open ring - so it is
   // heard when it happens, even while a long scene is talking. The scene picks up where it was. With
@@ -153519,11 +153931,12 @@ const CAMP_SEQS = {
     const items = [];
     for (const x of list) { const it = _item(x); if (it) items.push(it); }
     if (!items.length) return;
+    _yieldTip();   // (v52.70)
     D.q.unshift(...items);
     _kick();
   }
   function clear() {
-    D.tok++; D.q = []; D.busy = false; D.cur = null;
+    D.tok++; D.q = []; D.busy = false; D.cur = null; D.idleAt = performance.now(); D.aiT0 = 0; D.aiHeld = false;
     if (D.raf) { cancelAnimationFrame(D.raf); D.raf = 0; }
     if (D.ft) { clearTimeout(D.ft); D.ft = 0; }
     _stopFlicker();
@@ -153556,7 +153969,7 @@ const CAMP_SEQS = {
                          voices: _vset ? [..._vset] : null, lines: Object.keys(CAMP_LINES).length });
   // (v52.14) a `keep` scene is on screen or queued - the campaign pauses its action for it (_campSceneHold)
   const sceneActive = () => !!((D.cur && D.cur.keep) || D.q.some((x) => x.keep));
-  try { window.CampDialogue = window.__dlg = { say, line, play, beat, clear, state, cfg, whenIdle, sayLines, interject, sceneActive }; } catch (_) {}
+  try { window.CampDialogue = window.__dlg = { say, line, play, beat, clear, state, cfg, whenIdle, sayLines, interject, sceneActive, tip, idleFor }; } catch (_) {}
 })();
 
 // ⭐ (v52.31) CAMP PORTRAIT - THE SPEAKER, IN PERSON. Owner (2026-10-07): "just something for the whole campaign: we should
@@ -156823,7 +157236,9 @@ const CAMP_PROLOGUE = {
       src.playbackRate.value = 0.8 + Math.random() * 0.3;
       const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 500 + 5500 * Math.exp(-dist / 2400);
       const g = ctx.createGain(); g.gain.value = (big ? 1 : 0.72) * Math.min(1, Math.pow(2600 / Math.max(300, dist), 0.7));
-      src.connect(lp); lp.connect(g); g.connect(A.sfxBus || A.masterGain || ctx.destination);
+      // (v52.67) through the storm bus, which ducks under every voice line (STORM_DUCK)
+      let bus = null; try { bus = _lssStormBus(A); } catch (_) {}
+      src.connect(lp); lp.connect(g); g.connect(bus || A.sfxBus || A.masterGain || ctx.destination);
       src.start(ctx.currentTime + Math.min(2.4, dist / 1700));   // the sound after the light (sped up: a 5 s wait reads as a bug)
     } catch (_) {}
   }
