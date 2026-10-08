@@ -54,8 +54,11 @@ const RAW_JSON = join(RAW_DIR, 'raw.json');
 const LEVELER = join(ROOT, 'tools', 'campaign_voice_level.py');
 
 // voice ids from creative_list_voices (the owner's ElevenLabs workspace), 2026-10-07
+// (2026-10-08) the narrator is Gerald now (the owner: "i want to do a new voice for the narrator, i added gerald") - the
+// raspy older British "Gerald - Exciting Older Character", the one Gerald listed twice (the library entry and the
+// workspace's copy). Was Quentin 'Aa6nEBJJMKJwJkCx8VU2'. The id is in every narrator line's hash, so those 18 go stale.
 const CAST = {
-  narrator:  { name: 'Quentin',     id: 'Aa6nEBJJMKJwJkCx8VU2' },
+  narrator:  { name: 'Gerald',      id: 'fGIZlgPQ75MMlvQ6WxgY' },
   xorzo:     { name: 'Cybertronic', id: 'ZwO5tc54OHmMnLcq9Vep' },
   summoners: { name: 'Victor',      id: 'ttNi9wVM8M97tsxE7PFZ' },
   pilot:     { name: 'Grainger',    id: 'e6UxWrNGwfbzUCaklNVm' },
@@ -186,8 +189,15 @@ function syncMediaJson() {
   const mj = text ? JSON.parse(text) : { videos: [], voices: [], lines: [] };
   const before = (mj.lines || []).length;
   mj.lines = Object.keys(LINES).filter((id) => existsSync(voicePath(id)));
+  // (2026-10-08, v52.96) "rev": each clip's content version (the first 8 hex of the shipped file's sha1). The game asks for
+  // voice/<id>.mp3?v=<rev> (CampMedia.voiceUrl) and fetches with cache:'force-cache', so a re-made clip - the narrator's
+  // 18 when Gerald replaced Quentin - is a new URL, while every unchanged clip keeps its cached copy.
+  const prevRev = mj.rev || {};
+  mj.rev = {};
+  for (const id of mj.lines) mj.rev[id] = createHash('sha1').update(readFileSync(voicePath(id))).digest('hex').slice(0, 8);
+  const changed = mj.lines.filter((id) => prevRev[id] !== mj.rev[id]).length;
   writeFileSync(MEDIA_JSON, JSON.stringify(mj, null, 2).replace(/\n/g, eol) + eol);
-  console.log('media.json "lines": ' + before + ' -> ' + mj.lines.length);
+  console.log('media.json "lines": ' + before + ' -> ' + mj.lines.length + ' · "rev" changed for ' + changed);
 }
 const saveManifest = () => writeFileSync(MANIFEST, JSON.stringify(manifest, null, 2) + '\n');
 const saveRaw = () => { mkdirSync(RAW_DIR, { recursive: true }); writeFileSync(RAW_JSON, JSON.stringify(raw, null, 2) + '\n'); };

@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "52.95";
+const LSS_BUILD = "52.96";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -103272,8 +103272,13 @@ try { window.__stormDuck = STORM_DUCK; } catch (_) {}
         videos: new Set(Array.isArray(j && j.videos) ? j.videos : []),
         voices: new Set(Array.isArray(j && j.voices) ? j.voices : []),
         lines:  new Set(Array.isArray(j && j.lines) ? j.lines.filter((x) => typeof x === 'string') : []),
+        rev:    (j && j.rev && typeof j.rev === 'object') ? j.rev : {},   // (v52.96) see _campVoiceUrl
       }));
     return _mediaLoad;
+  }
+  function _campVoiceUrl(id) {
+    const r = _mediaList && _mediaList.rev ? _mediaList.rev[id] : null;
+    return _CAMP_BASE + 'voice/' + id + '.mp3' + (r ? '?v=' + encodeURIComponent(r) : '');
   }
   function _campPlayVideo(n, onEnd) {
     _campManifest().then((m) => {
@@ -103390,7 +103395,7 @@ try { window.__stormDuck = STORM_DUCK; } catch (_) {}
   }
 
   try {
-    window.CampMedia = { base: _campMediaBase, playVideo: _campPlayVideo, stopVideo: _campStopVideo, playVoice: _campPlayVoice, playVoiceUrl: _campPlayVoiceUrl, stopVoice: _campStopVoice, videoActive: function () { return _campVidPlaying; }, manifest: _campManifest };
+    window.CampMedia = { base: _campMediaBase, playVideo: _campPlayVideo, stopVideo: _campStopVideo, playVoice: _campPlayVoice, playVoiceUrl: _campPlayVoiceUrl, stopVoice: _campStopVoice, videoActive: function () { return _campVidPlaying; }, manifest: _campManifest, voiceUrl: _campVoiceUrl };
   } catch (_) {}
 })();
 
@@ -103749,7 +103754,7 @@ const CAMP_SEQS = {
     let voiceLen = 0;
     const voiceP = (line.id ? _voices() : Promise.resolve(null)).then((set) => {
       if (tok !== D.tok || !set || !set.has(line.id) || !window.CampMedia || !window.CampMedia.playVoiceUrl) return 0;
-      return window.CampMedia.playVoiceUrl(window.CampMedia.base() + 'voice/' + line.id + '.mp3', cfg.voiceVol);
+      return window.CampMedia.playVoiceUrl(window.CampMedia.voiceUrl ? window.CampMedia.voiceUrl(line.id) : (window.CampMedia.base() + 'voice/' + line.id + '.mp3'), cfg.voiceVol);
     }).then((len) => { voiceLen = +len || 0; }).catch(() => {});
     const typeDur = total / cps;
     let typed = false;

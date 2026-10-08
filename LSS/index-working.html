@@ -7550,7 +7550,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "52.95";
+const LSS_BUILD = "52.96";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -155313,8 +155313,19 @@ try { window.__stormDuck = STORM_DUCK; } catch (_) {}
         videos: new Set(Array.isArray(j && j.videos) ? j.videos : []),
         voices: new Set(Array.isArray(j && j.voices) ? j.voices : []),
         lines:  new Set(Array.isArray(j && j.lines) ? j.lines.filter((x) => typeof x === 'string') : []),
+        rev:    (j && j.rev && typeof j.rev === 'object') ? j.rev : {},   // (v52.96) see _campVoiceUrl
       }));
     return _mediaLoad;
+  }
+  // ⭐ (v52.96) A LINE'S CLIP URL CARRIES ITS CONTENT. Owner: "i want to do a new voice for the narrator, i added gerald" -
+  // the 18 narrator clips were re-made under the SAME file names, and _campPlayVoiceUrl fetches with cache:'force-cache',
+  // which serves any cached copy without asking the server: everyone who had heard the prologue would have kept Quentin.
+  // media.json now carries `rev` {line id: the first 8 hex of the levelled file's sha1} (written by tools/campaign_voice.mjs),
+  // and the URL is voice/<id>.mp3?v=<rev> - a re-made clip is a new URL, an unchanged one keeps its cache entry (and
+  // force-cache stays: the 13 MB of lines are never re-downloaded for nothing).
+  function _campVoiceUrl(id) {
+    const r = _mediaList && _mediaList.rev ? _mediaList.rev[id] : null;
+    return _CAMP_BASE + 'voice/' + id + '.mp3' + (r ? '?v=' + encodeURIComponent(r) : '');
   }
   function _campPlayVideo(n, onEnd) {
     _campManifest().then((m) => {
@@ -155436,7 +155447,7 @@ try { window.__stormDuck = STORM_DUCK; } catch (_) {}
   }
 
   try {
-    window.CampMedia = { base: _campMediaBase, playVideo: _campPlayVideo, stopVideo: _campStopVideo, playVoice: _campPlayVoice, playVoiceUrl: _campPlayVoiceUrl, stopVoice: _campStopVoice, videoActive: function () { return _campVidPlaying; }, manifest: _campManifest };
+    window.CampMedia = { base: _campMediaBase, playVideo: _campPlayVideo, stopVideo: _campStopVideo, playVoice: _campPlayVoice, playVoiceUrl: _campPlayVoiceUrl, stopVoice: _campStopVoice, videoActive: function () { return _campVidPlaying; }, manifest: _campManifest, voiceUrl: _campVoiceUrl };
   } catch (_) {}
 })();
 
@@ -155938,7 +155949,8 @@ const CAMP_SEQS = {
     let voiceLen = 0;
     const voiceP = (line.id ? _voices() : Promise.resolve(null)).then((set) => {
       if (tok !== D.tok || !set || !set.has(line.id) || !window.CampMedia || !window.CampMedia.playVoiceUrl) return 0;
-      return window.CampMedia.playVoiceUrl(window.CampMedia.base() + 'voice/' + line.id + '.mp3', cfg.voiceVol);
+      // (v52.96) the versioned URL (CampMedia.voiceUrl): a re-made clip must not come back out of the browser's cache
+      return window.CampMedia.playVoiceUrl(window.CampMedia.voiceUrl ? window.CampMedia.voiceUrl(line.id) : (window.CampMedia.base() + 'voice/' + line.id + '.mp3'), cfg.voiceVol);
     }).then((len) => { voiceLen = +len || 0; }).catch(() => {});
     const typeDur = total / cps;
     let typed = false;
