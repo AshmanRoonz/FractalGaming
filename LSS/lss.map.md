@@ -336,6 +336,10 @@ Mode descriptors + full single-player campaign: waves, bosses, escorts, hoard-bo
   - Sound: `sonar_ping_1` → `_2` → `_3` as you close. These are the same pings the hangar plays when Xorzo appears and the countdown plays for 3-2-1. ⛔ **SILENT since v52.58** (`CAMP_PING.sound: false`) — owner: *"the constant radar ping sound from xorzo is frigging annoying, we don't need a sound"*. The radar pings stay; `__campPing.cfg.sound = true` brings the sound back live.
   - Inside `revealD` 3,600 of the flagship (just over the tag's 3,500), or on any non-travel phase, `c._pingRevealed` is set and the real markers come back for the arena, the escape and the open ring.
   - Line `xz_ping` plays once a page session, only into a FREE box: the opening's arrival chains its lines, so a line queued mid-chain would land between two of them.
+    - ⭐ (v53.01) **Owner:** *"when xorzo says he found their ship in the first leg... it doesn't make sense... whose ship? he should say something more like, 'There's a strange anomaly on the radar... not part of the game. I'm tracking it with pings on your radar. You might want to check it out.'"*
+      - `xz_ping` now has the owner's words, re-voiced (Cybertronic, 137 credits, 8.24 s).
+      - The old line is kept as `xz_ping_them` ("I can sense their ship...") for a session that STARTS at a later leg, where you have met them. `_campPingTick` picks by `c.sceneIndex` (0 = the anomaly).
+      - Its clip is the old take restored from git and `--adopt`ed: no credits.
   - Each client runs its own pings (visual + sound); nothing touches the authority's PvE.
   - Knobs: `window.__campPing = { cfg, state(), ping() }`. `cfg.on = false` = the old always-visible end; `cfg.sound`.
   - Verified (background tab, Molten Core from the picker): hidden in travel, pings on schedule, echo arcs narrowing, reveal at 3.6 km with the portal and flagship back, desktop + mobile preset, 0 errors.
@@ -365,6 +369,34 @@ Mode descriptors + full single-player campaign: waves, bosses, escorts, hoard-bo
     - The release's `flickIdle = 0` stays; it is a no-op now that no hacked line plays after leg 4.
   - (v52.17-19) The takeover scene gains "How do we get the antivirus to your people?" / "...We have to wait for the Summoners to get tired of this."
   - `S.at <= 0` = due at once: the spawn sits a hair behind prog 0, so `prog < 0` would have held it until you moved.
+  - ⭐ **(v52.99-53.00) A LEG CAN BE LONGER, AND MOLTEN CORE IS (108.6 km of travel, was 34.6)** — owner: *"in leg 4, campaign, i made it to the end while we were mid conversation... so this leg needs to be physically longer"*.
+    - **Jump:** `A LEG CAN BE LONGER` (at `const CAMPAIGN_LEG_HALF_Z`) · `function _campLegRooms` / `function _campLegHalfZ` · `MOLTEN CORE IS ~3x LONGER` · `CHECKPOINTS ON A LONG LEG` (`const CAMP_CKPT`, beside `_campSceneTick`) · `game._campLegH =` (buildRoomGraphLevel).
+    - **Mechanism.** `CAMPAIGN_LEG_HALF_Z` 18,000 is the DEFAULT. A leg map may carry `legHalfZ` plus its own `rooms: _campLegRooms(H)`; `MAP_DATA.camp_volcanic.legHalfZ = 55000`. buildRoomGraphLevel stamps `game._campLegH` from the map it builds, and every campaign reader asks `_campLegHalfZ()`: the arena trigger (H − 1400), `_campPortalPos`, the ping target, the chase station, the scene's progress, `_campSpawnTravelWave`, the respawn, the route chevron and the travel scatter. ⚠ It reads the stamp, NOT `game.selectedMap`: the advance moves `selectedMap` to the next leg 2 s before this world is torn down.
+    - **What needed nothing.** The flight box: `_lssFlightArena` already grows to `game._levelSpan` (73.4 km here; the player, bot and bolt clamps all use it). The terrain: the streamer keeps only the chunks around you, clipped to FOOT. The outskirts summon: off in campaign.
+    - **Travel scatter.** Clusters scale with length, capped at 2× (26 here). The gas clouds keep their budget count.
+    - **The number.** The whisper scene is 22 voiced lines, 155 s of clips, ~176 s with the box's tails and gaps. It starts ~10 s in, once `leg3_a` frees the box, so it ends ~186 s into the leg. Waves pause for all of it.
+      - At ~550 u/s (light hull + dashes) you reach the arena ~14 s after "We got this!".
+      - At 450, ~58 s after; at 350 (medium), ~2 min after.
+    - **`atD`** (a CAMP_SCENES field): due at a DISTANCE flown from the spawn. Molten Core's is 2100, where `at` 0.06 fell on the old leg; 0.06 of the new one would be 6.5 km in, after the first wave.
+    - **Checkpoints (`CAMP_CKPT`).** A death respawns you at the leg's start, so the long leg has checkpoints one standard travel (34.6 km) apart, none in the last half step. Molten Core's are at −20,400 and +14,200.
+      - The spot you first passed each one at is kept. It is open space by construction.
+      - A death respawns you at the last one, facing +z (yaw π: `_facePlayerAtEnemy` falls back to the level centroid, which is behind you past mid-leg).
+      - Cleared on every leg start (`_campStartScene` → `c._ck = null`), so a leg always begins at its spawn. Standard legs have none.
+      - ⚠ **Do not key it on the build's spawn pick.** 52.99 did ("no `_spawnPickTake()` = a death respawn"). In the pane a campaign launch leaves that pick UNCONSUMED until the first death, so the first death went back to the start. 53.00 drops the guard.
+    - **Probe:** `__campLeg.state()` (H / span / box / foot / your z / ring / ck / phase) and `__campLeg.tp(z)`, which moves you down the axis to the crack's middle; a solo dev jump. `__campCkpt.on = false` = the old rule.
+    - **Offline:** `node tools/camp_leg_sim.mjs`, the real leg data + scenes + voice manifest. It shows each leg's travel against its scene at 350 / 450 / 550 and flies the checkpoint tick.
+      - (v53.01) **THE CRYSTAL CAVERNS TOO**, owner: *"and we can lengthen crystal caverns too"*. The sim had it reaching its arena 20-54 s BEFORE its scene (`onto_them`, ~113 s) ended.
+        - Now `legHalfZ` 37000 = 72.6 km. At 550 / 450 / 350 u/s you arrive 15 s / 43 s / 88 s after "Incoming!".
+        - `atD` 2100 on its scene; one checkpoint at −2,400.
+        - The sim now checks EVERY leg's scene against a 550 u/s arrival.
+      - ⚠ **Set a leg's `legHalfZ` BELOW the line that defines that leg.** The first cut put the Crystal Caverns' two lines under Molten Core's, above `MAP_DATA.camp_crystalcave = {...}`: a TypeError at boot.
+        - The sim runs that very slice, so it caught it. `node --check` (strip.py) never would: it checks syntax, not runtime.
+        - 53.01 boot-checked in the pane: menu up, 0 console errors.
+    - **Verified in the pane (53.00, Molten Core from the picker):**
+      - H 55000, foot [−55,650, 55,725], box 73,406, spawn z −55,187, ring at 55,000.
+      - Checkpoints recorded at −19,800 (n 1) and 14,500 (n 2), none past the second. Still 'travel' at 52,000, 'boss' at 53,700 (with `holdArena` off).
+      - A death at 30,000 respawned at 14,500 in open rock.
+      - The pane's localStorage was restored after.
   - **Per-leg ARRIVAL lines.** `CAMP_SEQS['arrive' + n]` plays INSTEAD of `arrive_xz` + `boss<n>` on the travel→boss edge. `arrive6` = The Broken Simulation's last arena and potty break, all the owner's: "There they are!!!" .. "Let's make him pee his pants!".
   - `ar_know` was reworded ("We're home, pilot! The artifact I told you about...") because he names the artifact in The Golden Deep now.
   - ⚠ The ANTIVIRUS PROGRESS is OFF (`CAMP_SCAN.on = false`; owner: "we aren't using the antivirus progress"). That means:

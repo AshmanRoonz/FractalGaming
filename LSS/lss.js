@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "52.98";
+const LSS_BUILD = "53.01";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -3478,6 +3478,7 @@ const CampaignMode = {
     c._pings = []; c._pingT = null; c._pingRevealed = false;   // (v52.10) Xorzo's pings
     c._sceneDone = false; c._scenePend = false; c._scenePendT = 0; c._sceneHoldPrev = false;   // (v52.14) the leg's scene
     c._tips = null;   // (v52.71) a leg start decides its tips anew (_campTipsTick): a replayed first leg teaches again
+    c._ck = null;     // (v52.99) a long leg's checkpoint (CAMP_CKPT): a new leg, or the same one again, starts with none
     if (typeof _clearBossPortal === 'function') _clearBossPortal();
     try { FormationDirector.clear(); } catch (_) {}
     if (game.entities) {
@@ -3519,6 +3520,7 @@ const CampaignMode = {
     try { _campScanTick(c, dt); } catch (e) { if (!c._scanErr) { c._scanErr = true; console.warn('[campaign] scan', e); } }   // (v49.49)
     try { _campPingTick(c, dt); } catch (e) { if (!c._pingErr) { c._pingErr = true; console.warn('[campaign] ping', e); } }   // (v52.10)
     try { _campSceneTick(c, dt); } catch (e) { if (!c._whErr) { c._whErr = true; console.warn('[campaign] scene', e); } }   // (v52.10 whisper -> v52.14 scenes)
+    try { _campCkptTick(c); } catch (e) { if (!c._ckErr) { c._ckErr = true; console.warn('[campaign] checkpoint', e); } }   // (v52.99) a long leg's checkpoints
     try { _campTipsTick(c, dt); } catch (e) { if (!c._tipErr) { c._tipErr = true; console.warn('[campaign] tips', e); } }   // (v52.70) Xorzo's tips
     
     
@@ -3573,7 +3575,7 @@ const CampaignMode = {
             }
           }
         }
-        if (_ca && player && player.position && player.position.z >= CAMPAIGN_LEG_HALF_Z - 1400 &&
+        if (_ca && player && player.position && player.position.z >= _campLegHalfZ() - 1400 &&   // (v52.99) this leg's length
             !(_hold && CAMP_SCENE_CFG.holdArena)) {   // (v52.14) the arena waits for a scene to finish
           c.phase = 'boss'; c.bossActive = true; c._travelSpawnTimer = null;
           c._arrived = true; c._formAtArrive = c._portalForm || 0;   // (v49.48) caught mid-opening
@@ -3586,7 +3588,6 @@ const CampaignMode = {
       case 'boss': {
         if (_ca) {
         if (!c._boss) {
-          const _bz = (typeof CAMPAIGN_LEG_HALF_Z !== 'undefined') ? CAMPAIGN_LEG_HALF_Z : 18000;
           const _defs = (typeof MONSTER_DEFS !== 'undefined' && MONSTER_DEFS) ? MONSTER_DEFS : null;
           const _key = _defs ? _defs[(c.sceneIndex || 0) % _defs.length].key : 'HallowWalker';
           const _at = _campPortalPos().add(new THREE.Vector3(0, CAMP_ARENA.summonUp, -CAMP_ARENA.summonBack));
@@ -5375,7 +5376,7 @@ function _campSpawnTravelWave(fromFlank, count) {
   if (!game.campaign || typeof Bot === 'undefined' || !player || !player.position) return;
   const keys = _campWaveShips(count || 3);   // (v49.65) count: the first leg's ramp (1, 2, then 3)
   const n = keys.length;
-  const bossZ = (typeof CAMPAIGN_LEG_HALF_Z !== 'undefined') ? CAMPAIGN_LEG_HALF_Z : 18000;
+  const bossZ = _campLegHalfZ();   // (v52.99) this leg's length
   const toBoss = new THREE.Vector3(0, 0, bossZ).sub(player.position);
   toBoss.y = 0; if (toBoss.lengthSq() < 1) toBoss.set(0, 0, 1); toBoss.normalize();
   const right = new THREE.Vector3(-toBoss.z, 0, toBoss.x);   
@@ -5535,7 +5536,7 @@ const CAMP_ARENA = { travelFull: 150, travelCap: 0.8, openAfter: 20, chanEvery: 
                      holdBack: 230, holdUp: 170, summonBack: 380, summonUp: -40, openOn: 'leave' };
 try { if (typeof window !== 'undefined') window.__campArena = CAMP_ARENA; } catch (_) {}
 const _campArenaV = new THREE.Vector3(), _campArenaV2 = new THREE.Vector3();
-function _campPortalPos(out) { return (out || new THREE.Vector3()).set(0, 0, CAMPAIGN_LEG_HALF_Z); }
+function _campPortalPos(out) { return (out || new THREE.Vector3()).set(0, 0, _campLegHalfZ()); }   // (v52.99) this leg's length
 function _campSpawnSummoner(c, at) {
   c._summonerSpawned = true;
   loadHoardModel(NEMESIS_SHIP).then((proto) => {
@@ -5681,7 +5682,7 @@ function _campPingTarget(out) {
     const e = ents[i];
     if (e && e.isNemesis && e.alive && e.position) return out.copy(e.position);
   }
-  return out.set(0, CAMP_ARENA.holdUp, CAMPAIGN_LEG_HALF_Z - CAMP_ARENA.holdBack);
+  return out.set(0, CAMP_ARENA.holdUp, _campLegHalfZ() - CAMP_ARENA.holdBack);   // (v52.99) this leg's length
 }
 function _campPingNear(d) {   // 0 at nearD .. 1 at farD
   const P = CAMP_PING;
@@ -5718,7 +5719,7 @@ function _campPingTick(c, dt) {
   }
   if (!_campPingSaid && c._pings && c._pings.length && window.CampDialogue) {
     const st = window.CampDialogue.state();
-    if (!st.busy && !st.queued) { _campPingSaid = true; window.CampDialogue.line('xz_ping'); }
+    if (!st.busy && !st.queued) { _campPingSaid = true; window.CampDialogue.line((c.sceneIndex | 0) === 0 ? 'xz_ping' : 'xz_ping_them'); }
   }
 }
 function _campPingMinimap(ctx, plot, cx, cy, scale) {
@@ -5768,9 +5769,9 @@ try {
 } catch (_) {}
 
 const CAMP_SCENES = [
-  { leg: 3, at: 0.06, seq: 'whisper', chase: true },   // Molten Core: the whisper, the tap, "We got this!" (v52.10-13); a quiet chase (v52.15)
+  { leg: 3, at: 0.06, atD: 2100, seq: 'whisper', chase: true },
   { leg: 4, at: 0.0, seq: 'takeover' },
-  { leg: 5, at: 0.06, seq: 'onto_them' },   // The Crystal Caverns: "we've been at this for a while", Matrix, Duke (v52.14)
+  { leg: 5, at: 0.06, atD: 2100, seq: 'onto_them' },   // The Crystal Caverns: "we've been at this for a while", Matrix, Duke (v52.14); (v53.01) atD as Molten Core's - the leg is 72.6 km now
 ];
 const CAMP_SCENE_CFG = { lullR: 5000, maxWait: 30, resumeIn: 2.0, holdArena: true };
 function _campSceneFor(c) {
@@ -5872,8 +5873,9 @@ function _campSceneTick(c, dt) {
   const S = _campSceneFor(c);
   if (!S || c._sceneDone || c.phase !== 'travel') { c._scenePend = false; return; }
   if (!player || !player.position || player.shipState === 'dead' || !window.CampDialogue) return;
-  const prog = (player.position.z + CAMPAIGN_LEG_HALF_Z) / (2 * CAMPAIGN_LEG_HALF_Z - 1400);
-  if (S.at > 0 && prog < S.at) return;   // (v52.17) at <= 0 = due at once (the spawn sits a hair behind 0)
+  const H = _campLegHalfZ(), prog = (player.position.z + H) / (2 * H - 1400);   // (v52.99) this leg's length
+  if (S.atD != null) { if (player.position.z + H < S.atD) return; }
+  else if (S.at > 0 && prog < S.at) return;   // (v52.17) at <= 0 = due at once (the spawn sits a hair behind 0)
   c._scenePend = true;
   c._scenePendT = (c._scenePendT || 0) + dt;
   const st = window.CampDialogue.state();
@@ -5881,6 +5883,36 @@ function _campSceneTick(c, dt) {
   c._sceneDone = true; c._scenePend = false;
   window.CampDialogue.play(S.seq, { keep: true });   // (v52.13) a scene: the next leg's start must not cut it
 }
+
+const CAMP_CKPT = { on: true, step: null };
+try { if (typeof window !== 'undefined') window.__campCkpt = CAMP_CKPT; } catch (_) {}
+function _campCkptTick(c) {
+  if (!CAMP_CKPT.on || !c || !player || !player.position || player.shipState === 'dead') return;
+  const H = _campLegHalfZ(), step = CAMP_CKPT.step || (2 * CAMPAIGN_LEG_HALF_Z - 1400);
+  const n = ((c._ck && c._ck.n) | 0) + 1, z = -H + n * step;
+  if (z > H - 1400 - step * 0.5 || player.position.z < z) return;
+  c._ck = { n, z, pos: player.position.clone() };
+}
+try {
+  if (typeof window !== 'undefined') window.__campLeg = {
+    state: () => {
+      const c = game.campaign, T = game.sandwichTerrain, P = game.bossPortal;
+      return { H: _campLegHalfZ(), map: game.selectedMap, span: Math.round(game._levelSpan || 0), box: Math.round(_lssFlightArena()),
+               foot: (T && T.FOOT) ? [Math.round(T.FOOT.minZ), Math.round(T.FOOT.maxZ)] : null,
+               z: (player && player.position) ? Math.round(player.position.z) : null, ring: P ? Math.round(P.position.z) : null,
+               phase: c ? c.phase : null, ck: (c && c._ck) ? { n: c._ck.n, z: Math.round(c._ck.pos.z) } : null };
+    },
+    tp: (z) => {
+      if (!player || !player.position || !isFinite(z)) return 'no player';
+      const T = game.sandwichTerrain, x = player.position.x;
+      let y = player.position.y;
+      try { if (T) y = (_stGroundYCarved(x, z, T) + _stCeilYCarved(x, z, T)) * 0.5; } catch (_) {}
+      player.position.set(x, y, z);
+      if (player.velocity) player.velocity.set(0, 0, 0);
+      return window.__campLeg.state();
+    },
+  };
+} catch (_) {}
 
 const CAMP_CHASE = { lead: 4600, swing: 1900, swingHz: 0.21, side: 900, up: 160, warpFar: 9500, behind: 900, home: 600 };
 const _campChaseV = new THREE.Vector3();
@@ -5895,7 +5927,7 @@ function _campChaseTick(c, dt, want) {
   const nb = c._nemesisBot;
   if (!nb || !nb.alive || !nb.position || nb._fleePortalPos) { c._chaseOn = false; return; }
   const K = CAMP_CHASE, A = CAMP_ARENA;
-  const stationZ = CAMPAIGN_LEG_HALF_Z - A.holdBack;
+  const stationZ = _campLegHalfZ() - A.holdBack;   // (v52.99) this leg's length
   if (!want) {
     if (!c._chaseOn) return;
     c._chaseOn = false; nb._campChase = false; nb._campHoldFire = false;
@@ -62705,8 +62737,8 @@ function spawnDynamicObjects(rooms) {
 
   if (typeof LSS !== 'undefined' && LSS.MODE === 'campaign' && typeof CAMPAIGN_LEG_HALF_Z !== 'undefined') {
     const _ct = game.sandwichTerrain;
-    const _cspan = CAMPAIGN_LEG_HALF_Z - 3500;   
-    const _cN = 13;
+    const _cspan = _campLegHalfZ() - 3500;   // (v52.99) this leg's length
+    const _cN = Math.round(13 * Math.min(2, Math.max(1, _cspan / (CAMPAIGN_LEG_HALF_Z - 3500))));
     for (let i = 0; i < _cN; i++) {
       const cz = -_cspan + (2 * _cspan) * (i + 0.5) / _cN + (Math.random() - 0.5) * 1400;
       const cx = (Math.random() - 0.5) * 2200;
@@ -62964,7 +62996,7 @@ function _spawnBasinClouds() {
   }
   if (typeof LSS !== 'undefined' && LSS.MODE === 'campaign' && typeof CAMPAIGN_LEG_HALF_Z !== 'undefined') {
     const _cbT = game.sandwichTerrain;
-    const _cbSpan = CAMPAIGN_LEG_HALF_Z - 3000;
+    const _cbSpan = _campLegHalfZ() - 3000;   // (v52.99) this leg's length (the count below is the gas budget's, not the length's)
     let _cbBudget = 220;
     if (_gasBudget && Number.isFinite(_gasBudget.detachedPockets)) _cbBudget = _gasBudget.detachedPockets;
     const _cbN = Math.max(24, Math.min(72, Math.floor(_cbBudget * 0.32)));
@@ -75682,8 +75714,11 @@ function respawnPlayer() {
   player.coreTimer = 0;
   let sp = _spawnPickTake() ||
            getValidSpawnPoint(_isAssault() ? _assaultSpawnSide(player.team) : (player.team === LSS.TEAM_FLEET_B ? 'B' : 'A'));
+  let _ckUsed = false;
   if (typeof LSS !== 'undefined' && LSS.MODE === 'campaign' && typeof CAMPAIGN_LEG_HALF_Z !== 'undefined') {
-    sp = new THREE.Vector3(0, 0, -CAMPAIGN_LEG_HALF_Z);
+    sp = new THREE.Vector3(0, 0, -_campLegHalfZ());   // (v52.99) this leg's length
+    const _ck = (game.campaign && CAMP_CKPT.on) ? game.campaign._ck : null;
+    if (_ck && _ck.pos) { sp = _ck.pos.clone(); _ckUsed = true; }
   }
   if (typeof _isCircuitRace === 'function' && _isCircuitRace()) {
     try {
@@ -75706,6 +75741,7 @@ function respawnPlayer() {
   }
   player.position.copy(sp);
   if (typeof _facePlayerAtEnemy === 'function') _facePlayerAtEnemy();
+  if (_ckUsed && player.euler) { player.euler.y = Math.PI; player.euler.x = 0; }
   if (typeof _faceRaceFirstRing === 'function') _faceRaceFirstRing();
 }
 
@@ -89206,8 +89242,8 @@ function updateMinimap() {
       if (_etx === null && _erun.gen) { _etx = _erun.gen.x; _etz = _erun.gen.z; }
     } else if (_navMode === 'campaign' && game.campaign && !game.bossPortal && !_campHide &&
                typeof CAMPAIGN_LEG_HALF_Z !== 'undefined') {
-      const _cdx = 0 - ccx, _cdz = CAMPAIGN_LEG_HALF_Z - ccz;
-      if (_cdx * _cdx + _cdz * _cdz > 2200 * 2200) { _etx = 0; _etz = CAMPAIGN_LEG_HALF_Z; }
+      const _cH = _campLegHalfZ(), _cdx = 0 - ccx, _cdz = _cH - ccz;   // (v52.99) this leg's length
+      if (_cdx * _cdx + _cdz * _cdz > 2200 * 2200) { _etx = 0; _etz = _cH; }
     } else if (_navMode === 'push' && game._push && typeof _pushFrontIdx === 'function') {
       const _fi = _pushFrontIdx(player.team), _fp = (_fi >= 0) ? game._push.pts[_fi] : null;
       if (_fp) { const _ddx = _fp.x - ccx, _ddz = _fp.z - ccz; if (_ddx * _ddx + _ddz * _ddz > 600 * 600) { _etx = _fp.x; _etz = _fp.z; } }
@@ -99939,17 +99975,21 @@ MAP_DATA.race_archipelago = Object.assign({}, MAP_DATA.hub_overworld, {
 });
 
 const CAMPAIGN_LEG_HALF_Z = 18000;
+function _campLegRooms(H) {
+  return [
+    { id: 'spawn', team: 'A',  x: 0, y: 0, z: -H, r: SU * 4.0 },
+    { id: 'boss',  team: null, x: 0, y: 0, z:  H, r: SU * 4.5, champion: true },
+  ];
+}
+function _campLegHalfZ() { return (typeof game !== 'undefined' && game && game._campLegH) || CAMPAIGN_LEG_HALF_Z; }
 const CAMPAIGN_LEG_MAP = {
   name: 'The Approach',
   description: 'Spawn arena, open mountainous caverns, a boss arena far ahead.',
   defaultTheme: 'Rocky',
-  _previewJourney: true,   
+  _previewJourney: true,
   palette: [0x1a2440, 0x202a48, 0x18203a, 0x241c40, 0x1c2848, 0x182038, 0x202848, 0x1a2240],
-  rooms: [
-    { id: 'spawn', team: 'A',  x: 0, y: 0, z: -CAMPAIGN_LEG_HALF_Z, r: SU * 4.0 },                 
-    { id: 'boss',  team: null, x: 0, y: 0, z:  CAMPAIGN_LEG_HALF_Z, r: SU * 4.5, champion: true },  
-  ],
-  tunnels: [],   
+  rooms: _campLegRooms(CAMPAIGN_LEG_HALF_Z),
+  tunnels: [],
 };
 MAP_DATA.camp_approach = CAMPAIGN_LEG_MAP;
 
@@ -100541,9 +100581,13 @@ function _lssGenEndlessLevel(base) {
 MAP_DATA.camp_grassy      = { ...CAMPAIGN_LEG_MAP, name: 'Verdant Pass',          description: 'Rolling green highlands under an open sky.',                 defaultTheme: 'Grassy',            palette: [0x33571f,0x4d7a33,0x7b7a5a,0x5fae4e,0x3f5e26,0x2c3f18,0x6f6552,0x4d7a33] };
 MAP_DATA.camp_snow        = { ...CAMPAIGN_LEG_MAP, name: 'Frozen Reach',          description: 'Glacial peaks and wind-scoured snowfields.',                defaultTheme: 'Snow',              palette: [0x6f8aa0,0xa9c2d6,0xd8e6f2,0xffffff,0x8fa6bd,0xbcd2e0,0x9fb4c6,0xeaf4ff] };
 MAP_DATA.camp_volcanic    = { ...CAMPAIGN_LEG_MAP, name: 'Molten Core',           description: 'Lava-veined mountains beneath an ash-choked sky.',          defaultTheme: 'Volcanic',          palette: [0xb5391a,0x5a2a22,0x36302e,0x9a9088,0x2a2220,0x6e5a50,0xc04020,0x803020] };
+MAP_DATA.camp_volcanic.legHalfZ = 55000;
+MAP_DATA.camp_volcanic.rooms = _campLegRooms(MAP_DATA.camp_volcanic.legHalfZ);
 MAP_DATA.camp_goldmine    = { ...CAMPAIGN_LEG_MAP, name: 'The Golden Deep',       description: 'Gold-ore veins glittering through the bronze rock.',         defaultTheme: 'Gold Mine',         palette: [0x8a6a2e,0xcea44e,0xf2dc92,0x5a4a32,0x34261a,0x705428,0xb8902e,0xead08a] };
 MAP_DATA.camp_crystalcave = { ...CAMPAIGN_LEG_MAP, name: 'The Crystal Caverns',   description: 'A magical cavern of glowing crystals and drifting sprites.', defaultTheme: 'Crystal Cavern',    palette: [0x3a4a78,0x6a7ac0,0xc8d4ff,0x2a3258,0x141838,0x4a5398,0x7a6ad0,0x9a8aff] };
 MAP_DATA.camp_brokensim   = { ...CAMPAIGN_LEG_MAP, name: 'The Broken Simulation', description: 'Reality fails around you — the final confrontation.',        defaultTheme: 'Broken Simulation', palette: [0x4a4a54,0x70707e,0xc8c8d6,0x42424c,0x1a1428,0x3a3a44,0x6a5a8a,0x8a7aaa] };
+MAP_DATA.camp_crystalcave.legHalfZ = 37000;
+MAP_DATA.camp_crystalcave.rooms = _campLegRooms(MAP_DATA.camp_crystalcave.legHalfZ);
 const CAMPAIGN_LEGS = [
   { key: 'camp_approach', name: 'The Approach' },
   { key: 'camp_grassy', name: 'Verdant Pass' },
@@ -101988,6 +102032,7 @@ function buildRoomGraphLevel(level) {
     bMinZ=Math.min(bMinZ,seg.a.z-sr,seg.b.z-sr);bMaxZ=Math.max(bMaxZ,seg.a.z+sr,seg.b.z+sr);
   }
   game._levelSpan = isFinite(bMinX) ? Math.max(Math.abs(bMinX), Math.abs(bMaxX), Math.abs(bMinZ), Math.abs(bMaxZ)) : 0;
+  game._campLegH = (level && level.legHalfZ) || CAMPAIGN_LEG_HALF_Z;
 
   if (game.sandwichTerrainEnabled === undefined) game.sandwichTerrainEnabled = true;
   if (_keepTerrain) {
@@ -103545,7 +103590,8 @@ const CAMP_LINES = {
   pl_incoming: { who: 'pilot', text: "That was all you! But let's not let them down! Incoming!" },
   xz_lastlife: { who: 'xorzo', text: "Pilot... that was your last respawn. From here on, it's up to your mind. Don't let go." },
   xz_gameover: { who: 'xorzo', text: 'Pilot? ...Pilot!' },
-  xz_ping:    { who: 'xorzo', text: 'I can sense their ship. Follow my pings on the radar, pilot.' },
+  xz_ping:    { who: 'xorzo', text: "There's a strange anomaly on the radar... not part of the game. I'm tracking it with pings on your radar. You might want to check it out." },
+  xz_ping_them: { who: 'xorzo', text: 'I can sense their ship. Follow my pings on the radar, pilot.' },
   arrive_xz:  { who: 'xorzo', text: "There - they're opening a portal!" },
   sum_escape: { who: 'summoners', text: 'You cannot catch what you cannot hold.' },
   xz_follow:  { who: 'xorzo', text: "They couldn't close it behind them. The portal's still open - after them!" },

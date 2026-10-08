@@ -7550,7 +7550,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "52.98";
+const LSS_BUILD = "53.01";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -12588,6 +12588,7 @@ const CampaignMode = {
     c._pings = []; c._pingT = null; c._pingRevealed = false;   // (v52.10) Xorzo's pings
     c._sceneDone = false; c._scenePend = false; c._scenePendT = 0; c._sceneHoldPrev = false;   // (v52.14) the leg's scene
     c._tips = null;   // (v52.71) a leg start decides its tips anew (_campTipsTick): a replayed first leg teaches again
+    c._ck = null;     // (v52.99) a long leg's checkpoint (CAMP_CKPT): a new leg, or the same one again, starts with none
     if (typeof _clearBossPortal === 'function') _clearBossPortal();
     try { FormationDirector.clear(); } catch (_) {}
     if (game.entities) {
@@ -12653,6 +12654,7 @@ const CampaignMode = {
     try { _campScanTick(c, dt); } catch (e) { if (!c._scanErr) { c._scanErr = true; console.warn('[campaign] scan', e); } }   // (v49.49)
     try { _campPingTick(c, dt); } catch (e) { if (!c._pingErr) { c._pingErr = true; console.warn('[campaign] ping', e); } }   // (v52.10)
     try { _campSceneTick(c, dt); } catch (e) { if (!c._whErr) { c._whErr = true; console.warn('[campaign] scene', e); } }   // (v52.10 whisper -> v52.14 scenes)
+    try { _campCkptTick(c); } catch (e) { if (!c._ckErr) { c._ckErr = true; console.warn('[campaign] checkpoint', e); } }   // (v52.99) a long leg's checkpoints
     try { _campTipsTick(c, dt); } catch (e) { if (!c._tipErr) { c._tipErr = true; console.warn('[campaign] tips', e); } }   // (v52.70) Xorzo's tips
     
     
@@ -12754,7 +12756,7 @@ const CampaignMode = {
         // (2.3) Reached the boss arena (the far +z end of the leg) → boss fight.
         // (v32.76) Authority decides (its own player.z leads the group in co-op for
         // now) + broadcasts the phase so every peer flips to 'boss' together.
-        if (_ca && player && player.position && player.position.z >= CAMPAIGN_LEG_HALF_Z - 1400 &&
+        if (_ca && player && player.position && player.position.z >= _campLegHalfZ() - 1400 &&   // (v52.99) this leg's length
             !(_hold && CAMP_SCENE_CFG.holdArena)) {   // (v52.14) the arena waits for a scene to finish
           c.phase = 'boss'; c.bossActive = true; c._travelSpawnTimer = null;
           c._arrived = true; c._formAtArrive = c._portalForm || 0;   // (v49.48) caught mid-opening
@@ -12776,7 +12778,6 @@ const CampaignMode = {
         // inits ~6s into 'playing', so _campSummonBoss returns null until then —
         // this naturally retries each frame. The boss rotates per leg.
         if (!c._boss) {
-          const _bz = (typeof CAMPAIGN_LEG_HALF_Z !== 'undefined') ? CAMPAIGN_LEG_HALF_Z : 18000;
           const _defs = (typeof MONSTER_DEFS !== 'undefined' && MONSTER_DEFS) ? MONSTER_DEFS : null;
           const _key = _defs ? _defs[(c.sceneIndex || 0) % _defs.length].key : 'HallowWalker';
           // (v49.48) Summoned IN FRONT of the ring (the ring owns the arena centre now), with a bolt from
@@ -15433,7 +15434,7 @@ function _campSpawnTravelWave(fromFlank, count) {
   if (!game.campaign || typeof Bot === 'undefined' || !player || !player.position) return;
   const keys = _campWaveShips(count || 3);   // (v49.65) count: the first leg's ramp (1, 2, then 3)
   const n = keys.length;
-  const bossZ = (typeof CAMPAIGN_LEG_HALF_Z !== 'undefined') ? CAMPAIGN_LEG_HALF_Z : 18000;
+  const bossZ = _campLegHalfZ();   // (v52.99) this leg's length
   const toBoss = new THREE.Vector3(0, 0, bossZ).sub(player.position);
   toBoss.y = 0; if (toBoss.lengthSq() < 1) toBoss.set(0, 0, 1); toBoss.normalize();
   const right = new THREE.Vector3(-toBoss.z, 0, toBoss.x);   
@@ -15664,7 +15665,7 @@ const CAMP_ARENA = { travelFull: 150, travelCap: 0.8, openAfter: 20, chanEvery: 
                      holdBack: 230, holdUp: 170, summonBack: 380, summonUp: -40, openOn: 'leave' };
 try { if (typeof window !== 'undefined') window.__campArena = CAMP_ARENA; } catch (_) {}
 const _campArenaV = new THREE.Vector3(), _campArenaV2 = new THREE.Vector3();
-function _campPortalPos(out) { return (out || new THREE.Vector3()).set(0, 0, CAMPAIGN_LEG_HALF_Z); }
+function _campPortalPos(out) { return (out || new THREE.Vector3()).set(0, 0, _campLegHalfZ()); }   // (v52.99) this leg's length
 function _campSpawnSummoner(c, at) {
   c._summonerSpawned = true;
   loadHoardModel(NEMESIS_SHIP).then((proto) => {
@@ -15877,7 +15878,7 @@ function _campPingTarget(out) {
     const e = ents[i];
     if (e && e.isNemesis && e.alive && e.position) return out.copy(e.position);
   }
-  return out.set(0, CAMP_ARENA.holdUp, CAMPAIGN_LEG_HALF_Z - CAMP_ARENA.holdBack);
+  return out.set(0, CAMP_ARENA.holdUp, _campLegHalfZ() - CAMP_ARENA.holdBack);   // (v52.99) this leg's length
 }
 function _campPingNear(d) {   // 0 at nearD .. 1 at farD
   const P = CAMP_PING;
@@ -15917,7 +15918,8 @@ function _campPingTick(c, dt) {
   // chains its lines one after another, so a line queued in the middle would land between two of them.
   if (!_campPingSaid && c._pings && c._pings.length && window.CampDialogue) {
     const st = window.CampDialogue.state();
-    if (!st.busy && !st.queued) { _campPingSaid = true; window.CampDialogue.line('xz_ping'); }
+    // (v53.01) the first leg: the anomaly (nobody has met the Summoners yet); a session resumed later: their ship
+    if (!st.busy && !st.queued) { _campPingSaid = true; window.CampDialogue.line((c.sceneIndex | 0) === 0 ? 'xz_ping' : 'xz_ping_them'); }
   }
 }
 // The radar half. updateMinimap calls it right after its portal layer, so a ping draws under every contact.
@@ -16003,10 +16005,12 @@ try {
 // Knobs: window.__campScene = { list, cfg, state(), play(seq) }. window.__campWhisper.play() is kept as an
 // alias for Molten Core's.
 const CAMP_SCENES = [
-  { leg: 3, at: 0.06, seq: 'whisper', chase: true },   // Molten Core: the whisper, the tap, "We got this!" (v52.10-13); a quiet chase (v52.15)
+  // Molten Core: the whisper, the tap, "We got this!" (v52.10-13); a quiet chase (v52.15). (v52.99) atD 2100 = where its
+  // `at` 0.06 fell on the old 34.6 km leg (the leg is 108.6 km now; 0.06 of that would be 6.5 km in, after the first wave)
+  { leg: 3, at: 0.06, atD: 2100, seq: 'whisper', chase: true },
   // (v52.16-17) The Golden Deep: Xorzo takes the ship, cleans himself, gets "fired", names the artifact. at 0 = at once.
   { leg: 4, at: 0.0, seq: 'takeover' },
-  { leg: 5, at: 0.06, seq: 'onto_them' },   // The Crystal Caverns: "we've been at this for a while", Matrix, Duke (v52.14)
+  { leg: 5, at: 0.06, atD: 2100, seq: 'onto_them' },   // The Crystal Caverns: "we've been at this for a while", Matrix, Duke (v52.14); (v53.01) atD as Molten Core's - the leg is 72.6 km now
 ];
 const CAMP_SCENE_CFG = { lullR: 5000, maxWait: 30, resumeIn: 2.0, holdArena: true };
 function _campSceneFor(c) {
@@ -16132,8 +16136,11 @@ function _campSceneTick(c, dt) {
   const S = _campSceneFor(c);
   if (!S || c._sceneDone || c.phase !== 'travel') { c._scenePend = false; return; }
   if (!player || !player.position || player.shipState === 'dead' || !window.CampDialogue) return;
-  const prog = (player.position.z + CAMPAIGN_LEG_HALF_Z) / (2 * CAMPAIGN_LEG_HALF_Z - 1400);
-  if (S.at > 0 && prog < S.at) return;   // (v52.17) at <= 0 = due at once (the spawn sits a hair behind 0)
+  const H = _campLegHalfZ(), prog = (player.position.z + H) / (2 * H - 1400);   // (v52.99) this leg's length
+  // (v52.99) `atD`: due at a DISTANCE flown from the spawn instead of a share of the travel - a longer leg must not push
+  // a scene that waits for "as soon as the leg's opening line frees the box" (Molten Core's) kilometres further in
+  if (S.atD != null) { if (player.position.z + H < S.atD) return; }
+  else if (S.at > 0 && prog < S.at) return;   // (v52.17) at <= 0 = due at once (the spawn sits a hair behind 0)
   c._scenePend = true;
   c._scenePendT = (c._scenePendT || 0) + dt;
   const st = window.CampDialogue.state();
@@ -16141,6 +16148,48 @@ function _campSceneTick(c, dt) {
   c._sceneDone = true; c._scenePend = false;
   window.CampDialogue.play(S.seq, { keep: true });   // (v52.13) a scene: the next leg's start must not cut it
 }
+
+// ⭐ (v52.99) CHECKPOINTS ON A LONG LEG. A campaign death respawns you at the leg's START (respawnPlayer) - on a standard
+// leg that is at most its 34.6 km of travel to fly again. Molten Core is 108.6 km now (MAP_DATA.camp_volcanic.legHalfZ),
+// and dying in its arena would have meant ~4 minutes back. So a leg longer than standard keeps the standard promise:
+// checkpoints one standard travel (`step`, default 2 x CAMPAIGN_LEG_HALF_Z - 1400) apart from the start. The first time you
+// pass one alive, the spot you passed it at is kept (open space by construction: you were flying there), and a death
+// respawns you there, facing the arena. None in the last half step before the arena, so a standard leg has none at all
+// and is unchanged; Molten Core's are at z -20,400 and +14,200 (an arena death costs 39 km, a standard leg's 34.6).
+// Per pilot (co-op peers keep their own) and per leg: _campStartScene clears it on every leg start, before that start's
+// respawn, so a leg (or a replay of it) always begins at its spawn arena. `on: false` = the old start-of-leg rule everywhere.
+const CAMP_CKPT = { on: true, step: null };
+try { if (typeof window !== 'undefined') window.__campCkpt = CAMP_CKPT; } catch (_) {}
+function _campCkptTick(c) {
+  if (!CAMP_CKPT.on || !c || !player || !player.position || player.shipState === 'dead') return;
+  const H = _campLegHalfZ(), step = CAMP_CKPT.step || (2 * CAMPAIGN_LEG_HALF_Z - 1400);
+  const n = ((c._ck && c._ck.n) | 0) + 1, z = -H + n * step;
+  if (z > H - 1400 - step * 0.5 || player.position.z < z) return;
+  c._ck = { n, z, pos: player.position.clone() };
+}
+// Probe (v52.99): window.__campLeg.state() = this leg's length, span, flight box, footprint, your z, the ring, the checkpoint
+// and the phase; __campLeg.tp(z) moves you down the leg's axis to z, in the middle of the crack there (a solo dev jump
+// for the arena trigger and the checkpoints - the travel is 108 km of flying otherwise).
+try {
+  if (typeof window !== 'undefined') window.__campLeg = {
+    state: () => {
+      const c = game.campaign, T = game.sandwichTerrain, P = game.bossPortal;
+      return { H: _campLegHalfZ(), map: game.selectedMap, span: Math.round(game._levelSpan || 0), box: Math.round(_lssFlightArena()),
+               foot: (T && T.FOOT) ? [Math.round(T.FOOT.minZ), Math.round(T.FOOT.maxZ)] : null,
+               z: (player && player.position) ? Math.round(player.position.z) : null, ring: P ? Math.round(P.position.z) : null,
+               phase: c ? c.phase : null, ck: (c && c._ck) ? { n: c._ck.n, z: Math.round(c._ck.pos.z) } : null };
+    },
+    tp: (z) => {
+      if (!player || !player.position || !isFinite(z)) return 'no player';
+      const T = game.sandwichTerrain, x = player.position.x;
+      let y = player.position.y;
+      try { if (T) y = (_stGroundYCarved(x, z, T) + _stCeilYCarved(x, z, T)) * 0.5; } catch (_) {}
+      player.position.set(x, y, z);
+      if (player.velocity) player.velocity.set(0, 0, 0);
+      return window.__campLeg.state();
+    },
+  };
+} catch (_) {}
 
 // ⭐ (v52.15) A QUIET CHASE DURING A LONG TALK (a scene with `chase: true`: Molten Core's).
 // Owner: "during the molten core long talk, xorzo could keep marking the summoner's ship on the map, and we
@@ -16172,7 +16221,7 @@ function _campChaseTick(c, dt, want) {
   const nb = c._nemesisBot;
   if (!nb || !nb.alive || !nb.position || nb._fleePortalPos) { c._chaseOn = false; return; }
   const K = CAMP_CHASE, A = CAMP_ARENA;
-  const stationZ = CAMPAIGN_LEG_HALF_Z - A.holdBack;
+  const stationZ = _campLegHalfZ() - A.holdBack;   // (v52.99) this leg's length
   if (!want) {
     if (!c._chaseOn) return;
     // the talk is over: home to the station, guns back on
@@ -96658,8 +96707,10 @@ function spawnDynamicObjects(rooms) {
   // by the rocks" (with the rock dots that push the clouds around).
   if (typeof LSS !== 'undefined' && LSS.MODE === 'campaign' && typeof CAMPAIGN_LEG_HALF_Z !== 'undefined') {
     const _ct = game.sandwichTerrain;
-    const _cspan = CAMPAIGN_LEG_HALF_Z - 3500;   
-    const _cN = 13;
+    const _cspan = _campLegHalfZ() - 3500;   // (v52.99) this leg's length
+    // (v52.99) 13 per standard leg; a longer one gets more, up to twice that (each is an always-updated cluster with its
+    // own atom-smoke cloud - an arena carries a few dozen - so the density thins on a 3x leg rather than tripling them)
+    const _cN = Math.round(13 * Math.min(2, Math.max(1, _cspan / (CAMPAIGN_LEG_HALF_Z - 3500))));
     for (let i = 0; i < _cN; i++) {
       const cz = -_cspan + (2 * _cspan) * (i + 0.5) / _cN + (Math.random() - 0.5) * 1400;
       const cx = (Math.random() - 0.5) * 2200;
@@ -97019,7 +97070,7 @@ function _spawnBasinClouds() {
   // ±1100 to hug the central flight path — so none float beyond the playable corridor.
   if (typeof LSS !== 'undefined' && LSS.MODE === 'campaign' && typeof CAMPAIGN_LEG_HALF_Z !== 'undefined') {
     const _cbT = game.sandwichTerrain;
-    const _cbSpan = CAMPAIGN_LEG_HALF_Z - 3000;
+    const _cbSpan = _campLegHalfZ() - 3000;   // (v52.99) this leg's length (the count below is the gas budget's, not the length's)
     let _cbBudget = 220;
     if (_gasBudget && Number.isFinite(_gasBudget.detachedPockets)) _cbBudget = _gasBudget.detachedPockets;
     const _cbN = Math.max(24, Math.min(72, Math.floor(_cbBudget * 0.32)));
@@ -115730,8 +115781,15 @@ function respawnPlayer() {
            getValidSpawnPoint(_isAssault() ? _assaultSpawnSide(player.team) : (player.team === LSS.TEAM_FLEET_B ? 'B' : 'A'));
   // (M2) Campaign : always respawn at the START of the leg (the spawn arena at
   // -HALF_Z), not wherever the team-spawn logic lands on the Z-oriented leg map.
+  let _ckUsed = false;
   if (typeof LSS !== 'undefined' && LSS.MODE === 'campaign' && typeof CAMPAIGN_LEG_HALF_Z !== 'undefined') {
-    sp = new THREE.Vector3(0, 0, -CAMPAIGN_LEG_HALF_Z);
+    sp = new THREE.Vector3(0, 0, -_campLegHalfZ());   // (v52.99) this leg's length
+    // (v52.99) ...or, on a long leg, the last CHECKPOINT you passed (CAMP_CKPT). A leg's first spawn never finds one:
+    // _campStartScene clears it on every leg start, and runs before that start's respawn (onBuildWorld / onWaveStart).
+    // ⚠ Not keyed on the build's spawn pick (_spawnPickTake): measured in the pane, a campaign launch leaves that pick
+    // UNCONSUMED until the first death, so "no pick = a death respawn" sent the first death back to the start.
+    const _ck = (game.campaign && CAMP_CKPT.on) ? game.campaign._ck : null;
+    if (_ck && _ck.pos) { sp = _ck.pos.clone(); _ckUsed = true; }
   }
   // (v46.83) RACE CIRCUITS: back WHERE YOU DIED (the respawn tick's latch), lap progress intact; a
   // respawn that is not that (a round reset) keeps the spawn pick / start line it was handed.
@@ -115772,6 +115830,9 @@ function respawnPlayer() {
   // level pitch. (Camera = setFromEuler(player.euler), YXZ ; forward at
   // yaw y is (-sin y, 0, -cos y), so y = atan2(px-cx, pz-cz) aims at center.)
   if (typeof _facePlayerAtEnemy === 'function') _facePlayerAtEnemy();
+  // (v52.99) a campaign checkpoint faces the ARENA (+z: forward at yaw PI), not the level's centroid - which, with no live
+  // hoard yet, is the middle of the leg, i.e. behind you once you are past it
+  if (_ckUsed && player.euler) { player.euler.y = Math.PI; player.euler.x = 0; }
   // (v36.71) Race overrides that: face the first gate, not the rival fleet.
   if (typeof _faceRaceFirstRing === 'function') _faceRaceFirstRing();
 }
@@ -136350,8 +136411,8 @@ function updateMinimap() {
       if (_etx === null && _erun.gen) { _etx = _erun.gen.x; _etz = _erun.gen.z; }
     } else if (_navMode === 'campaign' && game.campaign && !game.bossPortal && !_campHide &&
                typeof CAMPAIGN_LEG_HALF_Z !== 'undefined') {
-      const _cdx = 0 - ccx, _cdz = CAMPAIGN_LEG_HALF_Z - ccz;
-      if (_cdx * _cdx + _cdz * _cdz > 2200 * 2200) { _etx = 0; _etz = CAMPAIGN_LEG_HALF_Z; }
+      const _cH = _campLegHalfZ(), _cdx = 0 - ccx, _cdz = _cH - ccz;   // (v52.99) this leg's length
+      if (_cdx * _cdx + _cdz * _cdz > 2200 * 2200) { _etx = 0; _etz = _cH; }
     } else if (_navMode === 'push' && game._push && typeof _pushFrontIdx === 'function') {
       // (v52.90) TEAM DEATHPUSH: the fleet's front point - the next one it has to take
       const _fi = _pushFrontIdx(player.team), _fp = (_fi >= 0) ? game._push.pts[_fi] : null;
@@ -151005,18 +151066,32 @@ MAP_DATA.race_archipelago = Object.assign({}, MAP_DATA.hub_overworld, {
 // race carousels (see _visibleMapKeys).
 // CAMPAIGN_LEG_HALF_Z = world-center -> each arena. Tunable : push it up (and
 // expand ARENA_SIZE) for a longer journey toward the ~10-min target.
+// ⭐ (v52.99) ...PER LEG NOW. This is the DEFAULT; a leg map can carry its own `legHalfZ` with rooms built by
+// _campLegRooms(that). Owner, in Molten Core: "i made it to the end while we were mid conversation... so this leg
+// needs to be physically longer". Every campaign reader goes through _campLegHalfZ() (the leg buildRoomGraphLevel
+// last built), so the arena trigger, the portal, the spawn, the travel waves, the chase, the scene's progress, the
+// route chevron and the travel scatter all follow the rooms actually carved. ARENA_SIZE needs nothing: since v47.90
+// _lssFlightArena grows the flyable box to the level's span (game._levelSpan), and the streamer only ever holds the
+// chunks around you, so a longer FOOT costs no terrain. A long leg also gets CHECKPOINTS (CAMP_CKPT, beside
+// _campSceneTick) so a death never sends you much further back than a standard leg's whole travel.
 const CAMPAIGN_LEG_HALF_Z = 18000;
+function _campLegRooms(H) {
+  return [
+    { id: 'spawn', team: 'A',  x: 0, y: 0, z: -H, r: SU * 4.0 },
+    { id: 'boss',  team: null, x: 0, y: 0, z:  H, r: SU * 4.5, champion: true },
+  ];
+}
+// the leg being flown (stamped by buildRoomGraphLevel from the map it builds) - not game.selectedMap, which the advance
+// moves to the NEXT leg 2 s before this one's world is torn down
+function _campLegHalfZ() { return (typeof game !== 'undefined' && game && game._campLegH) || CAMPAIGN_LEG_HALF_Z; }
 const CAMPAIGN_LEG_MAP = {
   name: 'The Approach',
   description: 'Spawn arena, open mountainous caverns, a boss arena far ahead.',
   defaultTheme: 'Rocky',
-  _previewJourney: true,   
+  _previewJourney: true,
   palette: [0x1a2440, 0x202a48, 0x18203a, 0x241c40, 0x1c2848, 0x182038, 0x202848, 0x1a2240],
-  rooms: [
-    { id: 'spawn', team: 'A',  x: 0, y: 0, z: -CAMPAIGN_LEG_HALF_Z, r: SU * 4.0 },                 
-    { id: 'boss',  team: null, x: 0, y: 0, z:  CAMPAIGN_LEG_HALF_Z, r: SU * 4.5, champion: true },  
-  ],
-  tunnels: [],   
+  rooms: _campLegRooms(CAMPAIGN_LEG_HALF_Z),
+  tunnels: [],
 };
 // (v32.54) Register the campaign legs into MAP_DATA under a 'camp_' prefix so the
 // ship-select carousel + schematic preview list them with no special-casing. The
@@ -151891,9 +151966,25 @@ function _lssGenEndlessLevel(base) {
 MAP_DATA.camp_grassy      = { ...CAMPAIGN_LEG_MAP, name: 'Verdant Pass',          description: 'Rolling green highlands under an open sky.',                 defaultTheme: 'Grassy',            palette: [0x33571f,0x4d7a33,0x7b7a5a,0x5fae4e,0x3f5e26,0x2c3f18,0x6f6552,0x4d7a33] };
 MAP_DATA.camp_snow        = { ...CAMPAIGN_LEG_MAP, name: 'Frozen Reach',          description: 'Glacial peaks and wind-scoured snowfields.',                defaultTheme: 'Snow',              palette: [0x6f8aa0,0xa9c2d6,0xd8e6f2,0xffffff,0x8fa6bd,0xbcd2e0,0x9fb4c6,0xeaf4ff] };
 MAP_DATA.camp_volcanic    = { ...CAMPAIGN_LEG_MAP, name: 'Molten Core',           description: 'Lava-veined mountains beneath an ash-choked sky.',          defaultTheme: 'Volcanic',          palette: [0xb5391a,0x5a2a22,0x36302e,0x9a9088,0x2a2220,0x6e5a50,0xc04020,0x803020] };
+// ⭐ (v52.99) MOLTEN CORE IS ~3x LONGER (108.6 km of travel, was 34.6). Its scene (CAMP_SCENES leg 3: the whisper, the tap,
+// "We got this!") is 22 voiced lines, 155 s of clips, ~176 s with the box's tails and gaps (measured off the voice
+// manifest), and it starts ~10 s in once leg3_a frees the box - so it ends ~186 s into the leg. The waves are paused for
+// all of it, so nothing slows you: at a light hull's 450 cruise plus dashes (~550 u/s) the old leg was flown in ~63 s
+// and you sat at the arena for two minutes of talk. 55,000 = at ~550 u/s you arrive ~14 s after "We got this!", at 450
+// ~58 s after, at 350 (medium) ~2 min (node tools/camp_leg_sim.mjs). Tune here; the next start of the leg takes it.
+MAP_DATA.camp_volcanic.legHalfZ = 55000;
+MAP_DATA.camp_volcanic.rooms = _campLegRooms(MAP_DATA.camp_volcanic.legHalfZ);
 MAP_DATA.camp_goldmine    = { ...CAMPAIGN_LEG_MAP, name: 'The Golden Deep',       description: 'Gold-ore veins glittering through the bronze rock.',         defaultTheme: 'Gold Mine',         palette: [0x8a6a2e,0xcea44e,0xf2dc92,0x5a4a32,0x34261a,0x705428,0xb8902e,0xead08a] };
 MAP_DATA.camp_crystalcave = { ...CAMPAIGN_LEG_MAP, name: 'The Crystal Caverns',   description: 'A magical cavern of glowing crystals and drifting sprites.', defaultTheme: 'Crystal Cavern',    palette: [0x3a4a78,0x6a7ac0,0xc8d4ff,0x2a3258,0x141838,0x4a5398,0x7a6ad0,0x9a8aff] };
 MAP_DATA.camp_brokensim   = { ...CAMPAIGN_LEG_MAP, name: 'The Broken Simulation', description: 'Reality fails around you — the final confrontation.',        defaultTheme: 'Broken Simulation', palette: [0x4a4a54,0x70707e,0xc8c8d6,0x42424c,0x1a1428,0x3a3a44,0x6a5a8a,0x8a7aaa] };
+// ⭐ (v53.01) THE CRYSTAL CAVERNS TOO (72.6 km, was 34.6). Owner: "and we can lengthen crystal caverns too". Its scene
+// (`onto_them`: the Matrix, Duke, "Incoming!") is 20 lines, ~113 s, due at 2.1 km - and node tools/camp_leg_sim.mjs had
+// the old leg reaching its arena 20-54 s before the talk ended. 37,000 = the same margin as Molten Core: at ~550 u/s you
+// arrive ~15 s after "Incoming!", at 450 ~44 s, at 350 ~1.5 min. One checkpoint (CAMP_CKPT), at z -2,400.
+// ⚠ BELOW its definition line, like Molten Core's under its own: a leg's length set above the line that creates the
+// leg is a TypeError at boot (caught by the sim the first time).
+MAP_DATA.camp_crystalcave.legHalfZ = 37000;
+MAP_DATA.camp_crystalcave.rooms = _campLegRooms(MAP_DATA.camp_crystalcave.legHalfZ);
 // The ordered journey ; index === game.campaign.sceneIndex. A real leg has a
 // .key that is a MAP_DATA 'camp_' entry ; a { locked:true } entry (no key) is a
 // non-selectable "coming soon" teaser shown greyed in the campaign carousel.
@@ -153704,6 +153795,8 @@ function buildRoomGraphLevel(level) {
   }
   // (v47.90) how far out this level reaches - _lssFlightArena grows the flyable box to contain it
   game._levelSpan = isFinite(bMinX) ? Math.max(Math.abs(bMinX), Math.abs(bMaxX), Math.abs(bMinZ), Math.abs(bMaxZ)) : 0;
+  // (v52.99) ...and, for a campaign leg, how long it is (_campLegHalfZ). Every build stamps it; only campaign code reads it.
+  game._campLegH = (level && level.legHalfZ) || CAMPAIGN_LEG_HALF_Z;
 
   // --- SANDWICH TERRAIN: params + bounds expansion ---
   // Deterministic mountain "sandwich" (jagged peaks below + mirrored peaks
@@ -155711,7 +155804,12 @@ const CAMP_LINES = {
   xz_lastlife: { who: 'xorzo', text: "Pilot... that was your last respawn. From here on, it's up to your mind. Don't let go." },
   xz_gameover: { who: 'xorzo', text: 'Pilot? ...Pilot!' },
   // ── (v52.10) Xorzo's pings (_campPingTick), once a session - Claude's draft ──
-  xz_ping:    { who: 'xorzo', text: 'I can sense their ship. Follow my pings on the radar, pilot.' },
+  // (v53.01) the owner's words - "when xorzo says he found their ship in the first leg... it doesn't make sense... whose
+  // ship?": in leg 1 nobody has met the Summoners yet. Was 'I can sense their ship. Follow my pings on the radar, pilot.'
+  xz_ping:    { who: 'xorzo', text: "There's a strange anomaly on the radar... not part of the game. I'm tracking it with pings on your radar. You might want to check it out." },
+  // (v53.01) ...and the old line, kept for a session that starts at a LATER leg (the ping line is once a page session),
+  // where you have met them: _campPingTick picks by leg. Its clip is the old xz_ping take (git), adopted - no credits.
+  xz_ping_them: { who: 'xorzo', text: 'I can sense their ship. Follow my pings on the radar, pilot.' },
   arrive_xz:  { who: 'xorzo', text: "There - they're opening a portal!" },
   sum_escape: { who: 'summoners', text: 'You cannot catch what you cannot hold.' },
   xz_follow:  { who: 'xorzo', text: "They couldn't close it behind them. The portal's still open - after them!" },
