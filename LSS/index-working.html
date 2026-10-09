@@ -2648,6 +2648,27 @@ body.lss-nohud #camp-esc, body.lss-orbit #camp-esc, body.lss-picker-3d #camp-esc
 .team-score { border-bottom: none !important; padding: 0; position: relative; }
 .team-score .lss-tag { font-size: 15px; letter-spacing: 2px; }
 #round-timer, #round-state { text-shadow: -1px 0 0 rgba(255, 64, 96, 0.55), 1px 0 0 rgba(64, 220, 255, 0.55), 0 0 6px currentColor, 0 2px 16px rgba(0,0,0,0.6); }
+/* — ⭐ (v53.07) TIME AND SCORE ARE ONE UNIT. Owner: "make time and score one unit on the same horizontal line in a
+   translucent frame". It was three stacked lines - the timer, the round state under it, and FLEET A / FLEET B 180 px
+   apart under that. Now one framed row: FLEET A | the timer (round state under it) | FLEET B. CSS only: #score-display
+   becomes `display: contents`, so its two .team-score children sit in #round-info's grid beside the timer, and every
+   writer (updateHUD's _hudText / _hudDigi into #round-timer, #round-state and .ts-nm) is untouched. The frame is a plain
+   translucent fill - no backdrop-filter (a blur under a fixed HUD element re-samples the canvas every frame).
+   The champion bar and the top-band tenants pin to #round-info's MEASURED bottom (updateHUD / _hudPinTopBand), so the
+   shorter block moves them up on its own. — */
+#round-info {
+  display: grid; grid-template-columns: 1fr auto 1fr; grid-template-areas: "a t b" "a s b";
+  align-items: center; column-gap: 18px;
+  padding: 5px 20px 6px; border-radius: 10px; white-space: nowrap;
+  background: linear-gradient(180deg, rgba(12, 18, 34, 0.58), rgba(6, 10, 22, 0.42));
+  border: 1px solid rgba(140, 200, 255, 0.22);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+#score-display { display: contents; }
+#round-timer { grid-area: t; font-size: 28px; line-height: 1; }
+#round-state { grid-area: s; margin-top: 1px; font-size: 11px; }
+#round-info .team-a { grid-area: a; justify-self: end; }
+#round-info .team-b { grid-area: b; justify-self: start; }
 
 /* — the round banner (ROUND 1, ROUND START, VICTORY, the winner line) — */
 #ov-banner .lss-tag { --lt-subgap: 8px; color: #ffaa00; }
@@ -7550,7 +7571,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.02";
+const LSS_BUILD = "53.07";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -15612,6 +15633,33 @@ if (typeof window !== 'undefined') window.warpOutFx = warpOutFx;
 // (v49.68) ...and that chase is here: mortal while the overworld duel runs (G.esc), armoured everywhere else
 // (v52.20) ...and in the fight / vow before it: the overworld Summoners can be killed from the moment they show up
 function _campNemesisMortal() { try { const E = game._campGiant && game._campGiant.esc; return !!(E && (E.phase === 'chase' || E.phase === 'fight' || E.phase === 'vow')); } catch (_) { return false; } }
+// ⭐ (v53.05) THE SUMMONERS' RIM, IN ONE PLACE - AND ONLY WHERE IT CAN DRAW. Owner: "there's a hitch right when the
+// first leg starts right at the end of the countdown" - and, shown the program links: "shouldn't that draw call be in
+// the warmup?". It should have been, and it nearly was. MEASURED (pane, ?pbhud, The Approach from the picker): the
+// FIGHT frame ran 1925 ms, 1919 of it in renderFrame - nine synchronous getProgramParameter joins of 215-540 ms each,
+// every one a material of the Summoners' flagship, which _campArenaTick spawns on the leg's first live frame. The
+// prebake's entity prime HAD drawn summoners_ship in this very environment (__entPrime: 29 hulls, uncapped), but as a
+// plain hull, and _campMarkNemesis then rims every material: customProgramCacheKey 'basicRim' (the program-key diff
+// between the warmed p261 and FIGHT's p268 is that one slot: `lssSkinHue|...` vs `basicRim`). Same material, another
+// program, never linked. So the rim lives here, and _primeEntityModels rims its summoners_ship through this same
+// function: the warm links exactly what the flagship draws.
+// ...and only where it can draw. Of the flagship's 75 materials, 44 are ShaderMaterials (engine glow, thruster flames,
+// plume, shield, muzzle flashes). _addBasicRim patches three's own chunks (`#include <project_vertex>`,
+// `#include <opaque_fragment>`) and not one of the 44 has either (checked in the pane), so it painted nothing on them -
+// yet its key still forked each to a fresh 'basicRim' program: three of the nine FIGHT links, and more waiting for
+// the first time its flames or a shield hit drew. A shader the rim cannot patch keeps its own, already-linked program.
+function _lssSummonerRim(root) {
+  if (!root || typeof _addBasicRim !== 'function') return;
+  root.traverse((o) => {
+    if (!o || !o.isMesh || !o.material) return;
+    for (const m of (Array.isArray(o.material) ? o.material : [o.material])) {
+      if (!m) continue;
+      if (m.isShaderMaterial && !(/#include <project_vertex>/.test(m.vertexShader || '') && /#include <opaque_fragment>/.test(m.fragmentShader || ''))) continue;
+      _addBasicRim(m, 0xc8b0ff, 1.1);
+      m.needsUpdate = true;
+    }
+  });
+}
 // Brand a hoard Bot as the Nemesis : elevated HP so it survives to flee, plus a
 // distinct silver-violet fresnel rim so the recurring villain reads at a glance.
 function _campMarkNemesis(bot) {
@@ -15627,16 +15675,13 @@ function _campMarkNemesis(bot) {
   // real fight but a winnable one.
   bot.maxHealth = (bot.maxHealth || 1000) * (_campNemesisMortal() ? 5 : 9);
   bot.health = bot.maxHealth;
-  try {
-    if (bot.mesh && typeof _addBasicRim === 'function') {
-      bot.mesh.traverse((o) => {
-        if (o && o.isMesh && o.material) {
-          const mats = Array.isArray(o.material) ? o.material : [o.material];
-          mats.forEach((m) => { _addBasicRim(m, 0xc8b0ff, 1.1); m.needsUpdate = true; });
-        }
-      });
-    }
-  } catch (_) {}
+  try { _lssSummonerRim(bot.mesh); } catch (_) {}   // (v53.05) see _lssSummonerRim
+  // (v53.05) ...and linked while hidden, the overworld Summoners' way (_owSumWarm: compileAsync, one off-screen draw,
+  // then shown). Where the prebake drew it rimmed in this environment - every leg start - the compile is already done:
+  // it resolves on its first poll and the hull shows on the next frame, as before. Where it did not - a headset (the
+  // entity prime skips XR), the finale's overworld chase in light that changed since the load - the links run off the
+  // main thread while it is hidden, instead of one synchronous join per material in whatever frame first draws it.
+  try { if (bot.mesh && typeof _owSumWarm === 'function') _owSumWarm(bot); } catch (_) {}
 }
 
 // ⭐ (v49.48) THE SUMMONERS OPEN A PORTAL. Owner: "the summoners aren't exactly waiting at the portal,
@@ -57901,7 +57946,25 @@ function _swDisposeHubWater() {
 }
 
 // Drop every built chunk (map change / terrain off), restoring atmosphere too.
-function resetSandwichTerrain() {
+// ⭐ (v53.04) ...EXCEPT FOR THE WORLD BEING REPLACED. `outgoing` (buildRoomGraphLevel's teardown) skips the atmosphere
+// pass, because there `game.sandwichTerrain` is still the OUTGOING world (it is nulled a line later), so the pass
+// re-applied the very world being torn down. And since v44.43 every match end frees that world's water, ripple sim,
+// weather, birds and fish (returnToRootMenu -> _swDisposeHubWater) while its terrain stays resident - so on the next
+// build this pass REBUILT all of it for a world with milliseconds left: the 48 km sheet + mirror + ripple sim, the
+// weather group, two GPGPU flocks and their compileAsync. The next world's own pass (initSandwichTerrain) then met a
+// different water level and freed the lot - the flocks' render materials while their compileAsync was still polling:
+// three r165's 'isReady' trap, "Uncaught TypeError: Cannot read properties of undefined (reading 'isReady')", once per
+// flock on every build that leaves the hub after a match (the campaign's city -> caverns battle; Exhibition -> any other
+// map: a different water level, or none, frees them), and those two promises never settle. Pinned in the pane by
+// wrapping compileAsync + Material.dispose: _critterPrecompile's mesh compiles (birds, fish) started 10 ms before
+// _birdFlockDispose / _fishSchoolDispose freed them, both inside one buildRoomGraphLevel, and those were the only two
+// of the opening's 34 compiles to throw. A/B in the pane (window.__swOutgoingAtmo): the battle's build went from reset
+// 91 ms + init 146 ms with 2 throws to 2 ms + 60 ms with none.
+// Nothing downstream needed the pass: a terrain level applies its own atmosphere (initSandwichTerrain runs it twice),
+// a level with no terrain gets the terrain-off branch from initSandwichTerrain's own reset, and the Earth (gmaps)
+// builder, which returns before both, sets its own sky, weather and sea. Every other caller (initSandwichTerrain, the
+// streamer's terrain-off reset, __hubTerra) still restores.
+function resetSandwichTerrain(outgoing) {
   // (v44.91) merged blocks hold COPIES of the shells' triangles, so they have to go before the
   // shells do - otherwise the old terrain keeps drawing over the new one until the next stream tick.
   try { _swMergeClear(); } catch (_) {}
@@ -57909,6 +57972,7 @@ function resetSandwichTerrain() {
   try { if (typeof _owDispose === 'function') _owDispose(); } catch (_) {}   // (v38.78) the overworld cities go with the terrain
   if (game.sandwichChunks) for (const c of game.sandwichChunks.values()) _swDisposeChunk(c);
   game.sandwichChunks = new Map();
+  if (outgoing) return;   // (v53.04) see above
   try { _swApplyAtmosphere(); } catch (_) {}
 }
 
@@ -67067,11 +67131,7 @@ function _owSumDressLead(b) {
   const DN = (typeof CHASSIS !== 'undefined' && CHASSIS.DREADNOUGHT) ? CHASSIS.DREADNOUGHT : { maxHealth: 12500, maxShield: 5000 };
   b.maxHealth = Math.round(DN.maxHealth * K.hpX); b.maxShield = Math.round(DN.maxShield * K.shX);
   b.health = b.maxHealth; b.shield = b.maxShield;
-  try {
-    if (b.mesh && typeof _addBasicRim === 'function') b.mesh.traverse((o) => {
-      if (o && o.isMesh && o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => { _addBasicRim(m, 0xc8b0ff, 1.1); m.needsUpdate = true; });
-    });
-  } catch (_) {}
+  try { _lssSummonerRim(b.mesh); } catch (_) {}   // (v53.05) the one rim, and none on shaders it cannot patch
   _owSumWarm(b);
 }
 // The rimmed hull is a program nothing else links (a lit hull material under the 'basicRim' key), so it is linked while
@@ -107748,8 +107808,10 @@ function _entPrimeHoardKeys() {
     const map  = (typeof game !== 'undefined') ? (game.selectedMap || '') : '';
     const mode = (typeof LSS !== 'undefined') ? LSS.MODE : '';
     if (mode === 'campaign' || /^hub_/.test(map) || /^camp_/.test(map)) {
-      for (const k of HOARD_SHIPS) if (out.indexOf(k) < 0) out.push(k);
+      // (v53.05) the Summoners' flagship FIRST: it is the one hull certain to appear - on every leg's first live frame
+      // (_campArenaTick) - so a budget cap (_ENT_PRIME_MAX_MS) must never be what leaves it for FIGHT to link
       if (typeof NEMESIS_SHIP === 'string' && out.indexOf(NEMESIS_SHIP) < 0) out.push(NEMESIS_SHIP);
+      for (const k of HOARD_SHIPS) if (out.indexOf(k) < 0) out.push(k);
     }
   } catch (_) {}
   return out;
@@ -107844,6 +107906,12 @@ async function _primeEntityModels(keys, tStart, budgetMs) {
           let m = null;
           try { m = createShipMesh(ch, teamCol, k); } catch (_) { m = null; }
           if (!m || (m.userData && m.userData.isProceduralFallback)) continue;
+          // ⭐ (v53.05) THE SUMMONERS' FLAGSHIP IS ONLY EVER DRAWN RIMMED (_campMarkNemesis / _owSumDressLead), and the
+          // rim is its own program per material. This prime drew it plain, so every leg's FIGHT frame linked the rimmed
+          // set synchronously (1925 ms in the pane) - see _lssSummonerRim. Rimmed here through the same function, so
+          // what links behind the cover is exactly what the flagship draws. (Per-instance materials: buildModelShipMesh
+          // builds its own, so the model cache - which the prologue's hack draws - is never touched.)
+          if (typeof NEMESIS_SHIP === 'string' && k === NEMESIS_SHIP) { try { _lssSummonerRim(m); m.userData._lssPrimeKey = k; } catch (_) {} }
           m.position.set(0, -100000, 0);
           m.traverse((o) => {
             o.frustumCulled = false;
@@ -107876,6 +107944,15 @@ async function _primeEntityModels(keys, tStart, budgetMs) {
             if (typeof renderFrame === 'function') renderFrame();
             else { if (rt) renderer.setRenderTarget(rt); renderer.render(scene, camera); }
           } catch (_) {}
+          // (v53.05) ...and the Summoners' flagship WITH ITS HIDDEN PARTS: renderFrame draws only what is visible, and
+          // ten of its rimmed materials start hidden (eight additive flash cards, two plain shells). On 53.05's first cut
+          // their three `basic` 'basicRim' programs were still created in play - off-thread, by the spawn's own
+          // compileAsync (_campMarkNemesis), but in play, and with no such safety net their first draw (its first shot)
+          // would have joined them synchronously. _warmDrawRoot shows a root's hidden ancestors and descendants for one
+          // 8x8 draw into the scene target (v39.83), so they link and draw here, behind the cover.
+          if (rt && typeof _warmDrawRoot === 'function' && typeof NEMESIS_SHIP === 'string') {
+            for (const m of built) { if (m.userData && m.userData._lssPrimeKey === NEMESIS_SHIP) { try { _warmDrawRoot(m, rt, false); } catch (_) {} } }
+          }
           const _np1 = (renderer.info && renderer.info.programs) ? renderer.info.programs.length : 0;
           if (_np1 > _np0 && typeof _drainProgramLinks === 'function') {
             rep.forks = (rep.forks | 0) + (_np1 - _np0);
@@ -141822,13 +141899,11 @@ function _howtoRender(ov) {
   h += '<div style="font-size:12px;color:#9ab;letter-spacing:1px;line-height:1.6;margin-bottom:14px;">' +
        'Configure your controls and performance in the <span style="color:#ffaa00;">SETTINGS</span> menu before you fly. ' +
        'Your first launch downloads every ship, cockpit and soundtrack file up front (the LOADING ASSETS bar) so nothing stutters in mid-flight; after that they stay cached and matches start instantly.</div>';
-  h += '<div style="font-size:13px;color:#9ab;letter-spacing:1px;line-height:1.6;margin-bottom:14px;">' +
-       'Zero-gravity fleet combat. Destroy the enemy fleet to win the round, or capture the CHAMPION FIELD that appears in the final seconds (crack its shell first). First fleet to 4 rounds takes the match. Leave the arena and the leviathans outside will hunt you.</div>';
   // ---- game modes ----
   h += "<div class='lss-title' style='font-size:15px;letter-spacing:4px;color:#7cf;margin:14px 0 8px;'>GAME MODES — GOALS &amp; RULES</div>";
   const _modes = [
     ['ELIMINATION', '#7cf',
-     "Round-based team elimination — versus players, bots, or both. Wipe the enemy fleet to take the round, or crack the CHAMPION FIELD's shell and capture it in the final seconds; first fleet to 4 rounds takes the match. Committing your loadout in the hangar is your ready-up — ADD BOTS on the ship screen fills out the fleets."],
+     "Zero-gravity fleet combat — versus players, bots, or both. Destroy the enemy fleet to win the round, or capture the CHAMPION FIELD that appears in the final seconds (crack its shell first). First fleet to 4 rounds takes the match. Leave the arena and the leviathans outside will hunt you. Committing your loadout in the hangar is your ready-up — ADD BOTS on the ship screen fills out the fleets."],
     ['RACE', '#ff9fe0',
      'Two disciplines. THE STRAIGHTAWAY is an open-cavern point-to-point: line up on the start, find your own line through the mountains, first to capture the finish field wins. POLE POSITION is a ring-gated circuit: clear every ring to unlock the finish, then dive in and take it.'],
     ['ASSAULT', '#ff8a4a',
@@ -153447,7 +153522,9 @@ function buildRoomGraphLevel(level) {
     game.sandwichChunks && game.sandwichChunks.size > 0 &&
     !(typeof window !== 'undefined' && window.__keepTerrain === false));
   if (_keepTerrain) { try { console.log('[sandwich] terrain kept across the round (' + game.sandwichChunks.size + ' chunks)'); } catch (_) {} }
-  else { try { if (typeof resetSandwichTerrain === 'function') resetSandwichTerrain(); } catch (_) {} }
+  // (v53.04) `true`: the OUTGOING world - drop its chunks, but do not re-apply its atmosphere (resetSandwichTerrain).
+  // window.__swOutgoingAtmo = true restores the old re-application, for A/B.
+  else { try { if (typeof resetSandwichTerrain === 'function') resetSandwichTerrain(!(typeof window !== 'undefined' && window.__swOutgoingAtmo === true)); } catch (_) {} }
   try { game._rrBuildParts.reset = Math.round(performance.now() - _bpT0); } catch (_) {}   // (v39.49c)
   // gmaps levels return before the params block; default terrain off for them.
   if (!_keepTerrain) game.sandwichTerrain = null;
@@ -158129,6 +158206,14 @@ const CAMP_PROLOGUE = {
     shipEnv: 10,                // how strongly the ships reflect the storm night (_hkEnvBuild), live; tuned in the pane:
                                 // 2.2 still a silhouette, 6 dark but readable, 10 a violet-lit hull with its details
     thunder: 1,                 // 0 = silent storm
+    engine: 1,                  // (v53.03) the ships' engines while they are on screen (_hkEngTick), x the levels below; 0 = silent
+    // ...each one's voice: pitch (x the fleet's phi cascade), lowpass Hz, gain idle..under way (its own speed, full at
+    // 600 u/s), and the panner's distance law (ref / roll / max - read when the voice starts; everything else live)
+    engines: {
+      flag: { pitch: 0.85, lp: 2400, idle: 0.5, run: 0.85, ref: 420, roll: 1, max: 9000 },       // the Summoners' ship
+      car: { pitch: 0.382, lp: 1200, idle: 0.9, run: 1.3, ref: 900, roll: 0.85, max: 26000 },     // the carrier: 1/PHI^2, the Cyberpunk carrier's register
+      bond: { pitch: 1, lp: 3200, idle: 0.35, run: 0.6, ref: 260, roll: 1.2, max: 4000 },        // Jimmy's row ship, for the bond's close-up
+    },
   },
 };
 (function () {
@@ -159399,6 +159484,8 @@ const CAMP_PROLOGUE = {
     }
     // the thunder: three takes, one a moment
     for (let v = 0; v < 3 && P.hk === H; v++) { try { _hkThunderBuf(); } catch (_) {} await wait(0.05); }
+    // (v53.03) ...and the fleet's engine loop (_hkEngTick), rendered offline now rather than on the descent's first frame
+    try { if (typeof audio !== 'undefined' && audio && audio.ctx) _shipPhiLoop(audio.ctx); } catch (_) {}
     H.ready = true;
   }
 
@@ -159518,6 +159605,93 @@ const CAMP_PROLOGUE = {
       src.connect(lp); lp.connect(g); g.connect(bus || A.sfxBus || A.masterGain || ctx.destination);
       src.start(ctx.currentTime + Math.min(2.4, dist / 1700));   // the sound after the light (sped up: a 5 s wait reads as a bug)
     } catch (_) {}
+  }
+  // ⭐ (v53.03) THE SHIPS ON SCREEN HUM - AND NOTHING ELSE DOES. Owner: "we can hear the sound of a ship engine throughout
+  // the cinematic... it shouldn't be heard at all, except when there's a ship on screen". That engine was the hidden
+  // VORTEX's own bed, droning over a city with no ship in it (silent for these scenes now: _lssShipBedMuted). The hulls that
+  // ARE on screen here are clones with no voice of their own, so the three the camera dwells on get the fleet's: the phi
+  // cascade every ship hums (_shipPhiLoop - the carrier's idiom, _carrierEngineStart), placed in the world, and heard only
+  // while the hull is shown - from the descent on, never over the city, the glitch or the storm. Each idles, and swells
+  // and winds up a little with its own speed (the bed's spool, gentler). Levels: HK.engines, master HK.engine.
+  //   - The listener rides the camera while they play: the cinematic branch never runs _audioSpatialFrame, so it would
+  //     otherwise sit wherever the last gameplay frame left it (the hidden ship over the city).
+  //   - Each tick re-arms a fade to silence (the flyby pool's dead-man rule): a frame loop that stops cannot leave them
+  //     droning. _hkEnd stops them for good.
+  const _hkEP = new THREE.Vector3();
+  function _hkEngMake(A, buf, E, p) {
+    try {
+      const ctx = A.ctx, now = ctx.currentTime;
+      const src = ctx.createBufferSource(); src.buffer = buf; src.loop = true; src.playbackRate.value = E.pitch || 1;
+      const f = ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = E.lp || 2400; f.Q.value = 0.4;
+      // ⚠ the INTRINSIC value, not a setValueAtTime: the tick's cancelScheduledValues(t) on this same frame removes any
+      // event at or after t - a scheduled 0.0001 included - and its glide then starts from what is left, which was the
+      // GainNode's default 1.0. Measured in the pane on the first cut: the carrier's and Jimmy's ship's voices read 0.95
+      // and 0.77 on their first sample (a full-level onset); the flagship's 0.0001 happened to survive. The flyby pool's
+      // voices have always started this way (_flybyEnsureVoice).
+      const g = ctx.createGain(); g.gain.value = 0;
+      const pan = _audioKRatePanner(ctx.createPanner());   // (v48.39) k-rate - see _audioKRateSet
+      pan.panningModel = _mob() ? 'equalpower' : 'HRTF';   // no always-on convolution on a phone's audio thread (v32.90)
+      pan.channelCount = 1; pan.channelCountMode = 'explicit';   // point-source panning (see _acquireSpatialTriple)
+      pan.distanceModel = 'inverse'; pan.refDistance = E.ref || 400; pan.maxDistance = E.max || 9000; pan.rolloffFactor = E.roll || 1;
+      if (pan.positionX) { pan.positionX.value = p.x; pan.positionY.value = p.y; pan.positionZ.value = p.z; }
+      else if (pan.setPosition) pan.setPosition(p.x, p.y, p.z);
+      src.connect(f); f.connect(g); g.connect(pan);
+      pan.connect(A.sfxBus || A.masterGain || ctx.destination);
+      src.start(now, Math.random() * buf.duration * 0.9);
+      return { src, f, g, pan, sp: 0, p0: null, want: 0 };
+    } catch (_) { return null; }
+  }
+  function _hkEngTick(dt) {
+    const H = P.hk; if (!H || !H.on || !H.root) return;
+    const A = (typeof audio !== 'undefined') ? audio : null;
+    if (!A || !A.initialized || !A.ctx) return;
+    const ctx = A.ctx, t = ctx.currentTime, T = HK.engines || {}, vol = (HK.engine != null) ? +HK.engine : 1;
+    if (!H.eng) H.eng = {};
+    let any = false;
+    for (const who of ['flag', 'car', 'bond']) {
+      const E = T[who], S = who === 'flag' ? H.flag : (who === 'car' ? H.car : H.bondS);
+      if (!E || !S || !S.g) continue;
+      const shown = !!S.g.visible && vol > 0;
+      let v = H.eng[who];
+      if (!v) {
+        if (!shown) continue;
+        const buf = _shipPhiLoop(ctx); if (!buf) continue;   // still rendering offline (_hkPrep asked for it): next frame
+        S.g.getWorldPosition(_hkEP);
+        v = H.eng[who] = _hkEngMake(A, buf, E, _hkEP);
+        if (!v) continue;
+      }
+      any = true;
+      S.g.getWorldPosition(_hkEP);
+      // its speed: the hulls are posed, not flown, so the position's change IS the speed (smoothed; a cut is not a dash)
+      const sp = (v.p0 && dt > 0) ? Math.min(2000, _hkEP.distanceTo(v.p0) / dt) : 0;
+      (v.p0 || (v.p0 = new THREE.Vector3())).copy(_hkEP);
+      v.sp += (sp - v.sp) * (1 - Math.exp(-(dt || 0) * 3));
+      const k = _cl(v.sp / 600, 0, 1);
+      v.want = shown ? vol * ((E.idle || 0) + ((E.run || 0) - (E.idle || 0)) * k) : 0;
+      try {
+        if (v.pan.positionX) {
+          v.pan.positionX.setTargetAtTime(_hkEP.x, t, 0.04); v.pan.positionY.setTargetAtTime(_hkEP.y, t, 0.04); v.pan.positionZ.setTargetAtTime(_hkEP.z, t, 0.04);
+        } else if (v.pan.setPosition) v.pan.setPosition(_hkEP.x, _hkEP.y, _hkEP.z);
+        v.src.playbackRate.setTargetAtTime((E.pitch || 1) * (1 + 0.25 * k), t, 0.2);
+        v.g.gain.cancelScheduledValues(t);
+        v.g.gain.setTargetAtTime(v.want, t, 0.35);   // in and out over about a second
+        v.g.gain.setTargetAtTime(0, t + 0.5, 0.15);   // the dead-man fade: re-armed every tick, lands only if the ticks stop
+      } catch (_) {}
+    }
+    if (any) { try { _audioUpdateListener(); } catch (_) {} }
+  }
+  function _hkEngStop(H) {
+    const V = H && H.eng; if (!V) return;
+    H.eng = null;
+    const A = (typeof audio !== 'undefined') ? audio : null;
+    for (const who in V) {
+      const v = V[who]; if (!v) continue;
+      try { const t = A.ctx.currentTime; v.g.gain.cancelScheduledValues(t); v.g.gain.setTargetAtTime(0.0001, t, 0.12); } catch (_) {}
+      setTimeout(() => {
+        try { v.src.stop(); } catch (_) {}
+        try { v.src.disconnect(); v.f.disconnect(); v.g.disconnect(); v.pan.disconnect(); } catch (_) {}
+      }, 700);
+    }
   }
   // every live bolt into the segment pool; a snare re-forks as it crackles and follows the AI it holds
   function _hkBoltsTick() {
@@ -160204,6 +160378,7 @@ const CAMP_PROLOGUE = {
     }
     P.hk = null; P.duskK = 0;
     if (!H) return;
+    try { _hkEngStop(H); } catch (_) {}   // (v53.03) the ships' engines out with them
     try { if (H.cl0 && H.clM && H.clM.instanceMatrix) { H.clM.instanceMatrix.array.set(H.cl0); H.clM.instanceMatrix.needsUpdate = true; } } catch (_) {}   // the puffs back
     try { if (H.bcs0 != null) billboardCloudSystem.material.uniforms.uBrightness.value = H.bcs0; } catch (_) {}   // the low deck back
     try { const r = H.flag && H.flag.g.userData.lssSeat; if (r) _lssSeatDrop(r); } catch (_) {}   // the Summoners out of their seat
@@ -160225,6 +160400,7 @@ const CAMP_PROLOGUE = {
     try { _simOrbs(dt); } catch (e) { _err('orbs', e); }
     try { if (P.hk && P.hk.on) _hkTickFx(); } catch (e) { _err('hack fx', e); }   // the bolts and rings that follow them
     try { _camFrame(dt); } catch (e) { _err('camera', e); }
+    try { if (P.hk && P.hk.on) _hkEngTick(dt); } catch (e) { _err('hack engines', e); }   // (v53.03) after the camera: the listener rides it
     try { _gpSkip(); } catch (_) {}
   }
 
@@ -164582,6 +164758,25 @@ let _ambientBedDeferred = false;
 // online" played over the loading screen instead of greeting you when you arrived. Owner: "that
 // sound sometimes happens during the loading screen". Held here, spoken on release.
 let _welcomeAboardDeferred = null;
+// ⭐ (v53.03) THE HIDDEN SHIP'S ENGINE IS SILENT. Owner: "in the campaign, when it first starts, we can hear the sound of
+// a ship engine throughout the cinematic... it shouldn't be heard at all, except when there's a ship on screen". This bed
+// IS the player's engine (the phi cascade below winds up with the player's speed), and the campaign's opening scenes stand
+// their worlds up on a HIDDEN VORTEX: the prologue's city and hack (game._campPrologue) and the caverns battle
+// (game._campBattle, where the player is no one). commitLoadout asks for the bed, the loading cover lifts, and then:
+//   - in the prologue the drone came up to full under the black veil while the city finished building (measured on
+//     v53.02 in the pane: 0.26 a moment after the cover lifted, 0.85 = the ambient slider within seconds), and from the
+//     first shot on it was FROZEN wherever it stood - the cinematic branch of gameLoop returns before updateAmbientBed,
+//     so nothing moved it again: the parked hull's idle drone under the whole ~4 minutes of city and storm;
+//   - in the battle it ran at full, 'playing', the hidden hull parked at rest pitch - with the low-health TREMOLO on
+//     top (the hidden player has 0 hp: tremorDepth 0.3 at 5 Hz; measured 0.85 as the fight went live, 0.57 half a
+//     minute in).
+// While either scene runs, the bed starts into silence (startAmbientBed) and is held there (updateAmbientBed). It is
+// still STARTED, so updateAmbientBed keeps driving the reverb's open/tight crossfade for everything else in the battle.
+// The ships that ARE on screen keep voices of their own: the battle's bots through the flyby pool (_flybyTick), the
+// hack's Summoners' ship, carrier and Jimmy's row ship through CampPrologue's _hkEngTick.
+function _lssShipBedMuted() {
+  try { return !!(typeof game !== 'undefined' && game && (game._campPrologue || game._campBattle)); } catch (_) { return false; }
+}
 
 // ---- PHI-CASCADE BINAURAL AMBIENT ----
 // Ship ambient sound: phi-cascade binaural adapted from phi_resonance.html "Deep Rest" preset.
@@ -164617,6 +164812,9 @@ function startAmbientBed() {
   if (_loadingAudioHold) { _ambientBedDeferred = true; return; }   // (v36.24)
   ambientStarted = true;
   const ctx = audio.ctx;
+  // (v53.03) a scene with no ship of ours in it: the oscillators start into silence. ambientGain keeps whatever level the
+  // last match left it at (it is 0 only on a fresh page), and updateAmbientBed's first pull comes after the first samples.
+  if (_lssShipBedMuted()) { try { audio.ambientGain.gain.cancelScheduledValues(ctx.currentTime); audio.ambientGain.gain.value = 0; } catch (_) {} }
 
   // Phi-cascade binaural layers (exact phi_resonance.html architecture)
   // 6 layers: base * PHI^(i-3), centered around the base frequency
@@ -164796,8 +164994,11 @@ function updateAmbientBed() {
       tremorFactor = 1.0 - tremorDepth * (0.5 - 0.5 * Math.cos(2 * Math.PI * tremorFreq * t));
     }
   }
-  const targetVol = baseVol * audio.userVol.ambient * audio.duckFactor * tremorFactor;
-  audio.ambientGain.gain.value += (targetVol - audio.ambientGain.gain.value) * 0.02;
+  // (v53.03) held at 0 while the scene has no ship of ours in it (_lssShipBedMuted) - and pulled there fast, not over the
+  // slow fade-in's ~1 s: there is nothing on screen for it to fade with
+  const _bedMute = _lssShipBedMuted();
+  const targetVol = _bedMute ? 0 : baseVol * audio.userVol.ambient * audio.duckFactor * tremorFactor;
+  audio.ambientGain.gain.value += (targetVol - audio.ambientGain.gain.value) * (_bedMute ? 0.3 : 0.02);
 
   // Current base frequency: lerp from rest to speed (v49.70: to _SND_PEAK.engine, was PHI_SPEED_BASE 144)
   const _pk = (+_SND_PEAK.engine > 0) ? +_SND_PEAK.engine : PHI_SPEED_BASE;
@@ -171926,8 +172127,9 @@ function _occlusionRaycastAllowed() {
 // Tracker mega-core volley (the v39.49d starvation scenario). k-rate samples position/orientation once
 // a quantum instead; the glides are tau 20 ms, so the per-quantum steps are inaudible and the HRTF
 // panner still cross-fades its kernels. ⚠ ALL OR NOTHING: one a-rate panner, or an a-rate listener,
-// keeps its path slow - so every createPanner site in the file calls _audioKRatePanner (4 today:
-// _acquireSpatialTriple, _flybyEnsureVoice, _carrierEngineStart, _swPeerHiss (v48.95) - grep createPanner when adding one),
+// keeps its path slow - so every createPanner site in the file calls _audioKRatePanner (5 today:
+// _acquireSpatialTriple, _flybyEnsureVoice, _carrierEngineStart, _swPeerHiss (v48.95), the campaign prologue's
+// _hkEngMake (v53.03) - grep createPanner when adding one),
 // and these are function DECLARATIONS because the carrier's site sits ~90k lines above. Firefox has no
 // `automationRate` (the `in` guard skips it). A/B: window.__audioKRate = false, then new sounds and the
 // listener go back to a-rate within a frame (a pooled panner is re-set on every acquire).

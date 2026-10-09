@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.02";
+const LSS_BUILD = "53.07";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -5512,6 +5512,18 @@ function warpOutFx(pos, radius) {
 if (typeof window !== 'undefined') window.warpOutFx = warpOutFx;
 
 function _campNemesisMortal() { try { const E = game._campGiant && game._campGiant.esc; return !!(E && (E.phase === 'chase' || E.phase === 'fight' || E.phase === 'vow')); } catch (_) { return false; } }
+function _lssSummonerRim(root) {
+  if (!root || typeof _addBasicRim !== 'function') return;
+  root.traverse((o) => {
+    if (!o || !o.isMesh || !o.material) return;
+    for (const m of (Array.isArray(o.material) ? o.material : [o.material])) {
+      if (!m) continue;
+      if (m.isShaderMaterial && !(/#include <project_vertex>/.test(m.vertexShader || '') && /#include <opaque_fragment>/.test(m.fragmentShader || ''))) continue;
+      _addBasicRim(m, 0xc8b0ff, 1.1);
+      m.needsUpdate = true;
+    }
+  });
+}
 function _campMarkNemesis(bot) {
   if (!bot) return;
   bot.isNemesis = true;
@@ -5520,16 +5532,8 @@ function _campMarkNemesis(bot) {
   _campBoostSpeed(bot, 1.33);
   bot.maxHealth = (bot.maxHealth || 1000) * (_campNemesisMortal() ? 5 : 9);
   bot.health = bot.maxHealth;
-  try {
-    if (bot.mesh && typeof _addBasicRim === 'function') {
-      bot.mesh.traverse((o) => {
-        if (o && o.isMesh && o.material) {
-          const mats = Array.isArray(o.material) ? o.material : [o.material];
-          mats.forEach((m) => { _addBasicRim(m, 0xc8b0ff, 1.1); m.needsUpdate = true; });
-        }
-      });
-    }
-  } catch (_) {}
+  try { _lssSummonerRim(bot.mesh); } catch (_) {}   // (v53.05) see _lssSummonerRim
+  try { if (bot.mesh && typeof _owSumWarm === 'function') _owSumWarm(bot); } catch (_) {}
 }
 
 const CAMP_ARENA = { travelFull: 150, travelCap: 0.8, openAfter: 20, chanEvery: 0.38,
@@ -34415,12 +34419,13 @@ function _swDisposeHubWater() {
   }
 }
 
-function resetSandwichTerrain() {
+function resetSandwichTerrain(outgoing) {
   try { _swMergeClear(); } catch (_) {}
   try { _hubCityDispose(); } catch (_) {}
   try { if (typeof _owDispose === 'function') _owDispose(); } catch (_) {}   // (v38.78) the overworld cities go with the terrain
   if (game.sandwichChunks) for (const c of game.sandwichChunks.values()) _swDisposeChunk(c);
   game.sandwichChunks = new Map();
+  if (outgoing) return;   // (v53.04) see above
   try { _swApplyAtmosphere(); } catch (_) {}
 }
 
@@ -40922,11 +40927,7 @@ function _owSumDressLead(b) {
   const DN = (typeof CHASSIS !== 'undefined' && CHASSIS.DREADNOUGHT) ? CHASSIS.DREADNOUGHT : { maxHealth: 12500, maxShield: 5000 };
   b.maxHealth = Math.round(DN.maxHealth * K.hpX); b.maxShield = Math.round(DN.maxShield * K.shX);
   b.health = b.maxHealth; b.shield = b.maxShield;
-  try {
-    if (b.mesh && typeof _addBasicRim === 'function') b.mesh.traverse((o) => {
-      if (o && o.isMesh && o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => { _addBasicRim(m, 0xc8b0ff, 1.1); m.needsUpdate = true; });
-    });
-  } catch (_) {}
+  try { _lssSummonerRim(b.mesh); } catch (_) {}   // (v53.05) the one rim, and none on shaders it cannot patch
   _owSumWarm(b);
 }
 function _owSumWarm(b) {
@@ -70418,8 +70419,8 @@ function _entPrimeHoardKeys() {
     const map  = (typeof game !== 'undefined') ? (game.selectedMap || '') : '';
     const mode = (typeof LSS !== 'undefined') ? LSS.MODE : '';
     if (mode === 'campaign' || /^hub_/.test(map) || /^camp_/.test(map)) {
-      for (const k of HOARD_SHIPS) if (out.indexOf(k) < 0) out.push(k);
       if (typeof NEMESIS_SHIP === 'string' && out.indexOf(NEMESIS_SHIP) < 0) out.push(NEMESIS_SHIP);
+      for (const k of HOARD_SHIPS) if (out.indexOf(k) < 0) out.push(k);
     }
   } catch (_) {}
   return out;
@@ -70481,6 +70482,7 @@ async function _primeEntityModels(keys, tStart, budgetMs) {
           let m = null;
           try { m = createShipMesh(ch, teamCol, k); } catch (_) { m = null; }
           if (!m || (m.userData && m.userData.isProceduralFallback)) continue;
+          if (typeof NEMESIS_SHIP === 'string' && k === NEMESIS_SHIP) { try { _lssSummonerRim(m); m.userData._lssPrimeKey = k; } catch (_) {} }
           m.position.set(0, -100000, 0);
           m.traverse((o) => {
             o.frustumCulled = false;
@@ -70498,6 +70500,9 @@ async function _primeEntityModels(keys, tStart, budgetMs) {
             if (typeof renderFrame === 'function') renderFrame();
             else { if (rt) renderer.setRenderTarget(rt); renderer.render(scene, camera); }
           } catch (_) {}
+          if (rt && typeof _warmDrawRoot === 'function' && typeof NEMESIS_SHIP === 'string') {
+            for (const m of built) { if (m.userData && m.userData._lssPrimeKey === NEMESIS_SHIP) { try { _warmDrawRoot(m, rt, false); } catch (_) {} } }
+          }
           const _np1 = (renderer.info && renderer.info.programs) ? renderer.info.programs.length : 0;
           if (_np1 > _np0 && typeof _drainProgramLinks === 'function') {
             rep.forks = (rep.forks | 0) + (_np1 - _np0);
@@ -92569,12 +92574,10 @@ function _howtoRender(ov) {
   h += '<div style="font-size:12px;color:#9ab;letter-spacing:1px;line-height:1.6;margin-bottom:14px;">' +
        'Configure your controls and performance in the <span style="color:#ffaa00;">SETTINGS</span> menu before you fly. ' +
        'Your first launch downloads every ship, cockpit and soundtrack file up front (the LOADING ASSETS bar) so nothing stutters in mid-flight; after that they stay cached and matches start instantly.</div>';
-  h += '<div style="font-size:13px;color:#9ab;letter-spacing:1px;line-height:1.6;margin-bottom:14px;">' +
-       'Zero-gravity fleet combat. Destroy the enemy fleet to win the round, or capture the CHAMPION FIELD that appears in the final seconds (crack its shell first). First fleet to 4 rounds takes the match. Leave the arena and the leviathans outside will hunt you.</div>';
   h += "<div class='lss-title' style='font-size:15px;letter-spacing:4px;color:#7cf;margin:14px 0 8px;'>GAME MODES — GOALS &amp; RULES</div>";
   const _modes = [
     ['ELIMINATION', '#7cf',
-     "Round-based team elimination — versus players, bots, or both. Wipe the enemy fleet to take the round, or crack the CHAMPION FIELD's shell and capture it in the final seconds; first fleet to 4 rounds takes the match. Committing your loadout in the hangar is your ready-up — ADD BOTS on the ship screen fills out the fleets."],
+     "Zero-gravity fleet combat — versus players, bots, or both. Destroy the enemy fleet to win the round, or capture the CHAMPION FIELD that appears in the final seconds (crack its shell first). First fleet to 4 rounds takes the match. Leave the arena and the leviathans outside will hunt you. Committing your loadout in the hangar is your ready-up — ADD BOTS on the ship screen fills out the fleets."],
     ['RACE', '#ff9fe0',
      'Two disciplines. THE STRAIGHTAWAY is an open-cavern point-to-point: line up on the start, find your own line through the mountains, first to capture the finish field wins. POLE POSITION is a ring-gated circuit: clear every ring to unlock the finish, then dive in and take it.'],
     ['ASSAULT', '#ff8a4a',
@@ -101777,7 +101780,7 @@ function buildRoomGraphLevel(level) {
     game.sandwichChunks && game.sandwichChunks.size > 0 &&
     !(typeof window !== 'undefined' && window.__keepTerrain === false));
   if (_keepTerrain) { try { console.log('[sandwich] terrain kept across the round (' + game.sandwichChunks.size + ' chunks)'); } catch (_) {} }
-  else { try { if (typeof resetSandwichTerrain === 'function') resetSandwichTerrain(); } catch (_) {} }
+  else { try { if (typeof resetSandwichTerrain === 'function') resetSandwichTerrain(!(typeof window !== 'undefined' && window.__swOutgoingAtmo === true)); } catch (_) {} }
   try { game._rrBuildParts.reset = Math.round(performance.now() - _bpT0); } catch (_) {}   // (v39.49c)
   if (!_keepTerrain) game.sandwichTerrain = null;
   game.arenaField = null;
@@ -105526,6 +105529,12 @@ const CAMP_PROLOGUE = {
     ckCam: [90, 120, 40, 34],   // the speech's close-up on the Summoners in their seat: ahead of cockpit1, aside, up, lens
     shipEnv: 10,                // how strongly the ships reflect the storm night (_hkEnvBuild), live; tuned in the pane:
     thunder: 1,                 // 0 = silent storm
+    engine: 1,                  // (v53.03) the ships' engines while they are on screen (_hkEngTick), x the levels below; 0 = silent
+    engines: {
+      flag: { pitch: 0.85, lp: 2400, idle: 0.5, run: 0.85, ref: 420, roll: 1, max: 9000 },       // the Summoners' ship
+      car: { pitch: 0.382, lp: 1200, idle: 0.9, run: 1.3, ref: 900, roll: 0.85, max: 26000 },     // the carrier: 1/PHI^2, the Cyberpunk carrier's register
+      bond: { pitch: 1, lp: 3200, idle: 0.35, run: 0.6, ref: 260, roll: 1.2, max: 4000 },        // Jimmy's row ship, for the bond's close-up
+    },
   },
 };
 (function () {
@@ -106664,6 +106673,7 @@ const CAMP_PROLOGUE = {
       await wait(0.03);
     }
     for (let v = 0; v < 3 && P.hk === H; v++) { try { _hkThunderBuf(); } catch (_) {} await wait(0.05); }
+    try { if (typeof audio !== 'undefined' && audio && audio.ctx) _shipPhiLoop(audio.ctx); } catch (_) {}
     H.ready = true;
   }
 
@@ -106777,6 +106787,76 @@ const CAMP_PROLOGUE = {
       src.connect(lp); lp.connect(g); g.connect(bus || A.sfxBus || A.masterGain || ctx.destination);
       src.start(ctx.currentTime + Math.min(2.4, dist / 1700));   // the sound after the light (sped up: a 5 s wait reads as a bug)
     } catch (_) {}
+  }
+  const _hkEP = new THREE.Vector3();
+  function _hkEngMake(A, buf, E, p) {
+    try {
+      const ctx = A.ctx, now = ctx.currentTime;
+      const src = ctx.createBufferSource(); src.buffer = buf; src.loop = true; src.playbackRate.value = E.pitch || 1;
+      const f = ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = E.lp || 2400; f.Q.value = 0.4;
+      const g = ctx.createGain(); g.gain.value = 0;
+      const pan = _audioKRatePanner(ctx.createPanner());   // (v48.39) k-rate - see _audioKRateSet
+      pan.panningModel = _mob() ? 'equalpower' : 'HRTF';   // no always-on convolution on a phone's audio thread (v32.90)
+      pan.channelCount = 1; pan.channelCountMode = 'explicit';   // point-source panning (see _acquireSpatialTriple)
+      pan.distanceModel = 'inverse'; pan.refDistance = E.ref || 400; pan.maxDistance = E.max || 9000; pan.rolloffFactor = E.roll || 1;
+      if (pan.positionX) { pan.positionX.value = p.x; pan.positionY.value = p.y; pan.positionZ.value = p.z; }
+      else if (pan.setPosition) pan.setPosition(p.x, p.y, p.z);
+      src.connect(f); f.connect(g); g.connect(pan);
+      pan.connect(A.sfxBus || A.masterGain || ctx.destination);
+      src.start(now, Math.random() * buf.duration * 0.9);
+      return { src, f, g, pan, sp: 0, p0: null, want: 0 };
+    } catch (_) { return null; }
+  }
+  function _hkEngTick(dt) {
+    const H = P.hk; if (!H || !H.on || !H.root) return;
+    const A = (typeof audio !== 'undefined') ? audio : null;
+    if (!A || !A.initialized || !A.ctx) return;
+    const ctx = A.ctx, t = ctx.currentTime, T = HK.engines || {}, vol = (HK.engine != null) ? +HK.engine : 1;
+    if (!H.eng) H.eng = {};
+    let any = false;
+    for (const who of ['flag', 'car', 'bond']) {
+      const E = T[who], S = who === 'flag' ? H.flag : (who === 'car' ? H.car : H.bondS);
+      if (!E || !S || !S.g) continue;
+      const shown = !!S.g.visible && vol > 0;
+      let v = H.eng[who];
+      if (!v) {
+        if (!shown) continue;
+        const buf = _shipPhiLoop(ctx); if (!buf) continue;   // still rendering offline (_hkPrep asked for it): next frame
+        S.g.getWorldPosition(_hkEP);
+        v = H.eng[who] = _hkEngMake(A, buf, E, _hkEP);
+        if (!v) continue;
+      }
+      any = true;
+      S.g.getWorldPosition(_hkEP);
+      const sp = (v.p0 && dt > 0) ? Math.min(2000, _hkEP.distanceTo(v.p0) / dt) : 0;
+      (v.p0 || (v.p0 = new THREE.Vector3())).copy(_hkEP);
+      v.sp += (sp - v.sp) * (1 - Math.exp(-(dt || 0) * 3));
+      const k = _cl(v.sp / 600, 0, 1);
+      v.want = shown ? vol * ((E.idle || 0) + ((E.run || 0) - (E.idle || 0)) * k) : 0;
+      try {
+        if (v.pan.positionX) {
+          v.pan.positionX.setTargetAtTime(_hkEP.x, t, 0.04); v.pan.positionY.setTargetAtTime(_hkEP.y, t, 0.04); v.pan.positionZ.setTargetAtTime(_hkEP.z, t, 0.04);
+        } else if (v.pan.setPosition) v.pan.setPosition(_hkEP.x, _hkEP.y, _hkEP.z);
+        v.src.playbackRate.setTargetAtTime((E.pitch || 1) * (1 + 0.25 * k), t, 0.2);
+        v.g.gain.cancelScheduledValues(t);
+        v.g.gain.setTargetAtTime(v.want, t, 0.35);   // in and out over about a second
+        v.g.gain.setTargetAtTime(0, t + 0.5, 0.15);   // the dead-man fade: re-armed every tick, lands only if the ticks stop
+      } catch (_) {}
+    }
+    if (any) { try { _audioUpdateListener(); } catch (_) {} }
+  }
+  function _hkEngStop(H) {
+    const V = H && H.eng; if (!V) return;
+    H.eng = null;
+    const A = (typeof audio !== 'undefined') ? audio : null;
+    for (const who in V) {
+      const v = V[who]; if (!v) continue;
+      try { const t = A.ctx.currentTime; v.g.gain.cancelScheduledValues(t); v.g.gain.setTargetAtTime(0.0001, t, 0.12); } catch (_) {}
+      setTimeout(() => {
+        try { v.src.stop(); } catch (_) {}
+        try { v.src.disconnect(); v.f.disconnect(); v.g.disconnect(); v.pan.disconnect(); } catch (_) {}
+      }, 700);
+    }
   }
   function _hkBoltsTick() {
     const H = P.hk, BM = H && H.bm; if (!BM) return;
@@ -107381,6 +107461,7 @@ const CAMP_PROLOGUE = {
     }
     P.hk = null; P.duskK = 0;
     if (!H) return;
+    try { _hkEngStop(H); } catch (_) {}   // (v53.03) the ships' engines out with them
     try { if (H.cl0 && H.clM && H.clM.instanceMatrix) { H.clM.instanceMatrix.array.set(H.cl0); H.clM.instanceMatrix.needsUpdate = true; } } catch (_) {}   // the puffs back
     try { if (H.bcs0 != null) billboardCloudSystem.material.uniforms.uBrightness.value = H.bcs0; } catch (_) {}   // the low deck back
     try { const r = H.flag && H.flag.g.userData.lssSeat; if (r) _lssSeatDrop(r); } catch (_) {}   // the Summoners out of their seat
@@ -107401,6 +107482,7 @@ const CAMP_PROLOGUE = {
     try { _simOrbs(dt); } catch (e) { _err('orbs', e); }
     try { if (P.hk && P.hk.on) _hkTickFx(); } catch (e) { _err('hack fx', e); }   // the bolts and rings that follow them
     try { _camFrame(dt); } catch (e) { _err('camera', e); }
+    try { if (P.hk && P.hk.on) _hkEngTick(dt); } catch (e) { _err('hack engines', e); }   // (v53.03) after the camera: the listener rides it
     try { _gpSkip(); } catch (_) {}
   }
 
@@ -110201,6 +110283,9 @@ function resumeAudio() {
 let ambientStarted = false;
 let _ambientBedDeferred = false;
 let _welcomeAboardDeferred = null;
+function _lssShipBedMuted() {
+  try { return !!(typeof game !== 'undefined' && game && (game._campPrologue || game._campBattle)); } catch (_) { return false; }
+}
 
 
 
@@ -110222,6 +110307,7 @@ function startAmbientBed() {
   if (_loadingAudioHold) { _ambientBedDeferred = true; return; }   // (v36.24)
   ambientStarted = true;
   const ctx = audio.ctx;
+  if (_lssShipBedMuted()) { try { audio.ambientGain.gain.cancelScheduledValues(ctx.currentTime); audio.ambientGain.gain.value = 0; } catch (_) {} }
 
   audio.phiLayers = [];
 
@@ -110376,8 +110462,9 @@ function updateAmbientBed() {
       tremorFactor = 1.0 - tremorDepth * (0.5 - 0.5 * Math.cos(2 * Math.PI * tremorFreq * t));
     }
   }
-  const targetVol = baseVol * audio.userVol.ambient * audio.duckFactor * tremorFactor;
-  audio.ambientGain.gain.value += (targetVol - audio.ambientGain.gain.value) * 0.02;
+  const _bedMute = _lssShipBedMuted();
+  const targetVol = _bedMute ? 0 : baseVol * audio.userVol.ambient * audio.duckFactor * tremorFactor;
+  audio.ambientGain.gain.value += (targetVol - audio.ambientGain.gain.value) * (_bedMute ? 0.3 : 0.02);
 
   const _pk = (+_SND_PEAK.engine > 0) ? +_SND_PEAK.engine : PHI_SPEED_BASE;
   const currentBase = PHI_REST_BASE + t * (_pk - PHI_REST_BASE);
