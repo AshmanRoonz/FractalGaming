@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.11";
+const LSS_BUILD = "53.12";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -15808,6 +15808,15 @@ function _xrHandleTrustedMenuActivation() {
   if (typeof _XR_PTR !== 'undefined' && _XR_PTR && _XR_PTR.hoverId) return false;
   let handled = false;
 
+  if (_campVrOwns()) {
+    try {
+      const O = window.__campOpening, ph = (O && O.phaseNow) ? O.phaseNow() : '';
+      if (ph === 'choose' || ph === 'perk' || ph === 'view') O.onConfirm();
+    } catch (e) { console.warn('[campaign VR] trigger:', e && e.message); }
+    _xrTrustedMenuSuppressUntil = _xrNowMs() + 350;
+    return true;
+  }
+
   if (_xrLobbyVisible() && _xrLobbyPressArmed) {
     _xrLobbyPressArmed = false;
     const soloBtn = document.getElementById('btn-solo');
@@ -16356,6 +16365,7 @@ function _xrEnsureMinimapMesh() {
 function _xrShouldShowGameplayHud() {
   if (!(renderer && renderer.xr && renderer.xr.isPresenting)) return false;
   if (typeof player === 'undefined' || !player || !player.chassis) return false;
+  if (_campVrOwns()) return false;   // (v53.12) no combat HUD over a campaign cinematic
   if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return false;
   if (typeof _countdownActive !== 'undefined' && _countdownActive) return false;
   if (typeof settingsOpen !== 'undefined' && settingsOpen) return false;
@@ -17059,6 +17069,69 @@ function _xrDrawLobbyHint(ctx, W, H) {
 let _xrMenuLastMode = null;
 let _xrMenuLastKey = null;
 let _xrMenuForceHidden = false;
+function _campVrOwns() {
+  try {
+    if (typeof game === 'undefined' || !game) return false;
+    if (game._campPrologue || game._campBattle) return true;
+    const O = window.__campOpening;
+    return !!(O && O.phaseNow && O.phaseNow());
+  } catch (_) { return false; }
+}
+function _campVrWant() {
+  const B = game._campBattle;
+  if (B && (B.phase === 'load' || B.phase === 'end')) return 'black';
+  const P = game._campPrologue;
+  if (P && (P.phase === 'load' || P.finishing)) return 'black';
+  const O = window.__campOpening;
+  const ph = (O && O.phaseNow) ? O.phaseNow() : '';
+  if (ph && ph !== 'launch' && ph !== 'arrive') {
+    try { O.tick(); } catch (_) {}   // the picker's rAF loop that ticks it is paused in an immersive session
+    const st = O.stage();
+    if (st && st.scene && st.camera) return st;
+  }
+  return null;
+}
+const _campVr = { black: null, v: null, q: null, s: null, warned: false };
+function _campVrFrame() {
+  if (!(renderer && renderer.xr && renderer.xr.isPresenting)) return false;
+  if (!_campVrOwns()) return false;
+  try {
+    const want = _campVrWant();
+    if (!want) return false;
+    _xrSyncDollyBeforeRender();                    // the dolly current, the camera zeroed under it, as on every XR frame
+    try { _xrUpdateMenuMirror(); } catch (_) {}    // the menu down, its hit regions dropped (_campVrOwns)
+    try { if (xrHudMesh) xrHudMesh.visible = false; } catch (_) {}
+    let sc;
+    if (want === 'black') {
+      if (!_campVr.black) { _campVr.black = new THREE.Scene(); _campVr.black.background = new THREE.Color(0x000000); }
+      sc = _campVr.black;
+    } else {
+      if (!_campVr.v) { _campVr.v = new THREE.Vector3(); _campVr.q = new THREE.Quaternion(); _campVr.s = new THREE.Vector3(); }
+      if (want.vr) want.vr(true);                  // the gameshow: its photo in the world, not head-locked
+      want.camera.updateWorldMatrix(true, false);
+      want.camera.matrixWorld.decompose(_campVr.v, _campVr.q, _campVr.s);
+      xrDolly.position.copy(_campVr.v); xrDolly.quaternion.copy(_campVr.q); xrDolly.updateMatrixWorld(true);
+      sc = want.scene;
+    }
+    renderer.setRenderTarget(renderer.xr.getRenderTarget ? renderer.xr.getRenderTarget() : null);
+    renderer.render(sc, camera);
+    return true;
+  } catch (e) {
+    if (!_campVr.warned) { _campVr.warned = true; console.warn('[campaign VR] frame failed - the world instead:', e && e.message); }
+    return false;
+  }
+}
+try {
+  window.__campVr = {
+    owns: () => _campVrOwns(),
+    want: () => {
+      if (!_campVrOwns()) return null;
+      const w = _campVrWant();
+      return (w === 'black') ? 'black' : (w ? 'stage:' + window.__campOpening.phaseNow() : null);
+    },
+    frame: () => _campVrFrame(),
+  };
+} catch (_) {}
 function _xrUpdateMenuMirror() {
   if (!renderer.xr.isPresenting) {
     if (xrMenuMesh) xrMenuMesh.visible = false;
@@ -17067,7 +17140,7 @@ function _xrUpdateMenuMirror() {
     return;
   }
   const _selUp = (typeof _xrShipSelectVisible === 'function') && _xrShipSelectVisible();
-  const _matchStarting = _xrMenuForceHidden || !!(
+  const _matchStarting = _xrMenuForceHidden || _campVrOwns() || !!(   // (v53.12) no menu over a campaign cinematic
     (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) ||
     (!_selUp && typeof _countdownActive !== 'undefined' && _countdownActive)
   );
@@ -22316,6 +22389,7 @@ function renderFrame() {
       } catch (e) { console.warn('[v11b VR] log failed:', e); }
     }
     if (_xrCoverIsUp() && _xrCoverFrameRender()) return;
+    try { if (_campVrFrame()) return; } catch (_) {}
     try {
       _xrSyncDollyBeforeRender();
       const _xrShowHud = (typeof _xrShouldShowGameplayHud === 'function') ? _xrShouldShowGameplayHud() : true;
@@ -50437,6 +50511,7 @@ function _lssRenderPicker() {
     let _co = null;
     try { _co = window.__campOpening ? window.__campOpening.stage() : null; } catch (_) { _co = null; }
     if (_co) {
+      if (_co.vr) _co.vr(false);   // (v53.12) back from a headset: the gameshow's photo is its background again (_gsVr)
       if (_co.fit) _co.fit(w, h);
       else if (_co.camera.aspect !== aspect) { _co.camera.aspect = aspect; _co.camera.updateProjectionMatrix(); }
       renderer.setRenderTarget(null);
@@ -104845,9 +104920,31 @@ const CAMP_SEQS = {
     if (!people.length) throw new Error('no characters');
     const gs = { scene, camera, tex, iw, ih, people, hemi, key, rimA, rimB, _fitKey: '', fit: null };
     gs.fit = (w, h) => _gsFit(gs, w, h);
+    gs.vr = (on) => _gsVr(gs, on);   // (v53.12) a headset's version of the set - see _gsVr
     _gsPose(gs, 0);
     try { if (renderer.compileAsync) await renderer.compileAsync(scene, camera); } catch (_) {}
     return gs;
+  }
+  function _gsVr(gs, on) {
+    if (on) {
+      if (!gs._vrPlane) {
+        const D = cfg.gs.vrD || 30, h = 2 * D * Math.tan(gs.camera.fov * Math.PI / 360), w = h * gs.iw / gs.ih;
+        const t = gs.tex.clone(); t.repeat.set(1, 1); t.offset.set(0, 0); t.needsUpdate = true;
+        const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h),
+          new THREE.MeshBasicMaterial({ map: t, toneMapped: false, fog: false, depthWrite: false }));
+        m.renderOrder = -1; m.frustumCulled = false; m.userData.vrD = D;
+        gs._vrPlane = m; gs.scene.add(m);
+      }
+      const m = gs._vrPlane;
+      gs.camera.updateWorldMatrix(true, false);
+      m.quaternion.copy(gs.camera.quaternion);
+      m.position.set(0, 0, -m.userData.vrD).applyQuaternion(gs.camera.quaternion).add(gs.camera.position);
+      m.visible = true;
+      if (gs.scene.background) gs.scene.background = null;
+    } else if (gs._vrPlane && gs._vrPlane.visible) {
+      gs._vrPlane.visible = false;
+      gs.scene.background = gs.tex;
+    }
   }
   function _gsFit(gs, w, h) {
     const k = w + 'x' + h + '@' + gs.camera.fov;
@@ -104909,6 +105006,7 @@ const CAMP_SEQS = {
       try { p.blob.geometry.dispose(); p.blob.material.dispose(); } catch (_) {}
     }
     try { gs.scene.background = null; gs.tex.dispose(); } catch (_) {}
+    try { if (gs._vrPlane) { gs._vrPlane.geometry.dispose(); gs._vrPlane.material.map.dispose(); gs._vrPlane.material.dispose(); gs._vrPlane = null; } } catch (_) {}   // (v53.12)
     for (const url of [cfg.gs.pilot.url, cfg.gs.summoners.url]) {
       const pr = _gsG[url]; delete _gsG[url];
       if (pr) pr.then((g) => {
@@ -105586,6 +105684,7 @@ const CAMP_SEQS = {
     O.phase = 'choose'; _ui('choose');
     const getIn = new Promise((res) => { O._getIn = res; });
     if (D) D.sayLines(['op_fly', 'op_choose']);   // not awaited: pick while he talks
+    _vrAuto('choose', 3);   // (v53.12) a headset has no picker: the hull in focus, once he has said it
     await getIn; if (!live()) return;
     O.key = (game._ssKey && LOADOUTS[game._ssKey]) ? game._ssKey : O.st.ships[O.focus].key;
     O.focus = Math.max(0, O.st.ships.findIndex((s) => s.key === O.key));
@@ -105605,12 +105704,14 @@ const CAMP_SEQS = {
     try { _renderPerkPicker(); } catch (_) {}
     const perkP = new Promise((res) => { O._perkPick = res; });
     if (D) D.sayLines(['op_perk']);
+    _vrAuto('perk', 1.5);   // (v53.12) the stored perk
     await perkP; if (!live()) return;
     snd('reload'); if (D) D.clear();
     await wait(0.3); if (!live()) return;
     O.phase = 'view'; _ui('view');
     const pick = new Promise((res) => { O._viewPick = res; });
     if (D) D.sayLines(['op_view']);
+    _vrAuto('view', 1);   // (v53.12) the stored view (a headset flies from the seat either way)
     const v = await pick; if (!live()) return;
     try { localStorage.setItem('lss_view', v === 'fp' ? 'fp' : 'tp'); } catch (_) {}   // _applyStartView reads it at launch
     snd('rearm_reset');
@@ -105623,6 +105724,13 @@ const CAMP_SEQS = {
     game._campOpenArrive = true;
     O.failT = setTimeout(() => { if (O.on && O.phase === 'launch') arrive(); }, cfg.failsafe * 1000);
     try { commitLoadout(O.key); } catch (e) { console.warn('[campaign-opening] launch failed:', e && e.message); arrive(); }
+  }
+  function _vrAuto(ph, beat) {
+    try { if (!(renderer && renderer.xr && renderer.xr.isPresenting)) return; } catch (_) { return; }
+    const tok = O.tok, D = window.CampDialogue;
+    (D && D.whenIdle ? D.whenIdle() : Promise.resolve()).then(() => wait(beat)).then(() => {
+      if (O.on && O.tok === tok && O.phase === ph) onConfirm();
+    });
   }
   function arrive() {
     if (!O.on) return;
@@ -105704,7 +105812,8 @@ const CAMP_SEQS = {
     setTimeout(() => { if (O.on) _hsBeamIn(S); }, cfg.beamLead * 1000);
     return 'beaming into ' + (S && S.key);
   };
-  try { window.__campOpening = { start, reset, state, arrive, stage, tick, onConfirm, blockPreview, cfg, look, skip, gameshow, beam }; } catch (_) {}
+  const phaseNow = () => (O.on ? O.phase : '');
+  try { window.__campOpening = { start, reset, state, arrive, stage, tick, onConfirm, blockPreview, cfg, look, skip, gameshow, beam, phaseNow }; } catch (_) {}
 })();
 
 const CAMP_PROLOGUE = {
@@ -107802,7 +107911,6 @@ const CAMP_PROLOGUE = {
   function start() {
     if (P.on) return true;
     if (!K.on) return false;
-    try { if (renderer && renderer.xr && renderer.xr.isPresenting) return false; } catch (_) {}   // a headset owns its camera
     const tok = ++P.tok;
     Object.assign(P, { on: true, phase: 'load', t: 0, last: 0, frame: 0, cine: false, finishing: false, plan: null, sys: null,
                        shot: -1, xjGo: -1, xjGF: -1, skipped: false, gpPrev: false, curve: null, dbg: false, err: {}, hk: null, duskK: 0 });
@@ -107938,7 +108046,6 @@ const CAMP_BATTLE = {
   function start(then) {
     if (B.on) return true;
     if (!K.on) return false;
-    try { if (renderer && renderer.xr && renderer.xr.isPresenting) return false; } catch (_) {}
     if (typeof MAP_DATA === 'undefined' || !MAP_DATA[K.map]) return false;
     const tok = ++B.tok;
     Object.assign(B, { on: true, phase: 'load', t: 0, then: then || null, skipped: false, cut: true, topT: 0, err: {},
