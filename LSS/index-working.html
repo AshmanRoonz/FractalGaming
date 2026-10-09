@@ -7184,6 +7184,9 @@ body.lss-land-lobby #lss-version-badge {
      dims on THIS face's own lock (`.ssx-mode-locked`, _ssxSync: _lssRoomModeLocked), not on the old box's flag. */
   #ship-select.ssx:not(.camp-open) #ss-mode-box { display: block !important; }
   #ship-select.ssx:not(.camp-open) #ss-mode-row.ssx-mode-locked #ss-mode-current::after { opacity: 0.35; }
+  /* (v53.36) ...and the old box's own lock dim (#ss-mode-box.ss-mode-locked: the label at 0.45) is not this face's - it greyed
+     CAMPAIGN on the campaign picker, which is the first thing on screen now that the page opens there */
+  #ship-select.ssx:not(.camp-open) #ss-mode-box.ss-mode-locked #ss-mode-current { opacity: 1 !important; }
   /* the drop-down lists every mode, so the step arrows go (they are re-cloned by _lssRenderLobbyMode, so hidden, not removed) */
   #ship-select.ssx:not(.camp-open) .ss-mode-arrow { display: none !important; }
   #ship-select.ssx:not(.camp-open) #ss-mode-row { cursor: pointer; }
@@ -7458,9 +7461,12 @@ body.lss-land-lobby #lss-version-badge {
   #ship-select.ssx:not(.camp-open) .ssx-rooms-empty { grid-column: 1 / -1; text-align: center; padding: calc(30 * var(--u)) calc(10 * var(--u)); font-family: 'Rajdhani', sans-serif; font-size: calc(17 * var(--u)); color: #b9cde0; }
   #ship-select.ssx:not(.camp-open) .ssx-rooms-foot { margin-top: calc(10 * var(--u)); font-family: 'Rajdhani', sans-serif; font-size: calc(14 * var(--u)); color: #7f97ad; }
 
-  /* ---- between rounds (the same picker, mid-match): no room box, and MAIN MENU is the only way out of the match ---- */
+  /* ---- between rounds (the same picker, mid-match): no room box, and LEAVE MATCH is the only way out of the match ---- */
   #ship-select.ssx:not(.camp-open).ssx-mid #ssx-mp,
   #ship-select.ssx:not(.camp-open).ssx-mid .ssx-links > :not(#ssx-mainmenu) { display: none !important; }
+  /* (v53.36) ...and ONLY then: on the launch picker it reloaded to the main screen, which is retired - the reload would
+     land right back here */
+  #ship-select.ssx:not(.camp-open):not(.ssx-mid) #ssx-mainmenu { display: none !important; }
   /* ---- the 3-2-1: .lss-launching strips the picker's header and body; these five are #ship-select's own children, so
      they go by name (two ids, to outrank the show rules above) ---- */
   #ship-select.ssx.lss-launching:not(.camp-open) > #ssx-top,
@@ -7720,7 +7726,9 @@ body.lss-land-lobby #lss-version-badge {
     <span class="ssx-brand"><img src="FractalGaming_32.webp" alt="">Fractal Gaming</span>
     <span class="ssx-ver"><svg viewBox="0 0 24 24"><path d="M6 11h4M8 9v4M15 12h.01M18 10h.01M17.3 5H6.7a4 4 0 0 0-4 3.6L2 15a3 3 0 0 0 5.4 1.8L9 15h6l1.6 1.8A3 3 0 0 0 22 15l-.7-6.4A4 4 0 0 0 17.3 5z"/></svg>GAMEPAD RECOMMENDED <span id="ssx-ver"></span></span>
     <nav class="ssx-links">
-      <button id="ssx-mainmenu" type="button">&#9664; MAIN MENU</button>
+      <!-- (v53.36) the main screen is retired: this reload lands on this screen, so it is only shown MID-MATCH (.ssx-mid,
+           between rounds), as the way out of the match - its old name said where it went -->
+      <button id="ssx-mainmenu" type="button">&#9664; LEAVE MATCH</button>
       <a href="leaderboard.html" target="_blank" rel="noopener">LEADERBOARD</a>
       <button id="ssx-stats" type="button">MY STATS</button>
       <button id="ssx-replays" type="button">REPLAY STUDIO</button>
@@ -8155,12 +8163,18 @@ body.lss-land-lobby #lss-version-badge {
   window.discordSignout = function() { return queueOrCall('discordSignout', arguments); };
   // _bootLSS calls window.__lssReplayPending() at the end of its setup so
   // any click that arrived during boot is acted on once everything's wired.
+  // (v53.36) ...and SAYS whether it replayed one: the page then opens on the hangar (_ssxBootEnter) only if the player did
+  // not already choose something during the boot.
   window.__lssReplayPending = function() {
-    if (!pending) return;
+    if (!pending) return false;
     const real = window['__real_' + pending.name];
     if (typeof real === 'function') real.apply(null, pending.args);
     pending = null;
+    return true;
   };
+  // (v53.36) an invite link (index.html?room=CODE): the hangar boot opens the hangar INSIDE that room (_ssxBootEnter) - the
+  // CODE, kept here at page start because _tryAutoJoin strips ?room= from the URL before the boot ends. '' = no invite.
+  try { var _rm = /[?&]room=([^&#]*)/i.exec(location.search || ''); window.__lssBootRoom = _rm ? decodeURIComponent(_rm[1]).trim().toUpperCase() : ''; } catch (_) { window.__lssBootRoom = ''; }
 })();
 
 // (v35.20) Landscape lock, shared by the manual FULLSCREEN button and the
@@ -8443,7 +8457,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.35";
+const LSS_BUILD = "53.37";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -20714,7 +20728,9 @@ function _lobbyLandscape(force) {
   } catch (_) {}
   // (v44.87) the menu is assembled now, in whichever orientation - drop the boot cover. Outside the
   // try above so a thrown layout still lifts it; the inline failsafe backstops this either way.
-  try { if (window.__lssBootCover) window.__lssBootCover.hide(); } catch (_) {}
+  // (v53.36) ...unless the page is about to open on the hangar instead (_ssxBootEnter drops it then): lifting it here
+  // showed this retired menu for the seconds a cold load takes to reach the hangar.
+  try { if (window.__lssBootCover && !_ssxBootPending()) window.__lssBootCover.hide(); } catch (_) {}
 }
 try {
   window.addEventListener('resize', () => { try { _lobbyLandscape(); } catch (_) {} });
@@ -39000,12 +39016,15 @@ function _rplClearInput() {
     input.mouseDown = false; input.rightMouseDown = false; input.mouseDX = 0; input.mouseDY = 0;
   } catch (_) {}
 }
+// (v53.36) where a replay starts from and goes back to: the HANGAR on the new face (the main screen is retired - the page
+// opens on ship select, and the theater's way out reloads there), the MAIN MENU on the old one (?newss=0)
+function _rplHomeName() { try { return _ssxFlag() ? 'HANGAR' : 'MAIN MENU'; } catch (_) { return 'MAIN MENU'; } }
 function _rplStudioOpen(R, opts) {
   opts = opts || {};
   if (!R || _RPL.studio) return false;
   // (v48.07) only the THEATER opens it (a match it built for the replay) - or the console, for dev.
   // Owner: "replay studio shouldn't be available during a match".
-  if (!opts.theater && !opts.dev) { _rplFlash('REPLAYS ARE WATCHED FROM THE MAIN MENU'); return false; }
+  if (!opts.theater && !opts.dev) { _rplFlash('REPLAYS ARE WATCHED FROM THE ' + _rplHomeName()); return false; }
   const can = _rplStudioCan();
   if (!can.ok) { _rplFlash(can.why); return false; }
   if (!opts.force && R.sig && R.sig !== _rplLevelSig()) { _rplFlash('RECORDED ON ' + String(R.mapName || R.map).toUpperCase() + ' - START A SOLO MATCH THERE TO WATCH IT'); return false; }
@@ -39453,7 +39472,7 @@ function _rplStudioUIFill(st, root) {
   root.querySelector('.rst-sub').textContent = String(R.mapName || R.map || '').toUpperCase() + '  ·  ROUND ' + (R.round | 0) +
     ((R === _RPL.cur) ? '  ·  THIS ROUND' : '');
   // (v48.07) in the theater, leaving is going back to the main menu (_rplStudioExit)
-  try { root.querySelector('.rst-btns [data-a="close"]').textContent = st.theater ? 'MAIN MENU' : 'EXIT'; } catch (_) {}
+  try { root.querySelector('.rst-btns [data-a="close"]').textContent = st.theater ? _rplHomeName() : 'EXIT'; } catch (_) {}
   // the cast buttons
   st.ui.actors.textContent = '';
   for (const key of st.order) {
@@ -39762,7 +39781,7 @@ async function _rplTheaterRun(w) {
   _rplLog('theater: building ' + w.map + ' for replay ' + w.id);
   try {
     for (let i = 0; i < 150 && game.state !== 'select'; i++) await W(100);
-    if (game.state !== 'select') { _rplFlash('THE THEATER STARTS FROM THE MAIN MENU'); return; }
+    if (game.state !== 'select') { _rplFlash('THE THEATER STARTS FROM THE ' + _rplHomeName()); return; }
     _RPL.theater = Object.assign({ until: Date.now() + 120000 }, w);
     startSolo();
     for (let i = 0; i < 60 && !document.getElementById('ship-preview-confirm'); i++) await W(100);
@@ -131342,6 +131361,13 @@ function returnToMainMenu(opts) {
     return returnToMainMenu({ hard: true });
   }
 
+  // ⭐ (v53.36) THE MAIN SCREEN IS RETIRED on the new face, and this soft path is the campaign finale's way out (v52.63: "the
+  // main menu... with CAMPAIGN on it", not ELIMINATION's picker, where a pad's A + Start launched a match). So instead of
+  // raising #lobby it puts THIS screen on the campaign - the drop-down's own pick: the co-op campaign in a room, the last
+  // leg for a pilot with progress - the screen the page itself now opens on.
+  try {
+    if (_ssxFlag()) { _ssxCampaignPick(); return; }
+  } catch (_) {}
   // returnToRootMenu finishes by showing ship-select (that IS its "root menu").
   // For the main menu we want one step further out, so close it and raise
   // #lobby. Rebuilding ship-select first is a few wasted ms and much safer than
@@ -142877,6 +142903,13 @@ function _ssxSync() {
     let mid = false;
     try { mid = !!(game && game.state && game.state !== 'select'); } catch (_) {}
     _ssxClass(sel, 'ssx-mid', mid);
+    // (v53.36) the mode up here, for a reload within this tab session to land back on (_ssxBootEnter) - launch picker only
+    if (!mid) {
+      try {
+        const tag = _lssRoomTag();
+        if (tag && _ssxSync._land !== tag) { _ssxSync._land = tag; sessionStorage.setItem('lss_land', tag); }
+      } catch (_) {}
+    }
     // you
     let u = null;
     try { u = discordCurrentUser(); } catch (_) {}
@@ -143181,7 +143214,8 @@ function _ssxMenuOpen(kind, anchor) {
         _LSS_PICKABLE_MODES.forEach(t => items.push({ label: _lssModeDisplayName(t), sub: _lssModeBlurb(t), on: t === cur,
                                                       act: () => _ssxModePick(t) }));
         // the campaign picker's RESTART (#ss-camp-restart lives in the header dock this face hides): two presses, the
-        // second one ITS handler's own (clears the progress and reloads to the main menu, where CAMPAIGN plays the opening)
+        // second one ITS handler's own (clears the progress and reloads - (v53.36) onto this screen's campaign, The Approach,
+        // where LAUNCH plays the opening; it went to the main menu's CAMPAIGN before the main screen was retired)
         if (cur === 'campaign' && prog && game && game._campPicker) {
           const armed = performance.now() < (_ssxMenuOpen._rsUntil || 0);
           items.push({ label: armed ? 'PRESS AGAIN TO RESTART' : 'RESTART CAMPAIGN', sub: 'From the very beginning - clears your levels', danger: true, keep: !armed,
@@ -143201,11 +143235,12 @@ function _ssxMenuOpen(kind, anchor) {
       });
     } else if (kind === 'more') {
       // (v53.25) the compact arrangement's ☰: the footer it has no room for, in the footer's order, then its two
-      // drop-ups flattened (the main screen's own COMMUNITY / TOOLS links). Mid-match only MAIN MENU, as in the footer.
+      // drop-ups flattened (the main screen's own COMMUNITY / TOOLS links). Mid-match only LEAVE MATCH, as in the footer
+      // ((v53.36) and ONLY mid-match, as there: the main screen it went to is retired).
       const press = (id) => () => { const b = document.getElementById(id); if (b) b.click(); };
-      items.push({ label: 'MAIN MENU', act: press('lobby-back-btn') });
       let mid = false;
       try { mid = document.getElementById('ship-select').classList.contains('ssx-mid'); } catch (_) {}
+      if (mid) items.push({ label: 'LEAVE MATCH', act: press('lobby-back-btn') });
       if (!mid) {
         items.push({ label: 'LEADERBOARD', href: 'leaderboard.html' });
         items.push({ label: 'MY STATS', act: press('lobby-stats-btn') });
@@ -143303,6 +143338,47 @@ function _ssxCampaignPick() {
     game._ssxCampNew = true;
     enterShipSelect();
   } catch (e) { console.warn('[ssx] campaign pick failed:', e); }
+}
+// ⭐⭐ (v53.36) THE MAIN SCREEN IS RETIRED: THE PAGE OPENS ON THIS ONE, IN THE CAMPAIGN. Owner: "everything from the main
+// screen is on this screen... do we need the main screen anymore?" -> "let's do it... campaign should be what people see
+// first". Measured first: every one of the main screen's 30 controls has its twin here (the nine modes, rooms + LIVE
+// ROOMS, sign-in, settings, how to play, fullscreen, the Aegis rank, leaderboard, stats, replays, about, Goopling, the
+// four community links, the four labs).
+// HOW: the end of _bootLSS, right after the boot-click replay, calls this. It opens solo the main screen's own way
+// (startSolo, synchronous) and then picks the campaign the PLAY drop-down's way (_ssxCampaignPick: a new pilot on The
+// Approach, waiting for LAUNCH; a returning one on their last leg) - one task, so ELIMINATION never paints in between.
+// AN INVITE LINK (?room=CODE, kept at page start by the inline stub): the hangar opens INSIDE that room - startSolo, then
+// the hangar's own CREATE / JOIN (_ssxRoomGo: the current mode's start function with the code, which joins or opens it;
+// the room's own mode still wins on arrival). _tryAutoJoin's bare joinRoom stands aside on this face: it connected and
+// then sat on the main screen ("CONNECTED: ROOM ... WAITING FOR PLAYERS", measured), and the two together would double-join.
+// NOT: on the old face (?newss=0 - the main screen is still its home); after a click the player made during the boot.
+// WITHIN A TAB SESSION a reload (LEAVE MATCH, a refresh) lands back on the mode last up here - sessionStorage lss_land,
+// written by _ssxSync - and a fresh visit opens on the campaign: the owner's rule is what people see FIRST, and someone
+// who just left an ELIMINATION match would not expect the story.
+// THE COVER: the boot cover (LSS_loading) stays up through all of this and is dropped here, once the hangar has had two
+// frames - _lobbyLandscape would drop it the moment the old menu was laid out, which on a cold load showed that menu for
+// the seconds before the hangar (it asks _ssxBootPending first). The cover's 12 s failsafe still backstops everything.
+function _ssxBootPending() {
+  try { return !_ssxBootEnter._done && _ssxFlag(); } catch (_) { return false; }
+}
+function _ssxBootEnter(replayed) {
+  const coverOff = () => { try { if (window.__lssBootCover) window.__lssBootCover.hide(); } catch (_) {} };
+  try {
+    if (_ssxBootEnter._done) return;
+    _ssxBootEnter._done = true;
+    if (!_ssxFlag() || replayed) { coverOff(); return; }
+    const sel = document.getElementById('ship-select');
+    if (sel && sel.classList.contains('active')) { coverOff(); return; }
+    const invite = String(window.__lssBootRoom || '');
+    let land = null;
+    try { land = sessionStorage.getItem('lss_land'); } catch (_) {}
+    startSolo();
+    if (invite) _ssxRoomGo(invite);
+    else if (land && land !== 'campaign' && _LSS_PICKABLE_MODES.indexOf(land) >= 0) _ssxModePick(land);
+    else _ssxCampaignPick();
+    requestAnimationFrame(() => requestAnimationFrame(coverOff));
+    setTimeout(coverOff, 1500);   // a hidden tab gets no frames
+  } catch (e) { console.warn('[ssx] boot entry failed:', e); coverOff(); }
 }
 // CREATE ROOM / JOIN: exactly the main screen's route - a code in #room-code, then the CURRENT mode's own start function,
 // which joins (or mints) the room and re-opens this picker inside it (_startHostedMode / startElimination). A room's mode
@@ -144624,8 +144700,12 @@ document.addEventListener('DOMContentLoaded', () => {
     // (v35.83) Owner-directed revert: the v35.50 soft return glitched, so the
     // user-facing "main menu" button is a HARD full-page reload again. The
     // reload closes the room — the prompt must say so or it lies (map PART 17).
-    const ok = window.confirm(
-      'Return to the main menu? The game will reload and your current room will close.');
+    // (v53.36) on the new face this is LEAVE MATCH (the main screen is retired; the reload opens on the hangar)
+    let _face = false;
+    try { _face = _ssxFlag(); } catch (_) {}
+    const ok = window.confirm(_face
+      ? 'Leave the match? The game will reload to the hangar and your current room will close.'
+      : 'Return to the main menu? The game will reload and your current room will close.');
     if (!ok) return;
     try { returnToMainMenu({ hard: true }); } catch (e) { console.warn('[main-menu] returnToMainMenu failed', e); }
   });
@@ -144669,7 +144749,12 @@ document.addEventListener('DOMContentLoaded', () => {
       // joinRoom may not be defined yet ; the early stub queues it.
       // Fire it on a slight delay so any animations/intro have a moment
       // to settle and the lobby visibly registers the pre-filled code.
-      setTimeout(() => {
+      // (v53.36) NOT on the new face: the main screen is retired, and a bare joinRoom left the invited pilot on it ("CONNECTED:
+      // ROOM ... WAITING FOR PLAYERS", measured) - _ssxBootEnter opens the hangar inside the room instead, the hangar's own
+      // CREATE / JOIN way (_ssxRoomGo). Calling both would be the v38.60 double-join.
+      let _face = false;
+      try { _face = _ssxFlag(); } catch (_) {}
+      if (!_face) setTimeout(() => {
         try {
           if (typeof window.joinRoom === 'function') window.joinRoom();
         } catch (e) { console.warn('[auto-join] joinRoom threw:', e); }
@@ -146240,11 +146325,16 @@ function _refreshSettingsValues() {
 
   // Exit-to-main-menu button : visible only when not on the lobby. Computed
   // at build time before, so it could stay stale across state changes.
+  // (v53.36) On the new face the main screen is retired and this reload opens on the hangar - so it is LEAVE MATCH, shown
+  // only in a match: on the launch picker it would only reload the screen you are on.
   const exitBtn = $('#settings-exit-to-menu');
   if (exitBtn) {
     const lobbyVisible = (document.getElementById('lobby') &&
                          document.getElementById('lobby').style.display !== 'none');
-    exitBtn.style.display = lobbyVisible ? 'none' : '';
+    let _face = false, _atHangar = false;
+    try { _face = _ssxFlag(); _atHangar = _face && game.state === 'select'; } catch (_) {}
+    exitBtn.style.display = (lobbyVisible || _atHangar) ? 'none' : '';
+    exitBtn.textContent = _face ? 'LEAVE MATCH' : 'EXIT TO MAIN MENU';
   }
 }
 
@@ -147937,8 +148027,11 @@ function buildSettingsPage() {
       // (v35.83) Owner-directed revert: the v35.50 soft return glitched, so
       // this button is a HARD full-page reload again. The reload closes the
       // room — the prompt must say so or it lies (map PART 17).
-      const ok = window.confirm(
-        'Exit to the main menu? Your match will end, the game will reload, and your current room will close.');
+      let _face = false;
+      try { _face = _ssxFlag(); } catch (_) {}
+      const ok = window.confirm(_face   // (v53.36) LEAVE MATCH on the new face - see the refresh branch
+        ? 'Leave the match? It ends, the game will reload to the hangar, and your current room will close.'
+        : 'Exit to the main menu? Your match will end, the game will reload, and your current room will close.');
       if (!ok) return;
       try { closeSettings(); } catch (_) {}
       try { returnToMainMenu({ hard: true }); } catch (e) { console.warn('[exit] returnToMainMenu failed', e); }
@@ -154501,6 +154594,14 @@ MAP_DATA.camp_brokensim   = { ...CAMPAIGN_LEG_MAP, name: 'The Broken Simulation'
 // leg is a TypeError at boot (caught by the sim the first time).
 MAP_DATA.camp_crystalcave.legHalfZ = 37000;
 MAP_DATA.camp_crystalcave.rooms = _campLegRooms(MAP_DATA.camp_crystalcave.legHalfZ);
+// (v53.36) THE APPROACH HAS ITS PICTURE - the owner's concept art (concept/thumbs/the_approach.png, 941 x 1672), the first
+// thing a new pilot sees now that the page opens on the campaign. Halved to 470 x 836 webp (133 KB): PORTRAIT on purpose,
+// because the PLAY card's picture box is taller than wide on a desktop (188 x 302 measured) and square-ish on a phone, and
+// it covers - the 468 x 220 strips of the arena thumbs show only their middle there.
+// ⚠ SET HERE, AFTER THE SPREADS ABOVE, NOT IN CAMPAIGN_LEG_MAP'S LITERAL: camp_approach IS that object, and the six other
+//   legs are `{ ...CAMPAIGN_LEG_MAP, ... }` copies - a thumb in the literal would have put The Approach on every leg.
+//   Object.assign keeps it a `thumb: '...'` literal, which is what tools/gen_manifest.py looks for.
+Object.assign(MAP_DATA.camp_approach, { thumb: 'map_thumbs/the_approach.webp' });
 // The ordered journey ; index === game.campaign.sceneIndex. A real leg has a
 // .key that is a MAP_DATA 'camp_' entry ; a { locked:true } entry (no key) is a
 // non-selectable "coming soon" teaser shown greyed in the campaign carousel.
@@ -178296,7 +178397,13 @@ if (typeof startTest === 'function') window.__real_startTest = startTest;
 // Discord signin/signout exports for the early stub pattern.
 if (typeof discordSignin  === 'function') window.__real_discordSignin  = discordSignin;
 if (typeof discordSignout === 'function') window.__real_discordSignout = discordSignout;
-if (typeof window.__lssReplayPending === 'function') window.__lssReplayPending();
+// (v53.36) ...then THE PAGE OPENS ON THE HANGAR (_ssxBootEnter - the main screen is retired), unless that replay was a
+// click the player already made during the boot.
+{
+  let _replayed = false;
+  if (typeof window.__lssReplayPending === 'function') _replayed = !!window.__lssReplayPending();
+  try { _ssxBootEnter(_replayed); } catch (e) { console.warn('[ssx] boot entry threw:', e); }
+}
 
 // (v36.22) BULK ASSET PRELOAD — kicked off HERE, at page load, not at match
 // launch. Placed after __lssReplayPending so a click the player got in before

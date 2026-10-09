@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.35";
+const LSS_BUILD = "53.37";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -8499,7 +8499,7 @@ function _lobbyLandscape(force) {
       if (side && side.parentNode) side.parentNode.removeChild(side);
     }
   } catch (_) {}
-  try { if (window.__lssBootCover) window.__lssBootCover.hide(); } catch (_) {}
+  try { if (window.__lssBootCover && !_ssxBootPending()) window.__lssBootCover.hide(); } catch (_) {}
 }
 try {
   window.addEventListener('resize', () => { try { _lobbyLandscape(); } catch (_) {} });
@@ -21473,10 +21473,11 @@ function _rplClearInput() {
     input.mouseDown = false; input.rightMouseDown = false; input.mouseDX = 0; input.mouseDY = 0;
   } catch (_) {}
 }
+function _rplHomeName() { try { return _ssxFlag() ? 'HANGAR' : 'MAIN MENU'; } catch (_) { return 'MAIN MENU'; } }
 function _rplStudioOpen(R, opts) {
   opts = opts || {};
   if (!R || _RPL.studio) return false;
-  if (!opts.theater && !opts.dev) { _rplFlash('REPLAYS ARE WATCHED FROM THE MAIN MENU'); return false; }
+  if (!opts.theater && !opts.dev) { _rplFlash('REPLAYS ARE WATCHED FROM THE ' + _rplHomeName()); return false; }
   const can = _rplStudioCan();
   if (!can.ok) { _rplFlash(can.why); return false; }
   if (!opts.force && R.sig && R.sig !== _rplLevelSig()) { _rplFlash('RECORDED ON ' + String(R.mapName || R.map).toUpperCase() + ' - START A SOLO MATCH THERE TO WATCH IT'); return false; }
@@ -21883,7 +21884,7 @@ function _rplStudioUIFill(st, root) {
   st.ui.labels.textContent = '';
   root.querySelector('.rst-sub').textContent = String(R.mapName || R.map || '').toUpperCase() + '  ·  ROUND ' + (R.round | 0) +
     ((R === _RPL.cur) ? '  ·  THIS ROUND' : '');
-  try { root.querySelector('.rst-btns [data-a="close"]').textContent = st.theater ? 'MAIN MENU' : 'EXIT'; } catch (_) {}
+  try { root.querySelector('.rst-btns [data-a="close"]').textContent = st.theater ? _rplHomeName() : 'EXIT'; } catch (_) {}
   st.ui.actors.textContent = '';
   for (const key of st.order) {
     const A = R.actors[key];
@@ -22172,7 +22173,7 @@ async function _rplTheaterRun(w) {
   _rplLog('theater: building ' + w.map + ' for replay ' + w.id);
   try {
     for (let i = 0; i < 150 && game.state !== 'select'; i++) await W(100);
-    if (game.state !== 'select') { _rplFlash('THE THEATER STARTS FROM THE MAIN MENU'); return; }
+    if (game.state !== 'select') { _rplFlash('THE THEATER STARTS FROM THE ' + _rplHomeName()); return; }
     _RPL.theater = Object.assign({ until: Date.now() + 120000 }, w);
     startSolo();
     for (let i = 0; i < 60 && !document.getElementById('ship-preview-confirm'); i++) await W(100);
@@ -85261,6 +85262,9 @@ function returnToMainMenu(opts) {
   }
 
   try {
+    if (_ssxFlag()) { _ssxCampaignPick(); return; }
+  } catch (_) {}
+  try {
     const sel = document.getElementById('ship-select');
     if (sel) { sel.classList.remove('active'); sel.style.display = ''; }
     const lob = document.getElementById('lobby');
@@ -92717,6 +92721,12 @@ function _ssxSync() {
     let mid = false;
     try { mid = !!(game && game.state && game.state !== 'select'); } catch (_) {}
     _ssxClass(sel, 'ssx-mid', mid);
+    if (!mid) {
+      try {
+        const tag = _lssRoomTag();
+        if (tag && _ssxSync._land !== tag) { _ssxSync._land = tag; sessionStorage.setItem('lss_land', tag); }
+      } catch (_) {}
+    }
     let u = null;
     try { u = discordCurrentUser(); } catch (_) {}
     const av = document.getElementById('ssx-avatar');
@@ -92995,9 +93005,9 @@ function _ssxMenuOpen(kind, anchor) {
       });
     } else if (kind === 'more') {
       const press = (id) => () => { const b = document.getElementById(id); if (b) b.click(); };
-      items.push({ label: 'MAIN MENU', act: press('lobby-back-btn') });
       let mid = false;
       try { mid = document.getElementById('ship-select').classList.contains('ssx-mid'); } catch (_) {}
+      if (mid) items.push({ label: 'LEAVE MATCH', act: press('lobby-back-btn') });
       if (!mid) {
         items.push({ label: 'LEADERBOARD', href: 'leaderboard.html' });
         items.push({ label: 'MY STATS', act: press('lobby-stats-btn') });
@@ -93072,6 +93082,28 @@ function _ssxCampaignPick() {
     game._ssxCampNew = true;
     enterShipSelect();
   } catch (e) { console.warn('[ssx] campaign pick failed:', e); }
+}
+function _ssxBootPending() {
+  try { return !_ssxBootEnter._done && _ssxFlag(); } catch (_) { return false; }
+}
+function _ssxBootEnter(replayed) {
+  const coverOff = () => { try { if (window.__lssBootCover) window.__lssBootCover.hide(); } catch (_) {} };
+  try {
+    if (_ssxBootEnter._done) return;
+    _ssxBootEnter._done = true;
+    if (!_ssxFlag() || replayed) { coverOff(); return; }
+    const sel = document.getElementById('ship-select');
+    if (sel && sel.classList.contains('active')) { coverOff(); return; }
+    const invite = String(window.__lssBootRoom || '');
+    let land = null;
+    try { land = sessionStorage.getItem('lss_land'); } catch (_) {}
+    startSolo();
+    if (invite) _ssxRoomGo(invite);
+    else if (land && land !== 'campaign' && _LSS_PICKABLE_MODES.indexOf(land) >= 0) _ssxModePick(land);
+    else _ssxCampaignPick();
+    requestAnimationFrame(() => requestAnimationFrame(coverOff));
+    setTimeout(coverOff, 1500);   // a hidden tab gets no frames
+  } catch (e) { console.warn('[ssx] boot entry failed:', e); coverOff(); }
 }
 function _ssxRoomGo(code) {
   const S = _ssxRoomGo._s || (_ssxRoomGo._s = { busy: false, t0: 0 });
@@ -93987,8 +94019,11 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   const backBtn = document.getElementById('lobby-back-btn');
   if (backBtn) backBtn.addEventListener('click', () => {
-    const ok = window.confirm(
-      'Return to the main menu? The game will reload and your current room will close.');
+    let _face = false;
+    try { _face = _ssxFlag(); } catch (_) {}
+    const ok = window.confirm(_face
+      ? 'Leave the match? The game will reload to the hangar and your current room will close.'
+      : 'Return to the main menu? The game will reload and your current room will close.');
     if (!ok) return;
     try { returnToMainMenu({ hard: true }); } catch (e) { console.warn('[main-menu] returnToMainMenu failed', e); }
   });
@@ -94023,7 +94058,9 @@ document.addEventListener('DOMContentLoaded', () => {
       url.searchParams.delete('room');
       const cleaned = url.pathname + (url.search ? url.search : '') + url.hash;
       window.history.replaceState({}, document.title, cleaned);
-      setTimeout(() => {
+      let _face = false;
+      try { _face = _ssxFlag(); } catch (_) {}
+      if (!_face) setTimeout(() => {
         try {
           if (typeof window.joinRoom === 'function') window.joinRoom();
         } catch (e) { console.warn('[auto-join] joinRoom threw:', e); }
@@ -94973,7 +95010,10 @@ function _refreshSettingsValues() {
   if (exitBtn) {
     const lobbyVisible = (document.getElementById('lobby') &&
                          document.getElementById('lobby').style.display !== 'none');
-    exitBtn.style.display = lobbyVisible ? 'none' : '';
+    let _face = false, _atHangar = false;
+    try { _face = _ssxFlag(); _atHangar = _face && game.state === 'select'; } catch (_) {}
+    exitBtn.style.display = (lobbyVisible || _atHangar) ? 'none' : '';
+    exitBtn.textContent = _face ? 'LEAVE MATCH' : 'EXIT TO MAIN MENU';
   }
 }
 
@@ -96491,8 +96531,11 @@ function buildSettingsPage() {
                          document.getElementById('lobby').style.display !== 'none');
     exitBtn.style.display = lobbyVisible ? 'none' : '';
     exitBtn.addEventListener('click', () => {
-      const ok = window.confirm(
-        'Exit to the main menu? Your match will end, the game will reload, and your current room will close.');
+      let _face = false;
+      try { _face = _ssxFlag(); } catch (_) {}
+      const ok = window.confirm(_face   // (v53.36) LEAVE MATCH on the new face - see the refresh branch
+        ? 'Leave the match? It ends, the game will reload to the hangar, and your current room will close.'
+        : 'Exit to the main menu? Your match will end, the game will reload, and your current room will close.');
       if (!ok) return;
       try { closeSettings(); } catch (_) {}
       try { returnToMainMenu({ hard: true }); } catch (e) { console.warn('[exit] returnToMainMenu failed', e); }
@@ -101761,6 +101804,7 @@ MAP_DATA.camp_crystalcave = { ...CAMPAIGN_LEG_MAP, name: 'The Crystal Caverns', 
 MAP_DATA.camp_brokensim   = { ...CAMPAIGN_LEG_MAP, name: 'The Broken Simulation', description: 'Reality fails around you — the final confrontation.',        defaultTheme: 'Broken Simulation', palette: [0x4a4a54,0x70707e,0xc8c8d6,0x42424c,0x1a1428,0x3a3a44,0x6a5a8a,0x8a7aaa] };
 MAP_DATA.camp_crystalcave.legHalfZ = 37000;
 MAP_DATA.camp_crystalcave.rooms = _campLegRooms(MAP_DATA.camp_crystalcave.legHalfZ);
+Object.assign(MAP_DATA.camp_approach, { thumb: 'map_thumbs/the_approach.webp' });
 const CAMPAIGN_LEGS = [
   { key: 'camp_approach', name: 'The Approach' },
   { key: 'camp_grassy', name: 'Verdant Pass' },
@@ -121107,7 +121151,11 @@ if (typeof startSolo === 'function') window.__real_startSolo = startSolo;
 if (typeof startTest === 'function') window.__real_startTest = startTest;
 if (typeof discordSignin  === 'function') window.__real_discordSignin  = discordSignin;
 if (typeof discordSignout === 'function') window.__real_discordSignout = discordSignout;
-if (typeof window.__lssReplayPending === 'function') window.__lssReplayPending();
+{
+  let _replayed = false;
+  if (typeof window.__lssReplayPending === 'function') _replayed = !!window.__lssReplayPending();
+  try { _ssxBootEnter(_replayed); } catch (e) { console.warn('[ssx] boot entry threw:', e); }
+}
 
 try { _kickAssetPreloadOnPageLoad(); } catch (e) { console.warn('[preload] kickoff scheduling failed:', e); }
 
