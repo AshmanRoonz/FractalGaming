@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.24";
+const LSS_BUILD = "53.26";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -49771,8 +49771,10 @@ const _PSTAND = { scene: null, rig: null, lightG: null, L: null, root: null, bod
 function _lssPickerStandK() {
   const K = (typeof window !== 'undefined' && window.__ssx && window.__ssx.pilot) || {};
   const n = (v, d) => (v != null && isFinite(+v)) ? +v : d;
-  return { on: K.on !== false, x: n(K.x, 400), feet: n(K.feet, 262), h: n(K.h, 300), d: n(K.d, 0.5), turn: n(K.turn, 0.45),
-           light: n(K.light, 1), listen: n(K.listen, 0.18) };
+  let c = false;
+  try { c = _ssxCompact(); } catch (_) {}
+  return { on: K.on !== false, x: n(K.x, c ? 280 : 400), feet: n(K.feet, c ? 116 : 262), h: n(K.h, c ? 190 : 300), d: n(K.d, 0.5),
+           turn: n(K.turn, 0.45), light: n(K.light, 1), listen: n(K.listen, 0.18), gap: c ? 4 : 8 };
 }
 function _lssPickerStandBuild(s) {
   const P = _PSTAND, gen = ++P.gen;
@@ -49842,7 +49844,8 @@ function _lssPickerStandPlace(s) {
   const P = _PSTAND, K = _lssPickerStandK(), cam = s.camera;
   const el = renderer.domElement;
   const vw = el.clientWidth || window.innerWidth || 1, vh = el.clientHeight || window.innerHeight || 1;
-  const u = Math.min(vw / 1672, vh / 941);
+  let u = Math.min(vw / 1672, vh / 941);
+  try { u = _ssxU(); } catch (_) {}   // (v53.25) the compact canvas's unit on a phone
   const D = Math.max(1, (s.camR || 300) * K.d);
   const th = Math.tan(cam.fov * Math.PI / 360), asp = cam.aspect || (vw / vh);
   const cx = K.x * u, fy = vh - K.feet * u;
@@ -49856,8 +49859,8 @@ function _lssPickerStandPlace(s) {
   L.fill.intensity = _PICKER_LIGHTS.fill * K.light; L.rim.intensity = _PICKER_LIGHTS.rim * K.light; L.hemi.intensity = _PICKER_LIGHTS.hemi * K.light;
   try {
     const b = document.getElementById('ssx-pilot-cz');
-    const key = Math.round(cx) + ',' + Math.round(fy + 8 * u);
-    if (b && P.btnKey !== key) { P.btnKey = key; b.style.left = Math.round(cx) + 'px'; b.style.top = Math.round(fy + 8 * u) + 'px'; }
+    const key = Math.round(cx) + ',' + Math.round(fy + K.gap * u);
+    if (b && P.btnKey !== key) { P.btnKey = key; b.style.left = Math.round(cx) + 'px'; b.style.top = Math.round(fy + K.gap * u) + 'px'; }
   } catch (_) {}
 }
 function _lssPickerStandBtn(on) {
@@ -92559,15 +92562,15 @@ function _ssBannerRelease() {
 function _ssxFlag() {
   const S = _ssxFlag._s || (_ssxFlag._s = { v: null });
   if (S.v !== null) return S.v;
-  let on = false;
+  let on = true;
   try {
     const q = new URLSearchParams(location.search);
     if (q.has('newss')) {
       const v = String(q.get('newss') || '').toLowerCase();
       on = !(v === '0' || v === 'off' || v === 'false' || v === 'no');
-      try { if (on) localStorage.setItem('lss_newss', '1'); else localStorage.removeItem('lss_newss'); } catch (_) {}
+      try { localStorage.setItem('lss_newss', on ? '1' : '0'); } catch (_) {}
     } else {
-      try { on = localStorage.getItem('lss_newss') === '1'; } catch (_) {}
+      try { on = localStorage.getItem('lss_newss') !== '0'; } catch (_) {}
     }
   } catch (_) {}
   S.v = on;
@@ -92576,10 +92579,18 @@ function _ssxFlag() {
 function _ssxActive() {
   try {
     const sel = document.getElementById('ship-select');
-    if (!sel || !sel.classList.contains('ssx') || sel.classList.contains('camp-open')) return false;
-    const mq = _ssxActive._mq || (_ssxActive._mq = window.matchMedia ? window.matchMedia('(min-width: 1100px) and (min-height: 600px)') : null);
+    return !!(sel && sel.classList.contains('ssx') && !sel.classList.contains('camp-open'));
+  } catch (_) { return false; }
+}
+function _ssxCompact() {
+  try {
+    const mq = _ssxCompact._mq || (_ssxCompact._mq = window.matchMedia ? window.matchMedia('(max-width: 1000px), (max-height: 560px)') : null);
     return !!(mq && mq.matches);
   } catch (_) { return false; }
+}
+function _ssxU() {
+  const vw = window.innerWidth || 1, vh = window.innerHeight || 1;
+  return _ssxCompact() ? Math.min(vw / 1000, vh / 500) : Math.min(vw / 1672, vh / 941);
 }
 function _ssxClearRails() {
   try {
@@ -92599,10 +92610,11 @@ function _ssxBannerPlace() {
     const ban = H ? H.el : null;
     if (!ban) return;
     if (performance.now() >= H.until) { ban.style.removeProperty('top'); return; }
-    const u = Math.min(window.innerWidth / 1672, window.innerHeight / 941);
+    const u = _ssxU(), compact = _ssxCompact();
     const K = window.__ssx || {};
-    const y = (K.bannerY != null && isFinite(+K.bannerY)) ? +K.bannerY : 628;
-    ban.style.setProperty('top', Math.round(y * u) + 'px', 'important');
+    const y = (K.bannerY != null && isFinite(+K.bannerY)) ? +K.bannerY : (compact ? 380 : 628);
+    const top = compact ? (window.innerHeight - (500 - y) * u) : (window.innerHeight - (941 - y) * u);   // off the bottom, like the strip
+    ban.style.setProperty('top', Math.round(top) + 'px', 'important');
   } catch (_) {}
 }
 function _ssxSet(el, txt) { if (el && el.textContent !== txt) el.textContent = txt; }
@@ -92900,6 +92912,21 @@ function _ssxMenuOpen(kind, anchor) {
       document.querySelectorAll(kind === 'community' ? '#lobby-sec-community a[href]' : '#lobby-sec-tools a[href]').forEach(a => {
         items.push({ label: (a.textContent || '').replace(/\s+/g, ' ').trim(), href: a.getAttribute('href') });
       });
+    } else if (kind === 'more') {
+      const press = (id) => () => { const b = document.getElementById(id); if (b) b.click(); };
+      items.push({ label: 'MAIN MENU', act: press('lobby-back-btn') });
+      let mid = false;
+      try { mid = document.getElementById('ship-select').classList.contains('ssx-mid'); } catch (_) {}
+      if (!mid) {
+        items.push({ label: 'LEADERBOARD', href: 'leaderboard.html' });
+        items.push({ label: 'MY STATS', act: press('lobby-stats-btn') });
+        items.push({ label: 'REPLAY STUDIO', act: press('lobby-replays-btn') });
+        items.push({ label: 'ABOUT', href: 'about.html' });
+        items.push({ label: 'GOOPLING', href: 'goopling.html' });
+        document.querySelectorAll('#lobby-sec-community a[href], #lobby-sec-tools a[href]').forEach(a => {
+          items.push({ label: (a.textContent || '').replace(/\s+/g, ' ').trim(), href: a.getAttribute('href') });
+        });
+      }
     } else if (kind === 'user') {
       items.push({ label: 'MY STATS', sub: 'Your career page', act: () => { const b = document.getElementById('lobby-stats-btn'); if (b) b.click(); } });
       items.push({ label: 'AEGIS RANKS', sub: 'Per-ship progression', act: () => { try { _aegisPanelOpen(); } catch (_) {} } });
@@ -92926,7 +92953,7 @@ function _ssxMenuOpen(kind, anchor) {
   m.style.left = '0px'; m.style.top = '0px'; m.style.bottom = 'auto';
   m.classList.add('open');
   const mw = m.getBoundingClientRect().width;
-  let x = (kind === 'user') ? (r.right - mw) : r.left;
+  let x = (kind === 'user' || kind === 'more') ? (r.right - mw) : r.left;
   x = Math.max(8, Math.min(x, window.innerWidth - mw - 8));
   m.style.left = Math.round(x) + 'px';
   if (up) { m.style.top = 'auto'; m.style.bottom = Math.round(window.innerHeight - r.top + 6) + 'px'; }
@@ -92992,6 +93019,14 @@ function _ssxInit() {
     const sel = document.getElementById('ship-select');
     if (!sel) return;
     if (_ssxFlag()) sel.classList.add('ssx');
+    try {
+      let quest = false;
+      try { quest = (typeof isStandaloneQuest === 'function') && isStandaloneQuest(); } catch (_) {}
+      if (quest || /[?&]safetop=\d/.test(location.search || '')) {
+        const v = getComputedStyle(document.documentElement).getPropertyValue('--ss-top-safe').trim() || '28px';
+        document.documentElement.style.setProperty('--ssx-st', v);
+      }
+    } catch (_) {}
     const $ = id => document.getElementById(id);
     const on = (id, fn) => { const e = $(id); if (e) e.addEventListener('click', (ev) => { try { fn(ev, e); } catch (err) { console.warn('[ssx]', id, err); } setTimeout(_ssxSync, 0); }); };
     const press = id => { const b = $(id); if (b) b.click(); };
@@ -92999,6 +93034,7 @@ function _ssxInit() {
     on('ssx-howto', () => openHowToPlay());
     on('ssx-fs', () => window.lssRequestFullscreen());
     on('ssx-settings', () => press('lobby-settings-btn'));
+    on('ssx-more', (ev, el) => _ssxMenuOpen('more', el));   // (v53.25) the compact arrangement's footer
     on('ssx-shipdd', (ev, el) => _ssxMenuOpen('ship', el));
     on('ssx-mp-joinbtn', () => _ssxRoomGo((($('ssx-mp-input') || {}).value || '').trim()));
     const inp = $('ssx-mp-input');
@@ -93075,7 +93111,7 @@ try {
     _ssxClearRails(); _ssxSync(); return _ssxActive();
   };
   window.__ssx.off = () => {
-    try { localStorage.removeItem('lss_newss'); } catch (_) {}
+    try { localStorage.setItem('lss_newss', '0'); } catch (_) {}   // (v53.25) on is the default: off has to be remembered
     if (_ssxFlag._s) _ssxFlag._s.v = false;
     _ssxMenuClose();
     try { _ssxRoomsOpen(false); } catch (_) {}

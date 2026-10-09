@@ -709,7 +709,19 @@ Mode descriptors + full single-player campaign: waves, bosses, escorts, hoard-bo
     - **The jump:** selectMap moves `#gmaps-overlay-panel` INTO `#map-window` for a gmaps map (v43.33). This face's picture is the flex-grow part, so the panel took its height (measured 284 → 193 px) and the arrows, which ride the picture's middle (`--ssx-map-ay`), rose 46 px.
     - **The fix:** on this face the panel is `position: absolute` at the picture's foot (bottom 46u, just over the name). The "?" centres above it (padding-bottom 110u).
     - Measured after: every classic map, Custom Location included, has a 284 px picture with the arrows at y 269. The panel sits at 345–404, above the name at 410.
-  - **Open:** the gamepad cannot walk the new drop-downs (the D-pad ship cycle, CONFIRM etc. still go through the picker's own handlers). Phase 2 (more main-screen pieces) and phase 3 (boot straight into it, retire the main screen) are the owner's call.
+  - ⭐⭐ **(v53.25–53.26) THE DEFAULT, EVERYWHERE — and a COMPACT arrangement for phones.** Owner: *"i'm not seeing the new screen on mobile / i don't want the old screen"*. **Jump:** `THE DEFAULT, EVERYWHERE` (`_ssxFlag`) · `function _ssxCompact` / `function _ssxU` · `THE NEW FACE, COMPACT` (the second @media block) · `THE QUEST 2D BROWSER'S DEAD TOP STRIP` (`_ssxInit`).
+    - **ON BY DEFAULT.** `_ssxFlag` is true unless `lss_newss` is '0' (`?newss=0` or `__ssx.off()` write it). The size gate is gone: `_ssxActive()` = the class and not `.camp-open`. The main block is `@media all`. The old face now only draws the campaign opening's hangar, plus the escape hatch.
+    - **COMPACT** (`(max-width: 1000px), (max-height: 560px)`, the same query in `_ssxCompact`): the same pieces on a 1000 × 500 canvas (`--u` = min(vw/1000, vh/500)).
+      - Why: the 1672 × 941 mockup on a 740 × 360 phone is u 0.38, i.e. 5 px text. Compact gives 0.72 there.
+      - Top bar 36u with MORE (☰ `#ssx-more`, menu kind 'more' = the footer's items + the COMMUNITY / TOOLS links; mid-match only MAIN MENU). The footer is hidden.
+      - Left / PLAY are 200u each, inside the notch (safe-area insets; the page is viewport-fit=cover).
+      - The three centre buttons are 170u on a 50vw axis. Class line + stats; the prose lines are dropped, as the old face's v43.57 phone layout did.
+      - Cards are 136u with the thumbnail mapping × 0.557. The fleet strip sits at bottom 4u, 76u tall; PLAY ends at 88u.
+      - The pilot reads compact defaults (`_lssPickerStandK`: x 280, feet 116, h 190, button gap 4u). The banner is placed off the bottom by `_ssxU`.
+    - **Verified (pane, the Android UA at < 768):** default on with no flag; no block overlaps and nothing off-screen at 740×360, 844×390, 915×412 (compact) and at 1024×768 / 1079×688 (full). Smallest fitted labels ~7.7–8.2 px on the phones; the ☰ menu (14 items, no scroll) and PILOT PERKS checked.
+    - ⚠ **(v53.26) The old face's landscape-phone CSS labels CONFIRM / LAUNCH with `font-size:0` + `::after` (a ✓ / `attr(data-label)`).** This face shows the real text, so the phone printed "✓ CONFIRM ✓" and "LAUNCH LAU". Both pseudo-elements are `content: none` here.
+    - **The Quest 2D strip:** with the face default, the top bar met the Quest browser's dead top ~28 px (presses taken by the window chrome, `--ss-top-safe`). On a standalone Quest or a `?safetop=N` URL, `_ssxInit` sets `--ssx-st` on :root, and every top-anchored piece adds `var(--ssx-st, 0px)`. Elsewhere it is absent. **Not tried on a Quest.**
+  - **Open:** the gamepad cannot walk the new drop-downs (the D-pad ship cycle, CONFIRM etc. still go through the picker's own handlers). Phase 3 (boot straight into it, retire the main screen) is the owner's call. Deploy is the owner's: the phone sees this after a deploy.
 
 #### ⭐⭐⭐ (v46.88) THE EARTH CURTAIN HAS TO STOP THE WORLD, NOT JUST THE PICTURE — and the load's big frame, profiled
 **Jump:** `function _lssEarthWarmOnce` (the v46.88 MEASURED-AND-REVERTED note in it) · the F8 recorder (`?pbhud`, `window.__f8log`).
