@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.26";
+const LSS_BUILD = "53.35";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -20976,10 +20976,7 @@ function _rplKcEnd() {
   try { document.body.classList.remove('lss-killcam'); } catch (_) {}
 }
 function _rplPadRaw() {
-  try {
-    const pads = navigator.getGamepads ? navigator.getGamepads() : [];
-    for (let i = 0; i < pads.length; i++) { const g = pads[i]; if (g && g.connected !== false && !(g.id && g.id.indexOf('XR Virtual Gamepad') === 0)) return g; }
-  } catch (_) {}
+  try { return _lssPadFirst(); } catch (_) {}
   return null;
 }
 function _rplKcFrame(now) {
@@ -85645,14 +85642,60 @@ try {
   };
 } catch (_) {}
 
+function _lssPadChoice() {
+  const S = _lssPadChoice._s || (_lssPadChoice._s = { v: null });
+  if (S.v !== null) return S.v;
+  let v = 'auto';
+  try {
+    const m = /[?&]pad=(none|auto|\d{1,2})\b/i.exec(location.search || '');
+    if (m) {
+      const w = m[1].toLowerCase();
+      v = (w === 'none' || w === 'auto') ? w : String(Math.max(0, parseInt(w, 10) - 1));
+      try { sessionStorage.setItem('lss_pad', v); } catch (_) {}
+    } else {
+      const s = sessionStorage.getItem('lss_pad');
+      if (s === 'none' || s === 'auto' || /^\d{1,2}$/.test(s || '')) v = s;
+    }
+  } catch (_) {}
+  S.v = v;
+  return v;
+}
+function _lssPadSet(v) {
+  v = (v === 'none' || v === 'auto' || /^\d{1,2}$/.test(String(v))) ? String(v) : 'auto';
+  (_lssPadChoice._s || (_lssPadChoice._s = { v: null })).v = v;
+  try { sessionStorage.setItem('lss_pad', v); } catch (_) {}
+}
+function _lssPadReal(g) {
+  return !!(g && g.connected !== false && !(g.id && g.id.indexOf('XR Virtual Gamepad') === 0));
+}
+function _lssPadMine(g, pads) {
+  if (!_lssPadReal(g)) return false;
+  const c = _lssPadChoice();
+  if (c === 'none') return false;
+  if (c !== 'auto') return g.index === +c;
+  try {
+    pads = pads || (navigator.getGamepads ? navigator.getGamepads() : []);
+    for (let i = 0; i < pads.length; i++) { if (_lssPadReal(pads[i])) return pads[i].index === g.index; }
+  } catch (_) {}
+  return false;
+}
+function _lssPadFirst() {
+  try {
+    const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    for (let i = 0; i < pads.length; i++) { if (_lssPadMine(pads[i], pads)) return pads[i]; }
+  } catch (_) {}
+  return null;
+}
+if (typeof window !== 'undefined') window.__pad = { get: () => _lssPadChoice(), set: (v) => { _lssPadSet(v); return _lssPadChoice(); },
+  list: () => { try { return Array.from(navigator.getGamepads ? navigator.getGamepads() : []).filter(Boolean).map((g) => ({ index: g.index, id: g.id, mine: _lssPadMine(g) })); } catch (_) { return []; } } };
+
 function pollGamepad() {
   const xrGP = _xrSynthGamepad();
   const realGamepads = navigator.getGamepads ? navigator.getGamepads() : [];
   let realGP = null;
   for (let i = 0; i < realGamepads.length; i++) {
     const g = realGamepads[i];
-    if (!g || g.connected === false) continue;
-    if (g.id && g.id.indexOf('XR Virtual Gamepad') === 0) continue;
+    if (!_lssPadMine(g, realGamepads)) continue;
     realGP = g;
     break;
   }
@@ -90197,13 +90240,17 @@ function previewLoadout(key) {
   const heroName = document.getElementById('ship-hero-name');
   if (heroName) heroName.textContent = loadout.name;
   const heroClass = document.getElementById('ship-hero-class');
-  if (heroClass) heroClass.textContent = loadout.className + ' — ' + ch.name;
+  const _clsLine = (sep) => {
+    const cn = String(loadout.className || ''), cname = String((ch && ch.name) || '');
+    return (cname && cn.toLowerCase().indexOf(cname.toLowerCase()) < 0) ? (cn + sep + cname) : cn;
+  };
+  if (heroClass) heroClass.textContent = _clsLine(' — ');
 
   const headerEl = document.getElementById('ship-preview-header');
   if (headerEl) {
     headerEl.style.display = 'none';
     document.getElementById('ship-preview-name').textContent = loadout.name;
-    document.getElementById('ship-preview-class').textContent = loadout.className + ' ; ' + ch.name;
+    document.getElementById('ship-preview-class').textContent = _clsLine(' ; ');   // (v53.35) the same rule
   }
 
   const statsEl = document.getElementById('ship-preview-stats');
@@ -90461,7 +90508,9 @@ function _skinPanelPlace() {
     if (!saved && _ssxActive()) {
       const tg = document.getElementById('skin-toggle');
       const tb = tg ? tg.getBoundingClientRect() : null;
-      if (tb && tb.width > 0) { x = tb.left - sr.left; y = Math.round(tb.bottom - sr.top + 8); }
+      const col = document.getElementById('ssx-left');
+      const cr = col ? col.getBoundingClientRect() : null;   // off the COLUMN's edge, not the button's (that is inside the box)
+      if (tb && tb.width > 0) { x = Math.round(((cr && cr.width > 0) ? cr.right : tb.right) - sr.left + 12); y = Math.round(tb.top - sr.top); }
     }
   } catch (_) {}
   if (saved) { x = saved.x; y = saved.y; }
@@ -92332,6 +92381,18 @@ function _lssRefreshModeUI() {
   try { if (typeof _refreshRaceModeLock === 'function') _refreshRaceModeLock(); } catch (_) {}
   try { if (typeof _lssRenderLobbyMode === 'function') _lssRenderLobbyMode(); } catch (_) {}
   try { if (typeof _renderDifficultyPicker === 'function') _renderDifficultyPicker(); } catch (_) {}
+  try {
+    if (typeof game !== 'undefined' && game && game.state === 'select' && typeof net !== 'undefined' && net && net.active &&
+        typeof assignTeamFromPeerOrder === 'function') assignTeamFromPeerOrder();
+  } catch (_) {}
+  try {
+    if (typeof game !== 'undefined' && game && game.state === 'select' && typeof _botAuthority === 'function' && _botAuthority()) {
+      const d = game._botShipDeal;
+      if (!d || !d.enemy || !d.friendly) { _lssDealBotShips(); game._botShipDeal.fromPicker = true; }
+      _lssBotDealAnnounce();
+    }
+  } catch (_) {}
+  try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}
 }
 function _lssApplyModeDecree(evt, mine) {
   try {
@@ -92627,6 +92688,20 @@ function _ssxMsg(txt, ms) {
   if (S.t) { clearTimeout(S.t); S.t = null; }
   if (txt && ms) S.t = setTimeout(() => { el.textContent = ''; S.t = null; }, ms);
 }
+function _ssxShipBtnsPlace() {
+  try {
+    if (!_ssxActive()) return;
+    const sb = document.getElementById('ssx-shipbtns');
+    if (!sb || !sb.offsetParent) return;
+    const r = sb.getBoundingClientRect();
+    if (!(r.width > 0)) return;
+    const R = document.documentElement.style;
+    const put = (k, v) => { if (R.getPropertyValue(k) !== v) R.setProperty(k, v); };
+    put('--ssx-sbx', Math.round(r.left) + 'px');
+    put('--ssx-sby', Math.round(r.top) + 'px');
+    put('--ssx-sbw', Math.round(r.width) + 'px');
+  } catch (_) {}
+}
 function _ssxSync() {
   try {
     const sel = document.getElementById('ship-select');
@@ -92692,10 +92767,11 @@ function _ssxSync() {
     _ssxClass(sel, 'ssx-ready', allReady);
     try { _ssxSet(document.getElementById('ssx-ver'), 'v' + LSS_BUILD); } catch (_) {}
     try {
-      const ms = document.getElementById('map-select'), pv = document.getElementById('map-window-preview');
-      if (ms && pv && pv.offsetHeight > 0) {
-        const y = Math.round(pv.getBoundingClientRect().top - ms.getBoundingClientRect().top + pv.offsetHeight / 2) + 'px';
-        if (ms.style.getPropertyValue('--ssx-map-ay') !== y) ms.style.setProperty('--ssx-map-ay', y);
+      const ms = document.getElementById('map-select'), nm = document.getElementById('map-window-name');
+      if (ms && nm && nm.offsetHeight > 0) {
+        const t = Math.round(nm.getBoundingClientRect().top - ms.getBoundingClientRect().top) + 'px', h = nm.offsetHeight + 'px';
+        if (ms.style.getPropertyValue('--ssx-map-ny') !== t) ms.style.setProperty('--ssx-map-ny', t);
+        if (ms.style.getPropertyValue('--ssx-map-nh') !== h) ms.style.setProperty('--ssx-map-nh', h);
       }
       const df = document.getElementById('ship-preview-difficulty'), col = document.getElementById('ss-right-col');
       if (df && col && df.offsetHeight > 0) {
@@ -92710,6 +92786,7 @@ function _ssxSync() {
       if (st && st.style.getPropertyValue('--ssx-tz') !== tz) { if (tz) st.style.setProperty('--ssx-tz', tz); else st.style.removeProperty('--ssx-tz'); }
     } catch (_) {}
     _ssxFitAll();
+    _ssxShipBtnsPlace();   // (v53.34) after the fit: a refitted ship name can change the drop-down's height
     const M = _ssxMenuOpen._s;
     if (M && M.kind && M.anchor && !(M.anchor.offsetParent)) _ssxMenuClose();
   } catch (_) {}
@@ -92723,9 +92800,13 @@ function _ssxFit(el) {
     const tr = el.style.getPropertyValue('transition'), trP = el.style.getPropertyPriority('transition');
     el.style.setProperty('transition', 'none', 'important');
     el.style.setProperty('--ssx-fit', '1');
+    let wrap = false;
+    try { wrap = getComputedStyle(el).getPropertyValue('--ssx-fit-wrap').trim() === '1'; } catch (_) {}
     let f = 1;
-    for (let i = 0; i < 4 && el.scrollWidth > el.clientWidth + 0.5 && f > 0.55; i++) {
-      f = Math.max(0.55, f * (el.clientWidth / el.scrollWidth) * 0.98);
+    for (let i = 0; i < 6 && f > 0.55; i++) {
+      const hOver = el.scrollWidth > el.clientWidth + 0.5, vOver = wrap && el.scrollHeight > el.clientHeight + 0.5;
+      if (!hOver && !vOver) break;
+      f = Math.max(0.55, f * (hOver ? (el.clientWidth / el.scrollWidth) * 0.98 : 0.92));
       el.style.setProperty('--ssx-fit', f.toFixed(3));
     }
     void el.scrollWidth;   // settle the last size BEFORE the transition comes back, or it would animate in
@@ -93076,10 +93157,10 @@ function _ssxInit() {
         e.stopPropagation(); e.preventDefault();
       } catch (_) {}
     }, true);
-    window.addEventListener('resize', () => { try { _ssxMenuClose(); } catch (_) {} });
+    window.addEventListener('resize', () => { try { _ssxMenuClose(); } catch (_) {} try { _ssxShipBtnsPlace(); } catch (_) {} });
     try {
       let _fitQ = false;
-      const _fitSoon = () => { if (_fitQ) return; _fitQ = true; requestAnimationFrame(() => { _fitQ = false; _ssxFitAll(); }); };
+      const _fitSoon = () => { if (_fitQ) return; _fitQ = true; requestAnimationFrame(() => { _fitQ = false; _ssxFitAll(); _ssxShipBtnsPlace(); }); };
       if (typeof MutationObserver === 'function') ['ss-launch-row', 'ss-right-col', 'ssx-left'].forEach(id => {
         const n = $(id);
         if (n) new MutationObserver(_fitSoon).observe(n, { subtree: true, childList: true, characterData: true });
@@ -94707,9 +94788,31 @@ let settingsOpen = false;
 
 let _settingsBuilt = false;
 
+function _lssPadSelectFill() {
+  try {
+    const el = document.getElementById('set-gp-pad');
+    if (!el) return;
+    const pads = Array.from(navigator.getGamepads ? navigator.getGamepads() : [])
+      .filter((g) => g && g.connected !== false && !(g.id && g.id.indexOf('XR Virtual Gamepad') === 0));
+    const cur = _lssPadChoice();
+    const opts = [['auto', 'Auto (the first pad)']];
+    pads.forEach((g) => opts.push([String(g.index), 'Pad ' + (g.index + 1) + ' - ' + String(g.id || 'gamepad').replace(/\s*\(.*$/, '').slice(0, 40)]));
+    if (/^\d+$/.test(cur) && !pads.some((g) => String(g.index) === cur)) opts.push([cur, 'Pad ' + (+cur + 1) + ' (not connected)']);
+    opts.push(['none', 'None (keyboard + mouse)']);
+    el.innerHTML = '';
+    for (const [v, t] of opts) { const o = document.createElement('option'); o.value = v; o.textContent = t; el.appendChild(o); }
+    el.value = cur;
+  } catch (_) {}
+}
+try {
+  window.addEventListener('gamepadconnected', () => { try { _lssPadSelectFill(); } catch (_) {} });
+  window.addEventListener('gamepaddisconnected', () => { try { _lssPadSelectFill(); } catch (_) {} });
+} catch (_) {}
+
 function _refreshSettingsValues() {
   const overlay = document.getElementById('settings-overlay');
   if (!overlay) return;
+  try { _lssPadSelectFill(); } catch (_) {}   // (v53.27)
   const $ = sel => overlay.querySelector(sel);
   const setRange = (id, valId, val, decimals) => {
     if (val == null || (typeof val === 'number' && !isFinite(val))) return;
@@ -94909,6 +95012,19 @@ function buildSettingsPage() {
         <label>Mouse Sensitivity</label>
         <input type="range" id="set-mouse-sens" min="0.0005" max="0.01" step="0.0005" value="${input.sensitivity}">
         <div class="value-display" id="val-mouse-sens">${input.sensitivity.toFixed(4)}</div>
+      </div>
+    </div>
+
+    <!-- (v53.27) which gamepad drives THIS window - split screen in two browser windows (_lssPadChoice; per window, so it
+         lives in sessionStorage, not with the saved settings). The options are filled by _lssPadSelectFill. -->
+    <div class="settings-section">
+      <h3>Gamepad - Which Pad</h3>
+      <div class="setting-row">
+        <label>This Window Uses</label>
+        <select id="set-gp-pad" style="flex:1; min-width:0; max-width:60%;"><option value="auto">Auto (the first pad)</option></select>
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">Split screen: open the game in two windows side by side and give each window its own pad here (or open them as index.html?pad=1 and index.html?pad=2). Keyboard and mouse always go to the window you last clicked.</label>
       </div>
     </div>
 
@@ -96299,6 +96415,11 @@ function buildSettingsPage() {
     input.campTips = !!campTipsChk.checked;
     saveSettings();
   });
+  const gpPadSel = overlay.querySelector('#set-gp-pad');
+  if (gpPadSel) {
+    _lssPadSelectFill();
+    gpPadSel.addEventListener('change', () => { _lssPadSet(gpPadSel.value); _lssPadSelectFill(); });
+  }
   const paniniSel = overlay.querySelector('#set-panini');
   const paniniVal = overlay.querySelector('#val-panini');
   if (paniniSel) {
@@ -103610,6 +103731,7 @@ function _hitRumble(strong, weak, ms) {
     const pads = navigator.getGamepads ? navigator.getGamepads() : [];
     for (const gp of pads) {
       if (!gp) continue;
+      if (!(gp.id && gp.id.indexOf('XR Virtual Gamepad') === 0) && !_lssPadMine(gp, pads)) continue;
       const ha = gp.hapticActuators;
       if (ha && ha.length && typeof ha[0].pulse === 'function') {
         ha[0].pulse(Math.max(strong, weak), ms);
@@ -106668,8 +106790,8 @@ const CAMP_PROLOGUE = {
   function _gpSkip() {   // Start or B on a pad (the owner flies with one); the picker routes the gameshow's own Start
     let down = false;
     try {
-      const pads = navigator.getGamepads ? navigator.getGamepads() : [];
-      for (const g of pads) { if (g && g.buttons && ((g.buttons[9] && g.buttons[9].pressed) || (g.buttons[1] && g.buttons[1].pressed))) { down = true; break; } }
+      const g = _lssPadFirst();   // (v53.27) this window's pad (was: any pad - split screen would skip both windows' scenes)
+      down = !!(g && g.buttons && ((g.buttons[9] && g.buttons[9].pressed) || (g.buttons[1] && g.buttons[1].pressed)));
     } catch (_) {}
     if (down && !P.gpPrev && (P.phase === 'city' || P.phase === 'hack')) skip();
     P.gpPrev = down;
@@ -109110,7 +109232,7 @@ const CAMP_BATTLE = {
   }
   function _gpSkip() {   // Start or B on a pad, like the prologue's scenes
     let down = false;
-    try { for (const g of (navigator.getGamepads ? navigator.getGamepads() : [])) { if (g && g.buttons && ((g.buttons[9] && g.buttons[9].pressed) || (g.buttons[1] && g.buttons[1].pressed))) { down = true; break; } } } catch (_) {}
+    try { const g = _lssPadFirst(); down = !!(g && g.buttons && ((g.buttons[9] && g.buttons[9].pressed) || (g.buttons[1] && g.buttons[1].pressed))); } catch (_) {}   // (v53.27) this window's pad (was: any pad)
     if (down && !B.gpPrev) skip();
     B.gpPrev = down;
   }
