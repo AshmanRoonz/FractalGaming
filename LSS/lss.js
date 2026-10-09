@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.13";
+const LSS_BUILD = "53.14";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -15809,10 +15809,6 @@ function _xrHandleTrustedMenuActivation() {
   let handled = false;
 
   if (_campVrOwns()) {
-    try {
-      const O = window.__campOpening, ph = (O && O.phaseNow) ? O.phaseNow() : '';
-      if (ph === 'choose' || ph === 'perk' || ph === 'view') O.onConfirm();
-    } catch (e) { console.warn('[campaign VR] trigger:', e && e.message); }
     _xrTrustedMenuSuppressUntil = _xrNowMs() + 350;
     return true;
   }
@@ -16690,7 +16686,7 @@ function _xrShipMenuSignature() {
   const key = _xrSelectedLoadoutKey() || '';
   const perk = (typeof player !== 'undefined' && player && player.perkId) || '';
   const map = (typeof game !== 'undefined' && game && game.selectedMap) || '';
-  return key + '|' + perk + '|' + map;
+  return key + '|' + perk + '|' + map + '|' + _campVrPickPhase();   // (v53.14) + the hangar's beat
 }
 
 function _xrDrawShipSelectContent(ctx, W, H) {
@@ -16704,9 +16700,10 @@ function _xrDrawShipSelectContent(ctx, W, H) {
   const perk = _xrGetPerkInfo();
   const mapData = (typeof MAP_DATA !== 'undefined' && typeof game !== 'undefined' && game && game.selectedMap)
     ? MAP_DATA[game.selectedMap] : null;
+  const coPh = _campVrPickPhase();
 
-  _xrText(ctx, 'SHIP SELECT', 70, 82, 'bold 54px Orbitron, sans-serif', '#ffaa44', 'left');
-  _xrText(ctx, 'stick also cycles ships / maps', W - 70, 82, '26px Orbitron, sans-serif', '#88aacc', 'right');
+  _xrText(ctx, coPh === 'choose' ? 'CHOOSE YOUR SHIP' : (coPh === 'perk' ? 'CHOOSE YOUR PILOT PERK' : 'SHIP SELECT'), 70, 82, 'bold 54px Orbitron, sans-serif', '#ffaa44', 'left');
+  if (!coPh) _xrText(ctx, 'stick also cycles ships / maps', W - 70, 82, '26px Orbitron, sans-serif', '#88aacc', 'right');
 
   ctx.fillStyle = 'rgba(255,255,255,0.035)';
   ctx.fillRect(48, 116, 340, H - 190);
@@ -16735,7 +16732,7 @@ function _xrDrawShipSelectContent(ctx, W, H) {
       isSelected ? '#ffe8b0' : (isHover ? '#eaf7ff' : '#cfe7ff'), 'left');
     _xrText(ctx, loadout.className || '', 90, y + 26, '22px Orbitron, sans-serif',
       isSelected ? '#ffd080' : '#88aacc', 'left');
-    _xrHit(68, y - 48, 300, rowH - 6, id, () => previewLoadout(key));
+    if (coPh !== 'perk') _xrHit(68, y - 48, 300, rowH - 6, id, () => previewLoadout(key));   // (v53.14) locked on the perk beat
   }
 
   const detailX = 430;
@@ -16800,17 +16797,21 @@ function _xrDrawShipSelectContent(ctx, W, H) {
       _xrText(ctx, label, x + w / 2, y + h - 12, 'bold 28px Orbitron, sans-serif', on ? '#eaf7ff' : '#bcd6ee', 'center');
       _xrHit(x, y, w, h, id, act);
     };
-    if (perk) {
-      _xrText(ctx, 'PERK: ' + perk.name, detailX + 36, bottomY, '26px Orbitron, sans-serif', '#ffe0a0', 'left');
+    if (coPh !== 'choose') {   // (v53.14) the hangar's perk comes on its own beat
+      if (perk) {
+        _xrText(ctx, 'PERK: ' + perk.name, detailX + 36, bottomY, '26px Orbitron, sans-serif', '#ffe0a0', 'left');
+      }
+      step(detailX + detailW - 118, bottomY - 34, 'perk:prev', '◀', () => { if (typeof _cyclePerk === 'function') _cyclePerk(-1); });
+      step(detailX + detailW - 64,  bottomY - 34, 'perk:next', '▶', () => { if (typeof _cyclePerk === 'function') _cyclePerk(1); });
     }
-    step(detailX + detailW - 118, bottomY - 34, 'perk:prev', '◀', () => { if (typeof _cyclePerk === 'function') _cyclePerk(-1); });
-    step(detailX + detailW - 64,  bottomY - 34, 'perk:next', '▶', () => { if (typeof _cyclePerk === 'function') _cyclePerk(1); });
 
-    const fallbackMapName = (typeof game !== 'undefined' && game && game.selectedMap) ? game.selectedMap : 'Default';
-    _xrText(ctx, 'MAP: ' + (mapData ? mapData.name : fallbackMapName),
-      detailX + 36, bottomY + 40, '24px Orbitron, sans-serif', '#a9d8ff', 'left');
-    step(detailX + detailW - 118, bottomY + 8, 'map:prev', '◀', () => { if (typeof cycleMap === 'function') cycleMap(-1); });
-    step(detailX + detailW - 64,  bottomY + 8, 'map:next', '▶', () => { if (typeof cycleMap === 'function') cycleMap(1); });
+    if (!coPh) {   // (v53.14) the campaign's leg is fixed: no map row in the hangar
+      const fallbackMapName = (typeof game !== 'undefined' && game && game.selectedMap) ? game.selectedMap : 'Default';
+      _xrText(ctx, 'MAP: ' + (mapData ? mapData.name : fallbackMapName),
+        detailX + 36, bottomY + 40, '24px Orbitron, sans-serif', '#a9d8ff', 'left');
+      step(detailX + detailW - 118, bottomY + 8, 'map:prev', '◀', () => { if (typeof cycleMap === 'function') cycleMap(-1); });
+      step(detailX + detailW - 64,  bottomY + 8, 'map:next', '▶', () => { if (typeof cycleMap === 'function') cycleMap(1); });
+    }
   }
 
   {
@@ -16821,8 +16822,9 @@ function _xrDrawShipSelectContent(ctx, W, H) {
     ctx.strokeStyle = '#ffaa44';
     ctx.lineWidth = on ? 5 : 3;
     ctx.strokeRect(bx, by, bw, bh);
-    _xrText(ctx, 'LAUNCH', bx + bw / 2, by + 52, 'bold 44px Orbitron, sans-serif', on ? '#fff6e0' : '#ffe8b0', 'center');
+    _xrText(ctx, coPh === 'choose' ? 'GET IN' : (coPh === 'perk' ? 'LOCK IN' : 'LAUNCH'), bx + bw / 2, by + 52, 'bold 44px Orbitron, sans-serif', on ? '#fff6e0' : '#ffe8b0', 'center');
     _xrHit(bx, by, bw, bh, 'launch', () => {
+      if (coPh) { try { window.__campOpening.onConfirm(); } catch (e) { console.warn('[campaign VR] confirm:', e && e.message); } return; }
       const k = _xrSelectedLoadoutKey();
       if (k && LOADOUTS[k]) { _xrConfirmBeforeLaunch(k); commitLoadout(k); }
     });
@@ -17077,6 +17079,12 @@ function _campVrOwns() {
     return !!(O && O.phaseNow && O.phaseNow());
   } catch (_) { return false; }
 }
+function _campVrPickPhase() {
+  try {
+    const O = window.__campOpening, ph = (O && O.phaseNow) ? O.phaseNow() : '';
+    return (ph === 'choose' || ph === 'perk') ? ph : '';
+  } catch (_) { return ''; }
+}
 function _campVrWant() {
   const B = game._campBattle;
   if (B && (B.phase === 'load' || B.phase === 'end')) return 'black';
@@ -17115,6 +17123,20 @@ function _campVrFrame() {
     }
     renderer.setRenderTarget(_XR_COVER.frameRT || renderer.getRenderTarget());
     renderer.render(sc, camera);
+    if (want !== 'black' && _campVrPickPhase()) {
+      const home = xrDolly.parent, prevAuto = renderer.autoClear;
+      if (!_campVr.ui) _campVr.ui = new THREE.Scene();
+      try {
+        for (const m of [xrHudMesh, xrAuxMesh, xrScoreMesh, xrMinimapMesh]) { if (m) m.visible = false; }
+        _campVr.ui.add(xrDolly);
+        renderer.autoClear = false;
+        renderer.clearDepth();
+        renderer.render(_campVr.ui, camera);
+      } finally {
+        renderer.autoClear = prevAuto;
+        if (home) home.add(xrDolly);
+      }
+    }
     return true;
   } catch (e) {
     if (!_campVr.warned) { _campVr.warned = true; console.warn('[campaign VR] frame failed - the world instead:', e && e.message); }
@@ -17140,7 +17162,7 @@ function _xrUpdateMenuMirror() {
     return;
   }
   const _selUp = (typeof _xrShipSelectVisible === 'function') && _xrShipSelectVisible();
-  const _matchStarting = _xrMenuForceHidden || _campVrOwns() || !!(   // (v53.12) no menu over a campaign cinematic
+  const _matchStarting = _xrMenuForceHidden || (_campVrOwns() && !_campVrPickPhase()) || !!(   // (v53.12) no menu over a campaign cinematic - (v53.14) but the hangar's two picks
     (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) ||
     (!_selUp && typeof _countdownActive !== 'undefined' && _countdownActive)
   );
@@ -105684,7 +105706,7 @@ const CAMP_SEQS = {
     O.phase = 'choose'; _ui('choose');
     const getIn = new Promise((res) => { O._getIn = res; });
     if (D) D.sayLines(['op_fly', 'op_choose']);   // not awaited: pick while he talks
-    _vrAuto('choose', 3);   // (v53.12) a headset has no picker: the hull in focus, once he has said it
+    _vrAuto('choose', 60);   // (v53.14) a headset picks on the VR panel now; this is only the never-stuck net
     await getIn; if (!live()) return;
     O.key = (game._ssKey && LOADOUTS[game._ssKey]) ? game._ssKey : O.st.ships[O.focus].key;
     O.focus = Math.max(0, O.st.ships.findIndex((s) => s.key === O.key));
@@ -105704,17 +105726,20 @@ const CAMP_SEQS = {
     try { _renderPerkPicker(); } catch (_) {}
     const perkP = new Promise((res) => { O._perkPick = res; });
     if (D) D.sayLines(['op_perk']);
-    _vrAuto('perk', 1.5);   // (v53.12) the stored perk
+    _vrAuto('perk', 60);   // (v53.14) ditto
     await perkP; if (!live()) return;
     snd('reload'); if (D) D.clear();
     await wait(0.3); if (!live()) return;
-    O.phase = 'view'; _ui('view');
-    const pick = new Promise((res) => { O._viewPick = res; });
-    if (D) D.sayLines(['op_view']);
-    _vrAuto('view', 1);   // (v53.12) the stored view (a headset flies from the seat either way)
-    const v = await pick; if (!live()) return;
-    try { localStorage.setItem('lss_view', v === 'fp' ? 'fp' : 'tp'); } catch (_) {}   // _applyStartView reads it at launch
-    snd('rearm_reset');
+    let _vrSeat = false;
+    try { _vrSeat = !!(renderer && renderer.xr && renderer.xr.isPresenting); } catch (_) {}
+    if (!_vrSeat) {
+      O.phase = 'view'; _ui('view');
+      const pick = new Promise((res) => { O._viewPick = res; });
+      if (D) D.sayLines(['op_view']);
+      const v = await pick; if (!live()) return;
+      try { localStorage.setItem('lss_view', v === 'fp' ? 'fp' : 'tp'); } catch (_) {}   // _applyStartView reads it at launch
+      snd('rearm_reset');
+    }
     O.phase = 'launch'; _ui('launch'); if (D) D.clear();
     _veilClear();
     _flicker(0.9); await wait(0.5); if (!live()) return;
@@ -105837,6 +105862,7 @@ const CAMP_PROLOGUE = {
     from: '',                   // (dev) begin at a beat: work glitch storm descent speech circle rows snare bond
     dark: 4.5,                  // seconds for the sky to go black
     walk: 7,                    // Xorzo's last stretch to work, seconds
+    vrGlitch: 0.35,
     sky: { R0: 30000, R1: 42000, fog: 0x0a0b14, zen: 0x020206, hor: 0x1b1030, tint: 0x0e1018, tintK: 0.9, fogMul: 1.5,
            amb: 4.4, key: 0.14, fill: 0.3, rim: 0.4, hemi: 1.0, ambColor: 0x24306e, hemiSky: 0x2c3466, hemiGnd: 0x0a0b12,
            cloudAmb: [0.05, 0.07, 0.18], cloudDuskK: 0, cloudHazeK: 0 },
@@ -106436,7 +106462,7 @@ const CAMP_PROLOGUE = {
   }
   function _faceJ(o, q) {
     if (P.hk && P.hk.on) return false;   // (v52.35) at school: he faces the way he flies
-    if (P.who === 'jimmy') { _v4.subVectors(camera.position, o.p); }               // "I'm an actual intelligence." - to us
+    if (P.who === 'jimmy') { _eyePos(_v4).sub(o.p); }                                // "I'm an actual intelligence." - to us (v53.14: our eye, in a headset too)
     else if (P.who === 'xorzo' && P.sys) { _v4.subVectors(P.sys.orbs[0].p, o.p); }  // listening to his dad
     else return false;
     _v4.y *= 0.3;
@@ -106480,7 +106506,7 @@ const CAMP_PROLOGUE = {
       _m4.toArray(mA, i * 16);
       let g = o.glow;
       if (o.talk && P.who === o.talk) g *= 1.3 + 0.3 * Math.sin(P.t * 17) * Math.sin(P.t * 5.3);   // a voice: his light flutters
-      if (H) g = _hkGlow(o, g, frz);
+      if (H) g = _hkGlow(o, g, frz, dt);
       gA[i] = g;
       hP[i * 3] = _v1.x; hP[i * 3 + 1] = _v1.y; hP[i * 3 + 2] = _v1.z;
       hS[i] = r * ha * vis * (o.hs || 1) * (0.82 + 0.18 * Math.min(g, 2));
@@ -106503,6 +106529,15 @@ const CAMP_PROLOGUE = {
     try { if (S.body.dispose) S.body.dispose(); if (S.trail.dispose) S.trail.dispose(); } catch (_) {}
   }
 
+  const _eyeV = new THREE.Vector3();
+  const _inXr = () => { try { return !!(renderer.xr.isPresenting && typeof xrDolly !== 'undefined' && camera.parent === xrDolly); } catch (_) { return false; } };
+  function _camPose(outP, outQ) {
+    const x = _inXr();
+    if (outP) outP.copy(x ? xrDolly.position : camera.position);
+    if (outQ) outQ.copy(x ? xrDolly.quaternion : camera.quaternion);
+    return outP;
+  }
+  function _eyePos(out) { return _inXr() ? camera.getWorldPosition(out) : out.copy(camera.position); }
   function _setCam(pos, look, fov) {
     camera.position.copy(pos);
     camera.up.set(0, 1, 0);
@@ -106536,8 +106571,9 @@ const CAMP_PROLOGUE = {
       P.curve = new THREE.CatmullRomCurve3(pts, false, 'centripetal');
       P.dLook0 = new THREE.Vector3(pl.C.x, pl.Y0 + pl.TH * 0.4, pl.C.z);
     } else if (k === 4) {
-      P.camP = camera.position.clone();
-      P.camL = camera.position.clone().add(new THREE.Vector3(0, 0, -300).applyQuaternion(camera.quaternion));
+      const q = new THREE.Quaternion();   // (v53.14) from the pose we last wrote - the dolly's in a headset (_camPose)
+      P.camP = _camPose(new THREE.Vector3(), q);
+      P.camL = P.camP.clone().add(new THREE.Vector3(0, 0, -300).applyQuaternion(q));
     }
     _camFrame(0);
   }
@@ -107054,7 +107090,7 @@ const CAMP_PROLOGUE = {
       for (let s = 1; s < ns; s++) B.strokes.push([s * (0.06 + Math.random() * 0.07), 0.55 + Math.random() * 0.4]);
       B.life = B.strokes[B.strokes.length - 1][0] + 0.55;
       _hkBoltShape(B);
-      _hkThunder(camera.position.distanceTo(B.b), !!B.big);
+      _hkThunder(_eyePos(_eyeV).distanceTo(B.b), !!B.big);   // (v53.14) from our eye, in a headset too
     }
     H.bolts.push(B);
     return B;
@@ -107334,14 +107370,15 @@ const CAMP_PROLOGUE = {
     }
     return 1;
   }
-  function _hkGlow(o, g, frz) {
+  const _hkVrK = () => (_inXr() ? ((HK.vrGlitch != null) ? HK.vrGlitch : 0.35) : 1);
+  function _hkGlow(o, g, frz, dt) {
     const c = o.cap, H = P.hk;
     if (c) {
       if (c.lock && c.ship) return o.glow * (0.55 + 0.9 * (0.5 + 0.5 * Math.sin((P.t - c.lockT) * 2.4 + c.ship.ph)));
       return o.glow * (1.5 + 0.7 * Math.random());
     }
     if (frz > 0) {
-      const q = Math.random(), w = 0.3 + H.glitchK;
+      const q = Math.random(), w = (0.3 + H.glitchK) * Math.min(2, (dt || 1 / 60) * 60) * _hkVrK();
       if (q < 0.035 * w) return g * 0.12;
       if (q > 1 - 0.02 * w) return g * 2.6;
     }
@@ -107359,9 +107396,9 @@ const CAMP_PROLOGUE = {
       }
     }
     if (o.jit > 0) { o.jit -= dt; if (o.jit <= 0) { o.jx = 0; o.jy = 0; o.jz = 0; } }
-    else if (Math.random() < dt * (0.25 + 2.2 * H.glitchK)) {
+    else if (Math.random() < dt * (0.25 + 2.2 * H.glitchK) * _hkVrK()) {   // (v53.14) fewer in a headset
       o.jit = 0.03 + Math.random() * 0.09;
-      const a = o.r * (0.6 + Math.random() * 1.4);
+      const a = o.r * (0.6 + Math.random() * 1.4) * Math.sqrt(_hkVrK());   // ...and a shorter reach
       o.jx = (Math.random() - 0.5) * a; o.jy = (Math.random() - 0.5) * a; o.jz = (Math.random() - 0.5) * a;
     }
     return o.Tl;
@@ -107525,7 +107562,7 @@ const CAMP_PROLOGUE = {
     let fI = 0, fb = null;
     for (const B of H.bolts) {
       if (B.kind !== 'storm' || !(B.I > 0)) continue;
-      const d = camera.position.distanceTo(B.a), k = B.I / (1 + (d / 7000) * (d / 7000));
+      const d = _eyePos(_eyeV).distanceTo(B.a), k = B.I / (1 + (d / 7000) * (d / 7000));   // (v53.14) our eye
       if (k > fI) { fI = k; fb = B; }
     }
     H.flashI = fI;
@@ -107618,8 +107655,9 @@ const CAMP_PROLOGUE = {
     const H = P.hk; if (!H) return;
     H.camCut = true; H.hold = 0;
     if (k === 6) {   // no cut: it rises off him from where the last shot left it, hitching
-      H.c6a = camera.position.clone();
-      H.l6a = camera.position.clone().add(_hv1.set(0, 0, -400).applyQuaternion(camera.quaternion));
+      const q = new THREE.Quaternion();   // (v53.14) where the last shot left it - the dolly's pose in a headset (_camPose)
+      H.c6a = _camPose(new THREE.Vector3(), q);
+      H.l6a = H.c6a.clone().add(_hv1.set(0, 0, -400).applyQuaternion(q));
       H.c6b = H.X1.clone().addScaledVector(H.dX, -700).addScaledVector(H.sX, H.side * 300); H.c6b.y = H.top + 260;
       H.l6b = P.plan.C.clone(); H.l6b.y = H.top - 350;
     }
@@ -107694,7 +107732,7 @@ const CAMP_PROLOGUE = {
       fov = 38;
     }
     if (k === 8 || k === 10 || k === 11) { const rf = _hkRoofAt(p.x, p.z); if (p.y < rf + 120) p.y = rf + 120; }
-    if (H.shake > 0.1) { p.x += (Math.random() - 0.5) * H.shake; p.y += (Math.random() - 0.5) * H.shake; H.shake *= Math.exp(-dt * 5); }
+    if (H.shake > 0.1) { if (!_inXr()) { p.x += (Math.random() - 0.5) * H.shake; p.y += (Math.random() - 0.5) * H.shake; } H.shake *= Math.exp(-dt * 5); }
     if (rate > 0 && !H.camCut) { H.camP.lerp(p, 1 - Math.exp(-dt * rate)); H.camL.lerp(l, 1 - Math.exp(-dt * rate)); }
     else { H.camP.copy(p); H.camL.copy(l); }
     H.camCut = false;
@@ -107802,7 +107840,7 @@ const CAMP_PROLOGUE = {
     const H = P.hk;
     if (P.saved && P.saved.duskPal) {
       P.duskK = 0;
-      try { _hubZoneTick(camera.position.x, camera.position.z, 0); _hzDuskLights(); } catch (_) {}
+      try { _camPose(_eyeV); _hubZoneTick(_eyeV.x, _eyeV.z, 0); _hzDuskLights(); } catch (_) {}   // (v53.14) the pose we wrote
       try { Object.assign(_HUB_ZONES.DUSK, P.saved.duskPal); } catch (_) {}
       P.saved.duskPal = null;
     }
