@@ -7571,7 +7571,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.08";
+const LSS_BUILD = "53.09";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -159565,7 +159565,24 @@ const CAMP_PROLOGUE = {
     try { _hkBuild(H, M || { car: null, flag: null, hulls: new Map() }); }
     catch (e) { _err('hack build', e); H.ok = false; return; }
     // the programs, linked off the main thread (KHR_parallel_shader_compile) against the world's own lights
-    try { if (renderer.compileAsync) await Promise.race([renderer.compileAsync(H.root, camera, scene), wait(25)]); } catch (_) {}
+    // ⭐ (v53.09) ...AND UNDER THE TARGET THEY DRAW INTO. Owner: "i'm getting a hitch when the summoners and carrier drop
+    // down from the stormy sky". This compiled with whatever target was bound - the CANVAS - so every program came out
+    // with the canvas's output colour space and tone mapping (srgb / ACES), while the scene draws into postFX.rtScene
+    // (srgb-linear / none): both are program-key terms, so the live draw wanted a different program for every material
+    // and linked it synchronously on its first frame. Measured (pane, ?pbhud, the hack from its descent): the warmed
+    // Pyro_InnerHull p430 vs the live p440 differ in exactly those two slots, and the descent linked 8 programs in its
+    // first second (the flagship's five, the storm deck, the bolts) - 267 + 108 ms frames. compileAsync runs compile()
+    // synchronously at CALL time, so the binding wraps the call, not the promise (v39.89, _critterPrecompile's rule).
+    try {
+      if (renderer.compileAsync) {
+        const _rt = (typeof postFX !== 'undefined' && postFX && postFX.rtScene) ? postFX.rtScene : null;
+        const _pRT = renderer.getRenderTarget();
+        let job = null;
+        try { if (_rt) renderer.setRenderTarget(_rt); job = renderer.compileAsync(H.root, camera, scene); }
+        finally { try { renderer.setRenderTarget(_pRT); } catch (_) {} }
+        await Promise.race([job, wait(25)]);
+      }
+    } catch (_) {}
     if (P.hk !== H) return;
     // the hulls' textures, uploaded one a frame - not all on the first frame they are seen
     const tex = new Set();
@@ -160371,6 +160388,11 @@ const CAMP_PROLOGUE = {
     } catch (e) { _err('hack sky', e); }
     H.on = true;
     if (H.root && !H.root.parent) scene.add(H.root);
+    // (v53.09) ...and DRAWN once, here, behind the black the hack opens on: _hkPrep's compile links the programs, but ANGLE
+    // builds a vertex executable per input layout at the first DRAW, and the shadow pass's depth programs are only ever
+    // made by a draw (v39.52 / v39.84). _warmDrawRoot shows every hidden ship, deck and bolt for one 8x8 render into the
+    // scene target, shadow pass included, then hides them again - so the descent's first frame has nothing left to build.
+    try { if (typeof _warmDrawRoot === 'function' && typeof postFX !== 'undefined' && postFX && postFX.rtScene && H.root) _warmDrawRoot(H.root, postFX.rtScene, true); } catch (e) { _err('hack warm', e); }
     // the Summoners into their seat now, behind the black: the body compiles and warms while their ship is still hidden
     // (seated bodies are scene children placed every frame by _lssSeatFrame; one off-scene ~900 frames is let go)
     try { if (H.flagReal && _lssSeatKnob('summoners', true) !== false) _lssSeatEnsure(H.flag.g, 'summoners_ship', 'summoners'); } catch (e) { _err('hack seat', e); }
@@ -160393,6 +160415,18 @@ const CAMP_PROLOGUE = {
     // to black first: Xorzo and Jimmy move to work and school, and the sky changes hands, behind it
     _veil(1, K.cut); await until(wait(K.cut + 0.05)); if (!live()) return;
     _hkStart(from);
+    // (v53.09) ...and HOLD the black until the Summoners' seated body (asked for in _hkStart) has shown itself. Its warm -
+    // one off-screen draw that also uploads its textures, ~120 ms on whatever frame its compile lands (measured: 4 textures
+    // + 26 geometries made in one 116 ms frame) - happens on its own clock; left alone it lands on screen. 1.5 s at most.
+    try {
+      const _t0 = performance.now();
+      while (live() && performance.now() - _t0 < 1500) {
+        const _r = H.flag && H.flag.g && H.flag.g.userData ? H.flag.g.userData.lssSeat : null;
+        if (!_r || _r.shown) break;   // no seat (knob off / a stand-in hull) or already shown
+        await until(wait(0.05));
+      }
+    } catch (_) {}
+    if (!live()) return;
     const beat = (i) => { H.beat = _HK_BEATS[i]; return from <= i && live(); };
     // 1. WORK - "Just as Xorzo was about to get to work, the sky goes dark."
     if (beat(0)) {
@@ -160513,7 +160547,17 @@ const CAMP_PROLOGUE = {
     const live = () => P.on && tok === P.tok && !P.skipped && !P.dbg;
     const until = (p) => Promise.race([p, P.skipP]);
     // the AIs' programs, linked behind the black (no lights of ours: the light count, which keys every program, is unchanged)
-    try { if (P.sys && renderer.compileAsync) await until(Promise.race([renderer.compileAsync(P.sys.root, camera, scene), wait(8)])); } catch (_) {}
+    // (v53.09) under the scene's own target, like _hkPrep's (see there): bound to the canvas it linked the wrong twins
+    try {
+      if (P.sys && renderer.compileAsync) {
+        const _rt = (typeof postFX !== 'undefined' && postFX && postFX.rtScene) ? postFX.rtScene : null;
+        const _pRT = renderer.getRenderTarget();
+        let job = null;
+        try { if (_rt) renderer.setRenderTarget(_rt); job = renderer.compileAsync(P.sys.root, camera, scene); }
+        finally { try { renderer.setRenderTarget(_pRT); } catch (_) {} }
+        await until(Promise.race([job, wait(8)]));
+      }
+    } catch (_) {}
     _hkPrep(tok);   // (v52.35) the hack's plan, hulls and programs, behind the city part (not awaited)
     await until(wait(0.4));   // a few frames to draw them, behind the black
     if (!live()) { if (!P.dbg) _finish(tok); return; }

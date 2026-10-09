@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.08";
+const LSS_BUILD = "53.09";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -106724,7 +106724,16 @@ const CAMP_PROLOGUE = {
     if (P.hk !== H || !P.on || tok !== P.tok) return;
     try { _hkBuild(H, M || { car: null, flag: null, hulls: new Map() }); }
     catch (e) { _err('hack build', e); H.ok = false; return; }
-    try { if (renderer.compileAsync) await Promise.race([renderer.compileAsync(H.root, camera, scene), wait(25)]); } catch (_) {}
+    try {
+      if (renderer.compileAsync) {
+        const _rt = (typeof postFX !== 'undefined' && postFX && postFX.rtScene) ? postFX.rtScene : null;
+        const _pRT = renderer.getRenderTarget();
+        let job = null;
+        try { if (_rt) renderer.setRenderTarget(_rt); job = renderer.compileAsync(H.root, camera, scene); }
+        finally { try { renderer.setRenderTarget(_pRT); } catch (_) {} }
+        await Promise.race([job, wait(25)]);
+      }
+    } catch (_) {}
     if (P.hk !== H) return;
     const tex = new Set();
     H.root.traverse((o) => {
@@ -107438,6 +107447,7 @@ const CAMP_PROLOGUE = {
     } catch (e) { _err('hack sky', e); }
     H.on = true;
     if (H.root && !H.root.parent) scene.add(H.root);
+    try { if (typeof _warmDrawRoot === 'function' && typeof postFX !== 'undefined' && postFX && postFX.rtScene && H.root) _warmDrawRoot(H.root, postFX.rtScene, true); } catch (e) { _err('hack warm', e); }
     try { if (H.flagReal && _lssSeatKnob('summoners', true) !== false) _lssSeatEnsure(H.flag.g, 'summoners_ship', 'summoners'); } catch (e) { _err('hack seat', e); }
     const past = P.t - 100;
     if (from > 0) { H.tWork = past; H.tDark = past; }
@@ -107456,6 +107466,15 @@ const CAMP_PROLOGUE = {
     P.phase = 'hack';
     _veil(1, K.cut); await until(wait(K.cut + 0.05)); if (!live()) return;
     _hkStart(from);
+    try {
+      const _t0 = performance.now();
+      while (live() && performance.now() - _t0 < 1500) {
+        const _r = H.flag && H.flag.g && H.flag.g.userData ? H.flag.g.userData.lssSeat : null;
+        if (!_r || _r.shown) break;   // no seat (knob off / a stand-in hull) or already shown
+        await until(wait(0.05));
+      }
+    } catch (_) {}
+    if (!live()) return;
     const beat = (i) => { H.beat = _HK_BEATS[i]; return from <= i && live(); };
     if (beat(0)) {
       _shot(5); _veil(0, K.cut + 0.15);
@@ -107560,7 +107579,16 @@ const CAMP_PROLOGUE = {
     const D = window.CampDialogue;
     const live = () => P.on && tok === P.tok && !P.skipped && !P.dbg;
     const until = (p) => Promise.race([p, P.skipP]);
-    try { if (P.sys && renderer.compileAsync) await until(Promise.race([renderer.compileAsync(P.sys.root, camera, scene), wait(8)])); } catch (_) {}
+    try {
+      if (P.sys && renderer.compileAsync) {
+        const _rt = (typeof postFX !== 'undefined' && postFX && postFX.rtScene) ? postFX.rtScene : null;
+        const _pRT = renderer.getRenderTarget();
+        let job = null;
+        try { if (_rt) renderer.setRenderTarget(_rt); job = renderer.compileAsync(P.sys.root, camera, scene); }
+        finally { try { renderer.setRenderTarget(_pRT); } catch (_) {} }
+        await until(Promise.race([job, wait(8)]));
+      }
+    } catch (_) {}
     _hkPrep(tok);   // (v52.35) the hack's plan, hulls and programs, behind the city part (not awaited)
     await until(wait(0.4));   // a few frames to draw them, behind the black
     if (!live()) { if (!P.dbg) _finish(tok); return; }
