@@ -1406,9 +1406,14 @@ Where each re-homed perk now lives, and what it was doing before:
 | | System A — permanent perk trees | System B — endless surge |
 |---|---|---|
 | anchors | `AEGIS.TREES` / `_aegisUpFor` / `_aegisShipUpgrades` | `run.aegis` / `_aegisSetLvl` / `_endlessAegisDmgOut` |
-| earned by | per-ship XP from hub kills | bolts collected inside one run |
-| persistence | localStorage `lss_aegis` **+ account sync** | none — dies with the run |
-| applies in | **SOLO EXHIBITION ONLY** | endless only, solo **and co-op** |
+| earned by | per-ship XP from hub kills (campaign: kills in the campaign, its OWN ladder) | bolts collected inside one run |
+| persistence | localStorage `lss_aegis` **+ account sync**; campaign `lss_aegis_camp` (synced as `camp:<SHIP>` keys) | none — dies with the run |
+| applies in | **SOLO EXHIBITION** + (v53.08) **SOLO CAMPAIGN** on its separate ladder | endless only, solo **and co-op** |
+
+- **⭐ (v53.08) THE CAMPAIGN'S OWN LADDER** — **Jump:** `function _aegisCampaign` · `function _aegisLadderMode` · `function _aegisCampLoad` · `function _aegisSyncWrite`. Owner: *"let's put aegis ranks in campaign"* → *"i want the ranks to be separate"*. Same trees, curve and perks (every perk reads through `_aegisAbilityRank`), its own XP: `_aegisShipState` picks `lss_aegis_camp` when `_aegisCampaign()` (a leg, `LSS.MODE 'campaign'`, or the overworld finale: free flight with `game._campGiant.campaign`; an Exhibition `__campGiant.start()` giant has no flag). Still solo only. The panel has an EXHIBITION / CAMPAIGN switch and opens on the ladder you are in (+ `game._campPicker`); the lobby chip stays Exhibition's. Account sync folds the campaign ladder in as `camp:<SHIP>` keys (the server's `_mergeAegis` merges any key by max — no backend change) and splits it back on every pull / push response.
+  - ⚠⚠ **`_aegisSave` writes a store only if it was LOADED.** The old `game._aegis || {}` would have written `{}` over every Exhibition rank the first time a campaign session (which never reads Exhibition's) ranked up.
+  - **Every chassis reset in a leg re-applies the rank** (the apply-once rule): the fresh launch (buildWorld, as before), `_campSwapTo` (before `_shipMemRestore`, the hub swap's order) and the death re-entry (before `respawnPlayer`, which heals to `player.maxHealth`). Leg-to-leg advances do not reset the chassis and do not re-apply. `CampaignMode.onTeardown` puts back the same never-chassis-reset fields as FreeFlightMode's.
+  - Gate: `node tools/aegis_scope_check.cjs` asserts all of the above (22 checks). Verified on a shim page: campaign VORTEX rank 14 vs Exhibition rank 5 → 12,500 hull / 6,000 shield / 1,400 energy; a credited kill +33 to `lss_aegis_camp`, `lss_aegis` untouched; swap to PYRO (rank 0) = its chassis, back to VORTEX = ranked again, not stacked. The death re-entry path was not driven live.
 
 Both feed the same `_aegisAbilityRank()` choke point, which is why `_aegisUpFor` can be a single mode-blind predicate: **every perk must keep reading through it.**
 

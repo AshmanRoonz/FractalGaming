@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.07";
+const LSS_BUILD = "53.08";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -2532,6 +2532,22 @@ function _lssCollectAccountPrefs() {
   return out;
 }
 
+function _aegisSyncReadCamp() {
+  try { return JSON.parse(localStorage.getItem('lss_aegis_camp') || '{}') || {}; } catch (_) { return {}; }
+}
+function _aegisSyncJoin(exh, camp) {
+  const out = Object.assign({}, exh || {});
+  for (const k in (camp || {})) out['camp:' + k] = camp[k];
+  return out;
+}
+function _aegisSyncWrite(all) {
+  const exh = {}, camp = {};
+  for (const k in (all || {})) { if (k.indexOf('camp:') === 0) camp[k.slice(5)] = all[k]; else exh[k] = all[k]; }
+  try { localStorage.setItem('lss_aegis', JSON.stringify(exh)); } catch (_) {}
+  try { localStorage.setItem('lss_aegis_camp', JSON.stringify(camp)); } catch (_) {}
+  try { if (typeof game !== 'undefined' && game) { game._aegis = exh; game._aegisCamp = camp; } } catch (_) {}
+}
+
 async function lssPullAccountState() {
   try {
     const token = lssAuthToken();                  // (v49.57) the session, not the 7-day Discord token
@@ -2543,6 +2559,7 @@ async function lssPullAccountState() {
 
     let local = {};
     try { local = JSON.parse(localStorage.getItem('lss_aegis') || '{}') || {}; } catch (_) {}
+    local = _aegisSyncJoin(local, _aegisSyncReadCamp());   // (v53.08) + the campaign's ladder as camp:<SHIP>
     const rem = (remote && remote.aegis) || {};
     const xpOf = (v) => { const n = (v && typeof v === 'object') ? Number(v.xp) : Number(v); return Number.isFinite(n) ? Math.max(0, n) : 0; };
     const merged = {};
@@ -2557,8 +2574,7 @@ async function lssPullAccountState() {
       console.warn('[lss-backend] merge produced empty aegis ; keeping local');
       return local;
     }
-    try { localStorage.setItem('lss_aegis', JSON.stringify(merged)); } catch (_) {}
-    try { if (typeof game !== 'undefined' && game) game._aegis = merged; } catch (_) {}
+    _aegisSyncWrite(merged);
 
     for (const k of _LSS_ACCOUNT_PREF_KEYS) {
       const v = (remote.prefs || {})[k];
@@ -2586,6 +2602,7 @@ async function lssPushAccountState() {
     if (!token) return;
     let aegis = {};
     try { aegis = JSON.parse(localStorage.getItem('lss_aegis') || '{}') || {}; } catch (_) {}
+    aegis = _aegisSyncJoin(aegis, _aegisSyncReadCamp());   // (v53.08) + the campaign's ladder as camp:<SHIP>
     const res = await fetch(LSS_API_BASE + '/me/state', {
       method: 'PUT',
       headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
@@ -2595,8 +2612,7 @@ async function lssPushAccountState() {
     if (!res.ok) { console.warn('[lss-backend] state push failed', res.status); return; }
     const merged = await res.json().catch(() => null);
     if (merged && merged.aegis && !(Object.keys(merged.aegis).length === 0 && Object.keys(aegis).length > 0)) {
-      try { localStorage.setItem('lss_aegis', JSON.stringify(merged.aegis)); } catch (_) {}
-      try { if (typeof game !== 'undefined' && game) game._aegis = merged.aegis; } catch (_) {}
+      _aegisSyncWrite(merged.aegis);   // (v53.08) each ladder back to its own store
     }
   } catch (err) {
     console.warn('[lss-backend] state push threw', err);
@@ -3710,6 +3726,12 @@ game._xzScanFlare = 0;
       game.testMode = false;
       game.raceNoTimer = false;
       LSS.MODE = 'classic';
+    } catch (_) {}
+    try {
+      if (typeof player !== 'undefined' && player) {
+        player.vortexMaxEnergy = 1000; player.vortexEnergyRegen = 150;
+        if (player.chassis && player.chassis.maxDashes) player.maxDashes = player.chassis.maxDashes;
+      }
     } catch (_) {}
     try { document.body.classList.remove('lss-campaign'); } catch (_) {}   // (v49.74)
   },
@@ -36652,18 +36674,34 @@ function _aegisLoad() {
   catch (_) { game._aegis = {}; }
   return game._aegis;
 }
+function _aegisCampaign() {
+  try {
+    if (typeof LSS === 'undefined') return false;
+    if (LSS.MODE === 'campaign') return true;
+    const G = (typeof game !== 'undefined' && game) ? game._campGiant : null;
+    return !!(G && G.campaign && LSS.MODE === 'freeflight');
+  } catch (_) { return false; }
+}
+function _aegisLadderMode() { return typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || LSS.MODE === 'campaign'); }
+function _aegisCampLoad() {
+  if (game._aegisCamp) return game._aegisCamp;
+  try { game._aegisCamp = JSON.parse(localStorage.getItem('lss_aegis_camp') || '{}') || {}; }
+  catch (_) { game._aegisCamp = {}; }
+  return game._aegisCamp;
+}
 function _aegisSave() {
-  try { localStorage.setItem('lss_aegis', JSON.stringify(game._aegis || {})); } catch (_) {}
+  try { if (game._aegis) localStorage.setItem('lss_aegis', JSON.stringify(game._aegis)); } catch (_) {}
+  try { if (game._aegisCamp) localStorage.setItem('lss_aegis_camp', JSON.stringify(game._aegisCamp)); } catch (_) {}   // (v53.08)
   try { if (typeof lssPushAccountStateSoon === 'function') lssPushAccountStateSoon(); } catch (_) {}
 }
 function _aegisShipState() {
   const key = (typeof player !== 'undefined' && player.loadoutKey) || 'VORTEX';
-  const a = _aegisLoad();
+  const a = _aegisCampaign() ? _aegisCampLoad() : _aegisLoad();   // (v53.08) the campaign's own ladder
   if (!a[key]) a[key] = { xp: 0 };
   return a[key];
 }
 function _aegisApply() {
-  if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight' || !_aegisSoloOnly()) return;
+  if (!_aegisLadderMode() || !_aegisSoloOnly()) return;
   if (!_aegisModeAllowed()) return;
   const st = _aegisShipState();
   const r = AEGIS.rankFromXp(st.xp).rank;
@@ -36672,7 +36710,7 @@ function _aegisApply() {
   try { if (typeof _aegisShipUpgrades === 'function') _aegisShipUpgrades(); } catch (_) {}
 }
 function _aegisAwardXp(amount) {
-  if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight' || !_aegisSoloOnly()) return;
+  if (!_aegisLadderMode() || !_aegisSoloOnly()) return;
   if (!_aegisModeAllowed()) return;
   const st = _aegisShipState();
   const before = AEGIS.rankFromXp(st.xp).rank;
@@ -36723,7 +36761,7 @@ function _aegisAbilityRank() {
       return a ? (a.lvl || 0) : -1;
     } catch (_) { return -1; }
   }
-  if (LSS.MODE === 'freeflight' && _aegisSoloOnly()) {
+  if (_aegisLadderMode() && _aegisSoloOnly()) {
     try { return AEGIS.rankFromXp(_aegisShipState().xp).rank; } catch (_) { return -1; }
   }
   return -1;
@@ -36863,9 +36901,15 @@ function _aegisPanelBuild() {
   _aegisPanelEl = bg;
   return bg;
 }
+let _aegisPanelWhich = 'exh';
 function _aegisPanelRender() {
   const bg = _aegisPanelBuild();
-  const a = _aegisLoad();
+  const camp = _aegisPanelWhich === 'camp';
+  const a = camp ? _aegisCampLoad() : _aegisLoad();
+  const tab = (w, label) => '<button onclick="window._aegisPanelShow&&_aegisPanelShow(\'' + w + '\')" style="background:'
+    + (_aegisPanelWhich === w ? 'rgba(255,210,77,0.18)' : 'transparent') + ';border:1px solid rgba(255,210,77,'
+    + (_aegisPanelWhich === w ? '0.75' : '0.3') + ');color:' + (_aegisPanelWhich === w ? '#ffd24d' : '#8f96ad')
+    + ';border-radius:6px;font-size:12px;padding:4px 12px;cursor:pointer;letter-spacing:2px;font-family:inherit;font-weight:bold;">' + label + '</button>';
   const accent = (k) => {
     try {
       const c = LSS.CLASS_COLORS && LSS.CLASS_COLORS[k];
@@ -36878,10 +36922,15 @@ function _aegisPanelRender() {
     + '<div style="max-width:1180px;margin:0 auto;font-family:\'Rajdhani\',\'Orbitron\',sans-serif;">'
     + '<div style="display:flex;align-items:baseline;gap:16px;margin-bottom:4px;">'
     + '<div style="font-family:\'Orbitron\',sans-serif;font-size:22px;letter-spacing:6px;color:#ffd24d;font-weight:bold;">&#x2B21; AEGIS RANKS</div>'
+    + '<div style="display:flex;gap:6px;">' + tab('exh', 'EXHIBITION') + tab('camp', 'CAMPAIGN') + '</div>'
     + '<div style="flex:1"></div>'
     + '<button onclick="window._aegisPanelClose&&_aegisPanelClose()" style="background:transparent;border:1px solid rgba(255,210,77,0.4);color:#ffd24d;border-radius:6px;font-size:14px;padding:4px 14px;cursor:pointer;letter-spacing:2px;font-family:inherit;">CLOSE &#10005;</button>'
     + '</div>'
-    + '<div style="font-size:12px;color:#8f96ad;letter-spacing:1px;margin-bottom:18px;">Per-ship Exhibition progression &mdash; destroy ships in the hub and its zone-rift caverns to earn ' + AEGIS.XP_PER_KILL + ' XP per kill (+' + AEGIS.CAVERN_BONUS + ' per cleared cavern). Every unlocked upgrade is active in Exhibition.</div>'
+    + '<div style="font-size:12px;color:#8f96ad;letter-spacing:1px;margin-bottom:18px;">'
+    + (camp
+      ? 'Per-ship Campaign progression, separate from Exhibition &mdash; destroy ships and leviathans in the campaign to earn ' + AEGIS.XP_PER_KILL + ' XP per kill. Every unlocked upgrade is active in the campaign (solo).'
+      : 'Per-ship Exhibition progression &mdash; destroy ships in the hub and its zone-rift caverns to earn ' + AEGIS.XP_PER_KILL + ' XP per kill (+' + AEGIS.CAVERN_BONUS + ' per cleared cavern). Every unlocked upgrade is active in Exhibition.')
+    + '</div>'
     + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:14px;">';
   for (const k of keys) {
     const xp = (a[k] && a[k].xp) || 0;
@@ -36921,12 +36970,17 @@ function _aegisPanelRender() {
   html += '</div></div>';
   bg.innerHTML = html;
 }
-function _aegisPanelOpen() {
+function _aegisPanelOpen(which) {
+  let inCamp = false;
+  try { inCamp = _aegisCampaign() || !!(game && game._campPicker); } catch (_) {}
+  _aegisPanelWhich = (which === 'camp' || which === 'exh') ? which : (inCamp ? 'camp' : 'exh');
   _aegisPanelRender();
   _aegisPanelEl.style.display = 'block';
 }
+function _aegisPanelShow(which) { _aegisPanelWhich = which === 'camp' ? 'camp' : 'exh'; _aegisPanelRender(); }
 if (typeof window !== 'undefined') {
   window._aegisPanelOpen = _aegisPanelOpen;
+  window._aegisPanelShow = _aegisPanelShow;
   window._aegisPanelClose = _aegisPanelClose;
   _aegisMenuRefresh();
   setInterval(() => { try { _aegisMenuRefresh(); } catch (_) {} }, 2500);
@@ -74652,6 +74706,7 @@ function _campSwapTo(nextKey) {
   if (player.mesh) player.mesh.position.copy(_pos);
   if (player.velocity) player.velocity.copy(_vel);
   if (_eul && player.euler) player.euler.copy(_eul);
+  try { if (typeof _aegisApply === 'function') _aegisApply(); } catch (_) {}
   _shipMemRestore(nextKey);   // (v52.72) nothing remembered = not flown since the respawn = the full hull the commit built
   player.shipState = player.doomed ? 'doomed' : 'flying';
   player.spawnProtection = 0;
@@ -74969,6 +75024,7 @@ function commitLoadout(key) {
     try { const _sel = document.getElementById('ship-select'); if (_sel) { _sel.classList.remove('active'); _sel.style.display = 'none'; } } catch (_) {}
     try { stopShipPreviewLoop(); } catch (_) {}
     try { _xrMenuForceHidden = true; } catch (_) {}
+    try { if (typeof _aegisApply === 'function') _aegisApply(); } catch (_) {}
     try { _shipMemRestore(key); } catch (_) {}
     try { if (typeof respawnPlayer === 'function') respawnPlayer(); } catch (_) {}
     try { _safeRequestPointerLock(); } catch (_) {}
@@ -85785,7 +85841,7 @@ function _hmDrawAll(ctx, m, W, H, v) {
   a = P('hull');  if (a) _hmText(ctx, a[0], fit, W, H, 'HULL: ' + Math.ceil(player.health),
     _HUD_C.w_06, '12px Courier New');
   a = P('aegis');
-  if (a && typeof LSS !== 'undefined' && LSS.MODE === 'freeflight' && typeof AEGIS !== 'undefined') {
+  if (a && _aegisLadderMode() && typeof AEGIS !== 'undefined') {   // (v53.08) + the campaign's own ladder
     try { const ai = AEGIS.rankFromXp(_aegisShipState().xp);
       _hmText(ctx, a[0], fit, W, H,
         'AEGIS ' + ai.rank + (ai.need ? ('  ' + ai.into + '/' + ai.need) : '  MAX'),
@@ -87838,6 +87894,14 @@ function drawCircumpunctHUD() {
         const _ai = AEGIS.rankFromXp(_aegisShipState().xp);
         _aegisStr = 'AEGIS ' + _ai.rank + (_ai.need ? ('  ' + _ai.into + '/' + _ai.need) : '  MAX');
       } catch (_) {}
+    }
+    if (typeof LSS !== 'undefined' && LSS.MODE === 'campaign' && typeof AEGIS !== 'undefined') {
+      try {
+        const _ai = AEGIS.rankFromXp(_aegisShipState().xp);
+        _aegisStr = 'AEGIS ' + _ai.rank + (_ai.need ? ('  ' + _ai.into + '/' + _ai.need) : '  MAX');
+      } catch (_) {}
+    }
+    if (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight') {
       if (game._cavern && game._cavern.spawned) {
         try {
           const _cv = game._cavern;
@@ -88055,7 +88119,7 @@ function drawCircumpunctHUD() {
   hudFont('13px Courier New');
   ctx.textAlign = 'center';
   ctx.fillText('HULL: ' + Math.ceil(player.health), cx, cy + r1 + 24);
-  if (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight' && typeof AEGIS !== 'undefined') {
+  if (_aegisLadderMode() && typeof AEGIS !== 'undefined') {
     try {
       const _ai = AEGIS.rankFromXp(_aegisShipState().xp);
       ctx.fillStyle = _HUD_C.a_055;
@@ -92539,7 +92603,7 @@ function _howtoHudSvg() {
   g += callout(RX, 170, 'ammo',    '#ff5bd6', ['AMMO', 'your clip &#8212; reload when it runs dry'], 'start');
   g += callout(RX, 226, 'dash',    '#d9a2ff', ['DASH PIPS', 'one pip = one dash'], 'start');
   g += callout(RX, 292, 'compass', '#9fb4c8', ['COMPASS', 'spins as you turn &#183; the letter under the', 'cyan marker is your heading'], 'start');
-  g += callout(RX, 352, 'aegis',   '#ffb020', ['AEGIS RANK', 'free flight: this ship&#8217;s rank and XP'], 'start');
+  g += callout(RX, 352, 'aegis',   '#ffb020', ['AEGIS RANK', 'exhibition &amp; campaign (separate): this ship&#8217;s rank and XP'], 'start');
   g += '</svg>';
   return g;
 }

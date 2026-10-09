@@ -113,5 +113,27 @@ else fail('respawn heals to the chassis max — a ranked pilot respawns up to 25
 if (/player\.shield = \(player\.maxShield != null\) \? player\.maxShield : ch\.maxShield/.test(src)) ok('respawn heals to player.maxShield (rank 14 +2500 honoured)');
 else fail('respawn heals to the chassis shield max — rank 14 half-fails after every death');
 
+// ---- (v53.08) System A's CAMPAIGN ladder: same perks, its OWN XP ----
+// Owner: "let's put aegis ranks in campaign" / "i want the ranks to be separate".
+const shipState = body('function _aegisShipState', '\n}');
+if (shipState && /_aegisCampaign\(\) \? _aegisCampLoad\(\) : _aegisLoad\(\)/.test(shipState)) ok('_aegisShipState reads the campaign ladder in campaign context, Exhibition\'s elsewhere');
+else fail('_aegisShipState no longer picks the ladder by context — campaign and Exhibition XP would mix');
+const saveBody = body('function _aegisSave', '\n}');
+if (saveBody && /if \(game\._aegis\) localStorage\.setItem\('lss_aegis'/.test(saveBody) && /if \(game\._aegisCamp\) localStorage\.setItem\('lss_aegis_camp'/.test(saveBody)) ok('_aegisSave writes each store only when it was loaded');
+else fail('_aegisSave can write a store it never loaded — a campaign rank-up would wipe Exhibition ranks with {}');
+const campBody = body('function _aegisCampaign', '\n}');
+if (campBody && /LSS\.MODE === 'campaign'/.test(campBody) && /\.campaign/.test(campBody)) ok('_aegisCampaign covers the legs AND the overworld finale (campaign-flagged giant)');
+else fail('_aegisCampaign lost a campaign context');
+// every chassis reset in a campaign leg re-applies the rank (the apply-once invariant: once per RESET, never on respawn)
+const swapBody = body('function _campSwapTo', '\n}');
+if (swapBody && /_aegisApply\(\)[\s\S]*_shipMemRestore\(nextKey\)/.test(swapBody)) ok('campaign ship swap re-applies the rank, before the remembered hull');
+else fail('campaign ship swap does not re-apply the Aegis rank after its commitLoadout reset');
+const reIdx = src.indexOf('if (game._campReentry) {\n    game._campReentry = false;');
+if (reIdx > 0 && /_aegisApply\(\)[\s\S]*respawnPlayer\(\)/.test(src.slice(reIdx, reIdx + 2200))) ok('campaign death re-entry re-applies the rank before respawnPlayer heals');
+else fail('campaign death re-entry does not re-apply the rank — a re-picked ship respawns unranked');
+// the account sync splits the ladders back apart
+if (/function _aegisSyncWrite/.test(src) && (src.match(/_aegisSyncJoin\(/g) || []).length >= 3) ok('account sync joins (camp:<SHIP>) and splits the two ladders');
+else fail('account sync no longer carries the campaign ladder');
+
 console.log(fails ? '\n' + fails + ' FAILURE(S)' : '\nALL AEGIS SCOPE CHECKS PASSED');
 process.exit(fails ? 1 : 0);
