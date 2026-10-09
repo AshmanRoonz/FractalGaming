@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.14";
+const LSS_BUILD = "53.24";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -8173,6 +8173,10 @@ function selectMap(mapKey, opts) {
 function _renderMapPreview(mapData) {
   const wrap = document.getElementById('map-window-preview');
   if (!wrap) return;
+  if (mapData && mapData.thumbGlyph) {
+    wrap.innerHTML = '<div class="map-preview-glyph">' + String(mapData.thumbGlyph).replace(/[<>&"]/g, '') + '</div>';
+    return;
+  }
   if (mapData && mapData.thumb) {
     const alt = String(mapData.name || 'map').replace(/[<>"]/g, '');
     wrap.innerHTML = '<img class="map-thumb-img" src="' + mapData.thumb +
@@ -49762,6 +49766,153 @@ if (typeof window !== 'undefined') {
   window.__shipStage = () => _shipPreview3D;     // dev: the picker's stage (scene, camera, model, rotationSpeed)
 }
 
+const _PSTAND = { scene: null, rig: null, lightG: null, L: null, root: null, body: null, char: null, mats: null, fx: null,
+                  mixer: null, talk: null, rest: null, phase: 'off', t: 0, last: 0, gen: 0, loading: false, H: 1.8, btnKey: '' };
+function _lssPickerStandK() {
+  const K = (typeof window !== 'undefined' && window.__ssx && window.__ssx.pilot) || {};
+  const n = (v, d) => (v != null && isFinite(+v)) ? +v : d;
+  return { on: K.on !== false, x: n(K.x, 400), feet: n(K.feet, 262), h: n(K.h, 300), d: n(K.d, 0.5), turn: n(K.turn, 0.45),
+           light: n(K.light, 1), listen: n(K.listen, 0.18) };
+}
+function _lssPickerStandBuild(s) {
+  const P = _PSTAND, gen = ++P.gen;
+  P.loading = true;
+  _lssSeatLoad('pilot').then((g) => {
+    if (P.gen !== gen) return;
+    P.loading = false;
+    if (!g) { P.phase = 'fail'; return; }
+    const scene = new THREE.Scene();
+    try { scene.environment = (s.scene && s.scene.environment) || null; } catch (_) {}
+    const rig = new THREE.Group(); rig.matrixAutoUpdate = false; scene.add(rig);
+    const lightG = new THREE.Group(); rig.add(lightG);
+    const L = {};
+    const dl = (col, x, y, z) => { const l = new THREE.DirectionalLight(col, 1); l.position.set(x * 100, y * 100, z * 100); lightG.add(l); lightG.add(l.target); return l; };
+    L.amb = new THREE.AmbientLight(0xffffff, 1); scene.add(L.amb);
+    L.key = dl(0xbfd9ff, 0.55, 0.75, 0.85);      // upper front, from the ship's side (camera space: +z is toward the eye)
+    L.fill = dl(0xffb066, -0.7, -0.25, 0.55);    // low front, the other side
+    L.rim = dl(0xffaa00, 0.6, 0.55, -0.9);       // behind him, an amber edge
+    L.hemi = new THREE.HemisphereLight(0x8fb4e6, 0x3a2a1a, 1); scene.add(L.hemi);
+    const body = (typeof _wildRigClone === 'function') ? _wildRigClone(g.scene) : g.scene.clone(true);
+    const mats = [];
+    body.traverse((o) => {
+      if (!o.isMesh) return;
+      o.frustumCulled = false; o.castShadow = false; o.receiveShadow = false; o.raycast = _lssNoRaycast;
+      const arr = Array.isArray(o.material) ? o.material : [o.material];
+      const cl = arr.map((m) => { const c = m.clone(); c.userData._e0 = c.emissive ? c.emissive.getHex() : 0; c.userData._ei0 = c.emissiveIntensity; mats.push(c); return c; });
+      o.material = Array.isArray(o.material) ? cl : cl[0];
+    });
+    const K = _lssPickerStandK();
+    const clip = g.animations.find((c) => c.name === 'Stand_Talking_Angry') || g.animations.find((c) => /stand|talk/i.test(c.name)) || g.animations[0];
+    const mixer = new THREE.AnimationMixer(body);
+    const talk = mixer.clipAction(clip); talk.setLoop(THREE.LoopRepeat, Infinity); talk.play();
+    const rest = mixer.clipAction(clip.clone()); rest.setLoop(THREE.LoopRepeat, Infinity); rest.play(); rest.time = 0; rest.paused = true;
+    talk.setEffectiveWeight(K.listen); rest.setEffectiveWeight(1 - K.listen);
+    mixer.update(0);
+    body.updateMatrixWorld(true);
+    const bb = new THREE.Box3().setFromObject(body);
+    const H = Math.max(0.01, bb.max.y - bb.min.y);
+    body.position.set(-(bb.min.x + bb.max.x) / 2, -bb.min.y, -(bb.min.z + bb.max.z) / 2);
+    const wrap = new THREE.Group(); wrap.add(body);   // the beam grows / drains THIS from his feet (_lssPickerSeatFx scales .body)
+    const fx = _lssTeleportFx();
+    try { fx.userData.parts.ring.position.y = 0.03; } catch (_) {}   // the seat's ring is at the cushion; his is at his feet
+    const root = new THREE.Group(); root.name = 'lss_picker_stand'; root.add(wrap); root.add(fx);
+    rig.add(root);
+    Object.assign(P, { scene, rig, lightG, L, root, body: wrap, char: body, mats, fx, mixer, talk, rest, H, phase: 'warm', t: 0 });
+    let started = false;
+    const go = () => {
+      if (started || P.gen !== gen) return;
+      started = true;
+      P.phase = (game && game._ssConfirmed) ? 'gone' : 'in'; P.t = 0;
+    };
+    try {
+      _lssPickerStandPlace(s);
+      P.rig.matrix.copy(s.camera.matrixWorld); P.rig.matrixWorldNeedsUpdate = true;
+      root.visible = true; fx.visible = true; wrap.visible = true;   // compile() takes only visible objects, inside the call
+      const pRT = renderer.getRenderTarget();
+      renderer.setRenderTarget(null);   // he draws to the canvas, like the stage
+      const job = renderer.compileAsync ? renderer.compileAsync(scene, s.camera) : null;
+      renderer.setRenderTarget(pRT);
+      root.visible = false;
+      if (job) job.then(go, go); else go();
+    } catch (_) { go(); }
+    setTimeout(go, 1500);
+  });
+}
+function _lssPickerStandPlace(s) {
+  const P = _PSTAND, K = _lssPickerStandK(), cam = s.camera;
+  const el = renderer.domElement;
+  const vw = el.clientWidth || window.innerWidth || 1, vh = el.clientHeight || window.innerHeight || 1;
+  const u = Math.min(vw / 1672, vh / 941);
+  const D = Math.max(1, (s.camR || 300) * K.d);
+  const th = Math.tan(cam.fov * Math.PI / 360), asp = cam.aspect || (vw / vh);
+  const cx = K.x * u, fy = vh - K.feet * u;
+  const nx = (cx / vw) * 2 - 1, ny = 1 - (fy / vh) * 2;
+  P.root.position.set(nx * D * th * asp, ny * D * th, -D);
+  P.root.scale.setScalar(((K.h * u) / vh) * 2 * D * th / P.H);
+  P.root.rotation.set(0, K.turn, 0);
+  P.lightG.position.copy(P.root.position);
+  const L = P.L;
+  L.amb.intensity = _PICKER_LIGHTS.amb * K.light; L.key.intensity = _PICKER_LIGHTS.key * K.light;
+  L.fill.intensity = _PICKER_LIGHTS.fill * K.light; L.rim.intensity = _PICKER_LIGHTS.rim * K.light; L.hemi.intensity = _PICKER_LIGHTS.hemi * K.light;
+  try {
+    const b = document.getElementById('ssx-pilot-cz');
+    const key = Math.round(cx) + ',' + Math.round(fy + 8 * u);
+    if (b && P.btnKey !== key) { P.btnKey = key; b.style.left = Math.round(cx) + 'px'; b.style.top = Math.round(fy + 8 * u) + 'px'; }
+  } catch (_) {}
+}
+function _lssPickerStandBtn(on) {
+  try { const b = document.getElementById('ssx-pilot-cz'); if (b && b.classList.contains('ssx-pilot-on') !== !!on) b.classList.toggle('ssx-pilot-on', !!on); } catch (_) {}
+}
+function _lssPickerStandTick(s) {
+  const P = _PSTAND, K = _lssPickerStandK();
+  const now = performance.now();
+  const gap = P.last ? (now - P.last) / 1000 : 0;
+  P.last = now;
+  let want = false;
+  try { want = K.on && !!s.model && _ssxActive() && _lssSeatKnob('on', true) !== false && _lssSeatKnob('pilot', true) !== false; } catch (_) {}
+  if (!want || P.phase === 'fail') { _lssPickerStandBtn(false); if (P.root) P.root.visible = false; return false; }
+  if (!P.root) { _lssPickerStandBtn(false); if (!P.loading) _lssPickerStandBuild(s); return false; }
+  const conf = !!(game && game._ssConfirmed);
+  if (gap > 0.5 && P.phase !== 'warm') { P.phase = conf ? 'gone' : 'in'; P.t = 0; }
+  const dt = Math.min(0.1, gap);
+  P.t += dt;
+  if (P.phase !== 'warm') {
+    if (conf && (P.phase === 'stand' || P.phase === 'in')) { P.phase = 'out'; P.t = 0; }
+    else if (!conf && (P.phase === 'gone' || P.phase === 'out')) { P.phase = 'in'; P.t = 0; }
+    if (P.phase === 'in' && P.t >= _PSEAT_IN) P.phase = 'stand';
+    else if (P.phase === 'out' && P.t >= _PSEAT_OUT) P.phase = 'gone';
+  }
+  _lssPickerStandBtn(P.phase === 'stand' || P.phase === 'in');
+  if (P.phase === 'warm' || P.phase === 'gone') { P.root.visible = false; return false; }
+  _lssPickerStandPlace(s);
+  P.rig.matrix.copy(s.camera.matrixWorld); P.rig.matrixWorldNeedsUpdate = true;
+  if (P.talk && P.rest) { P.talk.setEffectiveWeight(K.listen); P.rest.setEffectiveWeight(1 - K.listen); }
+  P.mixer.update(dt);
+  _lssPickerSeatFx(P);   // 'in' / 'out' = the beam; anything else = standing, all of him, no beam
+  return !!P.root.visible;
+}
+function _lssPickerStandDraw(s) {
+  if (!_lssPickerStandTick(s)) return;
+  const ac = renderer.autoClear;
+  renderer.autoClear = false;
+  try { renderer.render(_PSTAND.scene, s.camera); } finally { renderer.autoClear = ac; }
+}
+if (typeof window !== 'undefined') {
+  window.__pickerStand = () => {
+    const P = _PSTAND;
+    let px = null;
+    try {
+      if (P.root && _shipPreview3D && _shipPreview3D.camera) {
+        P.root.updateWorldMatrix(true, false);
+        const v = new THREE.Vector3().setFromMatrixPosition(P.root.matrixWorld).project(_shipPreview3D.camera);
+        px = [Math.round((v.x * 0.5 + 0.5) * innerWidth), Math.round((1 - (v.y * 0.5 + 0.5)) * innerHeight)];
+      }
+    } catch (_) {}
+    return { phase: P.phase, t: +P.t.toFixed(2), loading: P.loading, feetPx: px, H: +P.H.toFixed(3), confirmed: !!(game && game._ssConfirmed) };
+  };
+  window.__pickerStandObj = _PSTAND;   // dev: the standing pilot's state (scene, rig, root, body, fx, phase)
+}
+
 let _PROCEDURAL_SHIP_NORMALMAP = null;
 function _makeProceduralShipNormalMap() {
   if (_PROCEDURAL_SHIP_NORMALMAP) return _PROCEDURAL_SHIP_NORMALMAP;
@@ -50550,6 +50701,7 @@ function _lssRenderPicker() {
     try { _lssPickerSeatTick(); } catch (_) {}   // (v52.06) CONFIRM beams the pilot into the stage hull
     renderer.setRenderTarget(null);
     renderer.render(s.scene, s.camera);
+    try { _lssPickerStandDraw(s); } catch (_) {}   // (v53.20) ...out of where he stood beside it (the new face)
     return true;
   } catch (_) { return false; }
 }
@@ -75054,6 +75206,12 @@ function _lssAnnounceLoadout() {
 
 function commitLoadout(key) {
   if (_commitPending && !game._liveSwap) return;
+  if (typeof game !== 'undefined' && game && game._ssxCampNew && game._campPicker && !game._liveSwap) {
+    game._ssxCampNew = false; game._campPicker = false; game._ssConfirmed = false;
+    try { _lssRefreshLaunchRow(); } catch (_) {}
+    try { startCampaignJourney(); } catch (e) { console.warn('[campaign] the story would not start:', e && e.message); }
+    return;
+  }
   if (typeof game !== 'undefined' && game._swapPending && !game._swapStaging && !game._liveSwap) game._swapPending = null;
   try { if (game._campReentry) _shipMemSave(); else if (!game._liveSwap) _shipMemClear(); } catch (_) {}
   try { _applyStartView(); } catch (_) {}
@@ -90296,6 +90454,13 @@ function _skinPanelPlace() {
   const hdr = document.getElementById('ss-header-right');
   if (hdr && hdr.offsetParent) { const hb = hdr.getBoundingClientRect(); if (hb.height > 0) y = Math.round(hb.bottom - sr.top + 6); }
   const saved = _czPosGet();
+  try {
+    if (!saved && _ssxActive()) {
+      const tg = document.getElementById('skin-toggle');
+      const tb = tg ? tg.getBoundingClientRect() : null;
+      if (tb && tb.width > 0) { x = tb.left - sr.left; y = Math.round(tb.bottom - sr.top + 8); }
+    }
+  } catch (_) {}
   if (saved) { x = saved.x; y = saved.y; }
   x = Math.max(0, Math.min(Math.round(x), Math.round(sr.width - w)));
   y = Math.max(0, Math.min(Math.round(y), Math.round(sr.height - 60)));   // the header always stays on screen
@@ -92391,7 +92556,539 @@ function _ssBannerRelease() {
   } catch (_) {}
 }
 
+function _ssxFlag() {
+  const S = _ssxFlag._s || (_ssxFlag._s = { v: null });
+  if (S.v !== null) return S.v;
+  let on = false;
+  try {
+    const q = new URLSearchParams(location.search);
+    if (q.has('newss')) {
+      const v = String(q.get('newss') || '').toLowerCase();
+      on = !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+      try { if (on) localStorage.setItem('lss_newss', '1'); else localStorage.removeItem('lss_newss'); } catch (_) {}
+    } else {
+      try { on = localStorage.getItem('lss_newss') === '1'; } catch (_) {}
+    }
+  } catch (_) {}
+  S.v = on;
+  return on;
+}
+function _ssxActive() {
+  try {
+    const sel = document.getElementById('ship-select');
+    if (!sel || !sel.classList.contains('ssx') || sel.classList.contains('camp-open')) return false;
+    const mq = _ssxActive._mq || (_ssxActive._mq = window.matchMedia ? window.matchMedia('(min-width: 1100px) and (min-height: 600px)') : null);
+    return !!(mq && mq.matches);
+  } catch (_) { return false; }
+}
+function _ssxClearRails() {
+  try {
+    const rm = (id, props) => { const e = document.getElementById(id); if (e) props.forEach(p => e.style.removeProperty(p)); };
+    rm('ss-right-col', ['top']);
+    rm('ship-preview-info', ['left', 'right', 'width', 'top', 'bottom']);
+    rm('ship-preview-stats', ['width']);
+    ['ship-preview-weapon', 'ship-preview-abilities', 'ship-preview-core', 'btn-aegis-select'].forEach(id => rm(id, ['max-width']));
+    rm('ship-preview-perks', ['left', 'width', 'top', 'bottom']);
+    rm('perks-desc', ['min-height', 'display', 'width', 'max-width']);
+    rm('ship-hero', ['top']);
+  } catch (_) {}
+}
+function _ssxBannerPlace() {
+  try {
+    const H = _ssBannerHold._st;
+    const ban = H ? H.el : null;
+    if (!ban) return;
+    if (performance.now() >= H.until) { ban.style.removeProperty('top'); return; }
+    const u = Math.min(window.innerWidth / 1672, window.innerHeight / 941);
+    const K = window.__ssx || {};
+    const y = (K.bannerY != null && isFinite(+K.bannerY)) ? +K.bannerY : 628;
+    ban.style.setProperty('top', Math.round(y * u) + 'px', 'important');
+  } catch (_) {}
+}
+function _ssxSet(el, txt) { if (el && el.textContent !== txt) el.textContent = txt; }
+function _ssxClass(el, cls, on) { if (el && el.classList.contains(cls) !== !!on) el.classList.toggle(cls, !!on); }
+function _ssxMsg(txt, ms) {
+  const S = _ssxMsg._s || (_ssxMsg._s = { t: null });
+  const el = document.getElementById('ssx-mp-msg');
+  if (!el) return;
+  el.textContent = txt || '';
+  if (S.t) { clearTimeout(S.t); S.t = null; }
+  if (txt && ms) S.t = setTimeout(() => { el.textContent = ''; S.t = null; }, ms);
+}
+function _ssxSync() {
+  try {
+    const sel = document.getElementById('ship-select');
+    if (!sel || !sel.classList.contains('ssx') || !sel.classList.contains('active')) return;
+    const hn = document.getElementById('ship-hero-name');
+    _ssxSet(document.getElementById('ssx-shipname'), (hn && hn.textContent) || ' ');
+    let locked = false;
+    try { locked = _lssPickLocked(); } catch (_) {}
+    _ssxClass(document.getElementById('ssx-shipdd'), 'ssx-locked', locked);
+    let mLocked = false;
+    try { mLocked = _lssRoomModeLocked(); } catch (_) {}
+    _ssxClass(document.getElementById('ss-mode-row'), 'ssx-mode-locked', mLocked);
+    let mid = false;
+    try { mid = !!(game && game.state && game.state !== 'select'); } catch (_) {}
+    _ssxClass(sel, 'ssx-mid', mid);
+    let u = null;
+    try { u = discordCurrentUser(); } catch (_) {}
+    const av = document.getElementById('ssx-avatar');
+    let avSrc = '';
+    try { if (u) avSrc = _discordAvatarUrlFor(u, 64) || ''; } catch (_) {}
+    if (av && (av.getAttribute('src') || '') !== avSrc) { if (avSrc) av.setAttribute('src', avSrc); else av.removeAttribute('src'); }
+    _ssxSet(document.getElementById('ssx-uname'), u ? String(u.global_name || u.username || 'PILOT').toUpperCase() : 'SIGN IN WITH DISCORD');
+    let rk = '';
+    try { const r = document.getElementById('aegis-menu-rank'); if (u && r) rk = '⬡ AEGIS RANK ' + (r.textContent || '0').trim(); } catch (_) {}
+    _ssxSet(document.getElementById('ssx-urank'), rk);
+    _ssxClass(document.getElementById('ssx-user'), 'ssx-signed', !!u);
+    const N = (typeof net !== 'undefined' && net) ? net : {};
+    const inRoom = !!(N.room && N.roomCode);
+    const R = _ssxRoomGo._s || {};
+    if (R.busy && (inRoom || performance.now() - R.t0 > 15000)) {
+      R.busy = false;
+      if (!inRoom) _ssxMsg('Could not reach the room - still playing solo.', 6000); else _ssxMsg('');
+    }
+    _ssxClass(sel, 'ssx-room', inRoom);
+    let peers = 0;
+    try { if (N.peers) for (const [, p] of N.peers) { if (!_peerIsJudge(p)) peers++; } } catch (_) {}
+    _ssxSet(document.getElementById('ssx-mp-state'),
+      R.busy ? 'CONNECTING…'
+      : inRoom ? (peers ? ('IN ROOM · ' + (peers + 1) + ' PILOTS') : 'IN ROOM · WAITING FOR FRIENDS')
+      : 'PLAYING SOLO');
+    _ssxSet(document.getElementById('ssx-mp-codetxt'), inRoom ? String(N.roomCode) : '');
+    try {
+      const inv = document.getElementById('btn-invite-all'), mine = document.getElementById('ssx-mp-invite');
+      const show = !!(inv && inv.style.display !== 'none' && getComputedStyle(inv).display !== 'none');
+      if (mine) { const d = show ? '' : 'none'; if (mine.style.display !== d) mine.style.display = d; }
+    } catch (_) {}
+    let humans = 1, ready = 0, bots = 0;
+    try {
+      const chips = sel.querySelectorAll('#teammates-list .fleet-chip, #enemies-list .fleet-chip');
+      let cards = 0;
+      chips.forEach(c => { if (!c.classList.contains('empty') && !c.classList.contains('bot-off')) cards++; });
+      if (N.active) humans = 1 + peers;
+      bots = Math.max(0, cards - humans);
+      const you = !!(game && (game._ssConfirmed || (player && player.loadoutKey && game.state !== 'select')));
+      ready = you ? 1 : 0;
+      if (N.active && N.peers) for (const [, p] of N.peers) { if (!_peerIsJudge(p) && (p.loadoutKey || p.ready)) ready++; }
+    } catch (_) {}
+    _ssxSet(document.getElementById('ssx-fleet-txt'),
+      humans + (humans === 1 ? ' PILOT' : ' PILOTS') + (bots ? (' · ' + bots + (bots === 1 ? ' BOT' : ' BOTS')) : ''));
+    const allReady = ready >= humans;
+    _ssxSet(document.getElementById('ssx-fleet-rtxt'),
+      humans > 1 ? (ready + ' / ' + humans + ' CONFIRMED') : (allReady ? 'CONFIRMED - READY TO LAUNCH' : 'WAITING FOR CONFIRMATION'));
+    _ssxClass(sel, 'ssx-ready', allReady);
+    try { _ssxSet(document.getElementById('ssx-ver'), 'v' + LSS_BUILD); } catch (_) {}
+    try {
+      const ms = document.getElementById('map-select'), pv = document.getElementById('map-window-preview');
+      if (ms && pv && pv.offsetHeight > 0) {
+        const y = Math.round(pv.getBoundingClientRect().top - ms.getBoundingClientRect().top + pv.offsetHeight / 2) + 'px';
+        if (ms.style.getPropertyValue('--ssx-map-ay') !== y) ms.style.setProperty('--ssx-map-ay', y);
+      }
+      const df = document.getElementById('ship-preview-difficulty'), col = document.getElementById('ss-right-col');
+      if (df && col && df.offsetHeight > 0) {
+        const h = df.offsetHeight + 'px';
+        if (col.style.getPropertyValue('--ssx-diff-h') !== h) col.style.setProperty('--ssx-diff-h', h);
+      }
+    } catch (_) {}
+    try {
+      const K = window.__ssx || {};
+      const st = document.getElementById('teammates-strip');
+      const tz = (K.tz != null && isFinite(+K.tz) && +K.tz > 0) ? String(+K.tz) : '';
+      if (st && st.style.getPropertyValue('--ssx-tz') !== tz) { if (tz) st.style.setProperty('--ssx-tz', tz); else st.style.removeProperty('--ssx-tz'); }
+    } catch (_) {}
+    _ssxFitAll();
+    const M = _ssxMenuOpen._s;
+    if (M && M.kind && M.anchor && !(M.anchor.offsetParent)) _ssxMenuClose();
+  } catch (_) {}
+}
+function _ssxFit(el) {
+  try {
+    if (!el || !el.isConnected) return;
+    const w = el.clientWidth;
+    if (!(w > 0)) return;
+    if (el._ssxFitKey === el.textContent + '|' + w) return;
+    const tr = el.style.getPropertyValue('transition'), trP = el.style.getPropertyPriority('transition');
+    el.style.setProperty('transition', 'none', 'important');
+    el.style.setProperty('--ssx-fit', '1');
+    let f = 1;
+    for (let i = 0; i < 4 && el.scrollWidth > el.clientWidth + 0.5 && f > 0.55; i++) {
+      f = Math.max(0.55, f * (el.clientWidth / el.scrollWidth) * 0.98);
+      el.style.setProperty('--ssx-fit', f.toFixed(3));
+    }
+    void el.scrollWidth;   // settle the last size BEFORE the transition comes back, or it would animate in
+    if (tr) el.style.setProperty('transition', tr, trP); else el.style.removeProperty('transition');
+    el._ssxFitKey = el.textContent + '|' + el.clientWidth;
+  } catch (_) {}
+}
+function _ssxFitAll() {
+  if (!_ssxActive()) return;
+  ['ship-preview-confirm', 'ship-preview-launch', 'ship-preview-confirm-vr', 'ss-mode-current', 'ssx-shipdd', 'map-window-name',
+   'insane-speed-toggle', 'ssx-mp-state', 'ssx-mp-joinbtn', 'ssx-mp-invite', 'ssx-mp-leave',
+   'skin-toggle', 'ssx-perksbtn', 'btn-aegis-select', 'ssx-pilot-cz']
+    .forEach(id => _ssxFit(document.getElementById(id)));
+}
+function _ssxLeaveRoom() {
+  const S = _ssxLeaveRoom._s || (_ssxLeaveRoom._s = { until: 0, t: null });
+  const btn = document.getElementById('ssx-mp-leave');
+  const disarm = () => { S.until = 0; if (S.t) { clearTimeout(S.t); S.t = null; } if (btn) { btn.textContent = 'LEAVE ROOM'; btn.classList.remove('ssx-armed'); } };
+  if (performance.now() > S.until) {
+    S.until = performance.now() + 3500;
+    if (btn) { btn.textContent = 'SURE? PRESS AGAIN'; btn.classList.add('ssx-armed'); }
+    if (S.t) clearTimeout(S.t);
+    S.t = setTimeout(disarm, 3500);
+    return;
+  }
+  disarm();
+  try {
+    if (typeof net === 'undefined' || !net || !net.room) return;
+    try {
+      if (net.peers) for (const [, peer] of net.peers) {
+        if (!peer || !peer.networkPlayer) continue;
+        try { peer.networkPlayer.destroy(); } catch (_) {}
+        const i = Array.isArray(net.networkPlayers) ? net.networkPlayers.indexOf(peer.networkPlayer) : -1;
+        if (i >= 0) net.networkPlayers.splice(i, 1);
+        const j = (game && Array.isArray(game.entities)) ? game.entities.indexOf(peer.networkPlayer) : -1;
+        if (j >= 0) game.entities.splice(j, 1);
+      }
+      if (net.peers) net.peers.clear();
+      if (net.peerGameSync) net.peerGameSync.clear();
+    } catch (_) {}
+    try { stopRoomHeartbeat(); } catch (_) {}
+    try { _cancelRoomForLocalPlay(); } catch (_) {}
+    try {
+      net.roomCode = null; net.myReady = false; net._dropin = null; net._teamPick = null; net._waitingForPeers = false;
+      net.mapCommitLocked = false; net.freeflight = false; net.cyber = false; net._forcedMode = null; net._decreedMode = null;
+      net.openSoloHostId = null;
+      if (net.startTimer) { clearTimeout(net.startTimer); net.startTimer = null; }
+      if (net.launchTimer) { clearTimeout(net.launchTimer); net.launchTimer = null; }
+      net.startScheduledAt = null; net.launchScheduledAt = null;
+    } catch (_) {}
+    try { game._ssConfirmed = false; } catch (_) {}
+    try { _syncMapButtonsDisabled(); } catch (_) {}
+    const inp = document.getElementById('room-code');
+    if (inp) inp.value = '';
+    const solo = { classic: startSolo, freeflight: startFreeFlight, cyberpunk: startCyberpunkCity, earth: startEarthFlight,
+                   endless: startEndless, race: startRace, assault: startAssault, push: startPush,
+                   campaign: _ssxCampaignPick }[_lssRoomTag()] || startSolo;   // (v53.21) a co-op campaign left = the solo one
+    solo();
+    _ssxMsg('Left the room - playing solo.', 4000);
+  } catch (e) { console.warn('[ssx] leave failed:', e); }
+}
+function _ssxRoomsOpen(on) {
+  const S = _ssxRoomsOpen._s || (_ssxRoomsOpen._s = { t: null, seq: 0 });
+  const sel = document.getElementById('ship-select');
+  if (!sel) return;
+  _ssxClass(sel, 'ssx-roomsopen', !!on);
+  if (S.t) { clearInterval(S.t); S.t = null; }
+  if (!on) { S.seq++; return; }
+  _ssxMenuClose(); sel.classList.remove('ssx-perks');
+  _ssxRoomsLoad();
+  S.t = setInterval(() => {
+    if (!sel.classList.contains('ssx-roomsopen') || !sel.classList.contains('active')) { _ssxRoomsOpen(false); return; }
+    _ssxRoomsLoad();
+  }, 10000);
+}
+async function _ssxRoomsLoad() {
+  const S = _ssxRoomsOpen._s || (_ssxRoomsOpen._s = { t: null, seq: 0 });
+  const seq = ++S.seq;
+  const list = document.getElementById('ssx-rooms-list'), cnt = document.getElementById('ssx-rooms-count');
+  if (!list) return;
+  const el = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
+  if (!list.childElementCount) list.appendChild(el('div', 'ssx-rooms-empty', 'Loading rooms...'));
+  let rooms = null, err = null;
+  try {
+    const res = await fetch(LSS_API_BASE + '/rooms', { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    rooms = (data && Array.isArray(data.rooms)) ? data.rooms : [];
+  } catch (e) { err = e; }
+  if (seq !== S.seq) return;   // closed, or a newer load overtook this one
+  list.innerHTML = '';
+  if (err) {
+    if (cnt) cnt.textContent = '';
+    list.appendChild(el('div', 'ssx-rooms-empty', 'Could not load the rooms (' + ((err && err.message) || err) + ').'));
+    return;
+  }
+  if (cnt) cnt.textContent = rooms.length + (rooms.length === 1 ? ' ROOM LIVE' : ' ROOMS LIVE');
+  if (!rooms.length) {
+    list.appendChild(el('div', 'ssx-rooms-empty', 'No live rooms right now. CREATE ROOM opens one - with a signed-in host it shows up here within seconds.'));
+    return;
+  }
+  const mine = (typeof net !== 'undefined' && net && net.room && net.roomCode) ? String(net.roomCode).toUpperCase() : '';
+  const age = (ms) => { const s = Math.max(0, Math.floor(ms / 1000)); return s < 5 ? 'live' : s < 60 ? s + 's ago' : s < 3600 ? Math.floor(s / 60) + 'm ago' : Math.floor(s / 3600) + 'h ago'; };
+  rooms.forEach(r => {
+    const code = String((r && r.code) || '').toUpperCase();
+    if (!code) return;
+    const card = el('div', 'ssx-room-card' + (code === mine ? ' mine' : ''));
+    const top = el('div', 'ssx-rc-top');
+    top.appendChild(el('span', 'ssx-rc-code', code));
+    const n = Number(r.player_count || 1);
+    top.appendChild(el('span', 'ssx-rc-n' + (n >= 6 ? ' full' : ''), n + (n === 1 ? ' PLAYER' : ' PLAYERS')));
+    card.appendChild(top);
+    const host = el('div', 'ssx-rc-host');
+    if (r.host_avatar && /^https:\/\//.test(String(r.host_avatar))) { const im = document.createElement('img'); im.src = String(r.host_avatar); im.alt = ''; host.appendChild(im); }
+    host.appendChild(el('span', '', String(r.host_name || 'Player')));
+    card.appendChild(host);
+    const meta = el('div', 'ssx-rc-meta');
+    meta.appendChild(el('span', '', 'MAP ' + String(r.map_key || '-')));
+    if (r.version) meta.appendChild(el('span', '', String(r.version)));
+    meta.appendChild(el('span', '', age(Date.now() - (Number(r.last_seen) || 0))));
+    card.appendChild(meta);
+    const acts = el('div', 'ssx-rc-acts');
+    const join = el('button', 'ssx-btn ssx-rc-join', code === mine ? 'YOUR ROOM' : 'JOIN');
+    join.type = 'button';
+    if (mine) { join.disabled = true; if (code !== mine) join.title = 'Leave your room first'; }
+    join.addEventListener('click', () => { _ssxRoomsOpen(false); _ssxRoomGo(code); });
+    const copy = el('button', 'ssx-btn', 'COPY');
+    copy.type = 'button';
+    copy.addEventListener('click', () => { try { navigator.clipboard.writeText(code); } catch (_) {} copy.textContent = 'COPIED'; setTimeout(() => { copy.textContent = 'COPY'; }, 1200); });
+    acts.appendChild(join); acts.appendChild(copy);
+    card.appendChild(acts);
+    list.appendChild(card);
+  });
+}
+function _ssxMenuClose() {
+  const S = _ssxMenuOpen._s;
+  if (S) { S.kind = null; S.anchor = null; }
+  const m = document.getElementById('ssx-menu');
+  if (m) { m.classList.remove('open'); m.innerHTML = ''; }
+}
+function _ssxMenuOpen(kind, anchor) {
+  const S = _ssxMenuOpen._s || (_ssxMenuOpen._s = { kind: null, anchor: null });
+  const m = document.getElementById('ssx-menu');
+  if (!m || !anchor) return;
+  if (S.kind === kind && m.classList.contains('open')) { _ssxMenuClose(); return; }
+  const items = [];
+  try {
+    if (kind === 'ship') {
+      if (_lssPickLocked()) items.push({ label: 'LOCKED IN', sub: 'Untick CONFIRM to change your ship' });
+      else document.querySelectorAll('#ship-carousel-track .ship-chip').forEach(c => {
+        const k = c.dataset.key;
+        const nm = c.querySelector('.sc-name'), cl = c.querySelector('.sc-class');
+        let img = null;
+        try { img = _shipThumbCache[k] || null; } catch (_) {}
+        items.push({ label: nm ? nm.textContent : k, sub: cl ? cl.textContent : '', img, on: c.classList.contains('selected'),
+                     act: () => { try { previewLoadout(k); } catch (_) {} } });
+      });
+    } else if (kind === 'mode') {
+      if (_lssRoomModeLocked()) {
+        let why = 'Locked while a round is live';
+        try { if (game._ssConfirmed) why = 'Untick CONFIRM to change the mode'; else if (_lssJoinedMatchInProgress()) why = 'This match was already running when you joined'; } catch (_) {}
+        items.push({ label: 'MODE LOCKED', sub: why });
+      } else {
+        const cur = _lssRoomTag();
+        let prog = false;
+        try { prog = _campLoadLegs().length > 0; } catch (_) {}
+        items.push({ label: 'CAMPAIGN', sub: prog ? 'The story - your unlocked levels' : 'The story, from the start', on: cur === 'campaign',
+                     act: () => { if (_lssRoomTag() !== 'campaign') _ssxCampaignPick(); } });
+        _LSS_PICKABLE_MODES.forEach(t => items.push({ label: _lssModeDisplayName(t), sub: _lssModeBlurb(t), on: t === cur,
+                                                      act: () => _ssxModePick(t) }));
+        if (cur === 'campaign' && prog && game && game._campPicker) {
+          const armed = performance.now() < (_ssxMenuOpen._rsUntil || 0);
+          items.push({ label: armed ? 'PRESS AGAIN TO RESTART' : 'RESTART CAMPAIGN', sub: 'From the very beginning - clears your levels', danger: true, keep: !armed,
+                       act: () => {
+                         if (performance.now() < (_ssxMenuOpen._rsUntil || 0)) {
+                           _ssxMenuOpen._rsUntil = 0;
+                           const b = document.getElementById('ss-camp-restart');
+                           try { _lssCampRestartClick(b, true); _lssCampRestartClick(b, true); } catch (e) { console.warn('[ssx] restart failed:', e); }
+                         } else _ssxMenuOpen._rsUntil = performance.now() + 3500;
+                       } });
+        }
+      }
+    } else if (kind === 'community' || kind === 'tools') {
+      document.querySelectorAll(kind === 'community' ? '#lobby-sec-community a[href]' : '#lobby-sec-tools a[href]').forEach(a => {
+        items.push({ label: (a.textContent || '').replace(/\s+/g, ' ').trim(), href: a.getAttribute('href') });
+      });
+    } else if (kind === 'user') {
+      items.push({ label: 'MY STATS', sub: 'Your career page', act: () => { const b = document.getElementById('lobby-stats-btn'); if (b) b.click(); } });
+      items.push({ label: 'AEGIS RANKS', sub: 'Per-ship progression', act: () => { try { _aegisPanelOpen(); } catch (_) {} } });
+      items.push({ label: 'SIGN OUT', act: () => { try { discordSignout(); } catch (_) {} } });
+    }
+  } catch (_) {}
+  m.innerHTML = '';
+  items.forEach(it => {
+    const el = document.createElement(it.href ? 'a' : 'button');
+    el.className = 'ssx-mi' + (it.on ? ' on' : '') + (it.danger ? ' danger' : '') + ((!it.act && !it.href) ? ' info' : '');
+    if (it.href) { el.href = it.href; el.target = '_blank'; el.rel = 'noopener'; } else el.type = 'button';
+    if (it.img) { const im = document.createElement('img'); im.src = it.img; im.alt = ''; el.appendChild(im); }
+    const t = document.createElement('span'); t.className = 'ssx-mi-t'; t.textContent = it.label; el.appendChild(t);
+    if (it.sub) { const s = document.createElement('small'); s.textContent = it.sub; el.appendChild(s); }
+    el.addEventListener('click', () => {
+      if (it.keep) { if (it.act) it.act(); const k = S.kind, a = S.anchor; _ssxMenuClose(); _ssxMenuOpen(k, a); return; }
+      _ssxMenuClose(); if (it.act) it.act(); setTimeout(_ssxSync, 0);
+    });
+    m.appendChild(el);
+  });
+  const r = anchor.getBoundingClientRect();
+  const up = (kind === 'community' || kind === 'tools');
+  m.style.minWidth = Math.round(r.width) + 'px';
+  m.style.left = '0px'; m.style.top = '0px'; m.style.bottom = 'auto';
+  m.classList.add('open');
+  const mw = m.getBoundingClientRect().width;
+  let x = (kind === 'user') ? (r.right - mw) : r.left;
+  x = Math.max(8, Math.min(x, window.innerWidth - mw - 8));
+  m.style.left = Math.round(x) + 'px';
+  if (up) { m.style.top = 'auto'; m.style.bottom = Math.round(window.innerHeight - r.top + 6) + 'px'; }
+  else m.style.top = Math.round(r.bottom + 6) + 'px';
+  S.kind = kind; S.anchor = anchor;
+}
+function _ssxModePick(t) {
+  try {
+    if (_lssRoomModeLocked()) return;
+    if ((typeof LSS !== 'undefined' && LSS.MODE === 'campaign') || (game && game._campPicker)) {
+      try { game._campPicker = false; game._ssxCampNew = false; } catch (_) {}
+      try { CampaignMode.onTeardown(); } catch (_) {}
+      try { _lssClearModeSetup(); } catch (_) {}
+      _lssPickRoomMode(t);
+      enterShipSelect();
+      return;
+    }
+    _lssPickRoomMode(t);
+  } catch (e) { console.warn('[ssx] mode pick failed:', e); }
+}
+function _ssxCampaignPick() {
+  try {
+    if (_lssRoomModeLocked()) return;
+    const inRoom = !!(typeof net !== 'undefined' && net && net.active && net.room);
+    if (inRoom) {
+      try { if (window.CampPortrait) window.CampPortrait.warm(); } catch (_) {}   // the speakers' bodies, as startCampaignJourney warms them
+      _lssPickRoomMode('campaign');
+      enterShipSelect();   // the roster, the map card (the campaign's levels) and the cards, for the campaign
+      return;
+    }
+    let prog = false;
+    try { prog = _campLoadLegs().length > 0; } catch (_) {}
+    if (prog) { startCampaignJourney(); return; }
+    _campPickerSetup('camp_approach');
+    game._ssxCampNew = true;
+    enterShipSelect();
+  } catch (e) { console.warn('[ssx] campaign pick failed:', e); }
+}
+function _ssxRoomGo(code) {
+  const S = _ssxRoomGo._s || (_ssxRoomGo._s = { busy: false, t0: 0 });
+  try {
+    if (S.busy) return;
+    if (typeof net !== 'undefined' && net && net.room) { _ssxMsg('Already in room ' + (net.roomCode || ''), 4000); return; }
+    const inp = document.getElementById('room-code');
+    if (!inp) return;
+    const starts = { classic: startElimination, freeflight: startFreeFlight, cyberpunk: startCyberpunkCity, earth: startEarthFlight,
+                     endless: startEndless, race: startRace, assault: startAssault, push: startPush,
+                     campaign: () => { try { game._campPicker = false; game._ssxCampNew = false; } catch (_) {} return startCampaignJourney(); } };
+    const go = starts[_lssRoomTag()];
+    if (typeof go !== 'function') { _ssxMsg('This mode cannot open a room from here.', 5000); return; }
+    inp.value = String(code || _elimGenCode()).trim().toUpperCase();
+    S.busy = true; S.t0 = performance.now();
+    _ssxMsg('');
+    _ssxSync();
+    const p = go();
+    if (p && typeof p.catch === 'function') p.catch(e => console.warn('[ssx] room failed:', e));
+  } catch (e) { S.busy = false; console.warn('[ssx] room failed:', e); }
+}
+function _ssxInit() {
+  if (_ssxInit._done) return;
+  _ssxInit._done = true;
+  try {
+    const sel = document.getElementById('ship-select');
+    if (!sel) return;
+    if (_ssxFlag()) sel.classList.add('ssx');
+    const $ = id => document.getElementById(id);
+    const on = (id, fn) => { const e = $(id); if (e) e.addEventListener('click', (ev) => { try { fn(ev, e); } catch (err) { console.warn('[ssx]', id, err); } setTimeout(_ssxSync, 0); }); };
+    const press = id => { const b = $(id); if (b) b.click(); };
+    on('ssx-user', (ev, el) => { let u = null; try { u = discordCurrentUser(); } catch (_) {} if (u) _ssxMenuOpen('user', el); else discordSignin(); });
+    on('ssx-howto', () => openHowToPlay());
+    on('ssx-fs', () => window.lssRequestFullscreen());
+    on('ssx-settings', () => press('lobby-settings-btn'));
+    on('ssx-shipdd', (ev, el) => _ssxMenuOpen('ship', el));
+    on('ssx-mp-joinbtn', () => _ssxRoomGo((($('ssx-mp-input') || {}).value || '').trim()));
+    const inp = $('ssx-mp-input');
+    if (inp) inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); const b = $('ssx-mp-joinbtn'); if (b) b.click(); } e.stopPropagation(); });
+    on('ssx-mp-invite', () => press('btn-invite-all'));
+    on('ssx-mp-leave', () => _ssxLeaveRoom());   // (v53.18) leave and stay here - see _ssxLeaveRoom
+    on('ssx-mp-live', () => _ssxRoomsOpen(true));   // (v53.18) pops out over the picker - see _ssxRoomsOpen
+    on('ssx-rooms-close', () => _ssxRoomsOpen(false));
+    const rooms = $('ssx-rooms');
+    if (rooms) rooms.addEventListener('pointerdown', (e) => { if (e.target === rooms) _ssxRoomsOpen(false); });   // the scrim, not the box
+    on('ssx-mp-copy', () => {
+      const c = (typeof net !== 'undefined' && net && net.roomCode) ? String(net.roomCode) : '';
+      if (!c) return;
+      try { navigator.clipboard.writeText(c); } catch (_) {}
+      const t = $('ssx-mp-codetxt'); if (t) { t.textContent = 'COPIED'; setTimeout(() => { t.textContent = c; }, 900); }
+    });
+    on('ssx-perksbtn', () => { _ssxMenuClose(); sel.classList.toggle('ssx-perks'); });
+    on('ss-mode-current', (ev, el) => { if (_ssxActive()) _ssxMenuOpen('mode', el.parentNode || el); });
+    on('ssx-mainmenu', () => press('lobby-back-btn'));
+    on('ssx-stats', () => press('lobby-stats-btn'));
+    on('ssx-replays', () => press('lobby-replays-btn'));
+    document.querySelectorAll('#ssx-foot .ssx-fdrop').forEach(b => b.addEventListener('click', () => _ssxMenuOpen(b.dataset.menu, b)));
+    document.addEventListener('pointerdown', (e) => {
+      try {
+        const t = e.target;
+        const M = _ssxMenuOpen._s;
+        if (M && M.kind && !(t.closest && (t.closest('#ssx-menu') || (M.anchor && M.anchor.contains(t))))) _ssxMenuClose();
+        if (sel.classList.contains('ssx-perks') && !(t.closest && (t.closest('#ship-preview-perks') || t.closest('#ssx-perksbtn')))) sel.classList.remove('ssx-perks');
+      } catch (_) {}
+    }, true);
+    window.addEventListener('keydown', (e) => {
+      try {
+        if (e.key !== 'Escape') return;
+        const M = _ssxMenuOpen._s;
+        const open = (M && M.kind) || sel.classList.contains('ssx-perks') || sel.classList.contains('ssx-roomsopen');
+        if (!open) return;
+        _ssxMenuClose(); sel.classList.remove('ssx-perks');
+        if (sel.classList.contains('ssx-roomsopen')) _ssxRoomsOpen(false);
+        e.stopPropagation(); e.preventDefault();
+      } catch (_) {}
+    }, true);
+    window.addEventListener('resize', () => { try { _ssxMenuClose(); } catch (_) {} });
+    try {
+      let _fitQ = false;
+      const _fitSoon = () => { if (_fitQ) return; _fitQ = true; requestAnimationFrame(() => { _fitQ = false; _ssxFitAll(); }); };
+      if (typeof MutationObserver === 'function') ['ss-launch-row', 'ss-right-col', 'ssx-left'].forEach(id => {
+        const n = $(id);
+        if (n) new MutationObserver(_fitSoon).observe(n, { subtree: true, childList: true, characterData: true });
+      });
+    } catch (_) {}
+    setInterval(() => {
+      try {
+        if (!sel.classList.contains('ssx')) return;
+        if (!sel.classList.contains('active')) {
+          if (_ssxMenuOpen._s && _ssxMenuOpen._s.kind) _ssxMenuClose();
+          sel.classList.remove('ssx-perks');
+          if (sel.classList.contains('ssx-roomsopen')) _ssxRoomsOpen(false);
+          return;
+        }
+        _ssxSync();
+      } catch (_) {}
+    }, 300);
+    _ssxSync();
+  } catch (e) { console.warn('[ssx] init failed:', e); }
+}
+try {
+  window.__ssx = window.__ssx || {};
+  window.__ssx.active = () => _ssxActive();
+  window.__ssx.sync = () => _ssxSync();
+  window.__ssx.on = () => {
+    try { localStorage.setItem('lss_newss', '1'); } catch (_) {}
+    if (_ssxFlag._s) _ssxFlag._s.v = true;
+    const s = document.getElementById('ship-select'); if (s) s.classList.add('ssx');
+    _ssxClearRails(); _ssxSync(); return _ssxActive();
+  };
+  window.__ssx.off = () => {
+    try { localStorage.removeItem('lss_newss'); } catch (_) {}
+    if (_ssxFlag._s) _ssxFlag._s.v = false;
+    _ssxMenuClose();
+    try { _ssxRoomsOpen(false); } catch (_) {}
+    const s = document.getElementById('ship-select'); if (s) s.classList.remove('ssx', 'ssx-perks', 'ssx-room', 'ssx-ready', 'ssx-mid', 'ssx-roomsopen');
+    try { _ssSpreadRails(); } catch (_) {}
+    return false;
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', _ssxInit);
+  else setTimeout(_ssxInit, 0);
+} catch (_) {}
+
 function _ssSpreadRails() {
+  try { if (_ssxActive()) { _ssxClearRails(); _ssxBannerPlace(); return; } } catch (_) {}
   if (_ssSpreadBusy) return;
   _ssSpreadBusy = true;
   try {
@@ -100255,7 +100952,7 @@ const MAP_DATA = {
     type: 'gmaps',
     stream: true,
     name: 'Custom Location',
-    thumb: 'map_thumbs/toronto.jpg',
+    thumbGlyph: '?',
     description: 'Type a location in the DROP panel and click GO, then LAUNCH.',
     lat: 40.7484,
     lng: -73.9857,
