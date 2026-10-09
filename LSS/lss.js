@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.12";
+const LSS_BUILD = "53.13";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -17113,7 +17113,7 @@ function _campVrFrame() {
       xrDolly.position.copy(_campVr.v); xrDolly.quaternion.copy(_campVr.q); xrDolly.updateMatrixWorld(true);
       sc = want.scene;
     }
-    renderer.setRenderTarget(renderer.xr.getRenderTarget ? renderer.xr.getRenderTarget() : null);
+    renderer.setRenderTarget(_XR_COVER.frameRT || renderer.getRenderTarget());
     renderer.render(sc, camera);
     return true;
   } catch (e) {
@@ -69952,7 +69952,7 @@ function _xrCoverFrameRender() {
         _XR_COVER.rig.matrixWorldNeedsUpdate = true;
       }
     } catch (_) {}
-    try { renderer.setRenderTarget((_xrOn && renderer.xr.getRenderTarget) ? renderer.xr.getRenderTarget() : null); } catch (_) {}
+    try { renderer.setRenderTarget(_xrOn ? (_XR_COVER.frameRT || renderer.getRenderTarget()) : null); } catch (_) {}
     renderer.render(_XR_COVER.scene, camera);
     return true;
   } catch (e) {
@@ -109626,6 +109626,7 @@ function __pmark(name) {
 })();
 
 function gameLoop(timestamp) {
+  try { if (!_lssFromWatchdog) _XR_COVER.frameRT = (renderer.xr && renderer.xr.isPresenting) ? renderer.getRenderTarget() : null; } catch (_) {}
   try { return _gameLoopBody(timestamp); }
   finally {
     if (!_lssFromWatchdog) {

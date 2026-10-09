@@ -7571,7 +7571,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.12";
+const LSS_BUILD = "53.13";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -31903,7 +31903,10 @@ function _campVrFrame() {
       xrDolly.position.copy(_campVr.v); xrDolly.quaternion.copy(_campVr.q); xrDolly.updateMatrixWorld(true);
       sc = want.scene;
     }
-    renderer.setRenderTarget(renderer.xr.getRenderTarget ? renderer.xr.getRenderTarget() : null);
+    // (v53.13) THE HEADSET'S TARGET, NEVER null: v53.12 bound `renderer.xr.getRenderTarget ? ... : null`, and r165 has no
+    // such method - so every frame of this went to the flat canvas and the headset kept re-showing the battle's last
+    // frames (the owner's "plays the last 3 frames on repeat"). The XR layer kept at the frame's start (gameLoop).
+    renderer.setRenderTarget(_XR_COVER.frameRT || renderer.getRenderTarget());
     renderer.render(sc, camera);
     return true;
   } catch (e) {
@@ -106962,7 +106965,10 @@ function _xrCoverFrameRender() {
     // The same XR-framebuffer re-assert the world render does: anything earlier in the tick (the
     // water GPGPU compute) can have left the flat canvas bound, which would leave the headset black.
     // Off XR getRenderTarget() is null, which is the flat canvas - the right answer there too.
-    try { renderer.setRenderTarget((_xrOn && renderer.xr.getRenderTarget) ? renderer.xr.getRenderTarget() : null); } catch (_) {}
+    // ⚠ (v53.13) ...but r165 HAS NO renderer.xr.getRenderTarget(), so in a headset this bound NULL - the flat canvas - and
+    // the cover never reached the headset (it kept re-showing its last frames). The XR layer is the one kept at the start
+    // of this frame (gameLoop: _XR_COVER.frameRT); failing that, the binding as it stands - never null in a headset.
+    try { renderer.setRenderTarget(_xrOn ? (_XR_COVER.frameRT || renderer.getRenderTarget()) : null); } catch (_) {}
     renderer.render(_XR_COVER.scene, camera);
     return true;
   } catch (e) {
@@ -163616,6 +163622,16 @@ function __pmark(name) {
 // One wrapper here covers every entry: setAnimationLoop, the three re-arm sites, XR, and the ?perf=1
 // profiler (which wraps whatever `gameLoop` is and still calls through to this).
 function gameLoop(timestamp) {
+  // ⭐ (v53.13) THE HEADSET'S OWN TARGET, KEPT AT THE START OF ITS FRAME. WebXRManager binds the XR layer right before it
+  // calls this, and a draw that is not the world's must bind THAT again before it draws: r165 has no
+  // renderer.xr.getRenderTarget(), and both draws that replace the world's - the VR loading cover and the campaign's
+  // (_xrCoverFrameRender, _campVrFrame) - fell back to setRenderTarget(null), which in a headset's frame paints the FLAT
+  // canvas. The headset gets no new frame and keeps re-showing its last ones. Owner, in VR, at v53.12: "the end of the
+  // battle scene doesn't transition into the gameshow scene... it stays on the battle scene but plays the last 3 frames
+  // on repeat, and then continues the dialogue with the glitching video". (The world's own draw never rebinds: see its
+  // v33.46 note - it relies on the binding still being the XR layer, which the water compute restores.)
+  // Not from the watchdog: its frames are not the compositor's, and nothing is bound for them.
+  try { if (!_lssFromWatchdog) _XR_COVER.frameRT = (renderer.xr && renderer.xr.isPresenting) ? renderer.getRenderTarget() : null; } catch (_) {}
   try { return _gameLoopBody(timestamp); }
   finally {
     if (!_lssFromWatchdog) {
