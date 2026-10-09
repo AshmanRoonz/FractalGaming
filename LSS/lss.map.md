@@ -2446,6 +2446,45 @@ the rebuild path retains instead of disposing. `window.__chargeGlowWarm` counts.
   fps); the 60-300 ms idle-main-thread stalls carry no upload, no link, no new layout and no GPU_DISJOINT,
   and their timer queries never resolved - still unexplained (external GPU preemption suspected).
 
+## ⭐⭐ v53.11 — the carriers see the floating islands
+
+Owner: *"carrier just went through a floating island"*. **Jump:** `THE CARRIERS SEE THE ISLANDS` ·
+`function _skCarrierFloor` · `_islandSteer(hx, hz, d, dt)` · `window.__carrier.isles`.
+
+- **Both carrier families were blind to them.** The Cyberpunk carrier's lateral fan (`_carrierSteer`) rays
+  `_hubCityRayHit` only (towers); its altitude ride (`_carrierRide`) samples the heightfield and calls
+  `raycastLevel(..., skipSky = true)` *on purpose* (v49.28: "ground, not a floating island"). The overworld
+  carriers (`OwCarrier.tick` home / hunt / follow) fly straight with a ground+tower floor. Island roots are
+  lifted only `SKY_I.clear` (300) over the ground under their column, the archipelago shelves sit 260-720 over
+  the water, and a carrier cruises at ground + 450 with ~270 of hull either side - same altitude.
+- **⚠⚠ THE FIRST CUT (steer only) FAILED ITS OWN A/B.** Sector 3's route spawns at y ~3,100-3,600 beside the
+  archipelago's `a-2:-3` shelves and rides DOWN to cruise height: the shelves entered the hull's height band
+  only when the hull was already over them (126 u from a blob centre) and it sank into them while moving
+  away - a lateral steer cannot fix a hull descending onto something beneath it. Two halves, both shared:
+  - `_skCarrierObstacles` + `_skCorridorDist` - islands whose rock reaches the hull's band, as plan-view
+    discs (`R*kH + padH + halfW`; one blob's surface tops out at 0.83 R even at full noise), ray vs circle
+    per fan heading. Fed into `_carrierSteer`'s existing fan and a new `_islandSteer` fan on `OwCarrier`.
+    The band runs from where the hull IS to where the ride is TAKING it (`_carrier._rideWant`,
+    `OwCarrier._wantY`); the corridor is capped at the route end + half a hull so an island past the
+    objective cannot turn the carrier off it. Inside a footprint only inward headings are blocked.
+  - `_skCarrierFloor` - the ride's floor: hull as a capsule along its heading; any island under it whose
+    top is within `2*half.y + 400` of the keel and whose root is not above the hull's top -> keel >= its top
+    + padV. Low shelves are flown OVER; tall columns are left to the fan (never climb a 4,000-u stack);
+    islands wholly above are passed under.
+- **⚠ `_skClusterAt` caches its ground probe per cell FOREVER** and skips the probe outside the hub, so the
+  helpers gate on `T.HUB` exactly like `_skFrame` - an off-hub call would cache islands unlifted for the session.
+  They read the deterministic layout (`_skNear`), not `_skLive`, so unmeshed islands count and peers agree.
+- **Measured** (pane, Cyberpunk, sector 3, x8 fast-forward with yawRate/vMax/rise/fall/roofFall all x8 so the
+  path geometry is real-speed): avoidance OFF - hull capsule inside three shelf islands for 48 / 57 / 56
+  samples, up to ~300 u deep; ON - **0**, the keel held 240-314 above the rock while over them (floor 529),
+  route completed. No island column lies on any of the six portal routes even at clearance 2,000, so the
+  lateral half was proven by a Node test of the extracted helpers (17/17, incl. the fan choosing the clear
+  1.2 rad heading around a column) rather than live. Overworld carriers: exercised live in Exhibition (orbit 61
+  u/s -> hunt ~330 u/s, no errors) but no island near that city, so their avoidance was not seen engaging.
+- Knobs: `window.__skyCarrier` (`kH` 1.05, `kV` 1.0, `padH` 160, `padV` 220); `__carrier.islands = false`,
+  `__cities.islands = false` switch each family off; `__carrier.isles()` shows the band, the islands in it, the
+  steer offset, the floor and the ride target.
+
 ## v39.56 — the ring in the right HUD path; purple as seen
 
 - The champion capture ring (v39.55) was drawn in the LEGACY crosshair layer of `drawCircumpunctHUD`; every
@@ -2825,6 +2864,33 @@ sites; measured live, all 20 lights in the scene are mask 33 → now 97), and `_
 re-asserts layer 6 over `scene.children` each pass — a flat loop where every light in the game
 actually lives — so a light added by future code cannot fork the program even once. Pane after:
 **one** water program with the full light set, `cold 0`, 144 fps measured over water.
+
+**⭐⭐ v53.10 — CYBERPUNK'S CINE LIGHTS BROKE BOTH LIGHT RULES AT ONCE.** Jump: `CYBERPUNK'S RESIDENT CINE LIGHTS JOIN THE SCENE BEFORE THE PIN`.
+Owner: "there's a hitch in cyberpunk city mode, as i am approaching the city" → F8 auto mark #47: a
+2443 ms frame, `renderFrame` 2420 ms, eight synchronous program joins — BLASTER's cockpit (`cockpit_CP_hood`
+/ `_screen` / `_console1` / `_seat4`, two DoubleSide passes each) in the **ghost-shell** variant, on the frame
+the third-person shell came on. (The owner suspected Body Shield; its mirror's first draw, 0.4 s earlier,
+was warm.) The shell programs HAD been warmed: diffing the warmed cache keys against the live ones, they
+were identical except `numDirLights 3 → 5` and `numHemiLights 1 → 2` — v42.30's resident cine lights
+(`_cyberCineLightsEnsure`: 2 DirectionalLights + 1 HemisphereLight at intensity 0). Two separate mistakes:
+1. **ORDER.** v42.30 builds them in `_cyberPrePlace`, inside `_prebakeWorldForLaunch` — which commitLoadout
+   chains AFTER its `_pinCombatEffectPrograms()` + `_ghostPinWarm()`. The scene's own materials survived
+   (the prebake's sliced compile and GPU prime ran after the lights existed), but nothing except
+   `_ghostPinWarm` ever applies the seat shell, so its variants were the ones left on the stale key.
+   Fix: commitLoadout calls `_cyberCineLightsEnsure()` just before the pin (idempotent; `_cyberPrePlace`'s
+   call stays as the fallback). Plus a tripwire, prebake phase **C5**: if `_programEnvSig()` no longer
+   equals `_pinnedEnvSig` after everything the prebake did, re-pin under the cover and
+   `console.warn('[prebake] program environment changed after the launch pin ...')`. Gated on a non-null
+   `_pinnedEnvSig` (phones never record one).
+2. **LAYERS.** They were layer 0 only — the exact thing the v39.74 rule above forbids. So the main
+   camera counted 5 / 2 while every layer-5/6 pass (ADS ship overlay, cockpit draws) counted 3 / 1: two
+   program keys per material. Measured on 53.10 before the layer fix: the first seat switch linked
+   `depth [FORK: numDirLights numHemiLights]` keyed 3 / 1. Fix: the cine lights `layers.enable(5)` + `(6)`.
+Verified in the pane (Cyberpunk, BLASTER, by **program creation**): no tripwire; all 7 dir/hemi lights mask
+97; ghost-shell ADS for 4 s → **0** new programs (was 8 joins); first-person seat → **0** (was 1 depth fork);
+~2.5 min of play at a constant 558 programs. ⚠ `_programEnvSig`'s old comment ("light counts are constant
+in practice") was true until v42.30 — now annotated. ⚠ The rule restated: a light added for ONE mode still
+has to (a) exist before the launch pin and (b) carry layers 5 + 6, or it forks every program it touches.
 
 **v39.75 — the cold-link watcher names what linked.** Every cold link so far reported `(unnamed)`,
 because `WebGLProgram.name` is `material.name` and almost nothing here names its materials, so a mark

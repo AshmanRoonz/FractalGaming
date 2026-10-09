@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.09";
+const LSS_BUILD = "53.11";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -38100,6 +38100,23 @@ function _carrierRide(dt, snap) {
   const _cl = (typeof K.clearance === 'number') ? K.clearance : CARRIER.clearance;
   let want = gy + _cl;
   if (typeof _carrier.fieldFloor === 'number' && want < _carrier.fieldFloor) want = _carrier.fieldFloor;
+  try {
+    if (K.islands !== false && typeof _skCarrierFloor === 'function' && _carrier.half && _carrier.dir) {
+      _carrier._isleT = (_carrier._isleT || 0) - (dt || 0.016);
+      if (_carrier._isleT <= 0 || snap) {
+        _carrier._isleT = 0.1;
+        const cy = o.position.y + (_carrier.ctr ? _carrier.ctr.y : 0), hy = _carrier.half.y;
+        const hl = Math.hypot(_carrier.dir.x, _carrier.dir.z) || 1;
+        _carrier._isleNeed = _skCarrierFloor(o.position.x, o.position.z, _carrier.dir.x / hl, _carrier.dir.z / hl,
+          _carrier.half.x, _carrier.half.z, cy - hy, cy + hy, hy * 2 + 400);
+      }
+      if (isFinite(_carrier._isleNeed)) {
+        const _need = _carrier._isleNeed - (_carrier.ctr ? _carrier.ctr.y : 0) + _carrier.half.y;
+        if (want < _need) want = _need;
+      }
+    }
+  } catch (_) {}
+  _carrier._rideWant = want;   // (v53.11) where the ride is taking the hull: the steer's height band reaches it
   const cur = (_carrier.rideY == null) ? o.position.y : _carrier.rideY;
   const rate = (want > cur) ? (K.riseRate != null ? K.riseRate : 1.2) : (K.fallRate != null ? K.fallRate : 0.3);
   let _vstep = (want - cur) * Math.min(1, (dt || 0.016) * rate);
@@ -38142,9 +38159,11 @@ function _carrierOwned() {
     return !!(typeof game !== 'undefined' && game && game._cyber && game._cyber.authority);
   } catch (_) { return true; }
 }
+const _csIsl = [];   // (v53.11) the islands in the hull's height band, gathered once per probe
 function _carrierSteer(dt) {
   const o = _carrier.obj;
-  if (!o || !game.hubCity || typeof _hubCityRayHit !== 'function') return;
+  if (!o) return;
+  const _city = !!(game.hubCity && typeof _hubCityRayHit === 'function');
   const K = _carrierKnobs();
   if (K.steer === false) return;
   _csWant.copy(_carrier.to).sub(o.position); _csWant.y = 0;
@@ -38156,21 +38175,32 @@ function _carrierSteer(dt) {
     _carrier._steerT = 0.1;
     const range = (K.lookAhead != null ? K.lookAhead : 2600);
     const halfW = (_carrier.half ? _carrier.half.z : 400);
+    _csIsl.length = 0;
+    if (K.islands !== false && typeof _skCarrierObstacles === 'function') {
+      const oy = (_carrier.ctr ? _carrier.ctr.y : 0), hy = (_carrier.half ? _carrier.half.y : 200);
+      const y0 = o.position.y, y1 = (typeof _carrier._rideWant === 'number' && isFinite(_carrier._rideWant)) ? _carrier._rideWant : y0;
+      _skCarrierObstacles(o.position.x, o.position.z, range + halfW, Math.min(y0, y1) + oy - hy, Math.max(y0, y1) + oy + hy, _csIsl);
+    }
+    const _isCap = Math.min(range, remain + (_carrier.half ? _carrier.half.x : 680));
+    if (!_city && !_csIsl.length) { _carrier._steerA = 0; }
+    else {
     let bestA = 0, bestS = -Infinity;
     for (const a of _CS_ANGLES) {
       _csDir.copy(_csWant).applyAxisAngle(_csUp, a);
       _crS.set(-_csDir.z, 0, _csDir.x);
       let dmin = range;
-      for (let j = -1; j <= 1; j++) {
+      if (_city) for (let j = -1; j <= 1; j++) {
         _crP.copy(o.position).addScaledVector(_crS, halfW * j);
         const d = _hubCityRayHit(_crP, _csDir, range);
         if (typeof d === 'number' && d < dmin) dmin = d;
       }
+      if (_csIsl.length) { const cap = Math.min(dmin, _isCap); const di = _skCorridorDist(_csIsl, o.position.x, o.position.z, _csDir.x, _csDir.z, halfW, cap); if (di < cap) dmin = di; }
       if (a === 0 && dmin >= range) { bestA = 0; bestS = Infinity; break; }
       const score = dmin - Math.abs(a) * (K.turnCost != null ? K.turnCost : 500);
       if (score > bestS) { bestS = score; bestA = a; }
     }
     _carrier._steerA = bestA;
+    }
   }
   _csBest.copy(_csWant).applyAxisAngle(_csUp, _carrier._steerA || 0);
   const cur = _carrier.dir;
@@ -38542,6 +38572,21 @@ if (typeof window !== 'undefined') {
   window.__carrier.deck = (i) => { const v = _carrierDeckPoint(i || 0); return v ? v.toArray().map(Math.round) : null; };
   window.__carrier.spot = (i) => { const v = _carrierDeckSpot(i || 0); return v ? v.toArray().map(Math.round) : null; };
   window.__carrier.inside = (x, y, z) => _carrierBlocks((x && x.isVector3) ? x : new THREE.Vector3(x, y, z), 0);
+  window.__carrier.isles = () => {
+    const o = _carrier.obj;
+    return {
+      steerA: (_carrier._steerA == null) ? null : +_carrier._steerA.toFixed(2),
+      floor: isFinite(_carrier._isleNeed) ? Math.round(_carrier._isleNeed) : null,   // keel height an island under the hull asks for
+      rideWant: (typeof _carrier._rideWant === 'number') ? Math.round(_carrier._rideWant) : null,
+      pos: o ? o.position.toArray().map(Math.round) : null,
+      dir: _carrier.dir ? [+_carrier.dir.x.toFixed(3), +_carrier.dir.z.toFixed(3)] : null,
+      to: _carrier.to ? _carrier.to.toArray().map(Math.round) : null,
+      band: (o && _carrier.half) ? [Math.round(o.position.y + (_carrier.ctr ? _carrier.ctr.y : 0) - _carrier.half.y), Math.round(o.position.y + (_carrier.ctr ? _carrier.ctr.y : 0) + _carrier.half.y)] : null,
+      list: _csIsl.map((I) => ({ id: I.id, x: Math.round(I.x), y: Math.round(I.y), z: Math.round(I.z), R: Math.round(I.R),
+        root: Math.round(I.y - I.R * I.dn), top: Math.round(I.y + I.R * I.up),
+        d: o ? Math.round(Math.hypot(I.x - o.position.x, I.z - o.position.z)) : null })),
+    };
+  };
   window.__carrier.info = () => ({
     alive: !!(_carrier.ent && _carrier.ent.alive), dead: _carrier.dead,
     model: _carrier.obj ? (_carrier.obj.userData._carrierPlaceholder ? 'placeholder' : 'Carrier.glb') : 'none',
@@ -39174,6 +39219,7 @@ function _cyberCineLightsEnsure() {
     scene.add(rim); scene.add(rim.target);
     const amb = new THREE.HemisphereLight(0xbfd4ff, 0x2a2438, 0);
     scene.add(amb);
+    for (const _l of [key, rim, amb]) { _l.layers.enable(5); _l.layers.enable(6); }
     _carrier._cineLights = [key, key.target, rim, rim.target, amb];
     _carrier._cineRig = { key, rim, amb };
     _carrier._cineOn = false;
@@ -40552,6 +40598,60 @@ function _skRayHit(origin, dir, maxDist, coarse) {
   _skHitOk = true;
   return best;
 }
+const SK_CARRIER = { kH: 1.05, kV: 1.0, padH: 160, padV: 220 };
+try { window.__skyCarrier = SK_CARRIER; } catch (_) {}
+function _skCarrierObstacles(px, pz, reach, yLo, yHi, out) {
+  out.length = 0;
+  try {
+    if (!SKY_I.on) return out;
+    const T = game.sandwichTerrain;
+    if (!T || !T.HUB) return out;
+    const list = _skNear(px, pz, reach);
+    for (let i = 0; i < list.length; i++) {
+      const I = list[i];
+      if (I.y - I.R * I.dn * SK_CARRIER.kV - SK_CARRIER.padV > yHi) continue;   // its root is above the hull
+      if (I.y + I.R * I.up * SK_CARRIER.kV + SK_CARRIER.padV < yLo) continue;   // its top is below the keel
+      out.push(I);
+    }
+  } catch (_) { out.length = 0; }
+  return out;
+}
+function _skCarrierFloor(px, pz, hx, hz, halfL, halfW, keel, top, climbMax) {
+  let need = -Infinity;
+  try {
+    if (!SKY_I.on) return need;
+    const T = game.sandwichTerrain;
+    if (!T || !T.HUB) return need;
+    const list = _skNear(px, pz, halfL + halfW);
+    for (let i = 0; i < list.length; i++) {
+      const I = list[i];
+      const iTop = I.y + I.R * I.up * SK_CARRIER.kV, iRoot = I.y - I.R * I.dn * SK_CARRIER.kV;
+      if (iRoot - SK_CARRIER.padV > top) continue;        // wholly above: it passes under
+      if (iTop > keel + climbMax) continue;                // a tall column: go round, not over
+      const ox = I.x - px, oz = I.z - pz;
+      let t = ox * hx + oz * hz; if (t > halfL) t = halfL; else if (t < -halfL) t = -halfL;
+      const ex = ox - hx * t, ez = oz - hz * t, rr = I.R * SK_CARRIER.kH + SK_CARRIER.padH + halfW;
+      if (ex * ex + ez * ez >= rr * rr) continue;          // not under the hull
+      if (iTop + SK_CARRIER.padV > need) need = iTop + SK_CARRIER.padV;
+    }
+  } catch (_) { need = -Infinity; }
+  return need;
+}
+function _skCorridorDist(list, px, pz, hx, hz, halfW, range) {
+  let best = range;
+  for (let i = 0; i < list.length; i++) {
+    const I = list[i];
+    const rr = I.R * SK_CARRIER.kH + SK_CARRIER.padH + halfW;
+    const ox = I.x - px, oz = I.z - pz;
+    const tc = ox * hx + oz * hz;                 // closest approach along the heading
+    const d2 = ox * ox + oz * oz - tc * tc;
+    if (d2 >= rr * rr) continue;                  // passes clear
+    const t = tc - Math.sqrt(rr * rr - d2);
+    if (t < 0) { if (tc > 0) best = 0; continue; } // inside it: blocked only heading inward
+    if (t < best) best = t;
+  }
+  return best;
+}
 try { window.__skyDbg = () => ({ live: _skLive.size, ms: +SKY_I._ms.toFixed(1),
   keep: _skKeep.size, job: _skJob ? _skJob.I.id : null,   // (v48.33) retained-out-of-range + the island being sliced
   near: _skNear(player.position.x, player.position.z, SKY_I.range).length,
@@ -41479,6 +41579,44 @@ class OwCarrier {
     this.mesh.quaternion.setFromUnitVectors(_OW_NEG_X, this.dir);
     this._glowTick();
   }
+  _islandSteer(hx, hz, d, dt) {
+    if (_owK().islands === false || typeof _skCarrierObstacles !== 'function') { this._isA = 0; return 0; }
+    this._isT = (this._isT || 0) - dt;
+    if (this._isT <= 0) {
+      this._isT = 0.1;
+      const halfL = this.half ? this.half.x : 700, halfW = this.half ? this.half.z : 450, hy = this.half ? this.half.y : 150;
+      const range = Math.min(2600, d + halfL);   // to the target plus half a hull, never past it
+      let bestA = 0;
+      if (range > 60) {
+        const y0 = this.position.y, y1 = (typeof this._wantY === 'number' && isFinite(this._wantY)) ? this._wantY : y0;
+        const L = _skCarrierObstacles(this.position.x, this.position.z, range + halfW, Math.min(y0, y1) - hy, Math.max(y0, y1) + hy, this._isL || (this._isL = []));
+        if (L.length) {
+          let bestS = -Infinity;
+          for (const a of _CS_ANGLES) {
+            const ca = Math.cos(a), sa = Math.sin(a);
+            const dm = _skCorridorDist(L, this.position.x, this.position.z, hx * ca - hz * sa, hx * sa + hz * ca, halfW, range);
+            if (a === 0 && dm >= range) { bestA = 0; break; }
+            const s = dm - Math.abs(a) * 500;
+            if (s > bestS) { bestS = s; bestA = a; }
+          }
+        }
+      }
+      this._isWant = bestA;
+    }
+    const w = this._isWant || 0, cur = this._isA || 0, st = 0.6 * dt;
+    this._isA = cur + Math.max(-st, Math.min(st, w - cur));
+    return this._isA;
+  }
+  _isleFloorTick(dt) {
+    if (_owK().islands === false || typeof _skCarrierFloor !== 'function') { this._isleNeed = -Infinity; return; }
+    this._isfT = (this._isfT || 0) - dt;
+    if (this._isfT > 0) return;
+    this._isfT = 0.1;
+    const halfL = this.half ? this.half.x : 700, halfW = this.half ? this.half.z : 450, hy = this.half ? this.half.y : 150;
+    const hl = Math.hypot(this.dir.x, this.dir.z) || 1;
+    this._isleNeed = _skCarrierFloor(this.position.x, this.position.z, this.dir.x / hl, this.dir.z / hl, halfL, halfW,
+      this.position.y - hy, this.position.y + hy, hy * 2 + 400);
+  }
   tick(dt) {
     if (!this.alive || !this.mesh) return;
     if (this.isProxy) { this.tickProxy(dt); return; }
@@ -41532,9 +41670,11 @@ class OwCarrier {
     this._spd += Math.max(-acc * 1.6, Math.min(acc, wantSpd - this._spd));
     if (d > 1 && this._spd > 0.5) {
       const step = Math.min(d, this._spd * dt);
-      this.position.x += dx / d * step; this.position.z += dz / d * step;
-      this.velocity.set(dx / d * this._spd, 0, dz / d * this._spd);
-      if (d > 40) { _owV1.set(dx / d, 0, dz / d); this.dir.lerp(_owV1, Math.min(1, dt * 0.9)).normalize(); }
+      let mx = dx / d, mz = dz / d;
+      try { const a = this._islandSteer(mx, mz, d, dt); if (a) { const ca = Math.cos(a), sa = Math.sin(a), nx = mx * ca - mz * sa; mz = mx * sa + mz * ca; mx = nx; } } catch (_) {}
+      this.position.x += mx * step; this.position.z += mz * step;
+      this.velocity.set(mx * this._spd, 0, mz * this._spd);
+      if (d > 40) { _owV1.set(mx, 0, mz); this.dir.lerp(_owV1, Math.min(1, dt * 0.9)).normalize(); }
     } else this.velocity.set(0, 0, 0);
     let gy = null;
     try { const T = game.sandwichTerrain; if (T && T.ON) { const h = _stGroundYCarved(this.position.x, this.position.z, T); if (isFinite(h)) gy = h; } } catch (_) {}
@@ -41548,6 +41688,8 @@ class OwCarrier {
         if (dd < oc.R + 900) floor = Math.max(floor, oc.padY + oc.site.genome.towerH * 0.95 + 300);
       }
     } catch (_) {}
+    try { this._isleFloorTick(dt); } catch (_) { this._isleNeed = -Infinity; }
+    if (typeof this._isleNeed === 'number' && isFinite(this._isleNeed)) floor = Math.max(floor, this._isleNeed + (this.half ? this.half.y : 150));
     if (this.rideY == null) this.rideY = Math.max((ty != null) ? ty : this.position.y, floor);
     if (ty != null) {
       const F2 = OW.FOLLOW, K3 = _owK();
@@ -41556,6 +41698,7 @@ class OwCarrier {
       if (Math.abs(diff) > band) { const goal = ty - Math.sign(diff) * band * 0.5; this.rideY += Math.max(-vz, Math.min(vz, goal - this.rideY)); }
     }
     if (this.rideY < floor) this.rideY += (floor - this.rideY) * Math.min(1, dt * 2.2);   // the ground and the towers come up fast
+    { let _w = this.rideY; if (ty != null) { const _b = (_owK().followBand != null) ? _owK().followBand : OW.FOLLOW.band; if (Math.abs(ty - this.rideY) > _b) _w = ty - Math.sign(ty - this.rideY) * _b * 0.5; } this._wantY = Math.max(floor, _w); }
     this.position.y = this.rideY;
     this.mesh.position.copy(this.position);
     this.mesh.quaternion.setFromUnitVectors(_OW_NEG_X, this.dir);
@@ -69941,6 +70084,17 @@ async function _prebakeWorldForLaunch() {
       try { _pbSub('waking the wild leviathans'); await Promise.race([_wildP, new Promise((r) => setTimeout(r, 6000 * _pbCapMul))]); rep.wild = 'loaded, not drawn'; } catch (_) {}
     }
 
+    try {
+      const _sigNow = _programEnvSig();
+      if (_pinnedEnvSig && _sigNow && _sigNow !== _pinnedEnvSig) {
+        console.warn('[prebake] program environment changed after the launch pin (' + _pinnedEnvSig + ' -> ' + _sigNow + '); re-pinning under the cover');
+        _pbSub('compiling effects');
+        _pinCombatEffectPrograms();
+        rep.repin = 1;
+        await _warmupYield();
+      }
+    } catch (_) {}
+
     const _tD = _pbNow();
     if (_pbNow() - _bt0 < _PREBAKE_MAX_MS) {
       _pbSub('priming the GPU');
@@ -75077,7 +75231,8 @@ function commitLoadout(key) {
     broadcastWorldObjects();
 
     game.state = 'warmup';
-    
+
+    try { if (game._cyber && game._cyber.armed && !game._cyber.started && typeof _cyberCineLightsEnsure === 'function') _cyberCineLightsEnsure(); } catch (_) {}
     if (typeof _pinCombatEffectPrograms === 'function') _pinCombatEffectPrograms();
     if (typeof musicSetPattern === 'function') {
       try { musicSetPattern('warmup', { bpmTarget: 92, intensity: 1 }); } catch (_) {}

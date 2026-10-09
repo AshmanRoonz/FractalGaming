@@ -7571,7 +7571,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.09";
+const LSS_BUILD = "53.11";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -63025,6 +63025,25 @@ function _carrierRide(dt, snap) {
   let want = gy + _cl;
   // (v48.58) never settle onto the Cyberpunk objective - see the floor in _cyberFrame
   if (typeof _carrier.fieldFloor === 'number' && want < _carrier.fieldFloor) want = _carrier.fieldFloor;
+  // (v53.11) ...nor down into a floating island under the hull - see _skCarrierFloor. 10 Hz; a keel height,
+  // so it is taken back to the hull's origin through ctr/half.
+  try {
+    if (K.islands !== false && typeof _skCarrierFloor === 'function' && _carrier.half && _carrier.dir) {
+      _carrier._isleT = (_carrier._isleT || 0) - (dt || 0.016);
+      if (_carrier._isleT <= 0 || snap) {
+        _carrier._isleT = 0.1;
+        const cy = o.position.y + (_carrier.ctr ? _carrier.ctr.y : 0), hy = _carrier.half.y;
+        const hl = Math.hypot(_carrier.dir.x, _carrier.dir.z) || 1;
+        _carrier._isleNeed = _skCarrierFloor(o.position.x, o.position.z, _carrier.dir.x / hl, _carrier.dir.z / hl,
+          _carrier.half.x, _carrier.half.z, cy - hy, cy + hy, hy * 2 + 400);
+      }
+      if (isFinite(_carrier._isleNeed)) {
+        const _need = _carrier._isleNeed - (_carrier.ctr ? _carrier.ctr.y : 0) + _carrier.half.y;
+        if (want < _need) want = _need;
+      }
+    }
+  } catch (_) {}
+  _carrier._rideWant = want;   // (v53.11) where the ride is taking the hull: the steer's height band reaches it
   const cur = (_carrier.rideY == null) ? o.position.y : _carrier.rideY;
   // (v39.55) gentler, and capped at window.__carrier.vMax units a second (180): with the forward
   // corridor above the climb starts long before the tower, so it no longer needs to be a lunge.
@@ -63104,9 +63123,12 @@ function _carrierOwned() {
     return !!(typeof game !== 'undefined' && game && game._cyber && game._cyber.authority);
   } catch (_) { return true; }
 }
+const _csIsl = [];   // (v53.11) the islands in the hull's height band, gathered once per probe
 function _carrierSteer(dt) {
   const o = _carrier.obj;
-  if (!o || !game.hubCity || typeof _hubCityRayHit !== 'function') return;
+  if (!o) return;
+  // (v53.11) the towers OR the islands: either alone is reason enough to steer (see _skCarrierObstacles)
+  const _city = !!(game.hubCity && typeof _hubCityRayHit === 'function');
   const K = _carrierKnobs();
   if (K.steer === false) return;
   _csWant.copy(_carrier.to).sub(o.position); _csWant.y = 0;
@@ -63118,21 +63140,37 @@ function _carrierSteer(dt) {
     _carrier._steerT = 0.1;
     const range = (K.lookAhead != null ? K.lookAhead : 2600);
     const halfW = (_carrier.half ? _carrier.half.z : 400);
+    // (v53.11) the hull's height band - from where it IS to where the ride is TAKING it (_carrier._rideWant),
+    // because the ride owns altitude: measured, a carrier descending onto its cruise height met the islands
+    // beside it only once it was level with them, too late to turn
+    _csIsl.length = 0;
+    if (K.islands !== false && typeof _skCarrierObstacles === 'function') {
+      const oy = (_carrier.ctr ? _carrier.ctr.y : 0), hy = (_carrier.half ? _carrier.half.y : 200);
+      const y0 = o.position.y, y1 = (typeof _carrier._rideWant === 'number' && isFinite(_carrier._rideWant)) ? _carrier._rideWant : y0;
+      _skCarrierObstacles(o.position.x, o.position.z, range + halfW, Math.min(y0, y1) + oy - hy, Math.max(y0, y1) + oy + hy, _csIsl);
+    }
+    // ...and only out to the route's end plus half a hull: an island past the objective is not in the way, and
+    // letting it count would turn the hull off its own destination
+    const _isCap = Math.min(range, remain + (_carrier.half ? _carrier.half.x : 680));
+    if (!_city && !_csIsl.length) { _carrier._steerA = 0; }
+    else {
     let bestA = 0, bestS = -Infinity;
     for (const a of _CS_ANGLES) {
       _csDir.copy(_csWant).applyAxisAngle(_csUp, a);
       _crS.set(-_csDir.z, 0, _csDir.x);
       let dmin = range;
-      for (let j = -1; j <= 1; j++) {
+      if (_city) for (let j = -1; j <= 1; j++) {
         _crP.copy(o.position).addScaledVector(_crS, halfW * j);
         const d = _hubCityRayHit(_crP, _csDir, range);
         if (typeof d === 'number' && d < dmin) dmin = d;
       }
+      if (_csIsl.length) { const cap = Math.min(dmin, _isCap); const di = _skCorridorDist(_csIsl, o.position.x, o.position.z, _csDir.x, _csDir.z, halfW, cap); if (di < cap) dmin = di; }
       if (a === 0 && dmin >= range) { bestA = 0; bestS = Infinity; break; }
       const score = dmin - Math.abs(a) * (K.turnCost != null ? K.turnCost : 500);
       if (score > bestS) { bestS = score; bestA = a; }
     }
     _carrier._steerA = bestA;
+    }
   }
   _csBest.copy(_csWant).applyAxisAngle(_csUp, _carrier._steerA || 0);
   const cur = _carrier.dir;
@@ -63614,6 +63652,23 @@ if (typeof window !== 'undefined') {
   // the two things you need to prove "nobody spawns under the carrier" instead of eyeballing it
   window.__carrier.spot = (i) => { const v = _carrierDeckSpot(i || 0); return v ? v.toArray().map(Math.round) : null; };
   window.__carrier.inside = (x, y, z) => _carrierBlocks((x && x.isVector3) ? x : new THREE.Vector3(x, y, z), 0);
+  // (v53.11) what the steer is going round right now: the islands in the hull's height band (last probe), the
+  // offset it picked, the route's end. `__carrier.islands = false` turns the island half of the steer off.
+  window.__carrier.isles = () => {
+    const o = _carrier.obj;
+    return {
+      steerA: (_carrier._steerA == null) ? null : +_carrier._steerA.toFixed(2),
+      floor: isFinite(_carrier._isleNeed) ? Math.round(_carrier._isleNeed) : null,   // keel height an island under the hull asks for
+      rideWant: (typeof _carrier._rideWant === 'number') ? Math.round(_carrier._rideWant) : null,
+      pos: o ? o.position.toArray().map(Math.round) : null,
+      dir: _carrier.dir ? [+_carrier.dir.x.toFixed(3), +_carrier.dir.z.toFixed(3)] : null,
+      to: _carrier.to ? _carrier.to.toArray().map(Math.round) : null,
+      band: (o && _carrier.half) ? [Math.round(o.position.y + (_carrier.ctr ? _carrier.ctr.y : 0) - _carrier.half.y), Math.round(o.position.y + (_carrier.ctr ? _carrier.ctr.y : 0) + _carrier.half.y)] : null,
+      list: _csIsl.map((I) => ({ id: I.id, x: Math.round(I.x), y: Math.round(I.y), z: Math.round(I.z), R: Math.round(I.R),
+        root: Math.round(I.y - I.R * I.dn), top: Math.round(I.y + I.R * I.up),
+        d: o ? Math.round(Math.hypot(I.x - o.position.x, I.z - o.position.z)) : null })),
+    };
+  };
   window.__carrier.info = () => ({
     alive: !!(_carrier.ent && _carrier.ent.alive), dead: _carrier.dead,
     model: _carrier.obj ? (_carrier.obj.userData._carrierPlaceholder ? 'placeholder' : 'Carrier.glb') : 'none',
@@ -63678,6 +63733,9 @@ function _cyberPrePlace() {
   // (v42.30) Build the cinematic's lights NOW, at zero intensity. This runs inside the world
   // prebake, so the loading screen is still up and the light-count program variants are compiled
   // on covered frames instead of on the first frame of the flight.
+  // (v53.10) ...but "inside the prebake" was still AFTER commitLoadout's pin and seat-shell warm, which
+  // were then keyed on the old light count. commitLoadout now builds them first; this call is the
+  // idempotent fallback for any path that reaches the prebake without that commit.
   try { _cyberCineLightsEnsure(); } catch (_) {}
   try {
     C.teamA = (typeof LSS !== 'undefined' && LSS.TEAM_FLEET_A != null) ? LSS.TEAM_FLEET_A : 2;
@@ -64658,6 +64716,16 @@ function _cyberCineLightsEnsure() {
     scene.add(rim); scene.add(rim.target);
     const amb = new THREE.HemisphereLight(0xbfd4ff, 0x2a2438, 0);
     scene.add(amb);
+    // ⭐ (v53.10) ...AND LAYERS 5 + 6, the rule v39.74 wrote down next to the combat lights: "Every light
+    // that carries 5 carries 6. Any future layer-restricted pass MUST do the same or its material forks".
+    // These were the future lights. three.js only counts a light in a pass whose CAMERA shares a layer
+    // with it, so in a Cyberpunk match the main pass (layer 0) counted 5 dir / 2 hemi while the ADS
+    // ship-overlay pass and the cockpit's layer-5 draws counted 3 / 1 - two program keys for every
+    // material both passes draw. Measured on 53.10 before this line: the first seat switch linked a
+    // `depth [FORK: numDirLights numHemiLights]` keyed on 3 / 1, and the 53.09 session showed the same
+    // ghost cockpit materials holding a 3 / 1 set beside the 5 / 2 one. Intensity is 0 outside the
+    // cinematic, so lighting is unchanged in every pass; only the counts now agree.
+    for (const _l of [key, rim, amb]) { _l.layers.enable(5); _l.layers.enable(6); }
     _carrier._cineLights = [key, key.target, rim, rim.target, amb];
     _carrier._cineRig = { key, rim, amb };
     _carrier._cineOn = false;
@@ -66592,6 +66660,92 @@ function _skRayHit(origin, dir, maxDist, coarse) {
   _skHitOk = true;
   return best;
 }
+// ⭐⭐ (v53.11) THE CARRIERS SEE THE ISLANDS. Owner: "carrier just went through a floating island".
+// Neither carrier family knew the islands existed. The Cyberpunk carrier's lateral steer (_carrierSteer)
+// fans its rays at _hubCityRayHit - towers only - and its altitude ride samples the ground heightfield and
+// a raycastLevel with skipSky set ("ground, not a floating island", v49.28, deliberately: the ride must
+// not climb onto every island it passes under). The overworld city carriers (OwCarrier.tick: home orbit,
+// hunt, follow) fly straight at their target with only a ground/tower floor. And the islands are low
+// enough to meet them: a column's ROOT is lifted only `clear` (300) over the highest ground under it,
+// while a carrier cruises at ground + 450 with a few hundred units of hull above and below that.
+// So these two helpers give the carriers the islands as OBSTACLES IN PLAN, the way they already go round
+// towers ("it needs to just go around", v39.55), not as a floor to climb:
+//   _skCarrierObstacles - the islands near (px, pz) whose rock reaches the hull's height band [yLo, yHi].
+//     From the DETERMINISTIC layout (_skNear), not _skLive, so an island that has not been meshed yet is
+//     still in the way, and every peer agrees. One blob's surface reaches 0.83 R at most even with the
+//     full noise swing (core 0.185 is where d + gated noise crosses 0), so R x kH/kV plus a pad is a
+//     conservative footprint; neighbours that merge into a bridge lie inside their two discs' union.
+//   _skCorridorDist - how far a corridor `halfW` either side of the heading (hx, hz) runs before it meets
+//     one of those footprints (ray vs circle of R*kH + pad + halfW). A hull already INSIDE a footprint is
+//     blocked only on headings that point toward its centre, so the fan can always pick a way out.
+// ⚠ Gated on T.HUB, as _skFrame is: _skClusterAt caches its ground probe per cell FOREVER, and outside the
+// hub the probe is skipped, which would cache every island it touched unlifted for the session.
+// Knobs: window.__skyCarrier (kH, kV, padH, padV); window.__carrier.islands / window.__cities.islands = false.
+const SK_CARRIER = { kH: 1.05, kV: 1.0, padH: 160, padV: 220 };
+try { window.__skyCarrier = SK_CARRIER; } catch (_) {}
+function _skCarrierObstacles(px, pz, reach, yLo, yHi, out) {
+  out.length = 0;
+  try {
+    if (!SKY_I.on) return out;
+    const T = game.sandwichTerrain;
+    if (!T || !T.HUB) return out;
+    const list = _skNear(px, pz, reach);
+    for (let i = 0; i < list.length; i++) {
+      const I = list[i];
+      if (I.y - I.R * I.dn * SK_CARRIER.kV - SK_CARRIER.padV > yHi) continue;   // its root is above the hull
+      if (I.y + I.R * I.up * SK_CARRIER.kV + SK_CARRIER.padV < yLo) continue;   // its top is below the keel
+      out.push(I);
+    }
+  } catch (_) { out.length = 0; }
+  return out;
+}
+// ⭐⭐ ...AND A FLOOR, because the first cut (steer only) failed its own A/B. Measured on the sector-3 route,
+// which spawns at y ~3,100-3,600 right beside the archipelago's low shelves (roots ~-290, tops ~0-300) and
+// rides DOWN to its cruise height: the shelves only entered the hull's height band once the hull was already
+// over them (126 units from a blob's centre), and it then sank into the rock while moving AWAY from them - 10
+// to 25 overlap samples per island with the steer on. A lateral steer cannot fix a hull that is descending
+// onto something underneath it. So the ride gets this: the keel height that keeps the hull out of every island
+// whose footprint is under it (the hull as a capsule along its heading vs each footprint disc) - it flies OVER
+// a low shelf instead of into it. Two exclusions keep it a floor and not a lift: an island wholly ABOVE the
+// hull (root over its top) is passed under, and one whose top is more than `climbMax` above the keel is a
+// tall column, which is the lateral steer's job - climbing a 4,000-unit stack is not a carrier's move.
+// Returns -Infinity when nothing is under the hull.
+function _skCarrierFloor(px, pz, hx, hz, halfL, halfW, keel, top, climbMax) {
+  let need = -Infinity;
+  try {
+    if (!SKY_I.on) return need;
+    const T = game.sandwichTerrain;
+    if (!T || !T.HUB) return need;
+    const list = _skNear(px, pz, halfL + halfW);
+    for (let i = 0; i < list.length; i++) {
+      const I = list[i];
+      const iTop = I.y + I.R * I.up * SK_CARRIER.kV, iRoot = I.y - I.R * I.dn * SK_CARRIER.kV;
+      if (iRoot - SK_CARRIER.padV > top) continue;        // wholly above: it passes under
+      if (iTop > keel + climbMax) continue;                // a tall column: go round, not over
+      const ox = I.x - px, oz = I.z - pz;
+      let t = ox * hx + oz * hz; if (t > halfL) t = halfL; else if (t < -halfL) t = -halfL;
+      const ex = ox - hx * t, ez = oz - hz * t, rr = I.R * SK_CARRIER.kH + SK_CARRIER.padH + halfW;
+      if (ex * ex + ez * ez >= rr * rr) continue;          // not under the hull
+      if (iTop + SK_CARRIER.padV > need) need = iTop + SK_CARRIER.padV;
+    }
+  } catch (_) { need = -Infinity; }
+  return need;
+}
+function _skCorridorDist(list, px, pz, hx, hz, halfW, range) {
+  let best = range;
+  for (let i = 0; i < list.length; i++) {
+    const I = list[i];
+    const rr = I.R * SK_CARRIER.kH + SK_CARRIER.padH + halfW;
+    const ox = I.x - px, oz = I.z - pz;
+    const tc = ox * hx + oz * hz;                 // closest approach along the heading
+    const d2 = ox * ox + oz * oz - tc * tc;
+    if (d2 >= rr * rr) continue;                  // passes clear
+    const t = tc - Math.sqrt(rr * rr - d2);
+    if (t < 0) { if (tc > 0) best = 0; continue; } // inside it: blocked only heading inward
+    if (t < best) best = t;
+  }
+  return best;
+}
 try { window.__skyDbg = () => ({ live: _skLive.size, ms: +SKY_I._ms.toFixed(1),
   keep: _skKeep.size, job: _skJob ? _skJob.I.id : null,   // (v48.33) retained-out-of-range + the island being sliced
   near: _skNear(player.position.x, player.position.z, SKY_I.range).length,
@@ -67759,6 +67913,53 @@ class OwCarrier {
     this.mesh.quaternion.setFromUnitVectors(_OW_NEG_X, this.dir);
     this._glowTick();
   }
+  // (v53.11) THE ISLAND FAN for the overworld carriers - the Cyberpunk carrier's _carrierSteer fan, islands
+  // only (these hulls fly OVER towers on their tower-top floor). Returns the offset, in radians, to turn the
+  // heading to the target by. Probed at 10 Hz, out to the target or 2600 units, whichever is nearer: an
+  // island beyond the point it is flying to is not in its way, and a target INSIDE an island's footprint
+  // (a pilot parked under one) leaves the hull holding off at the footprint's edge instead of inside it.
+  _islandSteer(hx, hz, d, dt) {
+    if (_owK().islands === false || typeof _skCarrierObstacles !== 'function') { this._isA = 0; return 0; }
+    this._isT = (this._isT || 0) - dt;
+    if (this._isT <= 0) {
+      this._isT = 0.1;
+      const halfL = this.half ? this.half.x : 700, halfW = this.half ? this.half.z : 450, hy = this.half ? this.half.y : 150;
+      const range = Math.min(2600, d + halfL);   // to the target plus half a hull, never past it
+      let bestA = 0;
+      if (range > 60) {
+        // the band from where the hull is to where its altitude is going (this._wantY, last tick)
+        const y0 = this.position.y, y1 = (typeof this._wantY === 'number' && isFinite(this._wantY)) ? this._wantY : y0;
+        const L = _skCarrierObstacles(this.position.x, this.position.z, range + halfW, Math.min(y0, y1) - hy, Math.max(y0, y1) + hy, this._isL || (this._isL = []));
+        if (L.length) {
+          let bestS = -Infinity;
+          for (const a of _CS_ANGLES) {
+            const ca = Math.cos(a), sa = Math.sin(a);
+            const dm = _skCorridorDist(L, this.position.x, this.position.z, hx * ca - hz * sa, hx * sa + hz * ca, halfW, range);
+            if (a === 0 && dm >= range) { bestA = 0; break; }
+            const s = dm - Math.abs(a) * 500;
+            if (s > bestS) { bestS = s; bestA = a; }
+          }
+        }
+      }
+      this._isWant = bestA;
+    }
+    // 0.6 rad/s: a 1,400-unit hull swings rather than snaps, but a follower cruises at 330 u/s (445 catching
+    // up), so a slower swing (the Cyberpunk carrier's 0.25 at ~95 u/s) would still be turning at the rock
+    const w = this._isWant || 0, cur = this._isA || 0, st = 0.6 * dt;
+    this._isA = cur + Math.max(-st, Math.min(st, w - cur));
+    return this._isA;
+  }
+  // (v53.11) the ride's island floor (see _skCarrierFloor) at 10 Hz, moving or parked; tick's altitude block applies it
+  _isleFloorTick(dt) {
+    if (_owK().islands === false || typeof _skCarrierFloor !== 'function') { this._isleNeed = -Infinity; return; }
+    this._isfT = (this._isfT || 0) - dt;
+    if (this._isfT > 0) return;
+    this._isfT = 0.1;
+    const halfL = this.half ? this.half.x : 700, halfW = this.half ? this.half.z : 450, hy = this.half ? this.half.y : 150;
+    const hl = Math.hypot(this.dir.x, this.dir.z) || 1;
+    this._isleNeed = _skCarrierFloor(this.position.x, this.position.z, this.dir.x / hl, this.dir.z / hl, halfL, halfW,
+      this.position.y - hy, this.position.y + hy, hy * 2 + 400);
+  }
   tick(dt) {
     if (!this.alive || !this.mesh) return;
     if (this.isProxy) { this.tickProxy(dt); return; }
@@ -67823,9 +68024,13 @@ class OwCarrier {
     this._spd += Math.max(-acc * 1.6, Math.min(acc, wantSpd - this._spd));
     if (d > 1 && this._spd > 0.5) {
       const step = Math.min(d, this._spd * dt);
-      this.position.x += dx / d * step; this.position.z += dz / d * step;
-      this.velocity.set(dx / d * this._spd, 0, dz / d * this._spd);
-      if (d > 40) { _owV1.set(dx / d, 0, dz / d); this.dir.lerp(_owV1, Math.min(1, dt * 0.9)).normalize(); }
+      // (v53.11) ...round the floating islands, not through them (see _skCarrierObstacles): the heading to the
+      // target is turned by the island fan's offset, eased so the hull swings rather than snaps
+      let mx = dx / d, mz = dz / d;
+      try { const a = this._islandSteer(mx, mz, d, dt); if (a) { const ca = Math.cos(a), sa = Math.sin(a), nx = mx * ca - mz * sa; mz = mx * sa + mz * ca; mx = nx; } } catch (_) {}
+      this.position.x += mx * step; this.position.z += mz * step;
+      this.velocity.set(mx * this._spd, 0, mz * this._spd);
+      if (d > 40) { _owV1.set(mx, 0, mz); this.dir.lerp(_owV1, Math.min(1, dt * 0.9)).normalize(); }
     } else this.velocity.set(0, 0, 0);
     // altitude: a hard floor (ground clearance, every city's towers) and, above it, a loose cruise band
     let gy = null;
@@ -67840,6 +68045,9 @@ class OwCarrier {
         if (dd < oc.R + 900) floor = Math.max(floor, oc.padY + oc.site.genome.towerH * 0.95 + 300);
       }
     } catch (_) {}
+    // (v53.11) ...and the floating island under the hull, if it is one to fly over (see _skCarrierFloor)
+    try { this._isleFloorTick(dt); } catch (_) { this._isleNeed = -Infinity; }
+    if (typeof this._isleNeed === 'number' && isFinite(this._isleNeed)) floor = Math.max(floor, this._isleNeed + (this.half ? this.half.y : 150));
     if (this.rideY == null) this.rideY = Math.max((ty != null) ? ty : this.position.y, floor);
     // (v38.84) THE CRUISE BAND. The carrier only minds its altitude when the pilot is more than `band`
     // above or below it, and then drifts at `vz` toward the band's edge - it never mirrors a climb.
@@ -67850,6 +68058,8 @@ class OwCarrier {
       if (Math.abs(diff) > band) { const goal = ty - Math.sign(diff) * band * 0.5; this.rideY += Math.max(-vz, Math.min(vz, goal - this.rideY)); }
     }
     if (this.rideY < floor) this.rideY += (floor - this.rideY) * Math.min(1, dt * 2.2);   // the ground and the towers come up fast
+    // (v53.11) where the altitude is heading - the island fan's height band reaches it (see _islandSteer)
+    { let _w = this.rideY; if (ty != null) { const _b = (_owK().followBand != null) ? _owK().followBand : OW.FOLLOW.band; if (Math.abs(ty - this.rideY) > _b) _w = ty - Math.sign(ty - this.rideY) * _b * 0.5; } this._wantY = Math.max(floor, _w); }
     this.position.y = this.rideY;
     this.mesh.position.copy(this.position);
     this.mesh.quaternion.setFromUnitVectors(_OW_NEG_X, this.dir);
@@ -104730,6 +104940,9 @@ let _pinnedEnvSig = null;
 // the pools are boot-resident and "off" means intensity 0, never removal, so in
 // practice this term is constant (verified identical across matches and modes) —
 // it is here to catch a future change, not because it moves today.
+// ⚠ (v53.10) IT MOVES NOW: v42.30 made Cyberpunk's cine lights resident (+2 dir, +1 hemi for the
+// whole match), and they arrived after the launch pin had already run - see the tripwire in
+// _prebakeWorldForLaunch (C5) and the note in commitLoadout.
 // Measured cost of one call on the campaign hub scene: 0.04-0.2 ms.
 function _programEnvSig() {
   try {
@@ -106956,6 +107169,27 @@ async function _prebakeWorldForLaunch() {
       // the first arrival, as before v48.41, instead of the parse as well)
       try { _pbSub('waking the wild leviathans'); await Promise.race([_wildP, new Promise((r) => setTimeout(r, 6000 * _pbCapMul))]); rep.wild = 'loaded, not drawn'; } catch (_) {}
     }
+
+    // ---- C5. (v53.10) THE PIN'S ENVIRONMENT TRIPWIRE ----
+    // commitLoadout pins every program (and the seat shell, which nothing else applies) BEFORE this
+    // prebake runs, so anything in here that changes a term of the program key - a light count, the
+    // environment map, fog kind, shadow settings - silently strands that pin on a key the match never
+    // renders with. That is exactly how Cyberpunk's cine lights put BLASTER's ghost cockpit into a
+    // 2443 ms frame on the approach to the city (see the v53.10 note in commitLoadout, which fixes that
+    // case at the source). This catches the next one: the pin is signature-gated, so when nothing moved
+    // it is a ~0.1 ms no-op, and when something did it re-pins here, under the cover, and says so.
+    // ⚠ Not on phones: their pin bails before it ever records a signature (v39.05), so a null
+    // _pinnedEnvSig means "never pinned", not "stale".
+    try {
+      const _sigNow = _programEnvSig();
+      if (_pinnedEnvSig && _sigNow && _sigNow !== _pinnedEnvSig) {
+        console.warn('[prebake] program environment changed after the launch pin (' + _pinnedEnvSig + ' -> ' + _sigNow + '); re-pinning under the cover');
+        _pbSub('compiling effects');
+        _pinCombatEffectPrograms();
+        rep.repin = 1;
+        await _warmupYield();
+      }
+    } catch (_) {}
 
     // ---- D. GPU prime: real scene, real camera, full sphere, rtScene bound ----
     const _tD = _pbNow();
@@ -114659,7 +114893,21 @@ function commitLoadout(key) {
     // _lssLockLandscape). The unlock that used to sit here re-evaluated
     // orientation at warmup — mid-touch — and could rotate the viewport,
     // which moved the touch sticks off screen on Chrome/Android.
-    
+
+    // ⭐⭐ (v53.10) CYBERPUNK'S RESIDENT CINE LIGHTS JOIN THE SCENE BEFORE THE PIN, NOT AFTER IT. Owner:
+    // "there's a hitch in cyberpunk city mode, as i am approaching the city" -> F8 auto mark #47: a 2443 ms
+    // frame, renderFrame 2420 ms, eight synchronous program joins - BLASTER's cockpit (hood / screen /
+    // console1 / seat4, two passes each) in its GHOST-SHELL variant, at the moment the third-person shell
+    // came on. Those programs HAD been warmed, by the pin below and the _ghostPinWarm after it. Diffing the
+    // warmed keys against the live ones: identical but for two fields, numDirLights 3 -> 5 and
+    // numHemiLights 1 -> 2 - exactly the two DirectionalLights + one HemisphereLight v42.30 made resident.
+    // v42.30 builds them in _cyberPrePlace, i.e. inside the world prebake, which commitLoadout chains AFTER
+    // this point; so every program pinned here was keyed on a light count the match never renders with.
+    // The scene's own materials survived it (the prebake's compile and GPU prime ran after the lights
+    // existed), but the seat shell is only ever applied by _ghostPinWarm, so its variants were the ones
+    // left to link in play. Building the lights here (idempotent; _cyberPrePlace's call becomes a no-op)
+    // puts the final count in front of both warms. Same lifetime: FreeFlightMode's teardown disposes them.
+    try { if (game._cyber && game._cyber.armed && !game._cyber.started && typeof _cyberCineLightsEnsure === 'function') _cyberCineLightsEnsure(); } catch (_) {}
     if (typeof _pinCombatEffectPrograms === 'function') _pinCombatEffectPrograms();
     // Reactive band: fresh match start, kick off warmup pattern.
     if (typeof musicSetPattern === 'function') {
