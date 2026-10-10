@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.40";
+const LSS_BUILD = "53.43";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -92612,12 +92612,42 @@ function _ssBannerHold(el, secs) {
     _ssSpreadRails();
   } catch (_) {}
 }
+function _ovBannerFitGap(el) {
+  const S = _ovBannerFitGap._s || (_ovBannerFitGap._s = { t: 0 });
+  if (S.t) { cancelAnimationFrame(S.t); S.t = 0; }
+  const again = () => {
+    const H = _ssBannerHold._st;
+    if (H && H.el === el && performance.now() < H.until) S.t = requestAnimationFrame(() => { S.t = 0; _ovBannerFitGap(el); });
+  };
+  try {
+    if (!el) return;
+    el.style.removeProperty('transform');
+    const sb = document.getElementById('scoreboard');
+    if (!sb || !sb.classList.contains('visible')) { again(); return; }
+    const sel = document.getElementById('ship-select');
+    if (sel && sel.classList.contains('active') && !sel.classList.contains('lss-launching') && getComputedStyle(sel).display !== 'none') return;
+    const sr = sb.getBoundingClientRect();
+    if (!(sr.height > 0)) return;
+    let above = 0;   // no timer box on screen (a cinematic, a mode without one): the gap starts at the screen's top
+    const ri = document.getElementById('round-info');
+    if (ri) {
+      const cs = getComputedStyle(ri), rr = ri.getBoundingClientRect();
+      if (cs.display !== 'none' && cs.visibility !== 'hidden' && rr.height > 0) above = rr.bottom;
+    }
+    const gap = sr.top - above, h = el.offsetHeight;   // offsetHeight: the untransformed height
+    if (!(h > 0)) { again(); return; }   // hidden (the kill cam): measure when it is back
+    if (!(gap > 0)) return;
+    const k = Math.max(0.6, Math.min(1, (gap - 8) / h));   // 4 px clear of each box
+    el.style.setProperty('top', Math.round(above + gap / 2) + 'px', 'important');
+    if (k < 1) el.style.setProperty('transform', 'translate(-50%, -50%) scale(' + k.toFixed(3) + ')');
+  } catch (_) {}
+}
 function _ssBannerRelease() {
   try {
     const st = _ssBannerHold._st;
     if (st) { if (st.t) { clearTimeout(st.t); st.t = null; } st.el = null; st.until = 0; }
     const ban = document.getElementById('ov-banner');
-    if (ban) ban.style.removeProperty('top');
+    if (ban) { ban.style.removeProperty('top'); ban.style.removeProperty('transform'); }   // (v53.41) + _ovBannerFitGap's scale
     const hero = document.getElementById('ship-hero');
     if (hero) hero.style.removeProperty('top');
     _ssSpreadRails();
@@ -92675,6 +92705,8 @@ function _ssxBannerPlace() {
     const ban = H ? H.el : null;
     if (!ban) return;
     if (performance.now() >= H.until) { ban.style.removeProperty('top'); return; }
+    const sel = document.getElementById('ship-select');
+    if (!sel || !sel.classList.contains('active') || sel.classList.contains('lss-launching') || getComputedStyle(sel).display === 'none') return;
     const u = _ssxU(), compact = _ssxCompact();
     const K = window.__ssx || {};
     const y = (K.bannerY != null && isFinite(+K.bannerY)) ? +K.bannerY : (compact ? 380 : 628);
@@ -103827,6 +103859,7 @@ const Overlays = (() => {
       ln.style.animationDuration = _bd + 's';
     });
     try { _ssBannerHold(el, _bd); } catch (_) {}
+    try { _ovBannerFitGap(el); } catch (_) {}
   }
 
   return { damageVignette, warp, underwater, killStreak, countdown, medal, abilityFlash, respawn, hideRespawn, banner };   // (v40.57) endCountdown retired with #ov-countdown; launchCountdown calls _cdClear() instead

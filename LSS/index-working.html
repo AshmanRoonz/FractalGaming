@@ -8566,7 +8566,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.40";
+const LSS_BUILD = "53.43";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -142865,12 +142865,56 @@ function _ssBannerHold(el, secs) {
     _ssSpreadRails();
   } catch (_) {}
 }
+// ⭐ (v53.41) WITH THE SCOREBOARD UP, THE BANNER SITS IN THE GAP UNDER THE TIMER. Owner: "it should be right under the
+// timer and above the scoreboard, there's a space there for it". #scoreboard is centred (top 50%, translate -50%), so its
+// top edge moves with its own height and the screen's, and the sheet's 18% knows neither: measured at 919 x 688 at the
+// matchEnd hold, #round-info 10..66, #scoreboard 120..568, the banner 64 px - centred at 18% it sat 92..156, across the
+// board's title. So while the scoreboard is up (the matchEnd hold, or Tab held) and the picker is not (its own band wins,
+// v48.29), the banner is centred between the two boxes' MEASURED edges, and scaled down - never below 0.6 - only when
+// that gap is shorter than the banner (54 px for 64 there). On a 1080p screen the gap is ~250 px: full size, moved up.
+// Run by Overlays.banner after _ssBannerHold; the transform it may write is taken off by the next banner or the release.
+// ⚠ THE KILL CAM HIDES BOTH ENDS OF THE MEASURE. The final kill's replay (body.lss-killcam, _RPL_HIDE) runs into the
+// matchEnd beat with #ov-banner AND #round-info display:none, so at the moment VICTORY fires the banner is 0 px tall
+// (measured: banH 0, round-info 0) and the placement gave up - the owner saw it land in the gap on one run and over the
+// board's title on the next, by whether the replay overlapped. So while its hold lasts, a banner that cannot be measured
+// yet (or a scoreboard not up yet) is tried again EVERY FRAME, and lands in the gap the frame the kill cam lifts. (A 100 ms
+// retry, the first cut, let it show for up to 100 ms at the old 18% and then jump - measured 92..156 -> 70..116.)
+function _ovBannerFitGap(el) {
+  const S = _ovBannerFitGap._s || (_ovBannerFitGap._s = { t: 0 });
+  if (S.t) { cancelAnimationFrame(S.t); S.t = 0; }
+  const again = () => {
+    const H = _ssBannerHold._st;
+    if (H && H.el === el && performance.now() < H.until) S.t = requestAnimationFrame(() => { S.t = 0; _ovBannerFitGap(el); });
+  };
+  try {
+    if (!el) return;
+    el.style.removeProperty('transform');
+    const sb = document.getElementById('scoreboard');
+    if (!sb || !sb.classList.contains('visible')) { again(); return; }
+    const sel = document.getElementById('ship-select');
+    if (sel && sel.classList.contains('active') && !sel.classList.contains('lss-launching') && getComputedStyle(sel).display !== 'none') return;
+    const sr = sb.getBoundingClientRect();
+    if (!(sr.height > 0)) return;
+    let above = 0;   // no timer box on screen (a cinematic, a mode without one): the gap starts at the screen's top
+    const ri = document.getElementById('round-info');
+    if (ri) {
+      const cs = getComputedStyle(ri), rr = ri.getBoundingClientRect();
+      if (cs.display !== 'none' && cs.visibility !== 'hidden' && rr.height > 0) above = rr.bottom;
+    }
+    const gap = sr.top - above, h = el.offsetHeight;   // offsetHeight: the untransformed height
+    if (!(h > 0)) { again(); return; }   // hidden (the kill cam): measure when it is back
+    if (!(gap > 0)) return;
+    const k = Math.max(0.6, Math.min(1, (gap - 8) / h));   // 4 px clear of each box
+    el.style.setProperty('top', Math.round(above + gap / 2) + 'px', 'important');
+    if (k < 1) el.style.setProperty('transform', 'translate(-50%, -50%) scale(' + k.toFixed(3) + ')');
+  } catch (_) {}
+}
 function _ssBannerRelease() {
   try {
     const st = _ssBannerHold._st;
     if (st) { if (st.t) { clearTimeout(st.t); st.t = null; } st.el = null; st.until = 0; }
     const ban = document.getElementById('ov-banner');
-    if (ban) ban.style.removeProperty('top');
+    if (ban) { ban.style.removeProperty('top'); ban.style.removeProperty('transform'); }   // (v53.41) + _ovBannerFitGap's scale
     // Directly, not only through the rails pass: that pass returns early while the picker is hidden,
     // and a name left stepped down would be waiting there the next time it opens.
     const hero = document.getElementById('ship-hero');
@@ -142955,6 +142999,14 @@ function _ssxBannerPlace() {
     const ban = H ? H.el : null;
     if (!ban) return;
     if (performance.now() >= H.until) { ban.style.removeProperty('top'); return; }
+    // ⚠ (v53.41) ...ONLY WHILE THE PICKER IS ON SCREEN. _ssxActive() is the face's CLASS, which #ship-select keeps all
+    // match long, and _ssSpreadRails hands every banner here - so since v53.25 made this face the default, every banner
+    // IN PLAY (ROUND START, ROUND WON, SHELL UP, the match's VICTORY) was pinned to the picker's band, 628 of 941 down:
+    // measured at 919 x 688 mid-round, top 578 px. Owner: "when you win elimination it says 'victory...' but it's too
+    // low". The old rails path never placed it with the picker hidden (its display check); this is that check. No write
+    // here: _ssBannerHold already took the last placement off, and the scoreboard gap (_ovBannerFitGap) may own it now.
+    const sel = document.getElementById('ship-select');
+    if (!sel || !sel.classList.contains('active') || sel.classList.contains('lss-launching') || getComputedStyle(sel).display === 'none') return;
     const u = _ssxU(), compact = _ssxCompact();
     const K = window.__ssx || {};
     // the band between the ship and the cards, from the TOP: 628 of the mockup's 941; on the compact canvas the cards
@@ -157310,6 +157362,8 @@ const Overlays = (() => {
     // sheet's 18% - see _ssBannerHold. Every banner, not just ROOM MODE: any banner over the picker
     // would land in the same place. A no-op placement (the sheet's own) when the picker is not up.
     try { _ssBannerHold(el, _bd); } catch (_) {}
+    // (v53.41) ...and with the scoreboard up (the match's VICTORY / DEFEAT), in the gap under the timer instead
+    try { _ovBannerFitGap(el); } catch (_) {}
   }
 
   return { damageVignette, warp, underwater, killStreak, countdown, medal, abilityFlash, respawn, hideRespawn, banner };   // (v40.57) endCountdown retired with #ov-countdown; launchCountdown calls _cdClear() instead
