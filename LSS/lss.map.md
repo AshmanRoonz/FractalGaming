@@ -669,6 +669,19 @@ Mode descriptors + full single-player campaign: waves, bosses, escorts, hoard-bo
       - JOIN goes through `_ssxRoomGo`. rooms.html's own JOIN is a page load (`index.html?room=CODE`).
       - Host names are other players' text: written with textContent only (verified with a `<b>` name). Esc, the ✕ and the scrim close it.
       - Real backend: "0 ROOMS LIVE". A room only lists with a SIGNED-IN host: the heartbeat needs the Discord session.
+    - ⭐ **(v53.39) ABOUT POPS OUT TOO** (`_ssxAboutOpen` / `_ssxAboutLoad`, `#ssx-about`, the footer's `#ssx-about-btn`, MORE's ABOUT item). Owner: *"let's make the about section a popup instead of another page... get rid of the big picture off it. take out the make it yours section"*.
+      - **One source:** the text is **about.html's own `<main>`**, fetched on the first open (`about.html?v=LSS_BUILD`, DOMParser, imported nodes), plus its `footer.page` as the pop-out's foot. Edit about.html and both change. The picture (`.hero img`) and MAKE IT YOURS were deleted from about.html itself. The pop-out also drops PLAY NOW (`.play-cta`). Every link but `mailto:` gets `target=_blank`.
+      - The box and head reuse LIVE ROOMS' classes (`.ssx-rooms-box.ssx-about-box`). Prose is sized in em off one body size, `max(13px, 17u)`, because `--u` alone made reading text ~10 px on a landscape phone. COMPACT makes it 94vw × 92vh.
+      - Closes on Esc, the ✕, the scrim, the picker leaving, and `__ssx.off()`. Hidden under `.lss-launching`.
+      - The old face's (`?newss=0`) ABOUT on `#lobby` is still the about.html link.
+    - ⭐ **(v53.40) LEADERBOARD AND MY STATS POP OUT** (`_ssxPageOpen` / `_ssxStatsOpen` / `_ssxPageNav` / `_ssxPageBack` / `_ssxPageHead` / `_ssxPageFrameLoad`, `#ssx-page`, `#ssx-page-frame`, the footer's `#ssx-lb` / `#ssx-stats`, the MORE and user-menu items). Owner: *"also make the leaderboard and stats pages pop outs"*.
+      - **The REAL pages in a same-origin `<iframe>`**, not ports: they are whole apps (D1 fetches, toggles, sortable tables), and shared localStorage keeps their own `lss_discord_user` "who am I" working.
+      - Each frame load gets a style that hides the page's `header.page` (the pop-out's head stands in for it), plus a capture click rule. Board ↔ career links stay IN the frame, and BACK returns. `index.html` links (PLAY / Play Now) close the pop-out. Anything else opens a new tab. Esc inside the focused frame closes it too.
+      - ⚠ **Every navigation is `contentWindow.location.replace`**, with `S.stack` as BACK's history. Never use `src=` or a followed link: a frame's navigations join the TOP page's session history (Android back would step the hidden frame), and `history.back()` from a frame with nothing behind it navigates the GAME. Verified: `history.length` stayed 3 through open → pilot → BACK → PLAY-close → reopen.
+      - MY STATS signed out opens the board with "Sign in with Discord to see your own stats." + SIGN IN (`discordSignin`). The old `#lobby-stats-btn` used `window.confirm`, which never shows in the pane.
+      - **Not verified:** MY STATS signed in (the pane has no Discord session). It is the same `profile.html?id=` load as a pilot clicked on the board, titled MY STATS when the id is yours.
+      - Pane note: a frame that scrolled ~0.75 s after opening was the OWNER scrolling it, not code (hooks on scrollTo / scrollIntoView / focus caught nothing).
+      - ⚠ **Pane trap:** at an emulated viewport the pane SCALES DOWN (1280×720 in a 919 pane), the `scroll` action delivered no wheel event at all, and scrollTop stayed 0. At the pane's own size the same wheel scrolled it (not prevented). Test scrolling un-emulated.
     - ⭐ **LEAVE ROOM = CREATE ROOM's INVERSE** (`_ssxLeaveRoom`):
       - It used to press MAIN MENU, whose `window.confirm()` never surfaces in the pane, so it looked dead; where it does run it reloads.
       - Now it takes two presses in the button ("SURE? PRESS AGAIN", 3.5 s).
@@ -725,6 +738,7 @@ Mode descriptors + full single-player campaign: waves, bosses, escorts, hoard-bo
     - **COMPACT** (`(max-width: 1000px), (max-height: 560px)`, the same query in `_ssxCompact`): the same pieces on a 1000 × 500 canvas (`--u` = min(vw/1000, vh/500)).
       - Why: the 1672 × 941 mockup on a 740 × 360 phone is u 0.38, i.e. 5 px text. Compact gives 0.72 there.
       - Top bar 36u with MORE (☰ `#ssx-more`, menu kind 'more' = the footer's items + the COMMUNITY / TOOLS links; mid-match only MAIN MENU). The footer is hidden.
+      - **(v53.38) ☰ says MORE.** Owner, on their phone: *"the bottom bar of the main screen on mobile is missing, it gets shoved off the bottom i think"*. It wasn't pushed off: it is `display: none` here by design, and a bare ☰ did not read as "the bar's links live in here". Offered the bar back (a slim one, shorter fleet cards, ~7 px text) or a label; they chose the label. Its icon dropped to the row's 14u. Measured with a 23-letter Discord name: no top-bar overflow at 740×360 (MORE 683–733 px) or 667×375 (the narrowest canvas, 1000u). If a phone report says "X is missing", check whether COMPACT moved it before hunting an overflow.
       - Left / PLAY are 200u each, 6u off the screen's edges. (v53.25 inset them by the safe-area insets; v53.28 took that out, see below.)
       - The three centre buttons are 170u on a 50vw axis. Class line + stats; the prose lines are dropped, as the old face's v43.57 phone layout did.
       - Cards are 136u with the thumbnail mapping × 0.557. The fleet strip sits at bottom 4u, 76u tall; PLAY ends at 88u.

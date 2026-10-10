@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.37";
+const LSS_BUILD = "53.40";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -92892,6 +92892,127 @@ function _ssxRoomsOpen(on) {
     _ssxRoomsLoad();
   }, 10000);
 }
+function _ssxAboutOpen(on) {
+  const sel = document.getElementById('ship-select');
+  if (!sel) return;
+  _ssxClass(sel, 'ssx-aboutopen', !!on);
+  if (!on) return;
+  _ssxMenuClose(); sel.classList.remove('ssx-perks');
+  try { if (sel.classList.contains('ssx-roomsopen')) _ssxRoomsOpen(false); } catch (_) {}
+  const body = document.getElementById('ssx-about-body');
+  if (body) body.scrollTop = 0;
+  _ssxAboutLoad();
+}
+async function _ssxAboutLoad() {
+  const S = _ssxAboutLoad._s || (_ssxAboutLoad._s = { done: false, busy: false });
+  const body = document.getElementById('ssx-about-body'), foot = document.getElementById('ssx-about-foot');
+  if (!body || S.done || S.busy) return;
+  S.busy = true;
+  body.textContent = 'Loading...';
+  try {
+    const r = await fetch('about.html?v=' + encodeURIComponent(LSS_BUILD), { cache: 'no-cache' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
+    const main = doc.querySelector('main');
+    if (!main) throw new Error('no <main> in about.html');
+    main.querySelectorAll('script, style, .play-cta, .hero img').forEach(n => n.remove());
+    body.replaceChildren(...Array.from(main.childNodes, n => document.importNode(n, true)));
+    const pf = doc.querySelector('footer.page');
+    if (foot) foot.replaceChildren(...(pf ? Array.from(pf.childNodes, n => document.importNode(n, true)) : []));
+    document.querySelectorAll('#ssx-about-body a[href], #ssx-about-foot a[href]').forEach(a => {
+      if (!/^mailto:/i.test(a.getAttribute('href') || '')) { a.target = '_blank'; a.rel = 'noopener'; }
+    });
+    S.done = true;
+  } catch (err) {
+    body.textContent = 'Could not load About (' + ((err && err.message) || err) + '). ';
+    const a = document.createElement('a');
+    a.href = 'about.html'; a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'Open it in a new tab';
+    body.appendChild(a);
+  } finally { S.busy = false; }
+}
+const _SSX_PAGES = { 'leaderboard.html': 1, 'profile.html': 1 };
+function _ssxPageOpen(url, opts) {
+  const S = _ssxPageOpen._s || (_ssxPageOpen._s = { stack: [] });
+  const sel = document.getElementById('ship-select'), box = document.getElementById('ssx-page');
+  if (!sel || !box) return;
+  _ssxClass(sel, 'ssx-pageopen', !!url);
+  if (!url) { S.stack = []; _ssxPageNav('about:blank'); _ssxPageHead(); return; }
+  _ssxMenuClose(); sel.classList.remove('ssx-perks');
+  try { if (sel.classList.contains('ssx-roomsopen')) _ssxRoomsOpen(false); } catch (_) {}
+  try { if (sel.classList.contains('ssx-aboutopen')) _ssxAboutOpen(false); } catch (_) {}
+  _ssxClass(box, 'ssx-page-signed-out', !!(opts && opts.signedOut));
+  S.stack = [url];
+  _ssxPageNav(url);
+  _ssxPageHead();
+}
+function _ssxStatsOpen() {
+  let u = null;
+  try { u = (typeof discordCurrentUser === 'function') ? discordCurrentUser() : null; } catch (_) {}
+  if (u && u.id) _ssxPageOpen('profile.html?id=' + encodeURIComponent(u.id));
+  else _ssxPageOpen('leaderboard.html', { signedOut: true });
+}
+function _ssxPageNav(url) {
+  const f = document.getElementById('ssx-page-frame');
+  if (!f) return;
+  try { f.contentWindow.location.replace(url); } catch (_) { f.src = url; }
+}
+function _ssxPageBack() {
+  const S = _ssxPageOpen._s;
+  if (!S || S.stack.length < 2) return;
+  S.stack.pop();
+  _ssxPageNav(S.stack[S.stack.length - 1]);
+  _ssxPageHead();
+}
+function _ssxPageHead() {
+  const S = _ssxPageOpen._s || { stack: [] };
+  const box = document.getElementById('ssx-page'), t = document.getElementById('ssx-page-title');
+  if (!box || !t) return;
+  _ssxClass(box, 'ssx-page-deep', S.stack.length > 1);
+  const cur = S.stack[S.stack.length - 1] || '';
+  let title = 'LEADERBOARD';
+  if (/^profile\.html/.test(cur)) {
+    let me = null;
+    try { me = discordCurrentUser(); } catch (_) {}
+    const id = new URLSearchParams(cur.split('?')[1] || '').get('id');
+    title = (me && me.id && (!id || id === String(me.id))) ? 'MY STATS' : 'PILOT STATS';
+  }
+  t.textContent = title;
+}
+function _ssxPageFrameLoad() {
+  const f = document.getElementById('ssx-page-frame');
+  let d = null;
+  try { d = f.contentDocument; } catch (_) {}
+  if (!d || !d.documentElement || d.location.href === 'about:blank' || d.__ssxEmbed) return;
+  d.__ssxEmbed = true;
+  try {
+    const st = d.createElement('style');
+    st.textContent = 'header.page { display: none !important; } body { min-height: 0 !important; }';
+    (d.head || d.documentElement).appendChild(st);
+  } catch (_) {}
+  d.addEventListener('click', (e) => {
+    try {
+      const a = e.target && e.target.closest && e.target.closest('a[href]');
+      if (!a || e.defaultPrevented) return;
+      const href = a.getAttribute('href') || '';
+      if (/^(mailto:|javascript:|#)/i.test(href)) return;
+      const u = new URL(href, d.baseURI);
+      e.preventDefault();
+      if (u.origin === location.origin) {
+        const file = u.pathname.split('/').pop() || 'index.html';
+        if (_SSX_PAGES[file]) {
+          const S = _ssxPageOpen._s;
+          const rel = file + u.search;
+          if (S) S.stack.push(rel);
+          _ssxPageNav(rel); _ssxPageHead();
+          return;
+        }
+        if (file === 'index.html') { _ssxPageOpen(false); return; }
+      }
+      window.open(u.href, '_blank', 'noopener');
+    } catch (err) { console.warn('[ssx] page link failed:', err); }
+  }, true);
+  d.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.preventDefault(); _ssxPageOpen(false); } }, true);
+}
 async function _ssxRoomsLoad() {
   const S = _ssxRoomsOpen._s || (_ssxRoomsOpen._s = { t: null, seq: 0 });
   const seq = ++S.seq;
@@ -93009,17 +93130,17 @@ function _ssxMenuOpen(kind, anchor) {
       try { mid = document.getElementById('ship-select').classList.contains('ssx-mid'); } catch (_) {}
       if (mid) items.push({ label: 'LEAVE MATCH', act: press('lobby-back-btn') });
       if (!mid) {
-        items.push({ label: 'LEADERBOARD', href: 'leaderboard.html' });
-        items.push({ label: 'MY STATS', act: press('lobby-stats-btn') });
+        items.push({ label: 'LEADERBOARD', act: () => _ssxPageOpen('leaderboard.html') });   // (v53.40) pop-outs, as in the footer
+        items.push({ label: 'MY STATS', act: () => _ssxStatsOpen() });
         items.push({ label: 'REPLAY STUDIO', act: press('lobby-replays-btn') });
-        items.push({ label: 'ABOUT', href: 'about.html' });
+        items.push({ label: 'ABOUT', act: () => _ssxAboutOpen(true) });   // (v53.39) a pop-out, as in the footer
         items.push({ label: 'GOOPLING', href: 'goopling.html' });
         document.querySelectorAll('#lobby-sec-community a[href], #lobby-sec-tools a[href]').forEach(a => {
           items.push({ label: (a.textContent || '').replace(/\s+/g, ' ').trim(), href: a.getAttribute('href') });
         });
       }
     } else if (kind === 'user') {
-      items.push({ label: 'MY STATS', sub: 'Your career page', act: () => { const b = document.getElementById('lobby-stats-btn'); if (b) b.click(); } });
+      items.push({ label: 'MY STATS', sub: 'Your career page', act: () => _ssxStatsOpen() });   // (v53.40) the pop-out
       items.push({ label: 'AEGIS RANKS', sub: 'Per-ship progression', act: () => { try { _aegisPanelOpen(); } catch (_) {} } });
       items.push({ label: 'SIGN OUT', act: () => { try { discordSignout(); } catch (_) {} } });
     }
@@ -93167,8 +93288,20 @@ function _ssxInit() {
     on('ssx-perksbtn', () => { _ssxMenuClose(); sel.classList.toggle('ssx-perks'); });
     on('ss-mode-current', (ev, el) => { if (_ssxActive()) _ssxMenuOpen('mode', el.parentNode || el); });
     on('ssx-mainmenu', () => press('lobby-back-btn'));
-    on('ssx-stats', () => press('lobby-stats-btn'));
+    on('ssx-lb', () => _ssxPageOpen('leaderboard.html'));
+    on('ssx-stats', () => _ssxStatsOpen());
+    on('ssx-page-close', () => _ssxPageOpen(false));
+    on('ssx-page-back', () => _ssxPageBack());
+    on('ssx-page-signin', () => discordSignin());
+    const pg = $('ssx-page');
+    if (pg) pg.addEventListener('pointerdown', (e) => { if (e.target === pg) _ssxPageOpen(false); });   // the scrim, not the box
+    const pgf = $('ssx-page-frame');
+    if (pgf) pgf.addEventListener('load', () => { try { _ssxPageFrameLoad(); } catch (err) { console.warn('[ssx] page frame:', err); } });
     on('ssx-replays', () => press('lobby-replays-btn'));
+    on('ssx-about-btn', () => _ssxAboutOpen(true));   // (v53.39) pops out over the picker - see _ssxAboutOpen
+    on('ssx-about-close', () => _ssxAboutOpen(false));
+    const about = $('ssx-about');
+    if (about) about.addEventListener('pointerdown', (e) => { if (e.target === about) _ssxAboutOpen(false); });   // the scrim, not the box
     document.querySelectorAll('#ssx-foot .ssx-fdrop').forEach(b => b.addEventListener('click', () => _ssxMenuOpen(b.dataset.menu, b)));
     document.addEventListener('pointerdown', (e) => {
       try {
@@ -93182,10 +93315,12 @@ function _ssxInit() {
       try {
         if (e.key !== 'Escape') return;
         const M = _ssxMenuOpen._s;
-        const open = (M && M.kind) || sel.classList.contains('ssx-perks') || sel.classList.contains('ssx-roomsopen');
+        const open = (M && M.kind) || sel.classList.contains('ssx-perks') || sel.classList.contains('ssx-roomsopen') || sel.classList.contains('ssx-aboutopen') || sel.classList.contains('ssx-pageopen');
         if (!open) return;
         _ssxMenuClose(); sel.classList.remove('ssx-perks');
         if (sel.classList.contains('ssx-roomsopen')) _ssxRoomsOpen(false);
+        if (sel.classList.contains('ssx-aboutopen')) _ssxAboutOpen(false);
+        if (sel.classList.contains('ssx-pageopen')) _ssxPageOpen(false);
         e.stopPropagation(); e.preventDefault();
       } catch (_) {}
     }, true);
@@ -93205,6 +93340,8 @@ function _ssxInit() {
           if (_ssxMenuOpen._s && _ssxMenuOpen._s.kind) _ssxMenuClose();
           sel.classList.remove('ssx-perks');
           if (sel.classList.contains('ssx-roomsopen')) _ssxRoomsOpen(false);
+          if (sel.classList.contains('ssx-aboutopen')) _ssxAboutOpen(false);
+          if (sel.classList.contains('ssx-pageopen')) _ssxPageOpen(false);
           return;
         }
         _ssxSync();
@@ -93228,7 +93365,9 @@ try {
     if (_ssxFlag._s) _ssxFlag._s.v = false;
     _ssxMenuClose();
     try { _ssxRoomsOpen(false); } catch (_) {}
-    const s = document.getElementById('ship-select'); if (s) s.classList.remove('ssx', 'ssx-perks', 'ssx-room', 'ssx-ready', 'ssx-mid', 'ssx-roomsopen');
+    try { _ssxAboutOpen(false); } catch (_) {}
+    try { if (_ssxPageOpen._s && _ssxPageOpen._s.stack.length) _ssxPageOpen(false); } catch (_) {}
+    const s = document.getElementById('ship-select'); if (s) s.classList.remove('ssx', 'ssx-perks', 'ssx-room', 'ssx-ready', 'ssx-mid', 'ssx-roomsopen', 'ssx-aboutopen', 'ssx-pageopen');
     try { _ssSpreadRails(); } catch (_) {}
     return false;
   };
