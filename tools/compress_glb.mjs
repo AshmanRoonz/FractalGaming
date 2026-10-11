@@ -203,6 +203,12 @@ const OVERRIDES = {
   // hands never on the legs) --retarget (the first pilot's Sit_Alert + Sit_Cheer_with_Left_Hand); 2k Meshy maps -> 1k.
   'objects/characters/pilot_azure_seat.glb': { simplify: 0.15, texMax: 1024, reason: 'in-seat LOD of Azure Vanguard' },
   'objects/characters/pilot_frostfang_seat.glb': { simplify: 0.15, texMax: 1024, reason: 'in-seat LOD of Captain Frostfang' },
+  // (2026-10-11, game v53.64) ...and their FULL files, for the gameshow (the one scene a pilot stands in, life-size on the
+  // screen), as pilot_ashman.glb is the first pilot's. Since v53.64 the gameshow's contestant is the CHOSEN pilot; standing
+  // there in the seat LOD, Azure's face came out faceted and soft - owner: "the female's face looked weird during that
+  // scene" (23k triangles and 1k maps where his scene was tuned on 174k and 2k). Same source as the seat LODs.
+  'objects/characters/pilot_azure.glb': { texMax: 2048, reason: 'Azure Vanguard standing (the gameshow), full detail' },
+  'objects/characters/pilot_frostfang.glb': { texMax: 2048, reason: 'Captain Frostfang standing (the gameshow), full detail' },
   // (2026-10-06) THE SUMMONERS' SHIP. Owner: "we will switch to using one of the older of the main ships that already
   // had a cut out cockpit, the old pyro". It is the c1seat Pyro exactly as it flew from v38.9x until the concept hulls
   // replaced it (git 7793287:LSS/ships/pyro.glb and its lean ships/m/ twin): ALREADY this script's output (welded,

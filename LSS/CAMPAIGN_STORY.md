@@ -260,7 +260,7 @@ The prologue changes that. It shows the player the city, the hack, the caverns a
 | `voice/<line id>.mp3` | A voiced version of any dialogue line. List the id in `campaign_media/media.json`. |
 | `fractal_frame.png` | The flicker of fractals in the opening. Not supplied yet; a generated pink-and-blue fractal stands in. |
 
-**The voice cast** (ElevenLabs, Ashman's picks, 2026-10-07): the narrator **Quentin**, Xorzo **Cybertronic** (Ashman's own designed voice, "like the Transformers"), the Summoners **Victor** (one voice for both heads), the pilot **Grainger**, Jimmy **Joe**. The ship's AI keeps its own voice ("Adam", `audio/`). Every line is baked by `tools/campaign_voice.mjs` (see `campaign_media/README.md`); the auditions are in `voice_casting.html`.
+**The voice cast** (ElevenLabs, Ashman's picks, 2026-10-07): the narrator **Quentin**, Xorzo **Cybertronic** (Ashman's own designed voice, "like the Transformers"), the Summoners **Victor** (one voice for both heads), the pilot **Grainger**, Jimmy **Joe**. The ship's AI keeps its own voice ("Adam", `audio/`). (2026-10-08 the narrator became **Gerald**.) (2026-10-11) **The pilot is whoever you fly**: Ashman Roonz and Captain Frostfang speak with Grainger, Azure Vanguard with **Verity**, and the same pilot stands in the gameshow and talks beside the dialogue box. None of the pilot's lines says "he", so the script needed no changes; the casual "bro" / "dude" / "buddy" that others call the pilot stays as written. Every line is baked by `tools/campaign_voice.mjs` (see `campaign_media/README.md`); the auditions are in `voice_casting.html`.
 
 ---
 

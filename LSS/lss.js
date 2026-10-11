@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.60";
+const LSS_BUILD = "53.65";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -49648,6 +49648,8 @@ const _LSS_PILOT_IDS = ['ashman', 'azure', 'frostfang'];
 const _LSS_SEATS = {
   ashman: {
     name: 'ASHMAN ROONZ', sub: 'HANGAR VANGUARD', stand: 'Stand_Talking_Angry', gearLum: 0.30,
+    suitLum: 0.016,   // (v53.61) the suit's typical value (the median of the colourless texels under 0.3 x gearLum)
+    accent: [22, 26, 0.03, 0.09],
     feetOut: 9,   // (v53.47) deg, standing only (_lssIdleBreath): his boots are modelled turned in - "feet are bowed in a bit"
     url: 'objects/characters/pilot_ashman_seat.glb',
     clip: 'Sit_Alert', fallback: 'Sit_and_Doze_Off', cheer: 'Sit_Cheer_with_Left_Hand',
@@ -49662,7 +49664,9 @@ const _LSS_SEATS = {
     },
   },
   azure: {
-    name: 'AZURE VANGUARD', sub: 'FLEET PILOT', stand: 'Talk_Passionately', gearLum: 0.17,
+    name: 'AZURE VANGUARD', sub: 'FLEET PILOT', stand: 'Talk_Passionately', gearLum: 0.17, suitLum: 0.021,
+    voice: 'azure',   // (v53.64) her campaign lines: '<line>.azure' (Verity), see CampDialogue _voiceId
+    full: 'objects/characters/pilot_azure.glb', fullArt: '53.64',
     url: 'objects/characters/pilot_azure_seat.glb', art: '53.44',
     clip: 'Sit_Alert', fallback: 'Sit_Cross_Legged', cheer: 'Sit_Cheer_with_Left_Hand',
     hulls: {   // seatfit.py, eyes at cockpit1, then lowered for 1 cm of headroom (shortfall at the eye fit in the comments)
@@ -49676,7 +49680,8 @@ const _LSS_SEATS = {
     },
   },
   frostfang: {
-    name: 'CAPTAIN FROSTFANG', sub: 'WOLF OF THE FLEET', stand: 'Talk_with_Hands_Open', gearLum: 0.23,
+    name: 'CAPTAIN FROSTFANG', sub: 'WOLF OF THE FLEET', stand: 'Talk_with_Hands_Open', gearLum: 0.23, suitLum: 0.025,
+    full: 'objects/characters/pilot_frostfang.glb', fullArt: '53.64',   // (v53.64) as Azure's: the gameshow's full-detail body
     url: 'objects/characters/pilot_frostfang_seat.glb', art: '53.44',
     clip: 'Sit_Alert', fallback: 'Sit_Cross_Legged_on_Floor', cheer: 'Sit_Cheer_with_Left_Hand',
     hulls: {   // as azure's; fitted with --tail 1 (his tail is skinned to the hips: the cushion read off his thighs)
@@ -50307,7 +50312,7 @@ if (typeof window !== 'undefined') {
   window.__pickerStandObj = _PSTAND;   // dev: the standing pilot's state (scene, rig, root, body, fx, phase)
 }
 
-const _PGEAR_K = { chroma: [0.06, 0.12], head: [0.25, 0.55], keep: 0.85, floor: 0.05, cap: 1.45, camoScale: 1.4, dbg: false };
+const _PGEAR_K = { chroma: [0.06, 0.12], head: [0.25, 0.55], keep: 0.85, floor: 0.05, cap: 1.45, camoScale: 1.4, zone: [0.3, 0.55], suitK: 0.35, dbg: false };
 const _PGEAR_SWATCHES = [
   ['WHITE', '#e8ecf2'], ['GUNMETAL', '#5b6672'], ['RED', '#d23a2c'], ['ORANGE', '#f0862a'], ['GOLD', '#e2b72e'],
   ['GREEN', '#4caf50'], ['TEAL', '#1fa8a0'], ['BLUE', '#2f6fe0'], ['PURPLE', '#8a4fe0'], ['PINK', '#e0559f'],
@@ -50344,6 +50349,14 @@ function _lssPilotGearPatch(m, mesh) {
     uSkinPatC0: { value: new THREE.Color(0xffffff) }, uSkinPatC1: { value: new THREE.Color(0xffffff) }, uSkinPatC2: { value: new THREE.Color(0xffffff) },
     uSkinRatio: { value: 1 }, uSkinHullLum: { value: 0.2 }, uSkinPatKeep: { value: 0.85 }, uSkinPatFloor: { value: 0.05 },
     uSkinPatCap: { value: 1.45 }, uSkinPatFlat: { value: 0 }, uSkinReflPass: { value: 0 }, uSkinPatTex: { value: _skinDefaultTex() },
+    uPilotZone: { value: new THREE.Vector4(0.3, 0.55, 0, 1) },
+    uPilotSuitG: { value: 1 },   // the suit's value x this = where the HULL's black sits against its paint (_lssPilotZoneSet)
+    uPilotAcc: { value: new THREE.Vector4(0, -1, 0, 0) },   // (v53.62) the pilot's accent: hue centre, half-window, chroma ramp (y <= 0: none)
+    uTrimOn: { value: 0 }, uTrimCol: { value: new THREE.Color(0x000000) }, uTrimLum: { value: 0.035 },
+    uTrimShade: { value: new THREE.Vector3(0.6, 0.25, 1.6) },
+    uLivBlend: { value: 0 }, uLivBlendAmt: { value: 1 }, uLivMulTone: { value: 0.5 },
+    uTerA: { value: new THREE.Vector4(0, 0, 0, 0) }, uTerCol: { value: new THREE.Color(0x808080) },
+    uSkinBaseMetal: { value: 0 }, uSkinBaseRough: { value: 0.5 },
   };
   Object.defineProperty(ud, '_pilotGearU', { value: u, writable: true, configurable: true, enumerable: false });
   const prev = m.onBeforeCompile;
@@ -50357,39 +50370,155 @@ function _lssPilotGearPatch(m, mesh) {
         + '\n#ifdef USE_SKINNING\n\tvLssHead = dot(skinWeight, vec4(lssIsHead(skinIndex.x), lssIsHead(skinIndex.y), lssIsHead(skinIndex.z), lssIsHead(skinIndex.w)));'
         + '\n#else\n\tvLssHead = 0.0;\n#endif');
     shader.fragmentShader = shader.fragmentShader
-      .replace('void main() {', _SKIN_HUE_PARS + '\nuniform float uPilotOn;\nuniform float uPilotDbg;\nuniform vec4 uPilotGear;\nvarying float vLssHead;\nvoid main() {')
-      .replace('#include <map_fragment>', '#include <map_fragment>\n\tif (uPilotOn > 0.5) {'
+      .replace('void main() {', _SKIN_HUE_PARS + '\nuniform float uPilotOn;\nuniform float uPilotDbg;\nuniform vec4 uPilotGear;\nuniform vec4 uPilotZone;\nuniform float uPilotSuitG;\nuniform vec4 uPilotAcc;\nvarying float vLssHead;\n'
+        + 'float lssPilotHue(vec3 c) { float mx = max(c.r, max(c.g, c.b)), d = mx - min(c.r, min(c.g, c.b)); if (d <= 1e-5) return 0.0; float h;'
+        + ' if (mx == c.r) h = mod((c.g - c.b) / d, 6.0); else if (mx == c.g) h = (c.b - c.r) / d + 2.0; else h = (c.r - c.g) / d + 4.0; return h / 6.0; }\nvoid main() {')
+      .replace('#include <map_fragment>', '#include <map_fragment>\n\tfloat lssSuitW = 0.0;\n\tif (uPilotOn > 0.5) {'
         + '\n\t\tvec3 lssRaw = diffuseColor.rgb;'
         + '\n\t\tvec3 lssS = pow(max(lssRaw, vec3(0.0)), vec3(0.4545));'   // ~sRGB: "is it coloured" is a perceptual question
         + '\n\t\tfloat lssC = max(lssS.r, max(lssS.g, lssS.b)) - min(lssS.r, min(lssS.g, lssS.b));'
-        + '\n\t\tfloat lssG = (1.0 - smoothstep(uPilotGear.x, uPilotGear.y, lssC)) * (1.0 - smoothstep(uPilotGear.z, uPilotGear.w, vLssHead));'
-        + '\n\t\tif (uPilotDbg > 0.5) diffuseColor.rgb = vec3(lssG);'
-        + '\n\t\telse if (lssG > 0.001) diffuseColor.rgb = mix(lssRaw, lssSkinPattern(lssRaw, lssRaw), lssG);'
-        + '\n\t}');
+        + '\n\t\tfloat lssAcc = 0.0;'
+        + '\n\t\tif (uPilotAcc.y > 0.0) { float lssDh = lssPilotHue(lssS) - uPilotAcc.x; lssDh -= floor(lssDh + 0.5);'
+        + ' lssAcc = (1.0 - smoothstep(uPilotAcc.y * 0.6, uPilotAcc.y, abs(lssDh))) * smoothstep(uPilotAcc.z, uPilotAcc.w, lssC); }'
+        + '\n\t\tfloat lssG = max(1.0 - smoothstep(uPilotGear.x, uPilotGear.y, lssC), lssAcc) * (1.0 - smoothstep(uPilotGear.z, uPilotGear.w, vLssHead));'
+        + '\n\t\tfloat lssPw = max(smoothstep(uPilotZone.x, uPilotZone.y, dot(lssRaw, vec3(0.2126, 0.7152, 0.0722)) / max(uSkinHullLum, 1e-4)), lssAcc);'
+        + '\n\t\tif (uPilotDbg > 1.5) diffuseColor.rgb = vec3(lssG * lssPw);'   // __pilotGear.dbg = 'zone': white = plate, black = suit / not gear
+        + '\n\t\telse if (uPilotDbg > 0.5) diffuseColor.rgb = vec3(lssG);'
+        + '\n\t\telse if (lssG > 0.001) {'
+        + '\n\t\t\tvec3 lssLiv = lssSkinPattern(lssRaw, lssRaw);'
+        + '\n\t\t\tvec3 lssLivS = (abs(uPilotSuitG - 1.0) > 1e-3) ? lssSkinPattern(lssRaw * uPilotSuitG, lssRaw * uPilotSuitG) : lssLiv;'
+        + '\n\t\t\tvec3 lssBlackA = lssRaw;'
+        + '\n\t\t\tif (uPilotZone.w > 0.5) lssBlackA = lssLivS;'
+        + '\n\t\t\telse if (uTrimOn > 0.5) lssBlackA = lssTrim(lssRaw);'
+        + '\n\t\t\tif (uLivBlend > 0.5 && uPilotZone.w < 0.5) {'
+        + '\n\t\t\t\tvec3 lssOver = lssLivS;'
+        + '\n\t\t\t\tif (uLivBlend > 1.5) {'
+        + '\n\t\t\t\t\tvec3 lssA = pow(clamp(lssLivS, 0.0, 1.0), vec3(0.4545)), lssB = pow(clamp(lssBlackA, 0.0, 1.0), vec3(0.4545));'
+        + '\n\t\t\t\t\tif (uLivBlend < 2.5) {'
+        + '\n\t\t\t\t\t\tvec3 lssT = vec3(uLivMulTone);'
+        + '\n\t\t\t\t\t\tif (uTrimOn > 0.5) { vec3 lssTc = pow(clamp(uTrimCol, 0.0, 1.0), vec3(0.4545)); float lssCm = max(max(lssTc.r, max(lssTc.g, lssTc.b)), 1e-4); lssT = (lssTc / lssCm) * (uLivMulTone + (1.0 - uLivMulTone) * lssCm); }'
+        + '\n\t\t\t\t\t\tlssOver = pow(lssA * lssT, vec3(2.2)) * lssPlateShade(lssRaw);'
+        + '\n\t\t\t\t\t} else lssOver = pow(vec3(1.0) - (vec3(1.0) - lssA) * (vec3(1.0) - lssB), vec3(2.2));'
+        + '\n\t\t\t\t}'
+        + '\n\t\t\t\tlssBlackA = mix(lssBlackA, lssOver, uLivBlendAmt);'
+        + '\n\t\t\t}'
+        + '\n\t\t\tvec3 lssGearC = mix(lssBlackA, lssLiv, lssPw);'
+        + '\n\t\t\tif (uTerA.x > 0.5) lssGearC = lssOverlay(lssGearC);'
+        + '\n\t\t\tdiffuseColor.rgb = mix(lssRaw, lssGearC, lssG);'
+        + '\n\t\t\tlssSuitW = lssG * (1.0 - lssPw) * uPilotZone.z;'   // where the secondary's (or METAL's) finish goes, below
+        + '\n\t\t}'
+        + '\n\t}')
+      .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\n\tif (lssSuitW > 0.001) roughnessFactor = mix(roughnessFactor, uSkinBaseRough, lssSuitW);')
+      .replace('#include <metalnessmap_fragment>', '#include <metalnessmap_fragment>\n\tif (lssSuitW > 0.001) metalnessFactor = mix(metalnessFactor, uSkinBaseMetal, lssSuitW);');
   };
-  m.customProgramCacheKey = () => 'lssPilotGear1';
+  m.customProgramCacheKey = () => 'lssPilotGear2';   // (v53.61) the zones
   return u;
 }
 function _lssPilotShipCtx(shipRoot, key) {
-  let skin = null;
-  try { skin = (shipRoot && shipRoot.userData && shipRoot.userData.skinId) || null; } catch (_) {}
+  let skin = null, trim = null;
+  try { const ud = shipRoot && shipRoot.userData; skin = (ud && ud.skinId) || null; trim = (ud && ud.trim) || null; } catch (_) {}
   const ship = key ? String(key).toUpperCase() : null;
   if (!skin && ship) { try { skin = _getStoredSkinId(ship); } catch (_) {} }
-  return { ship, skin };
+  if (!trim && ship) { try { trim = _getStoredTrim(ship); } catch (_) {} }
+  return { ship, skin, trim, root: shipRoot || null };
 }
 function _lssPilotGearSync(holder, pid, ctx) {
   if (!holder || !holder.mats || !holder.mats.length || !pid) return;
   const look = _lssPilotLook(pid);
   let ks = '';
   try { ks = (typeof window !== 'undefined' && window.__pilotGear) ? JSON.stringify(window.__pilotGear) : ''; } catch (_) {}
-  const sig = pid + '|' + look.mode + '|' + (look.hex || '') + '|' + (look.mode === 'camo' ? ((ctx && ctx.ship) + ':' + (ctx && ctx.skin)) : '') + '|' + ks;
-  if (holder.gearSig === sig) return;
+  let tw = '';
+  try { if (look.mode === 'camo' && ctx && ctx.trim) tw = _trimWire(ctx.trim); } catch (_) {}   // (v53.61) the ship's secondary / blend / tertiary
+  const sig = pid + '|' + look.mode + '|' + (look.hex || '') + '|' + (look.mode === 'camo' ? ((ctx && ctx.ship) + ':' + (ctx && ctx.skin) + ':' + tw) : '') + '|' + ks;
+  if (holder.gearSig === sig && !(holder.gearRe && performance.now() >= holder.gearRe)) return;
+  if (holder.gearSig !== sig) holder.gearTries = 0;
   holder.gearSig = sig;
-  _lssPilotGearSet(holder.mats, pid, look, ctx || {});
+  const ok = _lssPilotGearSet(holder.mats, pid, look, ctx || {});
+  holder.gearRe = (ok === false && (holder.gearTries = (holder.gearTries || 0) + 1) < 8) ? performance.now() + 1000 : 0;
+}
+let _lssPilotZoneLast = null;   // dev: __pilots.zone()
+function _lssPilotZone(ctx, sk) {
+  const tr = _trimNorm(ctx && ctx.trim);
+  const factory = !sk || !!sk.restore;
+  const T = SHIP_TRIMS[tr.id] || SHIP_TRIMS.black;
+  const Z = { same: false, trim: null, blend: 0, blendKey: tr.blend, ter: null, pending: false };
+  if (T.same) Z.same = !factory;   // SAME AS PRIMARY: the camo over the whole gear (under FACTORY: BLACK)
+  else if (!T.restore) {
+    const col = new THREE.Color();
+    if (tr.id === 'color') { const hsl = T.hsl || [0.75, 0.42]; col.setHSL(tr.hue / 360, hsl[0], hsl[1], THREE.SRGBColorSpace); }
+    else col.setHex(T.col);   // sRGB hex -> linear, as diffuseColor is
+    Z.trim = { col, metal: T.metal, rough: T.rough };
+  }
+  if (!factory && !Z.same) Z.blend = _LIV_BLEND_ID[tr.blend] || 0;   // a blend needs a livery, and a black to blend over
+  let hm = null;
+  try {
+    if (ctx && ctx.root) ctx.root.traverse((o) => {
+      if (hm || !o.isMesh) return;
+      for (const m of (Array.isArray(o.material) ? o.material : [o.material])) if (!hm && m && /_hull_game$/i.test(m.name || '')) hm = m;
+    });
+  } catch (_) {}
+  Z.hullK = null;
+  if (!factory && (Z.same || Z.blend)) {
+    let P = null;
+    try { P = (hm && hm.map) ? _skinTexPaint(hm.map) : null; } catch (_) {}
+    if (P && P.blk > 0 && P.lum > 0) Z.hullK = Math.max(0.05, Math.min(1.5, P.blk / P.lum));
+    else if (hm && hm.map && !P) Z.pending = true;   // not decoded yet: try again
+  }
+  const L = (tr.ter && tr.ter !== 'off') ? SHIP_TERS[tr.ter] : null;
+  if (L) {
+    const col = new THREE.Color();
+    if (L.factory) {
+      let got = null;
+      try { got = hm ? _terShipColor(hm, col) : null; } catch (_) {}
+      if (!got) {
+        Z.pending = !!hm;   // the hull is there but its paint is not measurable yet: try again
+        let cc = 0x8e99ad;
+        try { if (ctx && ctx.ship && LSS.CLASS_COLORS && LSS.CLASS_COLORS[ctx.ship] != null) cc = LSS.CLASS_COLORS[ctx.ship]; } catch (_) {}
+        col.setHex(cc);
+      }
+    } else if (tr.ter === 'color') col.setHSL(tr.terHue / 360, 0.85, 0.5, THREE.SRGBColorSpace);   // a mid tone: it tints
+    else col.setHex(L.col);
+    Z.ter = col;
+  }
+  return Z;
+}
+function _lssPilotZoneSet(u, Z, K, def, pid) {
+  const zn = (K.zone && K.zone.length === 2) ? K.zone : _PGEAR_K.zone;
+  u.uPilotZone.value.set(+zn[0], +zn[1], 0, (Z && !Z.same) ? 0 : 1);
+  u.uTrimOn.value = 0; u.uLivBlend.value = 0; u.uTerA.value.set(0, 0, 0, 0); u.uPilotSuitG.value = 1;
+  const ac = (K.accent && K.accent[pid] !== undefined) ? K.accent[pid] : def.accent;
+  if (ac && ac.length === 4) u.uPilotAcc.value.set((+ac[0] % 360) / 360, +ac[1] / 360, +ac[2], +ac[3]);
+  else u.uPilotAcc.value.set(0, -1, 0, 0);
+  if (!Z) return;
+  const suit = Math.max(1e-3, (K.suit && K.suit[pid]) || def.suitLum || 0.035);
+  u.uTrimLum.value = suit;
+  if (Z.same || Z.blend) {
+    const hk = (Z.hullK != null) ? Z.hullK : ((K.suitK != null) ? +K.suitK : 0.35);
+    u.uPilotSuitG.value = Math.max(1, Math.min(80, (u.uSkinHullLum.value / suit) * hk));
+  }
+  u.uTrimShade.value.set(_TRIM_SHADE.keep, _TRIM_SHADE.floor, _TRIM_SHADE.cap);
+  if (Z.trim) {
+    u.uTrimCol.value.copy(Z.trim.col);
+    u.uSkinBaseMetal.value = Z.trim.metal; u.uSkinBaseRough.value = Z.trim.rough;
+    u.uTrimOn.value = 1; u.uPilotZone.value.z = 1;
+  }
+  if (Z.blend) {
+    u.uLivBlend.value = Z.blend;
+    const a = _LIV_BLEND.amt ? _LIV_BLEND.amt[Z.blendKey] : null;
+    u.uLivBlendAmt.value = (a != null && isFinite(a)) ? Math.max(0, Math.min(1, +a)) : 1;
+    u.uLivMulTone.value = Math.max(0, Math.min(1, (_LIV_BLEND.tone != null) ? +_LIV_BLEND.tone : 0.5));
+    if (Z.blend === 1 && !Z.trim) { u.uSkinBaseMetal.value = _LIV_BLEND.metal; u.uSkinBaseRough.value = _LIV_BLEND.rough; u.uPilotZone.value.z = 1; }
+  }
+  if (Z.ter) {
+    u.uTerCol.value.copy(Z.ter);
+    let a = 0.6;
+    try { a = (typeof window !== 'undefined' && window.__terOverlayAmt != null) ? +window.__terOverlayAmt : _TER_OVERLAY.amt; } catch (_) {}   // (declared further down)
+    u.uTerA.value.set(1, Math.max(0, Math.min(1, isFinite(a) ? a : 0.6)), 0, 0);
+  }
 }
 function _lssPilotGearSet(mats, pid, look, ctx) {
   const def = _LSS_SEATS[pid] || _LSS_SEATS.ashman, K = _lssPilotGearK();
-  let P = null;
+  let P = null, Z = null;
   if (look.mode === 'color' && look.hex) P = { pat: 7, c0: look.hex };
   else if (look.mode === 'camo') {
     let sk = null;
@@ -50401,15 +50530,19 @@ function _lssPilotGearSet(mats, pid, look, ctx) {
     } else if (sk.pattern && _SKIN_PAT_ID[sk.pattern]) {
       P = { pat: _SKIN_PAT_ID[sk.pattern], sk };
     } else P = { pat: 7, c0: sk.swatch || 0x8e99ad };   // a hue-only livery (HUESHIFT): its swatch
+    try { Z = _lssPilotZone(ctx, sk); } catch (_) { Z = null; }   // (v53.61) ...and what the ship's black wears
+    _lssPilotZoneLast = Z ? { ship: ctx.ship, skin: ctx.skin, trim: _trimWire(ctx.trim), same: Z.same, trim2: !!Z.trim, blend: Z.blend,
+                              hullK: (Z.hullK != null) ? +Z.hullK.toFixed(3) : null, ter: Z.ter ? '#' + Z.ter.getHexString() : null, pending: Z.pending } : null;
   }
   for (const m of mats) {
     const u = m && m.userData && m.userData._pilotGearU;
     if (!u) continue;
     if (!P) { u.uPilotOn.value = 0; continue; }
-    u.uPilotOn.value = 1; u.uPilotDbg.value = K.dbg ? 1 : 0;
+    u.uPilotOn.value = 1; u.uPilotDbg.value = (K.dbg === 'zone') ? 2 : (K.dbg ? 1 : 0);
     u.uPilotGear.value.set(K.chroma[0], K.chroma[1], K.head[0], K.head[1]);
     u.uSkinRatio.value = 1; u.uSkinPatKeep.value = K.keep; u.uSkinPatFloor.value = K.floor; u.uSkinPatCap.value = K.cap;
     u.uSkinHullLum.value = (K.lum && K.lum[pid]) || def.gearLum || 0.2;
+    _lssPilotZoneSet(u, Z, K, def, pid);   // (v53.61)
     u.uSkinPatMix.value = 1; u.uSkinPatFlat.value = 0; u.uSkinPat.value = P.pat;
     const sk = P.sk;
     if (!sk) {
@@ -50431,6 +50564,7 @@ function _lssPilotGearSet(mats, pid, look, ctx) {
       u.uSkinPatC0.value.setHex(mc); u.uSkinPatC1.value.setHex(mc); u.uSkinPatC2.value.setHex(mc);
     } else u.uSkinPatTex.value = _skinDefaultTex();
   }
+  return !(Z && Z.pending);
 }
 
 const _PLINE = { open: false, scene: null, camera: null, figs: null, ready: false, building: false, last: 0, err: false };
@@ -50697,6 +50831,7 @@ if (typeof window !== 'undefined') {
   window.__pilots = {
     open: () => _lssPilotsOpen(true), close: () => _lssPilotsOpen(false), state: () => JSON.parse(JSON.stringify(_lssPilotState())),
     pick: (id) => _lssPilotsPick(id), look: (look) => _lssPilotsLook(look), obj: _PLINE,
+    zone: () => _lssPilotZoneLast,   // (v53.61)
   };
 }
 
@@ -105891,6 +106026,15 @@ const CAMP_SEQS = {
     if (!window.CampMedia || !window.CampMedia.manifest) return Promise.resolve(_vset = new Set());
     return window.CampMedia.manifest().then((m) => (_vset = m.lines)).catch(() => (_vset = new Set()));
   }
+  function _voiceId(line, set) {
+    if (!line || !line.id || !set) return null;
+    if (line.who === 'pilot') {
+      let v = null;
+      try { const d = _LSS_SEATS[_lssPilotId()]; v = d && d.voice; } catch (_) {}
+      if (v && set.has(line.id + '.' + v)) return line.id + '.' + v;
+    }
+    return set.has(line.id) ? line.id : null;
+  }
 
   function _fade(on) {
     const el = $root(); if (!el) return;
@@ -106010,8 +106154,9 @@ const CAMP_SEQS = {
     const t0 = performance.now();
     let voiceLen = 0;
     const voiceP = (line.id ? _voices() : Promise.resolve(null)).then((set) => {
-      if (tok !== D.tok || !set || !set.has(line.id) || !window.CampMedia || !window.CampMedia.playVoiceUrl) return 0;
-      return window.CampMedia.playVoiceUrl(window.CampMedia.voiceUrl ? window.CampMedia.voiceUrl(line.id) : (window.CampMedia.base() + 'voice/' + line.id + '.mp3'), cfg.voiceVol);
+      const vid = _voiceId(line, set);   // (v53.64) the chosen pilot's take of a pilot line
+      if (tok !== D.tok || !vid || !window.CampMedia || !window.CampMedia.playVoiceUrl) return 0;
+      return window.CampMedia.playVoiceUrl(window.CampMedia.voiceUrl ? window.CampMedia.voiceUrl(vid) : (window.CampMedia.base() + 'voice/' + vid + '.mp3'), cfg.voiceVol);
     }).then((len) => { voiceLen = +len || 0; }).catch(() => {});
     const typeDur = total / cps;
     let typed = false;
@@ -106164,16 +106309,20 @@ const CAMP_SEQS = {
     S.cam = new THREE.PerspectiveCamera(cfg.fov, 0.74, 0.05, 50);
     return true;
   }
+  const _key = (who) => (who === 'pilot') ? 'pilot:' + _lssPilotId() : who;
   function _build(who) {
-    if (S.recs[who]) return Promise.resolve(S.recs[who]);
-    if (S.loads[who]) return S.loads[who];
+    const key = _key(who);
+    if (S.recs[key]) return Promise.resolve(S.recs[key]);
+    if (S.loads[key]) return S.loads[key];
     let p;
     if (who === 'pilot' || who === 'summoners') {
-      p = _lssSeatLoad(who === 'pilot' ? 'ashman' : who).then((g) => {
+      const pid = (who === 'pilot') ? _lssPilotId() : who;
+      p = _lssSeatLoad(pid).then((g) => {
         if (!g) return null;
         const body = (typeof _wildRigClone === 'function') ? _wildRigClone(g.scene) : g.scene.clone(true);
         body.traverse((o) => { if (o.isMesh) { o.frustumCulled = false; o.castShadow = false; o.receiveShadow = false; } });
-        const clip = g.animations.find((c) => c.name === 'Stand_Talking_Angry') || g.animations.find((c) => /stand|talk/i.test(c.name)) || g.animations[0];
+        const st = (who === 'pilot' && _LSS_SEATS[pid] && _LSS_SEATS[pid].stand) || 'Stand_Talking_Angry';
+        const clip = g.animations.find((c) => c.name === st) || g.animations.find((c) => c.name === 'Stand_Talking_Angry') || g.animations.find((c) => /stand|talk/i.test(c.name)) || g.animations[0];
         const mixer = new THREE.AnimationMixer(body);
         const talk = mixer.clipAction(clip); talk.setLoop(THREE.LoopRepeat, Infinity); talk.play();
         const rest = mixer.clipAction(clip.clone()); rest.setLoop(THREE.LoopRepeat, Infinity); rest.play(); rest.time = 0; rest.paused = true;
@@ -106196,8 +106345,8 @@ const CAMP_SEQS = {
         return { who, kind: 'orb', root, orb: xz, mat, ei: mat.emissiveIntensity, ready: false };
       });
     } else p = Promise.resolve(null);
-    S.loads[who] = p.then((rec) => { if (rec) S.recs[who] = rec; return rec; }).catch(() => null);
-    return S.loads[who];
+    S.loads[key] = p.then((rec) => { if (rec) S.recs[key] = rec; return rec; }).catch(() => null);
+    return S.loads[key];
   }
   function _warmRec(rec) {
     if (rec.warmP) return rec.warmP;
@@ -106255,7 +106404,7 @@ const CAMP_SEQS = {
     if (!(el && el.classList.contains('on') && el.classList.contains('cd-port')) || !_ok()) { S.last = 0; return; }   // the box is down: no frames
     const dt = S.last ? Math.min(0.1, (now - S.last) / 1000) : 0.016;
     S.last = now; S.t += dt;
-    const rec = S.want ? S.recs[S.want] : null;
+    const rec = S.want ? S.recs[_key(S.want)] : null;   // (v53.64) the chosen pilot's body
     const show = (rec && rec.ready) ? rec : null;
     if (show !== S.shown) {
       if (S.shown) S.shown.root.visible = false;
@@ -106747,11 +106896,19 @@ const CAMP_SEQS = {
   }
 
   const _gsG = {};   // url -> Promise<gltf | null>
-  function _gsLoadChar(url) {
+  function _gsPilotSrc() {
+    let pid = 'ashman';
+    try { pid = _lssPilotId(); } catch (_) {}
+    const d = _LSS_SEATS[pid];
+    if (pid === 'ashman' || !d) return { url: cfg.gs.pilot.url, art: _LSS_SEAT_ART, clip: 'Stand_Talking_Angry' };
+    if (d.full) return { url: d.full, art: d.fullArt || d.art || _LSS_SEAT_ART, clip: d.stand || 'Stand_Talking_Angry' };
+    return { url: d.url, art: d.art || _LSS_SEAT_ART, clip: d.stand || 'Stand_Talking_Angry' };
+  }
+  function _gsLoadChar(url, art) {
     if (_gsG[url]) return _gsG[url];
     return (_gsG[url] = new Promise((res) => {
       try {
-        new THREE.GLTFLoader().load('./' + url + '?v=' + _LSS_SEAT_ART, (g) => {
+        new THREE.GLTFLoader().load('./' + url + '?v=' + (art || _LSS_SEAT_ART), (g) => {   // (v53.64) a seat file's own stamp
           try { _lssCapModelTextures(g.scene, 'gameshow'); } catch (_) {}
           res(g);
         }, undefined, (e) => { console.warn('[gameshow] load failed:', url, e && e.message); res(null); });
@@ -106782,7 +106939,8 @@ const CAMP_SEQS = {
   }
   async function _gsBuild() {
     const G = cfg.gs;
-    const [tex, gp, gm] = await Promise.all([_gsTex('./' + G.img), _gsLoadChar(G.pilot.url), _gsLoadChar(G.summoners.url)]);
+    const ps = _gsPilotSrc();   // (v53.64)
+    const [tex, gp, gm] = await Promise.all([_gsTex('./' + G.img), _gsLoadChar(ps.url, ps.art), _gsLoadChar(G.summoners.url)]);
     if (!tex) throw new Error('no ' + G.img);
     tex.colorSpace = THREE.SRGBColorSpace;
     const iw = (tex.image && tex.image.width) || 1672, ih = (tex.image && tex.image.height) || 941;
@@ -106798,7 +106956,8 @@ const CAMP_SEQS = {
       const g = (who === 'pilot') ? gp : gm; if (!g) continue;
       const body = (typeof _wildRigClone === 'function') ? _wildRigClone(g.scene) : g.scene.clone(true);
       body.traverse((o) => { if (o.isMesh) { o.frustumCulled = false; o.castShadow = false; o.receiveShadow = false; } });
-      const clip = g.animations.find((c) => c.name === 'Stand_Talking_Angry') || g.animations.find((c) => /stand|talk/i.test(c.name)) || g.animations[0];
+      const want = (who === 'pilot') ? ps.clip : 'Stand_Talking_Angry';   // (v53.64) the chosen pilot's own talking clip
+      const clip = g.animations.find((c) => c.name === want) || g.animations.find((c) => c.name === 'Stand_Talking_Angry') || g.animations.find((c) => /stand|talk/i.test(c.name)) || g.animations[0];
       const mixer = new THREE.AnimationMixer(body);
       const talk = mixer.clipAction(clip); talk.setLoop(THREE.LoopRepeat, Infinity); talk.play();
       talk.time = Math.random() * clip.duration;   // the two never gesture in step
@@ -106819,7 +106978,7 @@ const CAMP_SEQS = {
       people.push({ who, body, pivot, mixer, talk, rest, blob, head, w: G.listen, look: 0 });
     }
     if (!people.length) throw new Error('no characters');
-    const gs = { scene, camera, tex, iw, ih, people, hemi, key, rimA, rimB, _fitKey: '', fit: null };
+    const gs = { scene, camera, tex, iw, ih, people, hemi, key, rimA, rimB, _fitKey: '', fit: null, urls: [ps.url, G.summoners.url] };
     gs.fit = (w, h) => _gsFit(gs, w, h);
     gs.vr = (on) => _gsVr(gs, on);   // (v53.12) a headset's version of the set - see _gsVr
     _gsPose(gs, 0);
@@ -106908,7 +107067,7 @@ const CAMP_SEQS = {
     }
     try { gs.scene.background = null; gs.tex.dispose(); } catch (_) {}
     try { if (gs._vrPlane) { gs._vrPlane.geometry.dispose(); gs._vrPlane.material.map.dispose(); gs._vrPlane.material.dispose(); gs._vrPlane = null; } } catch (_) {}   // (v53.12)
-    for (const url of [cfg.gs.pilot.url, cfg.gs.summoners.url]) {
+    for (const url of (gs.urls || [cfg.gs.pilot.url, cfg.gs.summoners.url])) {
       const pr = _gsG[url]; delete _gsG[url];
       if (pr) pr.then((g) => {
         if (!g) return;

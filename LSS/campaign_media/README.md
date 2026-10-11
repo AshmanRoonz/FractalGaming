@@ -74,6 +74,12 @@ the free plan's monthly 10,000, and free-plan audio is non-commercial, so bake t
 on a paid plan. (All 171 were baked on Starter, 2026-10-08, through the ElevenLabs connector:
 `--plan`, generate, `node tools/campaign_voice_fetch.mjs`, `--ingest`.)
 
+**A second voice for one speaker (2026-10-11).** The pilot you fly can be Azure Vanguard, so every pilot line has a
+second take in her voice, **Verity**: `voice/<id>.azure.mp3` beside `voice/<id>.mp3`, listed in `media.json` like any
+line. The game plays the `.azure` take when Azure is the chosen pilot and falls back to the line's own clip otherwise
+(Frostfang speaks with Grainger's). `VARIANTS` in the baker holds them; `--var azure` selects only those, `--var none`
+only the lines' own. 32 lines, 2,020 credits.
+
 Every clip is **levelled to -17 LUFS** on the way in (`tools/campaign_voice_level.py`, run inside
 Blender): the voices come out of ElevenLabs at very different levels (the narrator 10-15 dB
 quieter than the rest). The raw takes are kept in `assets_base/campaign_voice_raw/` (local only),

@@ -27,6 +27,7 @@
  *                                                      --force re-levels them all) - no credits
  *   node tools/campaign_voice.mjs --adopt id,id        record clips put in voice/ by hand as made from the CURRENT text
  *   selectors (any mode): --only id,id   --who xorzo,pilot   --seq gameshow,pro_e   --force   --model eleven_v4
+ *                         --var azure (a VARIANT's clips only: '<id>.azure', see VARIANTS) | --var none (the lines' own)
  *
  * STATES. missing = never made. stale = made from other text / voice / model (the script changed since). raw = made,
  * waiting to be levelled (or levelled to another LEVEL). baked = up to date. own = a clip in voice/ the baker never made
@@ -63,6 +64,17 @@ const CAST = {
   summoners: { name: 'Victor',      id: 'ttNi9wVM8M97tsxE7PFZ' },
   pilot:     { name: 'Grainger',    id: 'e6UxWrNGwfbzUCaklNVm' },
   jimmy:     { name: 'Joe',         id: 'I1ApPIaF2fI21XlrwfaW' },
+};
+// (2026-10-11) A SPEAKER'S SECOND VOICE. The owner: "i just added a new voice on elevenlabs, 'verity' for the female_pilot
+// character... because we can choose between 3 characters for the campaign... let's copy all the pilot's lines for the
+// female pilot, in verity's voice / the animal pilot can use the same voice as the main pilot". A variant is every line
+// of `who` again in another voice: the clip <id>.<variant>.mp3 beside <id>.mp3, with its own raw / manifest / media.json
+// "lines" + "rev" entries under that id. The game plays it when the chosen pilot's `voice` names it (CampDialogue,
+// _campVoiceId) and falls back to the line's own clip when it is missing. Frostfang has none: Grainger's takes are his.
+// Verity = the "Chatty Young Woman, Fast-Paced Storyteller" (young, British): the owner's workspace copy - the Verity that
+// creative_list_voices lists twice, and only once with voice_category 'professional' (the library) - not "Calm & Soft".
+const VARIANTS = {
+  azure: { who: 'pilot', name: 'Verity', id: 'oW8bn5YtBB89X2nJ0DT9' },
 };
 // eleven_v4: the auditions' model. Same price as eleven_multilingual_v2 (1 credit per character, checked with
 // estimate_only on the same line), and it performs [audio tags]. FORMAT asks the API for what the levelled files are.
@@ -121,10 +133,13 @@ function jsLiteral(src, name) {
   return new Function('return (' + src.slice(a + head.length, b + 2) + ');')();
 }
 
-function spoken(id, line) {
-  if (SAY[id]) return SAY[id];
+// `id` = the clip's id (a variant's '<line>.<variant>'), `base` = the line's: SAY is the line's performance in any voice;
+// PRON is per VOICE (a variant's under '<who>.<variant>') and PRON_LINE per clip - a misread is one voice's habit
+function spoken(id, line, base, voiceKey) {
+  base = base || id;
+  if (SAY[base]) return SAY[base];
   let t = String(line.text).replace(/~/g, '');
-  for (const [w, r] of Object.entries(PRON[line.who] || {})) t = t.replace(new RegExp('\\b' + w + '\\b', 'g'), r);
+  for (const [w, r] of Object.entries(PRON[voiceKey || line.who] || {})) t = t.replace(new RegExp('\\b' + w + '\\b', 'g'), r);
   for (const [w, r] of Object.entries(PRON_LINE[id] || {})) t = t.replace(new RegExp('\\b' + w + '\\b', 'g'), r);
   const tags = Object.keys(STYLE_TAGS).filter((k) => line[k]).map((k) => STYLE_TAGS[k]);
   return (tags.length ? tags.join(' ') + ' ' : '') + t;
@@ -142,22 +157,26 @@ const model = opt('--model') || MODEL;
 const rawPath = (id) => join(RAW_DIR, id + '.mp3');
 const voicePath = (id) => join(VOICE_DIR, id + '.mp3');
 
-// ── the selection ──
-let ids = Object.keys(LINES);
-const only = csv('--only'), who = csv('--who'), seqs = csv('--seq'), adopt = csv('--adopt');
+// ── the selection ── every clip: each line's own, then each VARIANT's copy of the lines its speaker says
+const ALL = Object.keys(LINES).map((id) => ({ id, base: id, variant: null }));
+for (const [v, V] of Object.entries(VARIANTS)) for (const id of Object.keys(LINES)) if (LINES[id].who === V.who) ALL.push({ id: id + '.' + v, base: id, variant: v });
+const known = new Set(ALL.map((c) => c.id));
+let sel = ALL;
+const only = csv('--only'), who = csv('--who'), seqs = csv('--seq'), adopt = csv('--adopt'), vars = csv('--var');
 const ingest = opt('--ingest') ? readJson(opt('--ingest'), []) : null;
-if (only.length) { const s = new Set(only); for (const i of only) if (!LINES[i]) console.warn('warn: no line "' + i + '"'); ids = ids.filter((i) => s.has(i)); }
-if (who.length) { const s = new Set(who); ids = ids.filter((i) => s.has(LINES[i].who)); }
+if (only.length) { const s = new Set(only); for (const i of only) if (!known.has(i)) console.warn('warn: no line "' + i + '"'); sel = sel.filter((c) => s.has(c.id)); }
+if (who.length) { const s = new Set(who); sel = sel.filter((c) => s.has(LINES[c.base].who)); }
+if (vars.length) { const s = new Set(vars); sel = sel.filter((c) => s.has(c.variant || 'none')); }   // --var azure | none
 if (seqs.length) {
   const want = new Set();
   for (const n of seqs) {
     if (!SEQS[n]) console.warn('warn: no sequence "' + n + '"');
     for (const e of SEQS[n] || []) { const id = typeof e === 'string' ? e : e && e.id; if (id) want.add(id); }
   }
-  ids = ids.filter((i) => want.has(i));
+  sel = sel.filter((c) => want.has(c.base));
 }
-if (adopt.length) { const s = new Set(adopt); ids = ids.filter((i) => s.has(i)); }
-if (ingest) { const s = new Set(ingest.map((e) => e.id)); ids = ids.filter((i) => s.has(i)); }
+if (adopt.length) { const s = new Set(adopt); sel = sel.filter((c) => s.has(c.id)); }
+if (ingest) { const s = new Set(ingest.map((e) => e.id)); sel = sel.filter((c) => s.has(c.id)); }
 
 function stateOf(p) {
   const m = manifest[p.id], r = raw[p.id], inVoice = existsSync(voicePath(p.id));
@@ -166,10 +185,11 @@ function stateOf(p) {
   if (r && r.hash === p.hash && existsSync(rawPath(p.id))) return 'raw';
   return inVoice || r ? 'stale' : 'missing';
 }
-const plan = ids.map((id) => {
-  const L = LINES[id], cast = CAST[L.who];
-  if (!cast) throw new Error(id + ': no voice cast for speaker "' + L.who + '"');
-  const text = spoken(id, L), p = { id, who: L.who, voice: cast.name, voice_id: cast.id, model_id: model, text, chars: text.length, hash: hashOf(cast.id, model, text) };
+const plan = sel.map((c) => {
+  const L = LINES[c.base], V = c.variant ? VARIANTS[c.variant] : null, cast = V || CAST[L.who];
+  if (!cast) throw new Error(c.id + ': no voice cast for speaker "' + L.who + '"');
+  const text = spoken(c.id, L, c.base, V ? L.who + '.' + c.variant : L.who);
+  const p = { id: c.id, who: L.who, variant: c.variant, voice: cast.name, voice_id: cast.id, model_id: model, text, chars: text.length, hash: hashOf(cast.id, model, text) };
   p.status = stateOf(p);
   return p;
 });
@@ -181,12 +201,13 @@ const todo = plan.filter((p) => p.status === 'missing' || p.status === 'stale' |
 function report() {
   const fmt = (n) => n.toLocaleString('en-US');
   console.log('CAMPAIGN VOICE · model ' + model + ' · ' + FORMAT + ' · 1 credit per character · levelled to ' + LEVEL.target + ' LUFS');
-  for (const k of Object.keys(CAST)) {
-    const p = plan.filter((x) => x.who === k);
-    if (!p.length) continue;
+  const row = (k, name, p) => {
+    if (!p.length) return;
     const c = p.reduce((s, x) => s + x.chars, 0);
-    console.log('  ' + k.padEnd(10) + CAST[k].name.padEnd(13) + String(p.length).padStart(4) + ' lines ' + fmt(c).padStart(7) + ' chars');
-  }
+    console.log('  ' + k.padEnd(12) + name.padEnd(13) + String(p.length).padStart(4) + ' lines ' + fmt(c).padStart(7) + ' chars');
+  };
+  for (const k of Object.keys(CAST)) row(k, CAST[k].name, plan.filter((x) => x.who === k && !x.variant));
+  for (const [v, V] of Object.entries(VARIANTS)) row(V.who + '.' + v, V.name, plan.filter((x) => x.variant === v));
   const chars = plan.reduce((s, x) => s + x.chars, 0), tchars = todo.reduce((s, x) => s + x.chars, 0);
   const secs = chars / CPS;
   console.log('  ' + plan.length + ' lines · ' + fmt(chars) + ' characters · ~' + (secs / 60).toFixed(1) + ' min of audio · ~' +
@@ -196,7 +217,7 @@ function report() {
     ') · to level ' + by('raw') + ' · baked ' + by('baked') + ' · own ' + by('own'));
   const tagged = plan.filter((x) => /^\[/.test(x.text));
   if (tagged.length) console.log('  performed: ' + tagged.map((x) => x.id + ' ' + x.text.match(/^(\[[^\]]+\]\s*)+/)[0].trim()).join(' · '));
-  if (has('--list')) for (const x of plan) console.log('  ' + x.status.padEnd(8) + x.id.padEnd(16) + x.who.padEnd(10) + String(x.chars).padStart(4) + '  ' + x.text);
+  if (has('--list')) for (const x of plan) console.log('  ' + x.status.padEnd(8) + x.id.padEnd(20) + x.voice.padEnd(12) + String(x.chars).padStart(4) + '  ' + x.text);
 }
 
 function syncMediaJson() {
@@ -204,7 +225,7 @@ function syncMediaJson() {
   const eol = text.includes('\r\n') ? '\r\n' : '\n';
   const mj = text ? JSON.parse(text) : { videos: [], voices: [], lines: [] };
   const before = (mj.lines || []).length;
-  mj.lines = Object.keys(LINES).filter((id) => existsSync(voicePath(id)));
+  mj.lines = ALL.map((c) => c.id).filter((id) => existsSync(voicePath(id)));   // (2026-10-11) + the variants' clips
   // (2026-10-08, v52.96) "rev": each clip's content version (the first 8 hex of the shipped file's sha1). The game asks for
   // voice/<id>.mp3?v=<rev> (CampMedia.voiceUrl) and fetches with cache:'force-cache', so a re-made clip - the narrator's
   // 18 when Gerald replaced Quentin - is a new URL, while every unchanged clip keeps its cached copy.
@@ -270,8 +291,8 @@ if (has('--dry')) { report(); process.exit(0); }
 
 if (opt('--plan') !== null && !ingest) {
   const out = opt('--plan') || 'campaign_voice_plan.json';
-  writeFileSync(out, JSON.stringify(todo.map(({ id, who, voice, voice_id, model_id, text, chars, hash, status }) =>
-    ({ id, who, voice, voice_id, model_id, text, chars, hash, status })), null, 2) + '\n');
+  writeFileSync(out, JSON.stringify(todo.map(({ id, who, variant, voice, voice_id, model_id, text, chars, hash, status }) =>
+    ({ id, who, variant, voice, voice_id, model_id, text, chars, hash, status })), null, 2) + '\n');
   report();
   console.log('plan: ' + todo.length + ' lines -> ' + out + ' · download each take to ' + RAW_DIR + '\\<id>.mp3, then --ingest it');
   process.exit(0);
