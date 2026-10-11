@@ -615,7 +615,9 @@ The Summoners found their contestant! That's you, pilot! You're the chosen one! 
 
 ### LEG 7: THE BROKEN SIMULATION
 
-**XORZO:** This is the last cavern. They're opening something big - I can feel it through the rock.
+**XORZO:** I don't think the Summoners' procedural generation AI could keep up with us. They couldn't finish the simulation - this is our chance to catch them! ★
+
+*(v53.57, `leg6_sim`. It replaces my old opener, now retired: "This is the last cavern. They're opening something big - I can feel it through the rock." Ashman: Xorzo doesn't know for sure it's the last leg, and he should explain why the cavern is glitched.)*
 
 *At the arena, the leviathan is FleshMaw again.*
 

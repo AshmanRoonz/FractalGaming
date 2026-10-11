@@ -8660,7 +8660,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.56";
+const LSS_BUILD = "53.60";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -13489,6 +13489,7 @@ function _cancelRoomForLocalPlay() {
       net.roomJoinedAt = 0;   // (v43.22) the room's clock dies with the room
       net.campaign = false;
       net.endless = false;
+      net._campRoomMap = null;   // (v53.59) the room's campaign leg goes with the room
     }
   } catch (_) {}
   try {
@@ -13693,6 +13694,14 @@ const CampaignMode = {
   onStart(ctx) {  },
   onBuildWorld(seed) {
     try { document.body.classList.add('lss-campaign'); } catch (_) {}   // (v49.74) no FLEET A / B, no ROUND n
+    // ⭐ (v53.59) THE LEG NUMBER FOLLOWS THE WORLD. The story (CAMP_SEQS['leg' + n], the arena's lines, the advance's next
+    // leg) reads game.campaign.sceneIndex. The solo picker's CONFIRM fork set it from the chosen level; a co-op launch never
+    // did, so a room that picked The Broken Simulation would build it and run The Approach's script (and its portal would
+    // have led to Verdant Pass). The world being built IS game.selectedMap (buildRoomGraphLevel builds it), on every peer.
+    try {
+      const c = game.campaign, i = (typeof CAMPAIGN_LEGS !== 'undefined') ? CAMPAIGN_LEGS.findIndex((l) => l && l.key === game.selectedMap) : -1;
+      if (c && i >= 0 && c.sceneIndex !== i) c.sceneIndex = i;
+    } catch (_) {}
     try { this._campStartScene(seed); } catch (e) { console.warn('[campaign] onBuildWorld', e); }
   },
   // Start (or restart) a scene : clear leftover hoard bots (campaign skips
@@ -15622,7 +15631,30 @@ function _campInitState() {
     difficulty: _getStoredDifficulty(), swarmCap: _campSwarmCapFor(_getStoredDifficulty()),
   };
   net.worldSeed = (net.worldSeed != null) ? (net.worldSeed >>> 0) : ((Math.random() * 0xffffffff) >>> 0);
-  try { if (typeof _preloadCyanRing === 'function') _preloadCyanRing(); } catch (_) {}   
+  // ⭐ (v53.59) ...or, in a ROOM, the leg the room already agreed on (a map_change that came before this peer took the
+  // campaign on - see _campRoomLeg). At LAUNCH every peer builds whatever the lowest peer id holds (match_start), so a
+  // peer reset to The Approach here would pull the whole room there.
+  try {
+    const rm = (typeof net !== 'undefined' && net && net.active) ? net._campRoomMap : null;
+    if (rm && MAP_DATA[rm]) { if (game.campaign.unlockedLegs.indexOf(rm) < 0) game.campaign.unlockedLegs.push(rm); game.selectedMap = rm; }
+  } catch (_) {}
+  try { if (typeof _preloadCyanRing === 'function') _preloadCyanRing(); } catch (_) {}
+}
+// ⭐ (v53.59) A CAMPAIGN LEG A ROOM CHOSE (a peer's map_change: its map arrow, or its CAMPAIGN pick on its last leg) is
+// everyone's for this session: remembered on the room (net._campRoomMap, read by _campInitState for a peer whose campaign
+// setup comes after it) and, for a peer already in the campaign, added to its unlocked legs so the map_change legality
+// check (A MAP MUST BE LEGAL FOR *MY* MODE) lets it through and the map card lists it. Not saved by itself - a leg the room
+// clears is saved the way any cleared leg is. Returns whether the key was a campaign leg.
+function _campRoomLeg(key) {
+  if (typeof key !== 'string' || key.indexOf('camp_') !== 0 || !MAP_DATA[key]) return false;
+  if (typeof CAMPAIGN_LEGS === 'undefined' || !CAMPAIGN_LEGS.some((l) => l && l.key === key)) return false;
+  if (typeof net !== 'undefined' && net) net._campRoomMap = key;
+  const c = game.campaign;
+  if (c && Array.isArray(c.unlockedLegs) && c.unlockedLegs.indexOf(key) < 0) {
+    c.unlockedLegs.push(key);
+    try { if (LSS.MODE === 'campaign') buildMapSelector(); } catch (_) {}   // the card's dots list it now
+  }
+  return true;
 }
 
 function startCampaign() {
@@ -18046,7 +18078,8 @@ const CAMP_ART = {
   topFrac: 1.0,      // the socket's height as a fraction of that - ONLY for a model with no head joint (the fallback pillar)
   headLift: 0,       // (v49.53) world units above the head joint (HeadTop_End sits ~1 u under the skin's top: 1.69 of 1.7)
   out: 1700,         // how far outside the city's radius it stands (the flat city ground ends ~8,550 from the centre)
-  bearing: 0.28,     // radians round the city from the pilot's line, AWAY from the side the giant rose on
+  bearing: 0.5,      // radians round the city from the pilot's line, AWAY from the side the giant rose on
+                     // (v53.57) 0.28 -> 0.5: ~6,000 from where you land, was ~3,000-4,000 - room to fight the chase (_campArtChase)
   capR: 150,         // the catch: the orb within this of the podium's axis...
   capH: 450,         // ...no higher than this over the socket...
   vMax: 560,         // ...and slower than this (the pads use 420)
@@ -18056,8 +18089,8 @@ const CAMP_ART = {
   undockHold: 0.25,  // seconds of movement input that take you off (the pads use 0.12 - a dock is harder won)
   orbit: { az: 95, el: 9, dist: 760, spin: 13 },   // the lowering, from the side: the O key's own camera
   orbitHold: 2.2,    // seconds of the upload still seen from outside before the pilot's view comes back
-  near: 3500,        // how close before the Summoners notice (waveA)
-  waveA: 4, waveB: 4,
+  near: 5000,        // how close before the Summoners notice (waveA) - (v53.57) 3,500 -> 5,000, so the chase starts early
+  waveA: 3, waveB: 0,   // (v53.57) 4 + 4 -> 3 + 0: a few CHASE you (_campArtChase), none warp in at the dock
   risers: 6, riseEvery: 3.2, riseCap: 200, freedAlive: 16,   // (v49.54) cap 26 -> 60: 26 were all up in ~32 s and the storm then thinned them out; (v49.58) -> 200 for the 1M giant's ~4 min fight
   runIn: 380, runOut: 2300, runPref: 1500,   // (the v49.52 strafing runs - retired for the wing in v49.71)
   // (v49.71) the WING: line abreast on both sides of the pilot - wingGap between ships across, wingBack of stagger aft
@@ -18408,6 +18441,22 @@ function _campArtSpawn(n, mk) {
     one();
   }).catch(() => {});
 }
+// ⭐ (v53.57) THE FEW THAT CHASE. Owner: "at the very end, it was almost impossible to get xorzo to the artifact, without
+// getting destroyed... let's make it a bit further away, and only a few ships chase, so you can kill them and then do the
+// uplink". The first wave (4) warped in AROUND THE PODIUM, 900-1,600 out - the airspace you were flying into - and the
+// podium stood ~3-4 km from where you land, already inside `near`, so it came at once. Docking then warped four more in
+// round you while the pad lock held you still for the upload. Now the podium stands further round the city (`bearing`),
+// `waveA` (3) warps in BEHIND you when the Summoners notice (`near`) and chases you down, and nothing comes at the dock
+// (`waveB` 0): kill the few, then upload. Same ships, same smoke, same hostile AI (_campArtSpawn).
+function _campArtChase(A, n) {
+  const P = player && player.position; if (!P || !A.top) return;
+  const bx = P.x - A.top.x, bz = P.z - A.top.z, a0 = Math.atan2(bz, bx);   // from the podium through you: "behind"
+  _campArtSpawn(n, (i) => {
+    const a = a0 + (i - (n - 1) / 2) * 0.35 + (Math.random() - 0.5) * 0.15, r = 1800 + Math.random() * 700;
+    const pos = new THREE.Vector3(P.x + Math.cos(a) * r, P.y + 200 + Math.random() * 300, P.z + Math.sin(a) * r);
+    return { pos, freed: false, fx: (b, p) => { try { _hoardTeleportSmoke(p.x, p.y, p.z, p.x, p.y, p.z, 12, 120); } catch (_) {} } };
+  });
+}
 // The Summoners' ships warp in around the podium (the Slayer-blink smoke every hoard teleport uses).
 function _campArtWave(A, n) {
   const at = A.top;
@@ -18650,7 +18699,7 @@ function _campArtTick(G, dt) {
     _campArtUpHud(A, (A.prog || 0) > 0);   // off it mid-upload: the bar stays up, amber, "UPLOAD PAUSED"
     const dP = player.position.distanceTo(A.top);
     // (v52.20) closing in: the owner's "Stay away from that!..." / "We Actual... bitch!" (was my ar_sum)
-    if (!A.wA && dP < K.near) { A.wA = true; _campArtWave(A, K.waveA); try { if (window.CampDialogue) window.CampDialogue.sayLines(['sum_stay_1', 'sum_stay_2', 'xz_actual']); } catch (_) {} }
+    if (!A.wA && dP < K.near) { A.wA = true; _campArtChase(A, K.waveA); try { if (window.CampDialogue) window.CampDialogue.sayLines(['sum_stay_1', 'sum_stay_2', 'xz_actual']); } catch (_) {} }
     if (!A.saidNear && dP < 1000) { A.saidNear = true; try { if (window.CampDialogue) window.CampDialogue.line('ar_near'); } catch (_) {} }
     // the catch: the ORB over the socket, low and slow
     const orb = _campArtOrb(_caV1);
@@ -18812,7 +18861,8 @@ try {
 // release before their ship warps in (the pilot's line plays first).
 const CAMP_ESC = { clock: 80, kitEvery: 8, runEvery: 9, runFor: 3.5, finalRun: 12, dash: 300, exitR: 70, dashMax: 10,
                    hpX: 3, ahead: 1700, portalDist: 5200, portalUp: 800, homeMin: 1.0, homeMax: 5.0, vowGap: 2.5, tbcHold: 5.5,
-                   fleeAt: 0.15, fightDelay: 3 };
+                   fleeAt: 0.15, fightDelay: 3,
+                   spdK: 0.85 };   // (v53.57) their ship flies a Dreadnought's speeds x this (_campEscSpawn: "slower than a dreadnaught")
 const _ceV1 = new THREE.Vector3(), _ceV2 = new THREE.Vector3();
 // the freed hoard go home - back into the ground, one by one (v52.20: when the giant falls; it was the vow's opening)
 function _campFreedGoHome() {
@@ -18902,6 +18952,18 @@ function _campEscSpawn(G, E, withPortal) {
     bot.position.copy(at); if (bot.mesh) bot.mesh.position.copy(at);
     _campMarkNemesis(bot);
     const DN = (typeof CHASSIS !== 'undefined' && CHASSIS.DREADNOUGHT) ? CHASSIS.DREADNOUGHT : { maxHealth: 12500, maxShield: 5000 };
+    // ⭐ (v53.57) SLOWER THAN A DREADNOUGHT. Owner: "at the very end of the campaign, it was impossible to catch the
+    // summoners, they were just too fast... let's make him slower than a dreadnaught". Their ship flew the VORTEX body (a
+    // Corvette, 350 u/s) x1.33 from _campMarkNemesis = ~466 u/s, quicker than most hulls a pilot brings. Now a
+    // Dreadnought's speeds x spdK (0.85: ~212 u/s, one dash), a cloned chassis (the shared CHASSIS entry is never
+    // touched): any hull runs him down. The kits still lend him the odd blink or surge. The match-speed dial blends every
+    // ship toward the same top speed (_lssSpeedLerp), so he stays the slowest ship in the sky at any setting.
+    if (DN.flightSpeed) {
+      const sk = K.spdK || 0.85;
+      bot.chassis = Object.assign({}, bot.chassis, { flightSpeed: DN.flightSpeed * sk, strafeSpeed: DN.strafeSpeed * sk,
+        verticalSpeed: DN.verticalSpeed * sk, acceleration: DN.acceleration, deceleration: DN.deceleration,
+        maxDashes: 1, dashSpeed: DN.dashSpeed * sk });
+    }
     bot.maxHealth = bot.health = Math.round(DN.maxHealth * K.hpX);
     bot.maxShield = bot.shield = Math.round(DN.maxShield * K.hpX);
     bot.coreMeter = 100;                                  // "fully loaded"
@@ -20362,6 +20424,10 @@ function selectMap(mapKey, opts) {
   _mapSelectorRendered = true;
   _mapPaintedKey = mapKey;
   game.selectedMap = mapKey;
+  // (v53.59) a campaign leg CHOSEN in a room is the room's (see _campRoomLeg): a later campaign setup on this peer keeps it.
+  // ⚠ Not a silent call: buildMapSelector's re-snap and a peer's echo pass `silent`, and a re-snap to a campaign setup's
+  // default (The Approach) is no one's choice - marking it agreed would ride the decree and undo the room's real leg
+  try { if (!(opts && opts.silent) && typeof net !== 'undefined' && net && net.active && LSS.MODE === 'campaign' && mapKey.indexOf('camp_') === 0) net._campRoomMap = mapKey; } catch (_) {}
   const mapData = MAP_DATA[mapKey];
   // Auto-apply the map's default theme unless the user has picked a
   // non-default override (e.g. Cyberpunk_City1). Empty preset or another
@@ -23188,6 +23254,9 @@ function handleNetEvent(evt, fromPeerId) {
     // the mode this client has already been decreed. When the two modes agree it never fires.
     // Without it a freeflight peer could paint 'hub_overworld' into a classic peer, which echoed it
     // and then snapped back to 'hourglass' - the other edge of the 2-cycle.
+    // ⭐ (v53.59) ...EXCEPT A CAMPAIGN LEG THE ROOM CHOSE, which is everyone's (_ssxCampaignPick's room branch): it joins this
+    // session's legs before the check below, or is remembered for the campaign setup still on its way (_campRoomLeg)
+    try { _campRoomLeg(evt.mapKey); } catch (_) {}
     try {
       if (typeof _visibleMapKeys === 'function') {
         const _legal = _visibleMapKeys();
@@ -36718,13 +36787,23 @@ function renderPostFX() {
     // look entry — menus, gmaps — stay neutral). window.__grade fields still
     // override per-field for live tuning, exactly as before.
     const _bLook = (game.sandwichTerrain && typeof _SW_BIOME_LOOK !== 'undefined') ? _SW_BIOME_LOOK[game.sandwichTerrain.biome] : null;
-    const _bg = (_bLook && _bLook.grade) || null;
+    // (v53.57) ...or the MAP's own grade, from its `lift` (A MAP CAN LIFT ITS OWN LIGHT): the campaign's glitched cavern
+    // measured ~10 of 255 mean brightness with ~90% of pixels near black, and its lights x1.8 only moved it to 11 - the dark
+    // is its albedo and its glitch-black ceiling, so the lift that shows is in the image. Only while the built world IS
+    // that biome (the advance moves selectedMap 2 s before the old world goes); `__legLift.off` = the biome's own grade
+    let _mg = null;
+    try { const _md = MAP_DATA[game.selectedMap], _L = _md && _md.lift;
+      if (_L && _L.grade && !(window.__legLift && window.__legLift.off) && game.sandwichTerrain && _L.biome === game.sandwichTerrain.biome) _mg = _L.grade; } catch (_) {}
+    const _bg = _mg || (_bLook && _bLook.grade) || null;
     const _gr = window.__grade || {}; const _cm = postFX.compositeMat.uniforms;
     _cm.gradeSat.value      = (_gr.sat      != null) ? _gr.sat      : (_bg ? _bg.sat      : 1.0);
     _cm.gradeContrast.value = (_gr.contrast != null) ? _gr.contrast : (_bg ? _bg.contrast : 1.0);
     _cm.gradeWarmth.value   = (_gr.warmth   != null) ? _gr.warmth   : (_bg ? _bg.warmth   : 1.0);
     _cm.gradeLift.value     = (_gr.lift     != null) ? _gr.lift     : (_bg ? _bg.lift     : 0.0);
     if (window.__exposure != null) _cm.exposure.value = window.__exposure;
+    // (v53.57) the map grade's exposure, over the composite's own 1.05 - and put back the frame it stops applying
+    else if (_mg && _mg.exposure) { _cm.exposure.value = 1.05 * _mg.exposure; game._legExp = true; }
+    else if (game._legExp) { _cm.exposure.value = 1.05; game._legExp = false; }
   }
 
   // 1. Render scene to offscreen target
@@ -40504,6 +40583,7 @@ function _lssApplyArenaMood(mood) {
   ambientLight.intensity = s.amb * (mood.ambMul != null ? mood.ambMul : 1);
   if (mood.hSky != null) hemiLight.color.set(mood.hSky); else hemiLight.color.set(s.hSky);
   if (mood.hGnd != null) hemiLight.groundColor.set(mood.hGnd); else hemiLight.groundColor.set(s.hGnd);
+  hemiLight.intensity = s.hemi * (mood.hemiMul != null ? mood.hemiMul : 1);   // (v53.57) for a map's `lift` (_swLegLift)
   game._swArenaLit = true;
 }
 function _lssRestoreArenaMood() {
@@ -40513,9 +40593,34 @@ function _lssRestoreArenaMood() {
     ambientLight.intensity = s.amb; dirLight.intensity = s.key;
     if (s.keyCol != null) dirLight.color.set(s.keyCol);
     hemiLight.color.set(s.hSky); hemiLight.groundColor.set(s.hGnd);
+    if (s.hemi != null) hemiLight.intensity = s.hemi;   // (v53.57)
   }
   game._swArenaLit = false;
 }
+// ⭐ (v53.57) A MAP CAN LIFT ITS OWN LIGHT. Owner: "in the last leg of the campaign before the overworld, the glitched
+// caverns, it's too dark". The Broken Simulation THEME is shared (The Diamond and the arena maps wear it too), so the
+// campaign leg carries its own `lift` (MAP_DATA.camp_brokensim): an arena mood (_lssApplyArenaMood's fields, + hemiMul)
+// over the same saved baseline, plus `fogCol` for the distance haze, applied by _swApplyAtmosphere's brokensim branch -
+// which until now applied no mood at all. Live: window.__legLift = { ambMul, sunMul, hemiMul, hSky, hGnd, fogCol }, then
+// __legLift.apply() (a field set here beats the map's; delete it to fall back).
+function _swLegLift() {
+  let L = null;
+  try { const m = MAP_DATA[game.selectedMap]; L = (m && m.lift) || null; } catch (_) {}
+  const K = (typeof window !== 'undefined' && window.__legLift) ? window.__legLift : null;
+  if (!K) return L;
+  const o = Object.assign({}, L || {});
+  for (const k of ['sunCol', 'sunMul', 'ambMul', 'hemiMul', 'hSky', 'hGnd', 'fogCol']) if (K[k] != null) o[k] = K[k];
+  return o;
+}
+function _swLegLiftApply() {
+  const lf = _swLegLift();
+  _lssRestoreArenaMood();
+  if (!lf) return null;
+  _lssApplyArenaMood(lf);
+  try { if (lf.fogCol != null && scene.fog && scene.fog.color) scene.fog.color.set(lf.fogCol); } catch (_) {}
+  return lf;
+}
+if (typeof window !== 'undefined') window.__legLift = Object.assign(window.__legLift || {}, { apply: () => _swLegLiftApply() });
 
 // ---- STARFIELD ----
 
@@ -47836,7 +47941,7 @@ function _swApplyAtmosphere() {
       try { _swDisposeHubWater(); } catch (_) {}
     }
     try { _lssApplyHubLighting(false); } catch (_) {}
-    try { _lssRestoreArenaMood(); } catch (_) {}
+    try { _swLegLiftApply(); } catch (_) {}   // (v53.57) the baseline, or the map's own `lift` (the campaign leg's)
   } else if (T.biome === 'mossy') {
     
     
@@ -143397,6 +143502,12 @@ function _lssModeDecide() {
     //   question about the TAG. Every other mode is unaffected: its tag IS its mode string.
     try { if (_bestHostMap && _lssRoomTag() === bestMode) _map = _bestHostMap; } catch (_) {}
     try { if (!_map && _lssRoomTag() === bestMode && game && game.selectedMap) _map = game.selectedMap; } catch (_) {}
+    // ⭐ (v53.59) A CAMPAIGN DECREE CARRIES ONLY AN AGREED LEG. Measured with two tabs (the presser on The Crystal Caverns, the
+    // decider with no progress): the decider adopted the campaign, _campInitState put IT on The Approach, and its decree
+    // carried that - so the presser was moved to The Approach ("ADOPT map=camp_approach") while the decider took the
+    // presser's map_change and went to The Crystal Caverns: swapped, and apart. A campaign setup's default is no one's
+    // choice; only a leg the room picked (net._campRoomMap: a map arrow or a CAMPAIGN pick in the room) rides the decree.
+    try { if (bestMode === 'campaign' && !(net._campRoomMap && net._campRoomMap === _map)) _map = undefined; } catch (_) {}
     let _seed;
     try { if (net.worldSeed != null) _seed = net.worldSeed >>> 0; } catch (_) {}
     const _key = bestMode + '|' + (_map || '') + '|' + (_seed == null ? '' : _seed);
@@ -143583,6 +143694,9 @@ function _lssApplyModeDecree(evt, mine) {
       // holding is legal - snapping to the mode's first map if not. buildMapSelector does the same
       // snap, but only on the paths that call it; this is the invariant, stated once.
       let _want = evt.map;
+      // (v53.59) a campaign leg in a decree is the room's agreed one (see A CAMPAIGN DECREE CARRIES ONLY AN AGREED LEG): this
+      // session's legs take it before the legality check, or a peer without that leg would snap the room back to The Approach
+      try { if (evt.mode === 'campaign' && _want) _campRoomLeg(_want); } catch (_) {}
       try {
         if (_want && typeof _visibleMapKeys === 'function') {
           const _legal = _visibleMapKeys();
@@ -144639,11 +144753,33 @@ function _ssxModePick(t) {
 function _ssxCampaignPick() {
   try {
     if (_lssRoomModeLocked()) return;
-    const inRoom = !!(typeof net !== 'undefined' && net && net.active && net.room);
+    let inRoom = !!(typeof net !== 'undefined' && net && net.active && net.room);
+    // ⭐ (v53.57) A ROOM ONLY YOU ARE IN IS SOLO. Owner: "if you play another mode then go to campaign, it doesn't start
+    // in the right place, and the leg selection was not available even though i completed some legs". ELIMINATION opens
+    // a real room even alone (startElimination / startOpenSolo mint a code so others can drop in) and the room outlives
+    // the match - so CAMPAIGN read "in a room" and took the co-op road below: _lssPickRoomMode -> _campInitState, The
+    // Approach, no leg picker. With nobody else in it, leave it (the Live Rooms list drops it) and take the solo road:
+    // the returning pilot's picker on the last leg, every unlocked leg on the map card.
+    if (inRoom && !(net.peers && net.peers.size > 0)) { try { _cancelRoomForLocalPlay(); } catch (_) {} inRoom = false; }
+    // ...and a code left in the old menu's #room-code (written by any room this session made or joined, _ssxRoomGo) would
+    // send startCampaignJourney into its co-op host branch on its own: from here CAMPAIGN is the solo story unless you
+    // are in a room with someone
+    if (!inRoom) { try { const rc = document.getElementById('room-code'); if (rc) rc.value = ''; } catch (_) {} }
     if (inRoom) {
       try { if (window.CampPortrait) window.CampPortrait.warm(); } catch (_) {}   // the speakers' bodies, as startCampaignJourney warms them
       _lssPickRoomMode('campaign');
       enterShipSelect();   // the roster, the map card (the campaign's levels) and the cards, for the campaign
+      // ⭐ (v53.59) ...ON YOUR LAST LEG, AND THE ROOM GOES WITH YOU. Owner (in a room): "if you play another mode then go to
+      // campaign, it doesn't start in the right place, and the leg selection was not available". _campInitState always
+      // put the co-op campaign on The Approach, and every peer's map card listed only ITS OWN unlocked legs - a second
+      // device has none - so the room could never hold your leg: their map_change receiver refused it as "not legal here",
+      // and at LAUNCH the lowest peer id's map (match_start -> applyWorldSync) is what every peer builds. Now the picker's
+      // last leg is selected and broadcast like a press of the map arrow, and every peer takes a leg the room chose
+      // (_campRoomLeg, at the map_change receiver), so the room agrees on it before the launch.
+      try {
+        const last = _campLoadLast(), c = game.campaign;
+        if (_lssRoomTag() === 'campaign' && last && c && Array.isArray(c.unlockedLegs) && c.unlockedLegs.indexOf(last) >= 0 && MAP_DATA[last]) selectMap(last);
+      } catch (e) { console.warn('[ssx] campaign leg for the room:', e); }
       return;
     }
     let prog = false;
@@ -155930,6 +156066,13 @@ MAP_DATA.camp_volcanic.rooms = _campLegRooms(MAP_DATA.camp_volcanic.legHalfZ);
 MAP_DATA.camp_goldmine    = { ...CAMPAIGN_LEG_MAP, name: 'The Golden Deep',       description: 'Gold-ore veins glittering through the bronze rock.',         defaultTheme: 'Gold Mine',         palette: [0x8a6a2e,0xcea44e,0xf2dc92,0x5a4a32,0x34261a,0x705428,0xb8902e,0xead08a] };
 MAP_DATA.camp_crystalcave = { ...CAMPAIGN_LEG_MAP, name: 'The Crystal Caverns',   description: 'A magical cavern of glowing crystals and drifting sprites.', defaultTheme: 'Crystal Cavern',    palette: [0x3a4a78,0x6a7ac0,0xc8d4ff,0x2a3258,0x141838,0x4a5398,0x7a6ad0,0x9a8aff] };
 MAP_DATA.camp_brokensim   = { ...CAMPAIGN_LEG_MAP, name: 'The Broken Simulation', description: 'Reality fails around you — the final confrontation.',        defaultTheme: 'Broken Simulation', palette: [0x4a4a54,0x70707e,0xc8c8d6,0x42424c,0x1a1428,0x3a3a44,0x6a5a8a,0x8a7aaa] };
+// ⭐ (v53.57) THE GLITCHED CAVERN, LIT. Owner: "in the last leg of the campaign before the overworld, the glitched caverns,
+// it's too dark". This leg only (the theme is shared): see A MAP CAN LIFT ITS OWN LIGHT (_swLegLift).
+// Measured first (pane, 53.57 at the leg's start): mean ~10 of 255, ~90% of pixels near black; the lights x1.8 alone
+// reached ~11. So the lift is mostly in the image: `grade` (the composite's sat / contrast / warmth / lift + exposure, over
+// the biome's 0.90 / 1.10 / 0.95 / 0.02 and the composite's 1.05), used while the built world is this `biome`.
+MAP_DATA.camp_brokensim.lift = { ambMul: 1.8, sunMul: 1.2, hemiMul: 1.8, hSky: 0x9a88c8, hGnd: 0x3a3450, fogCol: 0x3a3058,
+  biome: 'brokensim', grade: { sat: 0.95, contrast: 1.04, warmth: 0.97, lift: 0.03, exposure: 1.6 } };
 // ⭐ (v53.01) THE CRYSTAL CAVERNS TOO (72.6 km, was 34.6). Owner: "and we can lengthen crystal caverns too". Its scene
 // (`onto_them`: the Matrix, Duke, "Incoming!") is 20 lines, ~113 s, due at 2.1 km - and node tools/camp_leg_sim.mjs had
 // the old leg reaching its arena 20-54 s before the talk ended. 37,000 = the same margin as Molten Core: at ~550 u/s you
@@ -159677,7 +159820,11 @@ const CAMP_LINES = {
   // takeover scene opens The Golden Deep now. So are leg5_a / leg5_b ("They're inside me. When I'm red, don't
   // listen." / "~Disregard. Corrupted packet.~"): Xorzo cleans the virus out of himself in that scene, so a
   // hacked line in the next leg contradicts it. CAMPAIGN_STORY.md keeps them.
-  leg6_a:  { who: 'xorzo', text: "This is the last cavern. They're opening something big - I can feel it through the rock." },
+  // (v53.57) leg6_a ("This is the last cavern. They're opening something big...") is RETIRED, owner: "we should also avoid
+  // xorzo saying this is the last leg, because he doesn't know for sure... he should explain why the cavern is glitched".
+  // leg6_sim is the owner's line (a NEW id: the old take is keyed to leg6_a, so a re-worded leg6_a would have played the
+  // old voice under the new words until re-baked). CAMPAIGN_STORY.md keeps the old one.
+  leg6_sim: { who: 'xorzo', text: "I don't think the Summoners' procedural generation AI could keep up with us. They couldn't finish the simulation - this is our chance to catch them!" },
   boss0_a: { who: 'summoners', text: 'Keep it busy, pet.' },
   boss1_a: { who: 'summoners', text: 'Play with it a while, little ship.' },
   boss2_a: { who: 'summoners', text: 'Another one of ours. Or was it one of yours?' },
@@ -159853,7 +160000,7 @@ const CAMP_SEQS = {
   // (v52.60) Verdant Pass and Frozen Reach: the owner's longer exchanges
   leg0: ['leg0_a', 'leg0_b'], leg1: ['leg1_a', 'leg1_b', 'leg1_c', 'leg1_d', 'leg1_e'],
   leg2: ['leg2_a', 'leg2_b', 'leg2_c', 'leg2_d', 'leg2_e', 'leg2_f'], leg3: ['leg3_a'],
-  leg6: ['leg6_a'],   // (v52.16) leg4 / leg5 retired: The Golden Deep opens on the takeover scene, The Crystal Caverns on its talk
+  leg6: ['leg6_sim'],   // (v52.16) leg4 / leg5 retired: The Golden Deep opens on the takeover scene, The Crystal Caverns on its talk. (v53.57) leg6_a -> leg6_sim
   boss0: ['boss0_a'], boss1: ['boss1_a'], boss2: ['boss2_a'], boss3: ['boss3_a'],
   boss4: ['boss4_a'], boss5: ['boss5_a'], boss6: ['boss6_a'],
   ending: ['end_q1', 'end_q2', 'end_go', 'end_body', 'end_ship'],

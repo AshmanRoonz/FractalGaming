@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.56";
+const LSS_BUILD = "53.60";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -3339,6 +3339,7 @@ function _cancelRoomForLocalPlay() {
       net.roomJoinedAt = 0;   // (v43.22) the room's clock dies with the room
       net.campaign = false;
       net.endless = false;
+      net._campRoomMap = null;   // (v53.59) the room's campaign leg goes with the room
     }
   } catch (_) {}
   try {
@@ -3476,6 +3477,10 @@ const CampaignMode = {
   onStart(ctx) {  },
   onBuildWorld(seed) {
     try { document.body.classList.add('lss-campaign'); } catch (_) {}   // (v49.74) no FLEET A / B, no ROUND n
+    try {
+      const c = game.campaign, i = (typeof CAMPAIGN_LEGS !== 'undefined') ? CAMPAIGN_LEGS.findIndex((l) => l && l.key === game.selectedMap) : -1;
+      if (c && i >= 0 && c.sceneIndex !== i) c.sceneIndex = i;
+    } catch (_) {}
     try { this._campStartScene(seed); } catch (e) { console.warn('[campaign] onBuildWorld', e); }
   },
   _campStartScene(seed) {
@@ -4723,7 +4728,22 @@ function _campInitState() {
     difficulty: _getStoredDifficulty(), swarmCap: _campSwarmCapFor(_getStoredDifficulty()),
   };
   net.worldSeed = (net.worldSeed != null) ? (net.worldSeed >>> 0) : ((Math.random() * 0xffffffff) >>> 0);
-  try { if (typeof _preloadCyanRing === 'function') _preloadCyanRing(); } catch (_) {}   
+  try {
+    const rm = (typeof net !== 'undefined' && net && net.active) ? net._campRoomMap : null;
+    if (rm && MAP_DATA[rm]) { if (game.campaign.unlockedLegs.indexOf(rm) < 0) game.campaign.unlockedLegs.push(rm); game.selectedMap = rm; }
+  } catch (_) {}
+  try { if (typeof _preloadCyanRing === 'function') _preloadCyanRing(); } catch (_) {}
+}
+function _campRoomLeg(key) {
+  if (typeof key !== 'string' || key.indexOf('camp_') !== 0 || !MAP_DATA[key]) return false;
+  if (typeof CAMPAIGN_LEGS === 'undefined' || !CAMPAIGN_LEGS.some((l) => l && l.key === key)) return false;
+  if (typeof net !== 'undefined' && net) net._campRoomMap = key;
+  const c = game.campaign;
+  if (c && Array.isArray(c.unlockedLegs) && c.unlockedLegs.indexOf(key) < 0) {
+    c.unlockedLegs.push(key);
+    try { if (LSS.MODE === 'campaign') buildMapSelector(); } catch (_) {}   // the card's dots list it now
+  }
+  return true;
 }
 
 function startCampaign() {
@@ -6434,7 +6454,7 @@ const CAMP_ART = {
   topFrac: 1.0,      // the socket's height as a fraction of that - ONLY for a model with no head joint (the fallback pillar)
   headLift: 0,       // (v49.53) world units above the head joint (HeadTop_End sits ~1 u under the skin's top: 1.69 of 1.7)
   out: 1700,         // how far outside the city's radius it stands (the flat city ground ends ~8,550 from the centre)
-  bearing: 0.28,     // radians round the city from the pilot's line, AWAY from the side the giant rose on
+  bearing: 0.5,      // radians round the city from the pilot's line, AWAY from the side the giant rose on
   capR: 150,         // the catch: the orb within this of the podium's axis...
   capH: 450,         // ...no higher than this over the socket...
   vMax: 560,         // ...and slower than this (the pads use 420)
@@ -6444,8 +6464,8 @@ const CAMP_ART = {
   undockHold: 0.25,  // seconds of movement input that take you off (the pads use 0.12 - a dock is harder won)
   orbit: { az: 95, el: 9, dist: 760, spin: 13 },   // the lowering, from the side: the O key's own camera
   orbitHold: 2.2,    // seconds of the upload still seen from outside before the pilot's view comes back
-  near: 3500,        // how close before the Summoners notice (waveA)
-  waveA: 4, waveB: 4,
+  near: 5000,        // how close before the Summoners notice (waveA) - (v53.57) 3,500 -> 5,000, so the chase starts early
+  waveA: 3, waveB: 0,   // (v53.57) 4 + 4 -> 3 + 0: a few CHASE you (_campArtChase), none warp in at the dock
   risers: 6, riseEvery: 3.2, riseCap: 200, freedAlive: 16,   // (v49.54) cap 26 -> 60: 26 were all up in ~32 s and the storm then thinned them out; (v49.58) -> 200 for the 1M giant's ~4 min fight
   runIn: 380, runOut: 2300, runPref: 1500,   // (the v49.52 strafing runs - retired for the wing in v49.71)
   wingGap: 150, wingFirst: 170, wingBack: 35, wingUp: 70, wingHold: 260, wingRange: 3400,
@@ -6762,6 +6782,15 @@ function _campArtSpawn(n, mk) {
     one();
   }).catch(() => {});
 }
+function _campArtChase(A, n) {
+  const P = player && player.position; if (!P || !A.top) return;
+  const bx = P.x - A.top.x, bz = P.z - A.top.z, a0 = Math.atan2(bz, bx);   // from the podium through you: "behind"
+  _campArtSpawn(n, (i) => {
+    const a = a0 + (i - (n - 1) / 2) * 0.35 + (Math.random() - 0.5) * 0.15, r = 1800 + Math.random() * 700;
+    const pos = new THREE.Vector3(P.x + Math.cos(a) * r, P.y + 200 + Math.random() * 300, P.z + Math.sin(a) * r);
+    return { pos, freed: false, fx: (b, p) => { try { _hoardTeleportSmoke(p.x, p.y, p.z, p.x, p.y, p.z, 12, 120); } catch (_) {} } };
+  });
+}
 function _campArtWave(A, n) {
   const at = A.top;
   _campArtSpawn(n, () => {
@@ -6962,7 +6991,7 @@ function _campArtTick(G, dt) {
     _campArtMark(A, true);
     _campArtUpHud(A, (A.prog || 0) > 0);   // off it mid-upload: the bar stays up, amber, "UPLOAD PAUSED"
     const dP = player.position.distanceTo(A.top);
-    if (!A.wA && dP < K.near) { A.wA = true; _campArtWave(A, K.waveA); try { if (window.CampDialogue) window.CampDialogue.sayLines(['sum_stay_1', 'sum_stay_2', 'xz_actual']); } catch (_) {} }
+    if (!A.wA && dP < K.near) { A.wA = true; _campArtChase(A, K.waveA); try { if (window.CampDialogue) window.CampDialogue.sayLines(['sum_stay_1', 'sum_stay_2', 'xz_actual']); } catch (_) {} }
     if (!A.saidNear && dP < 1000) { A.saidNear = true; try { if (window.CampDialogue) window.CampDialogue.line('ar_near'); } catch (_) {} }
     const orb = _campArtOrb(_caV1);
     const h = Math.hypot(orb.x - A.top.x, orb.z - A.top.z), dy = orb.y - A.top.y;
@@ -7086,7 +7115,8 @@ try {
 
 const CAMP_ESC = { clock: 80, kitEvery: 8, runEvery: 9, runFor: 3.5, finalRun: 12, dash: 300, exitR: 70, dashMax: 10,
                    hpX: 3, ahead: 1700, portalDist: 5200, portalUp: 800, homeMin: 1.0, homeMax: 5.0, vowGap: 2.5, tbcHold: 5.5,
-                   fleeAt: 0.15, fightDelay: 3 };
+                   fleeAt: 0.15, fightDelay: 3,
+                   spdK: 0.85 };   // (v53.57) their ship flies a Dreadnought's speeds x this (_campEscSpawn: "slower than a dreadnaught")
 const _ceV1 = new THREE.Vector3(), _ceV2 = new THREE.Vector3();
 function _campFreedGoHome() {
   const K = CAMP_ESC;
@@ -7167,6 +7197,12 @@ function _campEscSpawn(G, E, withPortal) {
     bot.position.copy(at); if (bot.mesh) bot.mesh.position.copy(at);
     _campMarkNemesis(bot);
     const DN = (typeof CHASSIS !== 'undefined' && CHASSIS.DREADNOUGHT) ? CHASSIS.DREADNOUGHT : { maxHealth: 12500, maxShield: 5000 };
+    if (DN.flightSpeed) {
+      const sk = K.spdK || 0.85;
+      bot.chassis = Object.assign({}, bot.chassis, { flightSpeed: DN.flightSpeed * sk, strafeSpeed: DN.strafeSpeed * sk,
+        verticalSpeed: DN.verticalSpeed * sk, acceleration: DN.acceleration, deceleration: DN.deceleration,
+        maxDashes: 1, dashSpeed: DN.dashSpeed * sk });
+    }
     bot.maxHealth = bot.health = Math.round(DN.maxHealth * K.hpX);
     bot.maxShield = bot.shield = Math.round(DN.maxShield * K.hpX);
     bot.coreMeter = 100;                                  // "fully loaded"
@@ -8117,6 +8153,7 @@ function selectMap(mapKey, opts) {
   _mapSelectorRendered = true;
   _mapPaintedKey = mapKey;
   game.selectedMap = mapKey;
+  try { if (!(opts && opts.silent) && typeof net !== 'undefined' && net && net.active && LSS.MODE === 'campaign' && mapKey.indexOf('camp_') === 0) net._campRoomMap = mapKey; } catch (_) {}
   const mapData = MAP_DATA[mapKey];
   try {
     if (mapData.defaultTheme && typeof applyMapPreset === 'function') {
@@ -9940,6 +9977,7 @@ function handleNetEvent(evt, fromPeerId) {
         if (inp) { inp.disabled = false; }
       } catch(_) {}
     }
+    try { _campRoomLeg(evt.mapKey); } catch (_) {}
     try {
       if (typeof _visibleMapKeys === 'function') {
         const _legal = _visibleMapKeys();
@@ -19586,13 +19624,18 @@ function renderPostFX() {
   postFX.compositeMat.uniforms.time.value = game.time;
   { 
     const _bLook = (game.sandwichTerrain && typeof _SW_BIOME_LOOK !== 'undefined') ? _SW_BIOME_LOOK[game.sandwichTerrain.biome] : null;
-    const _bg = (_bLook && _bLook.grade) || null;
+    let _mg = null;
+    try { const _md = MAP_DATA[game.selectedMap], _L = _md && _md.lift;
+      if (_L && _L.grade && !(window.__legLift && window.__legLift.off) && game.sandwichTerrain && _L.biome === game.sandwichTerrain.biome) _mg = _L.grade; } catch (_) {}
+    const _bg = _mg || (_bLook && _bLook.grade) || null;
     const _gr = window.__grade || {}; const _cm = postFX.compositeMat.uniforms;
     _cm.gradeSat.value      = (_gr.sat      != null) ? _gr.sat      : (_bg ? _bg.sat      : 1.0);
     _cm.gradeContrast.value = (_gr.contrast != null) ? _gr.contrast : (_bg ? _bg.contrast : 1.0);
     _cm.gradeWarmth.value   = (_gr.warmth   != null) ? _gr.warmth   : (_bg ? _bg.warmth   : 1.0);
     _cm.gradeLift.value     = (_gr.lift     != null) ? _gr.lift     : (_bg ? _bg.lift     : 0.0);
     if (window.__exposure != null) _cm.exposure.value = window.__exposure;
+    else if (_mg && _mg.exposure) { _cm.exposure.value = 1.05 * _mg.exposure; game._legExp = true; }
+    else if (game._legExp) { _cm.exposure.value = 1.05; game._legExp = false; }
   }
 
   {
@@ -22573,6 +22616,7 @@ function _lssApplyArenaMood(mood) {
   ambientLight.intensity = s.amb * (mood.ambMul != null ? mood.ambMul : 1);
   if (mood.hSky != null) hemiLight.color.set(mood.hSky); else hemiLight.color.set(s.hSky);
   if (mood.hGnd != null) hemiLight.groundColor.set(mood.hGnd); else hemiLight.groundColor.set(s.hGnd);
+  hemiLight.intensity = s.hemi * (mood.hemiMul != null ? mood.hemiMul : 1);   // (v53.57) for a map's `lift` (_swLegLift)
   game._swArenaLit = true;
 }
 function _lssRestoreArenaMood() {
@@ -22582,9 +22626,28 @@ function _lssRestoreArenaMood() {
     ambientLight.intensity = s.amb; dirLight.intensity = s.key;
     if (s.keyCol != null) dirLight.color.set(s.keyCol);
     hemiLight.color.set(s.hSky); hemiLight.groundColor.set(s.hGnd);
+    if (s.hemi != null) hemiLight.intensity = s.hemi;   // (v53.57)
   }
   game._swArenaLit = false;
 }
+function _swLegLift() {
+  let L = null;
+  try { const m = MAP_DATA[game.selectedMap]; L = (m && m.lift) || null; } catch (_) {}
+  const K = (typeof window !== 'undefined' && window.__legLift) ? window.__legLift : null;
+  if (!K) return L;
+  const o = Object.assign({}, L || {});
+  for (const k of ['sunCol', 'sunMul', 'ambMul', 'hemiMul', 'hSky', 'hGnd', 'fogCol']) if (K[k] != null) o[k] = K[k];
+  return o;
+}
+function _swLegLiftApply() {
+  const lf = _swLegLift();
+  _lssRestoreArenaMood();
+  if (!lf) return null;
+  _lssApplyArenaMood(lf);
+  try { if (lf.fogCol != null && scene.fog && scene.fog.color) scene.fog.color.set(lf.fogCol); } catch (_) {}
+  return lf;
+}
+if (typeof window !== 'undefined') window.__legLift = Object.assign(window.__legLift || {}, { apply: () => _swLegLiftApply() });
 
 
 let _starfieldPoints = null;
@@ -27660,7 +27723,7 @@ function _swApplyAtmosphere() {
       try { _swDisposeHubWater(); } catch (_) {}
     }
     try { _lssApplyHubLighting(false); } catch (_) {}
-    try { _lssRestoreArenaMood(); } catch (_) {}
+    try { _swLegLiftApply(); } catch (_) {}   // (v53.57) the baseline, or the map's own `lift` (the campaign leg's)
   } else if (T.biome === 'mossy') {
     
     
@@ -93083,6 +93146,7 @@ function _lssModeDecide() {
     let _map;
     try { if (_bestHostMap && _lssRoomTag() === bestMode) _map = _bestHostMap; } catch (_) {}
     try { if (!_map && _lssRoomTag() === bestMode && game && game.selectedMap) _map = game.selectedMap; } catch (_) {}
+    try { if (bestMode === 'campaign' && !(net._campRoomMap && net._campRoomMap === _map)) _map = undefined; } catch (_) {}
     let _seed;
     try { if (net.worldSeed != null) _seed = net.worldSeed >>> 0; } catch (_) {}
     const _key = bestMode + '|' + (_map || '') + '|' + (_seed == null ? '' : _seed);
@@ -93150,6 +93214,7 @@ function _lssApplyModeDecree(evt, mine) {
     let mapChanged = false;
     try {
       let _want = evt.map;
+      try { if (evt.mode === 'campaign' && _want) _campRoomLeg(_want); } catch (_) {}
       try {
         if (_want && typeof _visibleMapKeys === 'function') {
           const _legal = _visibleMapKeys();
@@ -93945,11 +94010,17 @@ function _ssxModePick(t) {
 function _ssxCampaignPick() {
   try {
     if (_lssRoomModeLocked()) return;
-    const inRoom = !!(typeof net !== 'undefined' && net && net.active && net.room);
+    let inRoom = !!(typeof net !== 'undefined' && net && net.active && net.room);
+    if (inRoom && !(net.peers && net.peers.size > 0)) { try { _cancelRoomForLocalPlay(); } catch (_) {} inRoom = false; }
+    if (!inRoom) { try { const rc = document.getElementById('room-code'); if (rc) rc.value = ''; } catch (_) {} }
     if (inRoom) {
       try { if (window.CampPortrait) window.CampPortrait.warm(); } catch (_) {}   // the speakers' bodies, as startCampaignJourney warms them
       _lssPickRoomMode('campaign');
       enterShipSelect();   // the roster, the map card (the campaign's levels) and the cards, for the campaign
+      try {
+        const last = _campLoadLast(), c = game.campaign;
+        if (_lssRoomTag() === 'campaign' && last && c && Array.isArray(c.unlockedLegs) && c.unlockedLegs.indexOf(last) >= 0 && MAP_DATA[last]) selectMap(last);
+      } catch (e) { console.warn('[ssx] campaign leg for the room:', e); }
       return;
     }
     let prog = false;
@@ -102706,6 +102777,8 @@ MAP_DATA.camp_volcanic.rooms = _campLegRooms(MAP_DATA.camp_volcanic.legHalfZ);
 MAP_DATA.camp_goldmine    = { ...CAMPAIGN_LEG_MAP, name: 'The Golden Deep',       description: 'Gold-ore veins glittering through the bronze rock.',         defaultTheme: 'Gold Mine',         palette: [0x8a6a2e,0xcea44e,0xf2dc92,0x5a4a32,0x34261a,0x705428,0xb8902e,0xead08a] };
 MAP_DATA.camp_crystalcave = { ...CAMPAIGN_LEG_MAP, name: 'The Crystal Caverns',   description: 'A magical cavern of glowing crystals and drifting sprites.', defaultTheme: 'Crystal Cavern',    palette: [0x3a4a78,0x6a7ac0,0xc8d4ff,0x2a3258,0x141838,0x4a5398,0x7a6ad0,0x9a8aff] };
 MAP_DATA.camp_brokensim   = { ...CAMPAIGN_LEG_MAP, name: 'The Broken Simulation', description: 'Reality fails around you — the final confrontation.',        defaultTheme: 'Broken Simulation', palette: [0x4a4a54,0x70707e,0xc8c8d6,0x42424c,0x1a1428,0x3a3a44,0x6a5a8a,0x8a7aaa] };
+MAP_DATA.camp_brokensim.lift = { ambMul: 1.8, sunMul: 1.2, hemiMul: 1.8, hSky: 0x9a88c8, hGnd: 0x3a3450, fogCol: 0x3a3058,
+  biome: 'brokensim', grade: { sat: 0.95, contrast: 1.04, warmth: 0.97, lift: 0.03, exposure: 1.6 } };
 MAP_DATA.camp_crystalcave.legHalfZ = 37000;
 MAP_DATA.camp_crystalcave.rooms = _campLegRooms(MAP_DATA.camp_crystalcave.legHalfZ);
 Object.assign(MAP_DATA.camp_approach, { thumb: 'map_thumbs/the_approach.webp' });
@@ -105646,7 +105719,7 @@ const CAMP_LINES = {
   leg2_e:  { who: 'summoners', text: "There's going to be an end for you soon, glitchy AI. Pilot, this AI has you hacked, you need to delete it manually." },
   leg2_f:  { who: 'pilot', text: "The AI appears to be working just fine, I'm still alive, aren't I?" },
   leg3_a:  { who: 'xorzo', text: "Pilot... if I ever tell you to ~k-kill~ something that isn't shooting at you... don't." },
-  leg6_a:  { who: 'xorzo', text: "This is the last cavern. They're opening something big - I can feel it through the rock." },
+  leg6_sim: { who: 'xorzo', text: "I don't think the Summoners' procedural generation AI could keep up with us. They couldn't finish the simulation - this is our chance to catch them!" },
   boss0_a: { who: 'summoners', text: 'Keep it busy, pet.' },
   boss1_a: { who: 'summoners', text: 'Play with it a while, little ship.' },
   boss2_a: { who: 'summoners', text: 'Another one of ours. Or was it one of yours?' },
@@ -105767,7 +105840,7 @@ const CAMP_SEQS = {
   gameshow: ['gs_winner', 'gs_only', 'gs_best', 'gs_special', 'gs_agree', 'gs_cash', 'gs_sim', 'gs_money', 'gs_people'],
   leg0: ['leg0_a', 'leg0_b'], leg1: ['leg1_a', 'leg1_b', 'leg1_c', 'leg1_d', 'leg1_e'],
   leg2: ['leg2_a', 'leg2_b', 'leg2_c', 'leg2_d', 'leg2_e', 'leg2_f'], leg3: ['leg3_a'],
-  leg6: ['leg6_a'],   // (v52.16) leg4 / leg5 retired: The Golden Deep opens on the takeover scene, The Crystal Caverns on its talk
+  leg6: ['leg6_sim'],   // (v52.16) leg4 / leg5 retired: The Golden Deep opens on the takeover scene, The Crystal Caverns on its talk. (v53.57) leg6_a -> leg6_sim
   boss0: ['boss0_a'], boss1: ['boss1_a'], boss2: ['boss2_a'], boss3: ['boss3_a'],
   boss4: ['boss4_a'], boss5: ['boss5_a'], boss6: ['boss6_a'],
   ending: ['end_q1', 'end_q2', 'end_go', 'end_body', 'end_ship'],
