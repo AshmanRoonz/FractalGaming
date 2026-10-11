@@ -198,6 +198,11 @@ const OVERRIDES = {
   // (2026-10-06) the pilot as he SITS in your ship (assets_src copy of pilot_ashman.glb): behind a canopy he is a
   // few dozen pixels tall, so ~26k triangles and 1k maps. The full 174k / 2k file stays for the standing scene.
   'objects/characters/pilot_ashman_seat.glb': { simplify: 0.15, texMax: 1024, reason: 'in-seat LOD of the pilot' },
+  // (2026-10-10) the owner's two more pilots, chosen under the hangar's CUSTOMIZE: the same in-seat LOD (it is also the
+  // body that stands in the hangar and in the CUSTOMIZE line-up). Built by char_pipeline.py --handfix 0 (rigged A- / T-pose,
+  // hands never on the legs) --retarget (the first pilot's Sit_Alert + Sit_Cheer_with_Left_Hand); 2k Meshy maps -> 1k.
+  'objects/characters/pilot_azure_seat.glb': { simplify: 0.15, texMax: 1024, reason: 'in-seat LOD of Azure Vanguard' },
+  'objects/characters/pilot_frostfang_seat.glb': { simplify: 0.15, texMax: 1024, reason: 'in-seat LOD of Captain Frostfang' },
   // (2026-10-06) THE SUMMONERS' SHIP. Owner: "we will switch to using one of the older of the main ships that already
   // had a cut out cockpit, the old pyro". It is the c1seat Pyro exactly as it flew from v38.9x until the concept hulls
   // replaced it (git 7793287:LSS/ships/pyro.glb and its lean ships/m/ twin): ALREADY this script's output (welded,

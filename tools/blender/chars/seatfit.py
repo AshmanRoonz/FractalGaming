@@ -54,12 +54,41 @@ head = carm.matrix_world @ carm.pose.bones['mixamorig:Head'].head
 headG = to_gl(head)
 ch = float(PG[:, 1].max() - PG[:, 1].min())
 eyeC = headG + np.array([0, 0.07, 0.09]) * (ch / 1.0) / max(ch, 1e-6) * 1.0   # the offsets are in metres, the rig is metric
-hips_m = np.isin(dom, ['Hips', 'LeftUpLeg', 'RightUpLeg'])
+# --tail 1 (2026-10-10, Captain Frostfang): a TAIL is skinned to the hips, so "the lowest hip vertex" was its tip
+# (butt -0.09 m, below the cushion: every seat scaled him to ~60%) and "the rearmost torso vertex" was its root. With
+# a tail, the cushion contact is read off the thighs alone and the back off the spine alone.
+TAIL = opt.get('tail', '0') == '1'
+hips_m = np.isin(dom, ['LeftUpLeg', 'RightUpLeg'] if TAIL else ['Hips', 'LeftUpLeg', 'RightUpLeg'])
 buttC = float(PG[hips_m, 1].min())
-torso = np.isin(dom, ['Spine', 'Spine1', 'Spine2', 'Hips'])
+torso = np.isin(dom, ['Spine', 'Spine1', 'Spine2'] if TAIL else ['Spine', 'Spine1', 'Spine2', 'Hips'])
 backC = float(PG[torso, 2].min())          # character faces +Z, so its back is its min Z
 midX = float(np.median(PG[torso, 0]))
 char = {'eye': eyeC.tolist(), 'butt_y': buttC, 'back_z': backC, 'mid_x': midX, 'height_posed': ch}
+
+# --headroom CM (2026-10-10, owner on Captain Frostfang in the Slayer: "the animal_pilot head is going through the glass...
+# might have to shrink that character"). The eyes are what the fit puts at cockpit1, and a wolf's head (ears, a mane)
+# rises far further above its eyes than a man's. So the HEAD (vertices on the head / neck bones, plus anything above
+# eye level: ears, fur, hair) is posed at every --headroom_frames frame of the clip, and after a pod fit each point is
+# measured against the canopy (glass + frame) straight above it - a ray UP from the cushion's height at that point finds
+# the glass's INNER face. If the closest point has less than CM centimetres (real scale) the character is shrunk about
+# the cushion and the backrest (butt stays on the seat, back on the backrest; the eyes end up below cockpit1, which is
+# harmless: first person hides your own pilot) to the largest scale that clears. Every hull's clearance is reported.
+HEAD_CM = float(opt['headroom']) if opt.get('headroom') else None
+HEADPTS = None
+if HEAD_CM is not None:
+    head_m = np.isin(dom, ['Head', 'HeadTop_End', 'headfront', 'Neck'])
+    pts = []
+    for hf in [int(x) for x in opt.get('headroom_frames', opt.get('frame', '1')).split(',')]:
+        scn.frame_set(hf)
+        dg2 = bpy.context.evaluated_depsgraph_get(); ev2 = cme.evaluated_get(dg2); em2 = ev2.to_mesh()
+        Q = np.array([to_gl(ev2.matrix_world @ v.co) for v in em2.vertices]); ev2.to_mesh_clear()
+        sel = head_m | (Q[:, 1] > eyeC[1] - 0.02)
+        idx = np.nonzero(sel)[0]
+        if len(idx) > 1500:
+            idx = idx[np.linspace(0, len(idx) - 1, 1500).astype(int)]
+        pts.append(Q[idx])
+    HEADPTS = np.concatenate(pts) if pts else None
+    scn.frame_set(int(opt.get('frame', 1)))   # back to the fit frame for the renders
 for o in cobjs:
     o.hide_render = True
 
@@ -130,6 +159,75 @@ for sp in opt['ships'].split(','):
         tz = eye[2] + s * char['mid_x']
         info['fit'] = {'scale': s, 'pos': [tx, ty, tz], 'yaw_deg': 90.0, 'mode': 'pod', 'cushion_y': cushion, 'back_x': x_back,
                        'eye_at': [tx - s * char['eye'][2], ty + s * char['eye'][1], tz], 'eye_shift_x': (tx - s * char['eye'][2]) - eye[0]}
+        if HEADPTS is not None and len(HEADPTS):
+            # the canopy over the seat: glass + frame (by material, as the seat filter above), inner faces found from below
+            cv, ct = [], []
+            for o in sobjs:
+                if o.type != 'MESH':
+                    continue
+                mn = ' '.join(m.name.lower() for m in o.data.materials if m)
+                if not any(k in mn for k in ('glass', 'windshield', 'canopy_frame')):
+                    continue
+                e3 = o.evaluated_get(bpy.context.evaluated_depsgraph_get()).to_mesh(); e3.calc_loop_triangles()
+                b0 = len(cv)
+                for v in e3.vertices:
+                    cv.append(mathutils.Vector(to_gl(o.matrix_world @ v.co)))
+                for t3 in e3.loop_triangles:
+                    ct.append(tuple(b0 + i for i in t3.vertices))
+                o.evaluated_get(bpy.context.evaluated_depsgraph_get()).to_mesh_clear()
+            cb = mathutils.bvhtree.BVHTree.FromPolygons(cv, ct) if ct else None
+
+            def place(sc):
+                return (x_back - 0.002 + sc * char['back_z'], cushion - sc * char['butt_y'], eye[2] + sc * char['mid_x'])
+
+            def clearance(sc):
+                if cb is None:
+                    return None
+                px, py, pz = place(sc)
+                X = px - sc * HEADPTS[:, 2]; Y = py + sc * HEADPTS[:, 1]; Z = pz + sc * HEADPTS[:, 0]
+                worst = None
+                for i in range(len(X)):
+                    h = cb.ray_cast(mathutils.Vector((X[i], cushion, Z[i])), mathutils.Vector((0, 1, 0)))
+                    if h[0] is None:
+                        continue                       # open sky above this point (no canopy there)
+                    c = (h[0].y - Y[i]) / sc               # in the CHARACTER's metres: real-scale headroom
+                    worst = c if worst is None else min(worst, c)
+                return worst
+            need = HEAD_CM / 100.0
+            c0 = clearance(s)
+            info['fit']['headroom_cm'] = None if c0 is None else round(c0 * 100, 1)
+            # --headroom_mode lower (the default since 2026-10-11; owner: "lower the pilots down into their seats instead
+            # of resizing them, it's okay if they're almost touching the glass"): same scale, the whole body dropped into
+            # the seat by exactly the missing clearance - a vertical drop moves every head point straight down under the
+            # same glass, so the gain is exact, no search. The hips sink below the cushion; the pod hides them.
+            if opt.get('headroom_mode', 'lower') == 'lower':
+                if c0 is not None and c0 < need:
+                    dy = (need - c0) * s
+                    info['fit']['pos'][1] = ty - dy
+                    info['fit']['lowered_cm'] = round((need - c0) * 100, 1)
+                    info['fit']['headroom_cm_before'] = round(c0 * 100, 1)
+                    info['fit']['headroom_cm'] = round(need * 100, 1)
+                    info['fit']['eye_at'] = [tx - s * char['eye'][2], ty - dy + s * char['eye'][1], tz]
+                c0 = None                                  # done: skip the shrink below
+            cl = clearance(s * 0.55) if (c0 is not None and c0 < need) else None
+            if c0 is not None and c0 < need and cl is not None and cl < need:
+                info['fit']['headroom_unfixable'] = round(cl * 100, 1)   # even at 55% it touches: report, never shrink that far
+            elif c0 is not None and c0 < need:             # --headroom_mode shrink: the largest scale that clears
+                lo, hi = 0.55, 1.0                         # largest k in [lo, hi] that clears
+                for _ in range(14):
+                    mid = (lo + hi) / 2
+                    cm = clearance(s * mid)
+                    if cm is None or cm >= need:
+                        lo = mid
+                    else:
+                        hi = mid
+                k = lo
+                s2 = s * k
+                tx2, ty2, tz2 = place(s2)
+                c2 = clearance(s2)
+                info['fit'].update({'scale': s2, 'pos': [tx2, ty2, tz2], 'shrunk': round(k, 4), 'scale_eye_fit': s,
+                                    'headroom_cm': None if c2 is None else round(c2 * 100, 1), 'headroom_cm_before': round(c0 * 100, 1),
+                                    'eye_at': [tx2 - s2 * char['eye'][2], ty2 + s2 * char['eye'][1], tz2]})
     elif opt.get('pan_y'):
         # SEAT MODE: hips on the cushion (pan_y), back on the backrest face (back_x), scale given
         s = float(opt['scale']); pan_y = float(opt['pan_y']); back_x = float(opt['back_x'])

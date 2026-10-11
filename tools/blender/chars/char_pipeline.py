@@ -28,6 +28,14 @@ STEPS (each is a step script beside this file, the same scripts the live session
 
 Refuses to run inside a GUI session (it starts from an empty scene).
 
+--handfix 0 skips steps 3-5 (the cut and the island clean-up): for a biped Meshy did NOT rig arms-down. (2026-10-10, the
+owner's second and third pilots, Azure Vanguard and Captain Frostfang, came rigged in an A-pose and a T-pose, hands
+clear of the body, and with FINGER bones, which handfix.py's one-bone hand does not know.) Measure with --report.
+
+--retarget SRC.glb:ClipA,ClipB brings clips over from another Meshy biped (retarget.py: limbs aimed like the source,
+trunk moved like it) - the new pilots get the first pilot's Sit_Alert + Sit_Cheer_with_Left_Hand, because the seat
+is fitted to that pose and Meshy gave them only a cross-legged floor sit.
+
 --upper 0 skips handfix's ARM PASS (the cut up the inner upper arm + the torso-side re-weight) and cuts the hands
 only. (2026-10-07, owner, looking at the shipped files: "when you cut under their arm, you cut into their chest...
 you cut the hand, away from the legs, good... but then you did the arm after, we should undo that step if possible,
@@ -89,6 +97,10 @@ if opt.get('alert'):
     for k, v in zip(('target', 'keep', 'neck'), a[2:]):
         kw[k] = v
     report['alert'] = step('alert_head.py', **kw)
+# 1c. (optional) clips from another biped: --retarget SRC.glb:ClipA,ClipB (retarget.py)
+if opt.get('retarget'):
+    src, _, cl = opt['retarget'].rpartition(':')
+    report['retarget'] = step('retarget.py', arm=NAME, src=os.path.abspath(src), clips=cl, prefix=PREFIX)
 report['clips'] = sorted(a.name[len(PREFIX):] for a in bpy.data.actions if a.name.startswith(PREFIX))
 report['import'] = {'verts': len(me.data.vertices), 'tris': sum(len(p.vertices) - 2 for p in me.data.polygons)}
 
@@ -97,17 +109,18 @@ m = me.data; n = len(m.loops)
 cn = np.zeros(n * 3, np.float32); m.corner_normals.foreach_get('vector', cn)
 m.attributes.new('cc_nrm', 'FLOAT_VECTOR', 'CORNER').data.foreach_set('vector', cn)
 
-# 3. the model's own small islands
-own = step('islands.py', arm=NAME, weld='1')
-keep = [s[2] for s in own['small']]
-report['own_islands'] = len(keep)
-
-# 4-5. the cut, then the fragments it freed
-if 'stretch' in opt.get('report_before', ''):
-    report['stretch_before'] = step('stretch.py', arm=NAME, prefix=PREFIX, step='3')
-report['upper'] = opt.get('upper', '1')
-report['handfix'] = step('handfix.py', arm=NAME, mode='apply', capcol='0', upper=report['upper'])
-report['islands'] = step('islands.py', arm=NAME, delete_below='40', keep=keep)
+# 3-5. the model's own small islands, the cut, then the fragments it freed (--handfix 0: none of it)
+if opt.get('handfix', '1') != '0':
+    own = step('islands.py', arm=NAME, weld='1')
+    keep = [s[2] for s in own['small']]
+    report['own_islands'] = len(keep)
+    if 'stretch' in opt.get('report_before', ''):
+        report['stretch_before'] = step('stretch.py', arm=NAME, prefix=PREFIX, step='3')
+    report['upper'] = opt.get('upper', '1')
+    report['handfix'] = step('handfix.py', arm=NAME, mode='apply', capcol='0', upper=report['upper'])
+    report['islands'] = step('islands.py', arm=NAME, delete_below='40', keep=keep)
+else:
+    report['handfix'] = 'skipped (--handfix 0)'
 
 # 6. the number
 if opt.get('report'):

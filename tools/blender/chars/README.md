@@ -96,3 +96,48 @@ There are two fitting modes, because the two kinds of seat put `cockpit1` in dif
 
 The glTF importer sets `rotation_mode = 'QUATERNION'`, so a Blender `rotation_euler` write does nothing until
 the mode is switched. That one cost a round of sideways-facing renders.
+
+## More pilots: Azure Vanguard and Captain Frostfang (2026-10-10, game v53.44)
+
+The owner's second and third pilots, picked under the hangar's CUSTOMIZE (`_LSS_SEATS.azure` / `.frostfang` in the game;
+`_LSS_SEATS.pilot` is now a getter for the chosen one). Two differences from the first pilot:
+
+- **Rigged in an A-pose (Azure) and a T-pose (Frostfang), with FINGER bones** (50 / 44 joints). Their hands never touched
+  their legs, so there is nothing to cut: `--handfix 0` skips steps 3-5 (handfix.py does not know finger bones anyway).
+- **Meshy gave them only a cross-legged FLOOR sit.** The seat is fitted to, and the game asks for, the first pilot's
+  `Sit_Alert` (+ `Sit_Cheer_with_Left_Hand`), so `--retarget` brings those over (`retarget.py`). Their rest poses differ
+  from his (arms down vs 45 deg vs straight out: bone directions 27-31 deg / 66-70 deg apart), so a bone's local rotation
+  means something else on each rig. Limbs are AIMED like the source (`QT = (QS QS0^-1) A QT0`, `A` = the shortest turn from
+  the target's rest bone direction onto the source's); the trunk takes the source's motion away from ITS rest onto the
+  target's own rest. Bones the source lacks (fingers) keep their rest pose.
+
+```bash
+"$B" -b --factory-startup -P tools/blender/chars/char_pipeline.py -- --name Azure \
+    --dir assets_base/objects/characters/Meshy_AI_Azure_Vanguard_biped --out tools/blender/work/chars/pilot_azure.glb \
+    --report tools/blender/work/chars/azure_report.json --handfix 0 \
+    --retarget assets_src/objects/characters/pilot_ashman.glb:Sit_Alert,Sit_Cheer_with_Left_Hand
+cp tools/blender/work/chars/pilot_azure.glb assets_src/objects/characters/pilot_azure_seat.glb   # only the in-seat LOD ships
+node tools/compress_glb.mjs --only pilot_azure_seat
+```
+
+(Frostfang: the same with `--name Frostfang`, his folder and `pilot_frostfang`.) Only the `_seat` LOD goes into assets_src:
+the game uses it for the seat, the hangar stand and the CUSTOMIZE line-up, and a full-size copy there would ship ~10 MB
+nobody loads.
+
+**Stretch report caveat:** both read thousands of >4x edges even in Meshy's OWN walk. It is real movement (up to 7-12 cm)
+on spine-weighted vertices - Azure's long hair, Frostfang's tail - not the hands; the retargeted sit is no worse than their
+own clips.
+
+## Seat fitting: tails and headroom (v53.44)
+
+- `--tail 1`: a tail skinned to the hips made "the lowest hip vertex" its tip (butt -0.09 m, every seat scaled him to
+  ~60%). With it the cushion contact is read off the thighs and the back off the spine only.
+- `--headroom CM --headroom_frames F1,F2,...`: the HEAD (head / neck bones + anything above eye level: ears, a mane, hair)
+  is posed at those frames and measured against the canopy (glass + frame, a ray UP from the cushion's height finds the
+  glass's inner face) after the eye fit. Owner, on Frostfang's head through the Slayer's glass: "lower the pilots down
+  into their seats instead of resizing them, it's okay if they're almost touching the glass" -> `--headroom_mode lower`
+  (the default) drops the body by exactly the shortfall (a vertical drop moves every head point straight down under the
+  same glass); `shrink` scales it about the cushion instead. Measured with 1 cm and 8 frames of Sit_Alert: the FIRST
+  pilot was through the glass too (Slayer -17, Puncture -13, Tracker -4 cm) and got the same drop in the game table.
+- The Slayer's numbers assume its RAISED canopy (v53.44, `backups/concept_ships/canopy/scripts/slayer_glass_raise.py` +
+  `glass_splice.mjs`): with the old glass the drops there were ~18-21 cm.
