@@ -14,10 +14,42 @@ it. `tools/compress_glb.mjs` (recipe `character`) builds the shipped copy.
 B="$(python tools/blender/blender_path.py)"
 "$B" -b --factory-startup -P tools/blender/chars/char_pipeline.py -- \
     --name Pilot --dir assets_base/objects/characters/Meshy_AI_Hangar_Vanguard_biped \
-    --out assets_src/objects/characters/pilot_ashman.glb --report tools/blender/work/chars/pilot_report.json     --alert Sit_and_Doze_Off:Sit_Alert
+    --out assets_src/objects/characters/pilot_ashman.glb --report tools/blender/work/chars/pilot_report.json     --alert Sit_and_Doze_Off:Sit_Alert \
+    --upper 0 --feet Stand_Talking_Angry
 cp assets_src/objects/characters/pilot_ashman.glb assets_src/objects/characters/pilot_ashman_seat.glb   # the in-seat LOD source
 node tools/compress_glb.mjs --only characters/
 ```
+
+(`--upper 0` since v52.59 and `--feet` since v53.66: see below.)
+
+## Level feet in the standing clips (2026-10-11, game v53.66)
+
+Owner, on the CUSTOMIZE line-up: "pilot and animal pilot both look like they are standing on a ball, ankles tilted in".
+Meshy's talk clips, which every standing pilot holds, keep the feet 17–23° off flat for the whole clip:
+
+| pilot | clip | the feet |
+|---|---|---|
+| Ashman | Stand_Talking_Angry | rolled ~16° onto the outer edges and toes up ~16° |
+| Frostfang | Talk_with_Hands_Open | rolled 17° / 11° |
+| Azure | Talk_Passionately | toes up ~22°, rolled ~6° |
+
+These are measured against the rest pose, where all three stand flat.
+
+- **`feet.py`** (headless) measures the feet and renders front, back, side and leg close-ups. With `--fix 1 --out X.glb` it
+  levels a finished GLB and exports it with `export.py`.
+- **`feet_level.py`** is the step that does the levelling (also `char_pipeline.py --feet Clip`). Each foot bone, then its toe
+  bone, is turned back to its rest lie on every frame, about the ankle, by the shortest rotation. That rotation never
+  changes the heading. It is exact in one step.
+
+**Don't fit a plane to the sole.** The first measure fitted a plane to the boot's down-facing skin (toe cap, heel bevel, lugs).
+It read Frostfang's left sole as 11.5° one way, and other readings of the same sole gave 10.5° and 4.6° the opposite way.
+"Levelling" by that fit rolled the foot to 31°.
+
+**Still off:** Azure's right foot hangs 2.5 cm off the floor in her clip. That is the leg's height, not a tilt, so it would
+need leg IK.
+
+The shipped six were fixed on the finished GLBs (originals in `tools/blender/work/chars/feet/orig_2026-10-11/`). Each pilot has
+its own `art` / `fullArt` stamp in the game; `_LSS_SEAT_ART` stays the Summoners'.
 
 Then look at it in `LSS/character_lab.html`, which loads the files with the game's own three 0.165. It has a clip
 picker, a scrubber, and CLAY / SKELETON / IN PLACE / WIRE toggles, plus `window.CL` hooks for headless checks.
@@ -115,12 +147,16 @@ The owner's second and third pilots, picked under the hangar's CUSTOMIZE (`_LSS_
 "$B" -b --factory-startup -P tools/blender/chars/char_pipeline.py -- --name Azure \
     --dir assets_base/objects/characters/Meshy_AI_Azure_Vanguard_biped --out tools/blender/work/chars/pilot_azure.glb \
     --report tools/blender/work/chars/azure_report.json --handfix 0 \
-    --retarget assets_src/objects/characters/pilot_ashman.glb:Sit_Alert,Sit_Cheer_with_Left_Hand
-cp tools/blender/work/chars/pilot_azure.glb assets_src/objects/characters/pilot_azure_seat.glb   # only the in-seat LOD ships
-node tools/compress_glb.mjs --only pilot_azure_seat
+    --retarget assets_src/objects/characters/pilot_ashman.glb:Sit_Alert,Sit_Cheer_with_Left_Hand --feet Talk_Passionately
+cp tools/blender/work/chars/pilot_azure.glb assets_src/objects/characters/pilot_azure_seat.glb   # the in-seat LOD source
+cp tools/blender/work/chars/pilot_azure.glb assets_src/objects/characters/pilot_azure.glb        # (v53.64) the gameshow's full file
+node tools/compress_glb.mjs --only characters/pilot_azure
 ```
 
-(Frostfang: the same with `--name Frostfang`, his folder and `pilot_frostfang`.) Only the `_seat` LOD goes into assets_src:
+(Frostfang: the same with `--name Frostfang`, his folder, `pilot_frostfang` and `--feet Talk_with_Hands_Open`.) ⚠ The retarget
+reads the FIRST pilot's assets_src file: since v53.66 its Stand_Talking_Angry has level feet, which does not touch the
+Sit_Alert / cheer brought over. (v53.64) Both files now ship: the `_seat` LOD and the full one the gameshow stands in. The
+text below is from v53.44, when only the `_seat` LOD went into assets_src:
 the game uses it for the seat, the hangar stand and the CUSTOMIZE line-up, and a full-size copy there would ship ~10 MB
 nobody loads.
 

@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.65";
+const LSS_BUILD = "53.66";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -49651,7 +49651,7 @@ const _LSS_SEATS = {
     suitLum: 0.016,   // (v53.61) the suit's typical value (the median of the colourless texels under 0.3 x gearLum)
     accent: [22, 26, 0.03, 0.09],
     feetOut: 9,   // (v53.47) deg, standing only (_lssIdleBreath): his boots are modelled turned in - "feet are bowed in a bit"
-    url: 'objects/characters/pilot_ashman_seat.glb',
+    url: 'objects/characters/pilot_ashman_seat.glb', art: '53.66', fullArt: '53.66',
     clip: 'Sit_Alert', fallback: 'Sit_and_Doze_Off', cheer: 'Sit_Cheer_with_Left_Hand',
     hulls: {
       blaster: { s: 0.0984, x: -0.6198, y: -0.0042, z: -0.0005 },
@@ -49666,8 +49666,8 @@ const _LSS_SEATS = {
   azure: {
     name: 'AZURE VANGUARD', sub: 'FLEET PILOT', stand: 'Talk_Passionately', gearLum: 0.17, suitLum: 0.021,
     voice: 'azure',   // (v53.64) her campaign lines: '<line>.azure' (Verity), see CampDialogue _voiceId
-    full: 'objects/characters/pilot_azure.glb', fullArt: '53.64',
-    url: 'objects/characters/pilot_azure_seat.glb', art: '53.44',
+    full: 'objects/characters/pilot_azure.glb', fullArt: '53.66',
+    url: 'objects/characters/pilot_azure_seat.glb', art: '53.66',   // (v53.66) level feet (see ashman)
     clip: 'Sit_Alert', fallback: 'Sit_Cross_Legged', cheer: 'Sit_Cheer_with_Left_Hand',
     hulls: {   // seatfit.py, eyes at cockpit1, then lowered for 1 cm of headroom (shortfall at the eye fit in the comments)
       blaster: { s: 0.1193, x: -0.6323, y: -0.0173, z: 0.0002 },    // lowered 1.6 cm
@@ -49681,8 +49681,8 @@ const _LSS_SEATS = {
   },
   frostfang: {
     name: 'CAPTAIN FROSTFANG', sub: 'WOLF OF THE FLEET', stand: 'Talk_with_Hands_Open', gearLum: 0.23, suitLum: 0.025,
-    full: 'objects/characters/pilot_frostfang.glb', fullArt: '53.64',   // (v53.64) as Azure's: the gameshow's full-detail body
-    url: 'objects/characters/pilot_frostfang_seat.glb', art: '53.44',
+    full: 'objects/characters/pilot_frostfang.glb', fullArt: '53.66',   // (v53.64) as Azure's: the gameshow's full-detail body
+    url: 'objects/characters/pilot_frostfang_seat.glb', art: '53.66',   // (v53.66) level feet (see ashman)
     clip: 'Sit_Alert', fallback: 'Sit_Cross_Legged_on_Floor', cheer: 'Sit_Cheer_with_Left_Hand',
     hulls: {   // as azure's; fitted with --tail 1 (his tail is skinned to the hips: the cushion read off his thighs)
       blaster: { s: 0.0989, x: -0.6106, y: -0.0066, z: 0.0002 },
@@ -106900,7 +106900,7 @@ const CAMP_SEQS = {
     let pid = 'ashman';
     try { pid = _lssPilotId(); } catch (_) {}
     const d = _LSS_SEATS[pid];
-    if (pid === 'ashman' || !d) return { url: cfg.gs.pilot.url, art: _LSS_SEAT_ART, clip: 'Stand_Talking_Angry' };
+    if (pid === 'ashman' || !d) return { url: cfg.gs.pilot.url, art: (_LSS_SEATS.ashman && _LSS_SEATS.ashman.fullArt) || _LSS_SEAT_ART, clip: 'Stand_Talking_Angry' };
     if (d.full) return { url: d.full, art: d.fullArt || d.art || _LSS_SEAT_ART, clip: d.stand || 'Stand_Talking_Angry' };
     return { url: d.url, art: d.art || _LSS_SEAT_ART, clip: d.stand || 'Stand_Talking_Angry' };
   }

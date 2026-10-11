@@ -36,6 +36,8 @@ clear of the body, and with FINGER bones, which handfix.py's one-bone hand does 
 trunk moved like it) - the new pilots get the first pilot's Sit_Alert + Sit_Cheer_with_Left_Hand, because the seat
 is fitted to that pose and Meshy gave them only a cross-legged floor sit.
 
+--feet ClipA,ClipB levels the feet in those (standing) clips - feet_level.py; see step 1d.
+
 --upper 0 skips handfix's ARM PASS (the cut up the inner upper arm + the torso-side re-weight) and cuts the hands
 only. (2026-10-07, owner, looking at the shipped files: "when you cut under their arm, you cut into their chest...
 you cut the hand, away from the legs, good... but then you did the arm after, we should undo that step if possible,
@@ -101,6 +103,12 @@ if opt.get('alert'):
 if opt.get('retarget'):
     src, _, cl = opt['retarget'].rpartition(':')
     report['retarget'] = step('retarget.py', arm=NAME, src=os.path.abspath(src), clips=cl, prefix=PREFIX)
+# 1d. (optional) LEVEL FEET in the standing clips: --feet ClipA,ClipB (feet_level.py). (2026-10-11, game v53.66) Meshy's
+# talk clips hold the feet 17-23 deg off flat ("standing on a ball, ankles tilted in"); each foot + toe goes back to its
+# rest lie on every frame, heading kept. The pilots' standing clips: Stand_Talking_Angry / Talk_Passionately /
+# Talk_with_Hands_Open (the shipped files were fixed with feet.py --fix on the finished GLBs - the same step).
+if opt.get('feet'):
+    report['feet'] = step('feet_level.py', arm=NAME, clips=','.join(PREFIX + c for c in opt['feet'].split(',') if c))
 report['clips'] = sorted(a.name[len(PREFIX):] for a in bpy.data.actions if a.name.startswith(PREFIX))
 report['import'] = {'verts': len(me.data.vertices), 'tris': sum(len(p.vertices) - 2 for p in me.data.polygons)}
 
