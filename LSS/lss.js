@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.47";
+const LSS_BUILD = "53.56";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -43775,14 +43775,23 @@ const _WX2 = (function () {
     sims: 3,            // 1 = the main sim scrambled; up to 4 (each extra sim ~1.5-2 ms of GPU per sim-step)
     res: 0.5,           // the cloud pass's size against the scene's active rect, per axis
     resNative: 1,       // (v52.77) ...against at most the NATIVE canvas: a supersampled scene (ULTRA / MEGA) no longer multiplies
-    gpuBudget: 1.5,     // (v52.79) ms of GPU the main view's cloud pass may take: the march lengthens its steps (uStepK) until it
-    reproj: 1,          // (v52.80) THE CHECKERBOARD (owner: "do the temporal reprojection on the clouds"): the main view marches half
+    gpuBudget: 1.0,     // (v52.79) ms of GPU the main view's cloud pass may take: the march lengthens its steps (uStepK) until it
+    reproj: 2,          // (v52.80) THE CHECKERBOARD (owner: "do the temporal reprojection on the clouds"): the main view marches half
+    acc: 0.5,           // (v53.51) how much of a fresh march a pixel takes over its history (1 = no averaging, the offsets show as grain)
+    edge: 1,            // (v53.49) the composite and the checkerboard's fill weigh cloud texels by depth (THE COMPOSITE LOOKS AT
+    edgeK: 0.12,        // ...the depth difference, as a fraction of the nearer depth, that halves a texel's weight
+    light: 1,           // (v53.50) THE SUNLIGHT VOLUME (at F_PACK2): a lit sample reads its sunlight with its density. 0 = the old
+    lightKm: 1.3,       // ...integrated this far toward the sun (km; 0 = to the box top). 1.3 = the old march's reach; a change
     step: 1,            // the main view's step length x this at least (the governor only ever goes ABOVE it)
     stepMax: 2.5,       // ...and never past this (the mirror's 51.73 coarseness, which nobody could see through the water)
     mirror: 1,          // (51.71) the clouds in the water's reflection too (0 = the 51.70 mirror: a cloudless sky in the lake)
-    mirrorRes: 0.5,     // the mirror's cloud pass against the MIRROR's own target (itself 0.5 / 0.4 / 0.25 of the canvas by tier)
+    mirrorRes: 0.35,    // the mirror's cloud pass against the MIRROR's own target (itself 0.5 / 0.4 / 0.25 of the canvas by tier)
     mirrorStep: 2.5,    // the mirror's march takes steps this many times longer, and skips the fractal detail (51.73, see draw)
-    mirrorEvery: 2,     // (v52.78) the mirror re-marches every Nth of ITS renders and composites its last image in between (1 = every one)
+    mirrorPano: 1,      // (v53.53) the mirror reads THE SKY PANORAMA (at ensurePano) instead of marching: steady while the view
+    panoW: 512,         // ...its width (height a quarter: 0.7 deg a texel, about the mirror's own), a 16th of it marched a frame
+    panoStep: 3,        // ...its march's step length x (its rays run the whole sky to distKm, with no ground to stop them).
+    panoEvery: 2,       // ...marched every Nth frame: a whole sky every 16 x N frames (0.22 s at 144 Hz) - km-off clouds don't move
+    mirrorEvery: 1,     // (v52.78) the mirror re-marches every Nth of ITS renders and composites its last image in between (1 = every one)
     gpuT: 0,            // 1 = time each view's cloud pass on the GPU (TIME_ELAPSED, never waited on) -> __wx2Info().gpu
     distKm: 30, visKm: 40,
     detail: 0, detQref: 1.0, detVref: 1.0,     // Milestone 2's fractal sub-grid detail (0 = off): strength, the edge band (q_c g/kg),
@@ -44289,12 +44298,15 @@ float gnoise(vec3 p){ vec3 i=floor(p), f=p-i, u=f*f*f*(f*(f*6.0-15.0)+10.0); ive
   return mix(mix(mix(n000,n100,u.x),mix(n010,n110,u.x),u.y), mix(mix(n001,n101,u.x),mix(n011,n111,u.x),u.y), u.z); }
 void main(){ vec3 p=vec3(gl_FragCoord.xy, float(uLayer)+0.5)/4.0; o=vec4(clamp(0.5+0.75*gnoise(p), 0.0, 1.0), 0, 0, 1); }`;
 const HEAD2 = HEAD.replace('out vec4 o;', 'layout(location=0) out vec4 o; layout(location=1) out vec4 o2;');
-const F_PACK2 = HEAD2 + `uniform sampler2D tB, tA; uniform int uLayer;
+const F_PACK2 = HEAD2 + `uniform sampler2D tB, tA; uniform int uLayer; uniform vec3 uSunA, uSunB; uniform float uLightM;
 vec3 curlP(ivec3 i){ ivec2 d=ivec2(1,0);
   vec3 x1=velC(tA,i-d.xyy), x2=velC(tA,i+d.xyy), y1=velC(tA,i-d.yxy), y2=velC(tA,i+d.yxy), z1=velC(tA,i-d.yyx), z2=velC(tA,i+d.yyx);
   return 0.5*vec3((y2.z-y1.z)-(z2.y-z1.y),(z2.x-z1.x)-(x2.z-x1.z),(x2.y-x1.y)-(y2.x-y1.x)); }
+float lightCol(ivec3 i, vec3 sd){ vec3 d=sd/max(sd.y,0.08); float dl=uDx*length(d), q=0.5*F(tB,i).y*dl, s=0.5*dl; vec3 p=vec3(i)+0.5+d;
+  for (int k=1;k<64;k++){ if (p.y>=64.0 || s>=uLightM) break; q+=F(tB,ivec3(floor(p))).y*dl; s+=dl; p+=d; }
+  return q; }                                                    // kg/kg x m = g/kg x km
 void main(){ ivec3 i=ivec3(int(gl_FragCoord.x), int(gl_FragCoord.y), uLayer); vec4 b=F(tB,i);
-  o=vec4(b.y*1000.0, (b.z+2.2*b.w)*1000.0, 0, 1);
+  o=vec4(b.y*1000.0, (b.z+2.2*b.w)*1000.0, lightCol(i,uSunA), lightCol(i,uSunB));
   o2=vec4(velC(tA,i), length(curlP(i))/uDx); }`;
 const DETAIL_GLSL = `
 uniform sampler3D tNoise;
@@ -44332,7 +44344,13 @@ precision highp float; precision highp int; precision highp sampler2D; precision
 uniform sampler3D tCloud, tC1, tC2, tC3;                       // (q_c, q_r) g/kg: the main sim, then the far-field sims
 uniform sampler2D tDepth;                                      // the opaque scene's depth, copied this frame
 uniform sampler2D tS0, tS1, tS2, tS3;                          // per sim: sunlight on its floor (r: the sun, g: mirrored)
+#ifndef WX_LOOK
 uniform sampler3D tV0, tV1, tV2, tV3;                          // per sim: resolved wind (m/s) + |vorticity| (1/s), for the detail
+#else
+uniform sampler2D tPano, tPanoZ;                               // (v53.53) THE SKY PANORAMA (the mirror's variant, F_CLOUDL): see main()
+#endif
+uniform float uPano, uPanoEl0; uniform vec2 uPanoPh;           // (v53.53) 1 = march the panorama (this frame's texel of each 4x4
+                                                               // block); its lowest elevation (rad)
 uniform mat4 uInvProj, uCamWorld;
 uniform vec2 uRes, uDepthSize;                                 // this pass's size; the scene's ACTIVE rect, in depth texels
 uniform float uNear, uFar, uSkyT, uFogD, uUpw, uPixAng;        // camera planes (u); where the opaque sky dome sits (u); the
@@ -44343,7 +44361,10 @@ uniform float uMaxT, uHaze, uExt, uSmooth, uM, uTime, uBright, uShadow, uDbg;
 uniform int uK; uniform float uBand; uniform vec2 uFlipN;
 uniform float uObl, uDomeR; uniform vec4 uZRow; uniform vec3 uDomeO;   // (51.71) the water's mirror only: see the depth below
 uniform float uStepK;                                          // (51.73) step length x this: 1 in the main view, __wx2.mirrorStep in the mirror
+uniform float uLight;                                          // (v53.50) 1 = the sunlight volume, 0 = the old per-sample march toward the sun
 uniform vec2 uCB;                                              // (v52.80) the checkerboard: (this frame's parity, on) - see main()
+uniform vec3 uQuad; uniform float uJit;                        // (v53.51) THE QUARTER (F_RESOLVE4): (this frame's pixel in each 2x2
+                                                               // block, on), and the frame's ray-offset seed (0 = the fixed dither)
 // (51.77) the city storm (slot 3): uStorm = (centre x, full radius, centre z, fade width) in fair-sim units, w 0 = none;
 // uStormP its presence (the city dusk); uStormK = (fair units -> storm units, its band top in fair units, -); the storm's 0 C
 // and -38 C levels (fair y), and skylight occlusion on (1) or off
@@ -44351,7 +44372,7 @@ uniform vec4 uStorm; uniform float uStormP; uniform vec3 uStormK; uniform vec2 u
 // (51.79) the city at dusk lights its clouds from below (uCityGlow: the dusk's violet horizon colour x the dusk weight), and
 // lightning: up to 4 glows along the live channel (fair-sim xyz, brightness), their colour, their reach; the scene's flash
 uniform vec3 uCityGlow; uniform vec4 uFl[4]; uniform vec3 uFlC; uniform float uFlL, uFlashS, uBowK;   // (51.80) uBowK: the bow fades with the dusk's sun
-` + REG_GLSL + DETAIL_GLSL + `
+` + REG_GLSL + '\n#ifndef WX_LOOK\n' + DETAIL_GLSL + '\n#endif\n' + `
 layout(location=0) out vec4 o;
 layout(location=1) out vec4 oZ;                                // (51.84) THE VEIL's data: see the end of main()
 const float CELL=2.0/64.0;
@@ -44373,16 +44394,26 @@ Reg regAt(vec2 xz){
   return r; }
 vec2 regM(Reg r, int j, vec2 v){ return r.fl[j]>0.5 ? v-2.0*dot(v,uFlipN)*uFlipN : v; }
 vec3 regX(Reg r, int j, vec3 w){ vec2 m=regM(r,j,w.xz); return vec3(m.x+r.ox[j], w.y, m.y+r.oz[j]); }
+#ifndef WX_LOOK
 // the dominant region's sim's resolved wind and |vorticity| at p, turned back into the world frame (mirrored regions)
 vec4 velFor(Reg r, vec3 p){ int j=0; float m=r.w[0]; for (int i=1;i<4;i++) if (r.w[i]>m){ m=r.w[i]; j=i; }
   vec3 t=regX(r,j,p)*0.5+0.5; int k=r.k[j];
   vec4 v = k==0 ? textureLod(tV0,t,0.0) : k==1 ? textureLod(tV1,t,0.0) : k==2 ? textureLod(tV2,t,0.0) : textureLod(tV3,t,0.0);
   vec2 h=regM(r,j,v.xz); return vec4(h.x, v.y, h.y, v.w); }
+#endif
 vec2 simQ(int k, vec3 w, float lod){ vec3 t=w*0.5+0.5;
   if (k==0) return textureLod(tCloud,t,lod).rg; if (k==1) return textureLod(tC1,t,lod).rg;
   if (k==2) return textureLod(tC2,t,lod).rg; return textureLod(tC3,t,lod).rg; }
 vec2 owQ(Reg r, vec3 w, float lod){ vec2 q=vec2(0);
   for (int j=0;j<4;j++) if (r.w[j]>0.0) q+=r.w[j]*simQ(r.k[j], regX(r,j,w), lod);
+  return q; }
+// (v53.50) ...and the sunlight volume from the SAME fetch (F_PACK2): z = cloud water between here and the sun, g/kg x km, along
+// each region's own sun (mirrored where the region is)
+vec4 simQ4(int k, vec3 w, float lod){ vec3 t=w*0.5+0.5;
+  if (k==0) return textureLod(tCloud,t,lod); if (k==1) return textureLod(tC1,t,lod);
+  if (k==2) return textureLod(tC2,t,lod); return textureLod(tC3,t,lod); }
+vec3 owQL(Reg r, vec3 w, float lod){ vec3 q=vec3(0);
+  for (int j=0;j<4;j++) if (r.w[j]>0.0){ vec4 s=simQ4(r.k[j], regX(r,j,w), lod); q+=r.w[j]*vec3(s.rg, r.fl[j]>0.5 ? s.a : s.b); }
   return q; }
 float sunTauK(int k, vec3 w, vec3 sd, int n, float seg, float lod){ float tau=0.0, d=0.0;
   for (int i=0;i<24;i++){ if (i>=n) break; vec3 q=w+sd*(d+seg*0.5); if (q.y>1.0) break; tau+=simQ(k,q,lod).x*seg; d+=seg; seg*=1.45; }
@@ -44445,13 +44476,23 @@ void main(){
   // (v52.80) THE CHECKERBOARD: with uCB on this pass is HALF as wide as the cloud image and marches the pixels whose x + y +
   // parity is even, two to a row of the image: full x = 2 x' + ((y + parity) & 1). F_RESOLVE rebuilds the other half
   vec2 fc=gl_FragCoord.xy;
-  if (uCB.y>0.5) fc.x=floor(fc.x)*2.0+mod(floor(fc.y)+uCB.x, 2.0)+0.5;
+  if (uQuad.z>0.5) fc=floor(fc)*2.0+uQuad.xy+0.5;              // (v53.51) THE QUARTER: one pixel of each 2x2 block, a quarter-size pass
+  else if (uCB.y>0.5) fc.x=floor(fc.x)*2.0+mod(floor(fc.y)+uCB.x, 2.0)+0.5;
   vec2 uv=fc/uRes;
   vec4 vh=uInvProj*vec4(uv*2.0-1.0, 1.0, 1.0); vec3 vd=normalize(vh.xyz/vh.w);   // view space: the camera looks down -z
   vec3 rd=normalize(mat3(uCamWorld)*vd), ro=uCamW;
+  // (v53.53) THE SKY PANORAMA (marched for the mirror's variant to read): this pass is a quarter of it each way, every pixel
+  // one texel of a 4x4 block (uPanoPh; F_PSCAT puts them in place). Its own direction - azimuth across, elevation uPanoEl0 ..
+  // 90 deg up - and no ground under it (sky only). ⚠ First built with the WHOLE panorama drawn and 15 of 16 pixels discarded:
+  // 6.7-10.4 ms, as each 32-pixel warp waited on its one or two marching rays. Dense, every pixel of the pass marches.
+  if (uPano>0.5){
+    fc=floor(fc)*4.0+uPanoPh+0.5; uv=fc/uRes;
+    float az=uv.x*6.2831853, el=mix(uPanoEl0, 1.5707963, uv.y);
+    rd=vec3(cos(el)*cos(az), sin(el), cos(el)*sin(az)); vd=vec3(0.0, 0.0, -1.0);
+  }
   // the opaque scene under this pixel, as a distance along the ray in sim units. The sky dome is opaque and writes depth at
   // ~20.5k u: that is SKY, not a wall, or every cloud past 1.6 km would stop dead against it.
-  float dz=texelFetch(tDepth, ivec2(uv*uDepthSize), 0).r, tGeo=1e9;
+  float dz=uPano>0.5 ? 1.0 : texelFetch(tDepth, ivec2(uv*uDepthSize), 0).r, tGeo=1e9;
   if (dz<1.0 && uObl<0.5){ float zn=dz*2.0-1.0, vz=2.0*uNear*uFar/(uFar+uNear-zn*(uFar-uNear)), tu=vz/max(-vd.z,1e-4);
     if (tu<uSkyT) tGeo=tu/uUpw; }
   // (51.71) THE WATER'S MIRROR. three's Reflector swaps its projection's depth row for an oblique clip plane (the water), so
@@ -44481,10 +44522,29 @@ void main(){
   float tA0=min(fairOn?tn:1e9, stormOn?sa:1e9), tA1=max(fairOn?tf:-1e9, stormOn?sb:-1e9);
   vec3 col=vec3(0); float T=1.0;
   float tF=-1.0, tB=-1.0;                                      // (51.84) where this ray's cloud begins and ends (sim units)
+#ifdef WX_LOOK
+  // (v53.53) THE REFLECTION READS THE SKY PANORAMA by direction instead of marching (S.pano, marched from the player's eye a
+  // sixteenth at a time): its light and transmittance, and where its cloud begins and ends - reflected geometry in front of
+  // the cloud stays clear of it, geometry inside it takes the share in front. The clouds are kilometres off, so the mirror's
+  // eye (as far below the water as the player is above it) sees them the same way within a fraction of a degree.
+  { float el=asin(clamp(rd.y,-1.0,1.0));
+    if (el>uPanoEl0){
+      vec2 pu=vec2(fract(atan(rd.z, rd.x)/6.2831853), (el-uPanoEl0)/(1.5707963-uPanoEl0));
+      vec4 pc=textureLod(tPano, pu, 0.0), pz=textureLod(tPanoZ, pu, 0.0);
+      col=pc.rgb; T=pc.a;
+      if (pz.x<1e8){ tF=pz.x; tB=max(pz.y, pz.x); }
+      if (tGeo<1e8 && tF>=0.0){
+        if (tGeo<=tF){ col=vec3(0); T=1.0; tF=-1.0; tB=-1.0; }
+        else if (tGeo<tB){ float k=(tGeo-tF)/max(tB-tF,1e-6); col*=k; T=mix(1.0,T,k); tB=tGeo; }
+      }
+    } }
+#else
   if (tA1>tA0){
     float mu=dot(rd,uSunDir); vec3 bow=rainbow(mu), glo=glory(mu);
     uvec2 pq=uvec2(fc);                                         // (v52.80) the image's pixel, not this pass's
-    uint hv=pq.x*1973u+pq.y*9277u; hv=hv*747796405u+2891336453u; hv=((hv>>((hv>>28u)+4u))^hv)*277803737u; hv=(hv>>22u)^hv;
+    // (v53.51) uJit: a new offset each march, averaged by F_RESOLVE4. ⚠ (v53.52) 53.51 put this note INSIDE the hash line and
+    // commented out its second half (the PCG output step), leaving a linear lattice for a dither that shifted every frame
+    uint hv=pq.x*1973u+pq.y*9277u+uint(uJit)*26699u; hv=hv*747796405u+2891336453u; hv=((hv>>((hv>>28u)+4u))^hv)*277803737u; hv=(hv>>22u)^hv;
     float t=tA0+(float(hv)/4294967295.0)*stepAt(tA0);
     for (int k=0;k<400;k++){
       if (t>tA1 || T<0.01) break;
@@ -44499,7 +44559,7 @@ void main(){
       vec2 qf=(fw ? (1.0-m)*owQ(rg,p,4.0) : vec2(0)) + (m>0.0 ? m*stormQ(p,4.0) : vec2(0)); if (qf.x<1e-6 && qf.y<2e-6){ t+=6.0*CELL*kS; continue; }
       vec2 qb=(fw ? (1.0-m)*owQ(rg,p,2.5) : vec2(0)) + (m>0.0 ? m*stormQ(p,2.5) : vec2(0)); if (qb.x<1e-5 && qb.y<2e-5){ t+=1.5*CELL*kS; continue; }
       float ds=stepAt(t)*kS;
-      vec2 qF = fw ? owQ(rg,p,max(uSmooth, log2(max(ds/CELL,1.0)))) : vec2(0);
+      vec3 qFL = fw ? owQL(rg,p,max(uSmooth, log2(max(ds/CELL,1.0)))) : vec3(0); vec2 qF=qFL.xy;   // (v53.50) + the sunlight
       vec2 qS = m>0.0 ? stormQ(p, max(uSmooth, log2(max(ds*uStormK.x/CELL,1.0)))) : vec2(0);
       // Milestone 2 on the view ray (lighting reads the smooth field, plus the detail's own self-shadow below) - the far
       // field's liquid cumulus only, not the storm (an anvil is smooth ice)
@@ -44513,7 +44573,8 @@ void main(){
         float lq = m>0.0 ? mix(1.0, liqR(p.y), m) : 1.0;        // falling streaks and the bow are rain's, not graupel's
         sigR*=mix(0.625, curtain(p, t, q.y, q.x), lq);
         float sig=sigC+sigR;
-        float tau=(fw ? (1.0-m)*sunTauR(rg, p, 7, 0.02, uSmooth+0.5) : 0.0) + (m>0.0 ? m*stormSunTau(p, 9, 0.03, uSmooth+0.5) : 0.0);
+        // (v53.50) THE SUNLIGHT VOLUME (at F_PACK2) instead of a 7-step march per region per lit sample; __wx2.light = 0 marches
+        float tau=(fw ? (1.0-m)*(uLight>0.5 ? qFL.z*165.0*uExt : sunTauR(rg, p, 7, 0.02, uSmooth+0.5)) : 0.0) + (m>0.0 ? m*stormSunTau(p, 9, 0.03, uSmooth+0.5) : 0.0);
         // the detail's self-shadow: lumps between here and half a cell sunward shade this sample, gaps let light through,
         // so billows read as lit faces and shaded folds (lab: without it the detail only changed 8.5% of pixels, faintly)
         if (det){ vec3 ps=p+uSunDir*(0.5*CELL); float qs=owQ(rg, ps, uSmooth).x;
@@ -44545,6 +44606,7 @@ void main(){
       t+=ds;
     }
   }
+#endif
   // the clouds' shadows on the opaque ground: the direct sun's share of its light, faded by the terrain's own fog there
   float shf=1.0, dbS=-1.0, dbF=-1.0, dbT=-1.0;
   if (tGeo<1e8 && uShadow>0.0){
@@ -44566,9 +44628,16 @@ void main(){
   if (tF>=0.0){ vec3 vf=vd*(tF*uUpw), vb=vd*(max(tB,tF)*uUpw);
     z4=vec4(0.5*dot(uZRow, vec4(vf,1.0))/max(-vf.z,1e-6)+0.5, 0.5*dot(uZRow, vec4(vb,1.0))/max(-vb.z,1e-6)+0.5, T, 0.0); }
   oZ=z4;
+  if (uPano>0.5) oZ = tF>=0.0 ? vec4(tF, max(tB,tF), T, 0.0) : vec4(1e9, 1e9, 1.0, 0.0);   // (v53.53) the panorama keeps raw distances
   if (uDbg>0.5) o=vec4(dz, min(tGeo, 9.0), T, shf);           // __wx2.dbg = 1: the raw terms, read by __wx2Dbg() (no composite)
   if (uDbg>1.5) o=vec4(dbS, dbF, dbT, rd.y);                  // __wx2.dbg = 2: the ground shadow's own terms
 }`;
+  const F_CLOUDL = F_CLOUD.replace('#version 300 es', '#version 300 es\n#define WX_LOOK 1');
+  const F_PSCAT = `#version 300 es
+precision highp float; precision highp int; precision highp sampler2D;
+uniform sampler2D tC, tZ; uniform vec2 uPh;
+layout(location=0) out vec4 o; layout(location=1) out vec4 oZ;
+void main(){ ivec2 p=ivec2(gl_FragCoord.xy); if (p%4!=ivec2(uPh)) discard; ivec2 c=p/4; o=texelFetch(tC,c,0); oZ=texelFetch(tZ,c,0); }`;
 const F_BUB = HEAD + `uniform sampler2D tA; uniform vec4 uBub; uniform vec2 uBubC;   // (dT K, horizontal radius m, centre height m, vertical radius m); centre (x, z) in cells
 void main(){ baseInit(); vec4 a=F(tA,g_i);
   vec2 d=vec2(float(g_i.x)+0.5, float(g_i.z)+0.5)-uBubC; d-=64.0*floor(d/64.0+0.5);
@@ -44617,21 +44686,59 @@ void main(){
       if (vz>0.0 && vz*rl<0.96*tD && vz<vZ) discard; } }
   float s=abs(vS); o=vec4(uBoltC*(uI*vB*(exp(-s*s*30.0)+0.22*exp(-s*s*3.5))), 1.0); }`;
 const F_COMP = `#version 300 es
-precision highp float; uniform sampler2D tCld; uniform vec2 uInv; out vec4 o;
-void main(){ o=texture(tCld, gl_FragCoord.xy*uInv); }`;
+precision highp float; precision highp int; precision highp sampler2D;
+uniform sampler2D tCld, tDepth; uniform vec2 uInv, uCldRes, uDepthSize; uniform vec4 uZRow; uniform mat4 uInvProj; uniform float uEdge, uEdgeK;
+out vec4 o;
+float vz(float d, vec2 r){ float z=uZRow.w/((d*2.0-1.0)-(uZRow.x*r.x+uZRow.y*r.y-uZRow.z)); return z>0.0 ? z : 1e7; }
+void main(){
+  vec2 uv=gl_FragCoord.xy*uInv;
+  if (uEdge<0.5){ o=texture(tCld, uv); return; }
+  vec4 vh=uInvProj*vec4(uv*2.0-1.0, 1.0, 1.0); vec3 vd=normalize(vh.xyz/vh.w); vec2 r=vd.xy/max(-vd.z, 1e-4);
+  float zp=vz(texelFetch(tDepth, ivec2(gl_FragCoord.xy), 0).r, r);
+  vec2 t=uv*uCldRes-0.5, b=floor(t), f=t-b; ivec2 ib=ivec2(b), mx=ivec2(uCldRes)-1;
+  vec4 acc=vec4(0.0); float ws=0.0;
+  for (int k=0;k<4;k++){
+    ivec2 d=ivec2(k&1, k>>1), c=clamp(ib+d, ivec2(0), mx);
+    float zt=vz(texelFetch(tDepth, ivec2((vec2(c)+0.5)/uCldRes*uDepthSize), 0).r, r);
+    float e=min(abs(zt-zp)/(max(min(zt,zp), 1e-3)*uEdgeK), 1e3); e*=e;
+    float w=((d.x==1 ? f.x : 1.0-f.x)*(d.y==1 ? f.y : 1.0-f.y)+0.02)/(1.0+e*e);   // +0.02: a matching texel counts even far off
+    acc+=w*texelFetch(tCld, c, 0); ws+=w;
+  }
+  o=acc/ws;
+}`;
 const F_RESOLVE = `#version 300 es
 precision highp float; precision highp int; precision highp sampler2D;
 uniform sampler2D tFresh, tHist, tDepth;
 uniform mat4 uInvProj, uCamWorld, uPrevVP;
 uniform vec2 uRes, uDepthSize;
-uniform float uNear, uFar, uSkyT, uParity, uHistOk;
+uniform float uNear, uFar, uSkyT, uParity, uHistOk, uEdge, uEdgeK;
 out vec4 o;
 vec4 fresh(ivec2 p){ p=clamp(p, ivec2(0), ivec2(uRes)-1); return texelFetch(tFresh, ivec2(p.x>>1, p.y), 0); }
+// (v53.49) the view depth this image pixel's ray stopped at, read as F_CLOUD read it, and how alike two are (1 .. 0, F_COMP's weight)
+float zAt(ivec2 p){ p=clamp(p, ivec2(0), ivec2(uRes)-1); float zn=texelFetch(tDepth, ivec2((vec2(p)+0.5)/uRes*uDepthSize), 0).r*2.0-1.0;
+  return 2.0*uNear*uFar/(uFar+uNear-zn*(uFar-uNear)); }
+float alike(float a, float b){ float e=min(abs(a-b)/(max(min(a,b), 1e-3)*uEdgeK), 1e3); e*=e; return 1.0/(1.0+e*e); }
 void main(){
   ivec2 p=ivec2(gl_FragCoord.xy);
   if (((p.x+p.y+int(uParity))&1)==0){ o=texelFetch(tFresh, ivec2(p.x>>1, p.y), 0); return; }
   vec4 n0=fresh(p+ivec2(1,0)), n1=fresh(p-ivec2(1,0)), n2=fresh(p+ivec2(0,1)), n3=fresh(p-ivec2(0,1));
-  vec4 avg=0.25*(n0+n1+n2+n3);
+  vec4 avg=0.25*(n0+n1+n2+n3), lo=min(min(n0,n1),min(n2,n3)), hi=max(max(n0,n1),max(n2,n3));
+  bool box=true;
+  // (v53.49) ...and across a silhouette only the neighbours on THIS pixel's side fill it and bound its history (F_COMP's note).
+  // None alike (a twig one texel wide): the nearest depth fills it, and its own history stands unclamped - fetched NEAREST, or
+  // the bilinear tap would thin it toward the sky around it every other frame
+  if (uEdge>0.5){
+    float z=zAt(p), w0=alike(zAt(p+ivec2(1,0)),z), w1=alike(zAt(p-ivec2(1,0)),z), w2=alike(zAt(p+ivec2(0,1)),z), w3=alike(zAt(p-ivec2(0,1)),z);
+    vec4 nb=n0; float wb=w0;
+    if (w1>wb){ wb=w1; nb=n1; } if (w2>wb){ wb=w2; nb=n2; } if (w3>wb){ wb=w3; nb=n3; }
+    float ws=w0+w1+w2+w3;
+    avg = ws>1e-6 ? (w0*n0+w1*n1+w2*n2+w3*n3)/ws : nb;
+    lo=vec4(1e9); hi=vec4(-1e9); box=false;
+    if (w0>0.5){ lo=min(lo,n0); hi=max(hi,n0); box=true; }
+    if (w1>0.5){ lo=min(lo,n1); hi=max(hi,n1); box=true; }
+    if (w2>0.5){ lo=min(lo,n2); hi=max(hi,n2); box=true; }
+    if (w3>0.5){ lo=min(lo,n3); hi=max(hi,n3); box=true; }
+  }
   if (uHistOk<0.5){ o=avg; return; }
   vec2 uv=(vec2(p)+0.5)/uRes;
   vec4 vh=uInvProj*vec4(uv*2.0-1.0, 1.0, 1.0); vec3 vd=normalize(vh.xyz/vh.w);
@@ -44643,7 +44750,48 @@ void main(){
   if (pc.w<=1e-6){ o=avg; return; }
   vec2 q=pc.xy/pc.w*0.5+0.5;
   if (q.x<0.0 || q.y<0.0 || q.x>1.0 || q.y>1.0){ o=avg; return; }
-  o=clamp(texture(tHist, q), min(min(n0,n1),min(n2,n3)), max(max(n0,n1),max(n2,n3)));
+  o = box ? clamp(texture(tHist, q), lo, hi) : texelFetch(tHist, clamp(ivec2(q*uRes), ivec2(0), ivec2(uRes)-1), 0);
+}`;
+const F_RESOLVE4 = `#version 300 es
+precision highp float; precision highp int; precision highp sampler2D;
+uniform sampler2D tFresh, tHist, tDepth;
+uniform mat4 uInvProj, uCamWorld, uPrevVP;
+uniform vec2 uRes, uDepthSize, uOff;
+uniform float uNear, uFar, uSkyT, uHistOk, uEdgeK, uAcc;
+out vec4 o;
+float zAt(ivec2 p){ p=clamp(p, ivec2(0), ivec2(uRes)-1); float zn=texelFetch(tDepth, ivec2((vec2(p)+0.5)/uRes*uDepthSize), 0).r*2.0-1.0;
+  return 2.0*uNear*uFar/(uFar+uNear-zn*(uFar-uNear)); }
+float alike(float a, float b){ float e=min(abs(a-b)/(max(min(a,b), 1e-3)*uEdgeK), 1e3); e*=e; return 1.0/(1.0+e*e); }
+void main(){
+  ivec2 p=ivec2(gl_FragCoord.xy), off=ivec2(uOff), gm=textureSize(tFresh, 0)-1;
+  float z=zAt(p);
+  ivec2 d=p-off, g0=ivec2(floor(vec2(d)*0.5));                 // fresh texel g was marched at image pixel 2g + off
+  bool fr=(d.x&1)==0 && (d.y&1)==0;                             // this pixel was marched this frame
+  vec2 f=vec2(d-2*g0)*0.5;                                      // 0 or 0.5 per axis: where it sits between fresh texels
+  // its fresh neighbourhood: itself and the four around it (fresh), or the 2x2 it sits between (stale)
+  vec4 acc=vec4(0.0), lo=vec4(1e9), hi=vec4(-1e9), best=vec4(0.0); float ws=0.0, ab=-1.0; bool box=false;
+  for (int k=0;k<5;k++){
+    if (k==4 && !fr) break;
+    ivec2 e = k==0 ? ivec2(0) : k==1 ? ivec2(1,0) : k==2 ? ivec2(0,1) : k==3 ? (fr ? ivec2(-1,0) : ivec2(1,1)) : ivec2(0,-1);
+    ivec2 g=clamp(g0+e, ivec2(0), gm); vec4 v=texelFetch(tFresh, g, 0);
+    float a=alike(zAt(2*g+off), z);
+    float wb = fr ? (k==0 ? 1.0 : 0.0) : (e.x==1 ? f.x : 1.0-f.x)*(e.y==1 ? f.y : 1.0-f.y);
+    float w=(wb+0.02)*a; acc+=w*v; ws+=w;
+    if (a>ab){ ab=a; best=v; }
+    if (a>0.5){ lo=min(lo,v); hi=max(hi,v); box=true; }
+  }
+  vec4 sp = fr ? texelFetch(tFresh, clamp(g0, ivec2(0), gm), 0) : (ws>1e-6 ? acc/ws : best);   // this frame's own estimate
+  if (uHistOk<0.5){ o=sp; return; }
+  vec2 uv=(vec2(p)+0.5)/uRes;
+  vec4 vh=uInvProj*vec4(uv*2.0-1.0, 1.0, 1.0); vec3 vd=normalize(vh.xyz/vh.w);
+  vec3 rd=normalize(mat3(uCamWorld)*vd);
+  vec4 pc=uPrevVP*vec4(rd, 0.0);                                // the sky by direction; the ground by its own point
+  if (z<uFar*0.9999){ float tu=z/max(-vd.z,1e-4); if (tu<uSkyT) pc=uPrevVP*vec4(uCamWorld[3].xyz+rd*tu, 1.0); }
+  if (pc.w<=1e-6){ o=sp; return; }
+  vec2 q=pc.xy/pc.w*0.5+0.5;
+  if (q.x<0.0 || q.y<0.0 || q.x>1.0 || q.y>1.0){ o=sp; return; }
+  vec4 h = box ? clamp(texture(tHist, q), lo, hi) : texelFetch(tHist, clamp(ivec2(q*uRes), ivec2(0), ivec2(uRes)-1), 0);
+  o = fr ? mix(h, sp, uAcc) : h;
 }`;
 
   let gl = null, PX = null, S = null;
@@ -44694,7 +44842,7 @@ void main(){
     return { tex: t, fbo: f }; }
   function make3D() { const t = { tex: gl.createTexture(), target: gl.TEXTURE_3D };
     gl.bindTexture(gl.TEXTURE_3D, t.tex);
-    gl.texImage3D(gl.TEXTURE_3D, 0, gl.RG16F, N, N, N, 0, gl.RG, gl.HALF_FLOAT, null);
+    gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGBA16F, N, N, N, 0, gl.RGBA, gl.HALF_FLOAT, null);
     gl.generateMipmap(gl.TEXTURE_3D);
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR); gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.REPEAT); gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.REPEAT);
@@ -44821,11 +44969,16 @@ void main(){
     run(PR.prs, A.b.fbo, RES2, RES2, { tA: A.a, tP: P.a }); A.swap(); yield 1;
   }
   function packCloud() {                                           // the bound sim -> its 3D textures (clouds, and wind for the detail), atomically
+    const g = (typeof _WX !== 'undefined' && _WX && _WX.sunDir) ? _WX.sunDir : { x: 0.503, y: 0.423, z: 0.754 };
+    const f = +KN('windFrom') * Math.PI / 180, nx = Math.cos(f), nz = -Math.sin(f), dn = g.x * nx + g.z * nz;
+    const sunA = [g.x, g.y, g.z], sunB = [g.x - 2 * dn * nx, g.y, g.z - 2 * dn * nz];
     gl.bindFramebuffer(gl.FRAMEBUFFER, S.packFbo);
     gl.useProgram(PR.pack2.p);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, B.a.tex); gl.uniform1i(U(PR.pack2, 'tB'), 0);
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, A.a.tex); gl.uniform1i(U(PR.pack2, 'tA'), 1);
     gl.uniform1f(U(PR.pack2, 'uDx'), DX);
+    gl.uniform3fv(U(PR.pack2, 'uSunA'), sunA); gl.uniform3fv(U(PR.pack2, 'uSunB'), sunB);   // (v53.50) THE SUNLIGHT VOLUME
+    gl.uniform1f(U(PR.pack2, 'uLightM'), (+KN('lightKm') > 0 ? +KN('lightKm') : 99) * 1000);
     gl.viewport(0, 0, N, N);
     gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
     for (let z = 0; z < N; z++) {
@@ -44835,9 +44988,7 @@ void main(){
     }
     gl.drawBuffers([gl.COLOR_ATTACHMENT0]); gl.framebufferTextureLayer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, null, 0, 0);
     gl.bindTexture(gl.TEXTURE_3D, cloud3.tex); gl.generateMipmap(gl.TEXTURE_3D);
-    const g = (typeof _WX !== 'undefined' && _WX && _WX.sunDir) ? _WX.sunDir : { x: 0.503, y: 0.423, z: 0.754 };
-    const f = +KN('windFrom') * Math.PI / 180, nx = Math.cos(f), nz = -Math.sin(f), dn = g.x * nx + g.z * nz;
-    run(PR.shade2, sunMap.fbo, N, N, { tB: B.a }, { uSunA: [g.x, g.y, g.z], uSunB: [g.x - 2 * dn * nx, g.y, g.z - 2 * dn * nz], uExt: +KN('ext') });
+    run(PR.shade2, sunMap.fbo, N, N, { tB: B.a }, { uSunA: sunA, uSunB: sunB, uExt: +KN('ext') });
   }
   function* bandG(s) {
     run(PR.qmax1, M1.fbo, N, N, { tB: B.a }); yield 1;
@@ -44920,7 +45071,7 @@ void main(){
       if (!gl.getQueryParameter(q, gl.QUERY_RESULT_AVAILABLE)) break;
       const ns = gl.getQueryParameter(q, gl.QUERY_RESULT); gl.deleteQuery(q); S.tqP.shift();
       if (disj) continue;                                           // the GPU clock jumped: this one is meaningless
-      const a = (S.tq || (S.tq = { main: [], mirror: [] }))[k]; a.push(ns / 1e6); if (a.length > 240) a.shift();
+      const tqs = S.tq || (S.tq = { main: [], mirror: [] }), a = tqs[k] || (tqs[k] = []); a.push(ns / 1e6); if (a.length > 240) a.shift();   // (v53.53) + 'pano'
       if (k === 'main') (S.gov || (S.gov = { k: 1, acc: [], at: 0, med: 0 })).acc.push(ns / 1e6);   // (v52.79) govTick's feed
     }
   }
@@ -45008,15 +45159,18 @@ void main(){ wxMain(); gl_FragColor${pm === 'P' ? '' : '.a'}*=wxVeil(); }
     const TS = renderer.state;
     for (let u = 0; u < _hookUnits; u++) { gl.activeTexture(gl.TEXTURE0 + S.unit0 + u);
       st.units.push([gl.getParameter(gl.TEXTURE_BINDING_2D), gl.getParameter(gl.TEXTURE_BINDING_3D)]); }
-    const tq = (+KN('gpuT') || (!eye && +KN('gpuBudget') > 0)) ? tqBegin() : null;   // (v52.79) the budget needs the main pass timed
+    let tq = (+KN('gpuT') || (!eye && +KN('gpuBudget') > 0)) ? tqBegin() : null;   // (v52.79) the budget needs the main pass timed
+    let panoArgs = null;                                            // (v53.53) THE SKY PANORAMA's sixteenth, after this view's work
     try {
       const every = Math.max(1, Math.round(+KN('mirrorEvery') || 1));
-      const fresh = !eye || !V.cld || every <= 1 || ((V.mirN = (V.mirN | 0) + 1) % every) === 0;
+      if (eye) S.mirAt = performance.now();                         // ...and the main view keeps it marched while a mirror draws
+      const look = !!(eye && +KN('mirrorPano') && S.pano && S.pano.full);
+      const fresh = !eye || look || !V.cld || every <= 1 || ((V.mirN = (V.mirN | 0) + 1) % every) === 0;
+      ensureDepth(V, rt.width, rt.height, st.dr);
+      TS.setScissorTest(false);                                     // (v52.81) through three's tracker - see the note at st
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, st.dr); gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, V.depthFbo);
+      gl.blitFramebuffer(0, 0, aw, ah, 0, 0, aw, ah, gl.DEPTH_BUFFER_BIT, gl.NEAREST);
       if (fresh) {
-        ensureDepth(V, rt.width, rt.height, st.dr);
-        TS.setScissorTest(false);                                   // (v52.81) through three's tracker - see the note at st
-        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, st.dr); gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, V.depthFbo);
-        gl.blitFramebuffer(0, 0, aw, ah, 0, 0, aw, ah, gl.DEPTH_BUFFER_BIT, gl.NEAREST);
         const res = Math.max(0.2, Math.min(1, +KN(eye ? 'mirrorRes' : 'res')));
         let bw = aw, bh = ah;
         if (!eye && +KN('resNative')) {
@@ -45025,22 +45179,35 @@ void main(){ wxMain(); gl_FragColor${pm === 'P' ? '' : '.a'}*=wxVeil(); }
         }
         V.aw = aw; V.ah = ah;                                         // for __wx2Info().scenePx
         const lw = Math.max(16, Math.round(bw * res)), lh = Math.max(16, Math.round(bh * res));
-        const cb = !eye && !!+KN('reproj') && !+KN('dbg'), mw = cb ? ((lw + 1) >> 1) : lw;
-        ensureCld(V, mw, lh);
-        gl.bindFramebuffer(gl.FRAMEBUFFER, V.cld.fbo); gl.viewport(0, 0, mw, lh);
+        const rmode = (!eye && !+KN('dbg')) ? Math.round(+KN('reproj')) : 0;
+        const cb = rmode === 1, q4 = rmode >= 2, mw = (cb || q4) ? ((lw + 1) >> 1) : lw, mh = q4 ? ((lh + 1) >> 1) : lh;
+        ensureCld(V, mw, mh);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, V.cld.fbo); gl.viewport(0, 0, mw, mh);
         plainState(TS);                                             // (v52.81) through three's tracker - see the note at st
         gl.bindVertexArray(S.vao);
         const m = S.sims[0], t = i => (S.sims[i] && S.sims[i].live) ? S.sims[i] : m;
-        gl.useProgram(PR.cloud.p);
-        bindTex(PR.cloud, { tCloud: m.cloud3, tC1: t(1).cloud3, tC2: t(2).cloud3, tC3: t(3).cloud3, tDepth: V.depthTex, tWarp: S.warpTex,
+        const texB = { tCloud: m.cloud3, tC1: t(1).cloud3, tC2: t(2).cloud3, tC3: t(3).cloud3, tDepth: V.depthTex, tWarp: S.warpTex,
           tS0: m.sunMap, tS1: t(1).sunMap, tS2: t(2).sunMap, tS3: t(3).sunMap,
-          tNoise: S.noise3, tV0: m.vel3, tV1: t(1).vel3, tV2: t(2).vel3, tV3: t(3).vel3 }, S.unit0);
+          tNoise: S.noise3, tV0: m.vel3, tV1: t(1).vel3, tV2: t(2).vel3, tV3: t(3).vel3 };
+        const prog = look ? PR.cloudL : PR.cloud;
+        const texL = look ? Object.assign({}, texB, { tPano: S.pano.col, tPanoZ: S.pano.z }) : texB;
+        if (look) for (const k of ['tNoise', 'tV0', 'tV1', 'tV2', 'tV3']) delete texL[k];
+        gl.useProgram(prog.p);
+        bindTex(prog, texL, S.unit0);
         if (cb) V.cbPar = (V.cbPar | 0) ^ 1;                         // the other half of the pixels this frame
+        const QO = [[0, 0], [1, 1], [1, 0], [0, 1]];                // (v53.51) the quarter's Bayer order
+        if (q4) { V.q4i = ((V.q4i | 0) + 1) & 3; V.jit = ((V.jit | 0) + 1) & 4095; }
         const cu = cloudUniforms(cam, aw, ah, lw, lh, eye);
         cu.uCB = [cb ? V.cbPar : 0, cb ? 1 : 0];                   // ALWAYS set: the mirror shares this program
-        setU(PR.cloud, cu);
+        cu.uQuad = q4 ? [QO[V.q4i][0], QO[V.q4i][1], 1] : [0, 0, 0];   // (v53.51) ...and these
+        cu.uJit = q4 ? V.jit : 0;
+        cu.uPano = 0; cu.uPanoEl0 = PANO_EL0; cu.uPanoPh = [0, 0];   // (v53.53) ...and these: a camera's own rays
+        setU(prog, cu);
         gl.drawArrays(gl.TRIANGLES, 0, 3);
-        V.out = cb ? resolveCB(cam, V, aw, ah, lw, lh, cu) : V.cld;   // (v52.80) the image the composite draws
+        V.out = (cb || q4) ? resolveCB(cam, V, aw, ah, lw, lh, cu, q4 ? QO[V.q4i] : null) : V.cld;   // (v52.80) the image the composite draws
+        V.outW = lw; V.outH = lh;                                     // (v53.49) ...and its size (the march's own is half as wide)
+        if (!eye && +KN('mirrorPano') && !+KN('dbg') && performance.now() - (S.mirAt || 0) < 1500 &&
+            (S.panoTick = (S.panoTick | 0) + 1) % Math.max(1, Math.round(+KN('panoEvery') || 1)) === 0) panoArgs = [cu, texB];
       } else {
         plainState(TS);
         gl.bindVertexArray(S.vao);
@@ -45052,11 +45219,20 @@ void main(){ wxMain(); gl_FragColor${pm === 'P' ? '' : '.a'}*=wxVeil(); }
       if (st.sc) TS.setScissorTest(true);                           // (v52.81) three's own box, never changed here
       TS.setBlending(THREE.CustomBlending, THREE.AddEquation, THREE.OneFactor, THREE.SrcAlphaFactor, THREE.AddEquation, THREE.ZeroFactor, THREE.OneFactor, blendC0(), 0);
       gl.useProgram(PR.comp.p);
-      bindTex(PR.comp, { tCld: V.out || V.cld }, S.unit0);         // (v52.80) the resolved checkerboard, or the march itself
-      setU(PR.comp, { uInv: [1 / aw, 1 / ah] });
+      bindTex(PR.comp, { tCld: V.out || V.cld, tDepth: V.depthTex }, S.unit0);   // (v52.80) the resolved checkerboard, or the march itself
+      const pz = cam.projectionMatrix.elements;
+      setU(PR.comp, { uInv: [1 / aw, 1 / ah], uCldRes: [V.outW || 1, V.outH || 1], uDepthSize: [aw, ah],
+        uZRow: [pz[2], pz[6], pz[10], pz[14]], uInvProj: { m4: (eye || cam).projectionMatrixInverse.elements },
+        uEdge: +KN('edge') ? 1 : 0, uEdgeK: Math.max(0.01, +KN('edgeK') || 0.12) });
       gl.drawArrays(gl.TRIANGLES, 0, 3);
       if (eye) { S.drawnM++; drawBolt(cam, aw, ah, V, eye); }       // (51.83) owner: "bolts should appear in the water/reflections"
       else { S.drawn++; drawBolt(cam, aw, ah, V, null); }          // (51.79) the lightning channel, main view
+      if (panoArgs) {
+        if (tq) { tqEnd(tq, 'main'); tq = null; }
+        const tp = +KN('gpuT') ? tqBegin() : null;
+        panoStep(cam, panoArgs[0], panoArgs[1]);
+        if (tp) tqEnd(tp, 'pano');
+      }
     } finally {
       if (tq) tqEnd(tq, eye ? 'mirror' : 'main');
       for (let u = 0; u < _hookUnits; u++) { gl.activeTexture(gl.TEXTURE0 + S.unit0 + u);
@@ -45140,17 +45316,67 @@ void main(){ wxMain(); gl_FragColor${pm === 'P' ? '' : '.a'}*=wxVeil(); }
     V.histW = w; V.histH = h; V.histOk = false;
   }
   let _cbM = null;
-  function resolveCB(cam, V, aw, ah, lw, lh, cu) {
+  const PANO_EL0 = -6 * Math.PI / 180, PANO_B4 = [0, 10, 2, 8, 5, 15, 7, 13, 1, 11, 3, 9, 4, 14, 6, 12];
+  function ensurePano() {
+    const w = Math.max(256, Math.min(2048, (+KN('panoW') | 0) || 512)) >> 4 << 4, h = w >> 2;   // both a multiple of 4
+    if (S.pano && S.pano.w === w) return S.pano;
+    freePano();
+    gl.activeTexture(gl.TEXTURE0 + S.unit0);                       // a unit the hook restores, never one of three's
+    const mk = (tw, th, fmt, type, filt, wrapS) => { const tx = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tx);
+      gl.texImage2D(gl.TEXTURE_2D, 0, fmt, tw, th, 0, gl.RGBA, type, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filt); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filt);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrapS); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      return { tex: tx }; };
+    const mrt = (a, b) => { const f = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, a.tex, 0);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, b.tex, 0);
+      gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]); return f; };
+    const col = mk(w, h, gl.RGBA16F, gl.HALF_FLOAT, gl.LINEAR, gl.REPEAT), z = mk(w, h, gl.RGBA32F, gl.FLOAT, gl.NEAREST, gl.REPEAT);
+    const fbo = mrt(col, z);
+    gl.clearBufferfv(gl.COLOR, 0, [0, 0, 0, 1]); gl.clearBufferfv(gl.COLOR, 1, [1e9, 1e9, 1, 0]);   // a clear sky until marched
+    const qc = mk(w >> 2, h >> 2, gl.RGBA16F, gl.HALF_FLOAT, gl.NEAREST, gl.CLAMP_TO_EDGE), qz = mk(w >> 2, h >> 2, gl.RGBA32F, gl.FLOAT, gl.NEAREST, gl.CLAMP_TO_EDGE);
+    S.pano = { w, h, col, z, fbo, qc, qz, qfbo: mrt(qc, qz), n: 0, full: false, at: null };
+    return S.pano;
+  }
+  function freePano() {
+    if (!S || !S.pano) return; const P = S.pano;
+    for (const x of [P.col, P.z, P.qc, P.qz]) gl.deleteTexture(x.tex); gl.deleteFramebuffer(P.fbo); gl.deleteFramebuffer(P.qfbo); S.pano = null;
+  }
+  function panoStep(cam, cu, tex) {
+    plainState(renderer.state);                                    // the clears inside ensurePano need no scissor / colour mask
+    const P = ensurePano(), e = cam.matrixWorld.elements;
+    if (P.at && Math.hypot(e[12] - P.at[0], e[13] - P.at[1], e[14] - P.at[2]) > 20000) { P.n = 0; P.full = false; }
+    P.at = [e[12], e[13], e[14]];
+    const k = PANO_B4[P.n & 15], ph = [k & 3, k >> 2];
+    gl.bindFramebuffer(gl.FRAMEBUFFER, P.qfbo); gl.viewport(0, 0, P.w >> 2, P.h >> 2);
+    gl.useProgram(PR.cloud.p);
+    bindTex(PR.cloud, tex, S.unit0);
+    setU(PR.cloud, Object.assign({}, cu, { uPano: 1, uPanoEl0: PANO_EL0, uPanoPh: ph, uRes: [P.w, P.h],
+      uPixAng: 2 * Math.PI / P.w, uCB: [0, 0], uQuad: [0, 0, 0], uJit: 0, uFlashS: 0, uDetAmp: 0, uDbg: 0,
+      uStepK: Math.max(1, +KN('panoStep') || 3) }));
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, P.fbo); gl.viewport(0, 0, P.w, P.h);
+    gl.useProgram(PR.pscat.p);
+    bindTex(PR.pscat, { tC: P.qc, tZ: P.qz }, S.unit0);
+    setU(PR.pscat, { uPh: ph });
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    P.n++; if (P.n >= 16) P.full = true;
+  }
+  function resolveCB(cam, V, aw, ah, lw, lh, cu, q4) {
     ensureHist(V, lw, lh);
     const e = cam.matrixWorld.elements, now = performance.now();
     const moved = V.prevPos ? Math.hypot(e[12] - V.prevPos[0], e[13] - V.prevPos[1], e[14] - V.prevPos[2]) : 1e9;
     const ok = !!(V.histOk && V.prevVP && now - (V.histT || 0) < 150 && moved < 2000);
     const cur = V.histI = (V.histI | 0) ^ 1;
     gl.bindFramebuffer(gl.FRAMEBUFFER, V.hist[cur].fbo); gl.viewport(0, 0, lw, lh);
-    gl.useProgram(PR.resolve.p);
-    bindTex(PR.resolve, { tFresh: V.cld, tHist: V.hist[cur ^ 1], tDepth: V.depthTex }, S.unit0);
-    setU(PR.resolve, { uInvProj: cu.uInvProj, uCamWorld: cu.uCamWorld, uPrevVP: { m4: V.prevVP || cu.uCamWorld.m4 }, uRes: [lw, lh],
-      uDepthSize: [aw, ah], uNear: cu.uNear, uFar: cu.uFar, uSkyT: cu.uSkyT, uParity: V.cbPar | 0, uHistOk: ok ? 1 : 0 });
+    const pr = q4 ? PR.resolve4 : PR.resolve;
+    gl.useProgram(pr.p);
+    bindTex(pr, { tFresh: V.cld, tHist: V.hist[cur ^ 1], tDepth: V.depthTex }, S.unit0);
+    const uni = { uInvProj: cu.uInvProj, uCamWorld: cu.uCamWorld, uPrevVP: { m4: V.prevVP || cu.uCamWorld.m4 }, uRes: [lw, lh],
+      uDepthSize: [aw, ah], uNear: cu.uNear, uFar: cu.uFar, uSkyT: cu.uSkyT, uParity: V.cbPar | 0, uHistOk: ok ? 1 : 0,
+      uEdge: +KN('edge') ? 1 : 0, uEdgeK: Math.max(0.01, +KN('edgeK') || 0.12) };   // (v53.49)
+    if (q4) { uni.uOff = q4; uni.uAcc = Math.max(0.05, Math.min(1, +KN('acc') || 0.5)); }
+    setU(pr, uni);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     if (!_cbM) _cbM = new THREE.Matrix4();
     _cbM.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
@@ -45196,6 +45422,7 @@ void main(){ wxMain(); gl_FragColor${pm === 'P' ? '' : '.a'}*=wxVeil(); }
       uMaxT: +KN('distKm') * 1000 / (H / 2), uHaze: 3.912 / (+KN('visKm') * 1000) * (H / 2), uExt: +KN('ext'), uSmooth: +KN('smooth'),
       uM: H / 2, uTime: (performance.now() / 1000) % 1000, uBright: +KN('bright'), uShadow: +KN('shadow'), uDbg: +KN('dbg') || 0,
       uStepK: eye ? Math.max(1, +KN('mirrorStep')) : Math.max(Math.max(0.5, +KN('step') || 1), (+KN('gpuBudget') > 0 && S.gov) ? S.gov.k : 1),
+      uLight: +KN('light') ? 1 : 0,                                // (v53.50) THE SUNLIGHT VOLUME (at F_PACK2)
       uDetAmp: eye ? 0 : +KN('detail'), uDetTime: S.tDet || 0, uDetPer: 40, uDetQref: +KN('detQref'), uDetDx: DX, uDetVref: +KN('detVref'),
       uK: { i: 1 + satLive() }, uBand: REG.band, uRegR: REG.R, uWarpAmp: REG.amp, uWarpK: 1 / REG.period,
       uRegRot: [Math.cos(REG.rot), Math.sin(REG.rot)], uRegOff: REG.off, uFlipN: [Math.cos(f), -Math.sin(f)],
@@ -45391,6 +45618,9 @@ void main(){ wxMain(); gl_FragColor${pm === 'P' ? '' : '.a'}*=wxVeil(); }
     const src = { init: F_INIT, scal: F_SCAL, adP: F_ADV_P, adC: F_ADV_C, keddy: F_KEDDY, diff: F_DIFF, mean1: F_MEAN1, mean2: F_MEAN2,
       qmax1: F_QMAX1, qmax2: F_QMAX2, phys: F_PHYS, surf: F_SURF, shade: F_SHADE, vort: F_VORT, vfilt: F_VFILT, div: F_DIV, pois: F_POIS,
       prs: F_PRS, pack2: F_PACK2, noise3: F_NOISE3, shift: F_SHIFT, shade2: F_SHADE2, cloud: F_CLOUD, comp: F_COMP, resolve: F_RESOLVE,
+      resolve4: F_RESOLVE4,                                        // (v53.51) THE QUARTER, ACCUMULATED
+      cloudL: F_CLOUDL,                                            // (v53.53) the mirror's variant: THE SKY PANORAMA's reader
+      pscat: F_PSCAT,                                              // (v53.53) ...and its scatter
       bub: F_BUB, elec: F_ELEC, bolt: [F_BOLT, V_BOLT] };
     PR = {}; for (const k in src) PR[k] = Array.isArray(src[k]) ? mkProg(src[k][0], src[k][1]) : mkProg(src[k]);
     try {
@@ -45570,6 +45800,7 @@ void main(){ wxMain(); gl_FragColor${pm === 'P' ? '' : '.a'}*=wxVeil(); }
         if (V.cldZ) gl.deleteTexture(V.cldZ.tex);
         if (V.hist) for (const x of V.hist) { gl.deleteTexture(x.tex); gl.deleteFramebuffer(x.fbo); }   // (v52.80)
         if (V.depthTex) { gl.deleteTexture(V.depthTex.tex); gl.deleteFramebuffer(V.depthFbo); } }
+      freePano();                                                   // (v53.53)
       veilDrop();
       if (S.vao) { gl.deleteVertexArray(S.vao); gl.deleteBuffer(S.vbo); }
       renderer.resetState();
@@ -45584,9 +45815,10 @@ void main(){ wxMain(); gl_FragColor${pm === 'P' ? '' : '.a'}*=wxVeil(); }
       bands: S.sims.map(s => s && s.live ? s.band : null), unit0: S.unit0, depthFmt: S.vMain.fmt || null, cloudPass: S.vMain.cld ? [S.vMain.cldW, S.vMain.cldH] : null,
       scenePx: S.vMain.aw ? [S.vMain.aw, S.vMain.ah] : null, cloudReallocs: S.vMain.reallocs | 0,   // (v52.77)
       gov: S.gov ? { stepK: +S.gov.k.toFixed(2), gpuMed: +S.gov.med.toFixed(2), budget: +KN('gpuBudget') } : null,   // (v52.79)
-      reproj: S.vMain.hist ? { on: !!+KN('reproj'), image: [S.vMain.histW, S.vMain.histH], historyUsed: !!S.vMain.cbOk } : null,   // (v52.80)
-      mirror: { drawn: S.drawnM, pass: S.vMirror.cld ? [S.vMirror.cldW, S.vMirror.cldH] : null, depthFmt: S.vMirror.fmt || null },
-      gpu: S.tq ? { main: tqStat(S.tq.main), mirror: tqStat(S.tq.mirror) } : null,
+      reproj: S.vMain.hist ? { mode: Math.round(+KN('reproj')), image: [S.vMain.histW, S.vMain.histH], historyUsed: !!S.vMain.cbOk } : null,   // (v52.80) (v53.51) mode 2 = the quarter
+      mirror: { drawn: S.drawnM, pass: S.vMirror.cld ? [S.vMirror.cldW, S.vMirror.cldH] : null, depthFmt: S.vMirror.fmt || null,
+        pano: S.pano ? { size: [S.pano.w, S.pano.h], marched: S.pano.n, read: !!(S.pano.full && +KN('mirrorPano')) } : null },   // (v53.53)
+      gpu: S.tq ? { main: tqStat(S.tq.main), mirror: tqStat(S.tq.mirror), pano: tqStat(S.tq.pano) } : null,   // (v53.53) + the panorama
       storm: S.storm ? { live: !!(S.sims[3] && S.sims[3].live), spinLeft: S.storm.spinLeft, band: S.sims[3] && S.sims[3].band, zT: S.cxStorm && S.cxStorm.zT,
         boxKm: S.cxStorm && S.cxStorm.H / 1000, presence: +stormPresence().toFixed(2),
         flash: { I: +(S.flI || 0).toFixed(3), scene: +(S.flS || 0).toFixed(3), boltDraws: S.boltN || 0, cur: !!LT.cur, nv: LT.cur ? LT.cur.nv : 0, rtType: (typeof postFX !== 'undefined' && postFX && postFX.rtScene) ? postFX.rtScene.texture.type : null },
