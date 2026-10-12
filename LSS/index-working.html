@@ -8666,7 +8666,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.77";
+const LSS_BUILD = "53.80";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -28699,10 +28699,34 @@ const _emitArcB = new THREE.Vector3();
 const _botFireOrigin = new THREE.Vector3();
 const _botFireDir = new THREE.Vector3();
 const _botSpreadDir = new THREE.Vector3();
-// (v48.17) THE DAMAGE STAGE A HULL IS SHOWING: 0 none, 1 sparking (< 100 %), 2 electric (< 75 %), 3 smoke
-// (< 50 %), 4 fire (< 25 %). One rule for the live emitter AND the replay recorder (the stage rides the
-// state track `sx`), so a replay can never show a different stage from the one that was on screen.
+// (v48.17) THE DAMAGE STAGE A HULL IS SHOWING: 0 none, 1 (< 100 %), 2 (< 75 %), 3 (< 50 %), 4 (< 25 %).
+// (v53.78) What each stage SHOWS is _dmgStateEmit's: 1 smoke, 2 smoke + sparks, 3 smoke + electric, 4 fire
+// (which trails its own smoke) - see the v53.78 note there; the bands themselves did not move. One rule for
+// the live emitter AND the replay recorder (the stage rides the state track `sx`), so a replay can never
+// show a different stage from the one that was on screen.
+// (v53.78) KNOB `window.__dmgPreview(stage | 'all', seconds)` - forces a stage onto YOUR OWN hull for a few seconds
+// without touching health, to eyeball the stages from third person: 1 smoke, 2 + sparks, 3 + electric, 4 fire.
+// 'all' walks 1 -> 4 (`seconds` each, default 4); `__dmgPreview(0)` stops it. It answers through _dmgTierOf, so
+// the replay recorder takes the forced stage as well - a debug view, not a game state.
+let _dmgPreview = null;
+try {
+  if (typeof window !== 'undefined') window.__dmgPreview = function (stage, seconds) {
+    const s = Math.max(0.5, +seconds || 4), t0 = performance.now();
+    if (!stage) { _dmgPreview = null; return 'off'; }
+    _dmgPreview = stage === 'all' ? { t0, s, all: true } : { t0, s, tier: Math.max(1, Math.min(4, stage | 0)) };
+    return stage === 'all' ? 'stages 1-4, ' + s + ' s each' : 'stage ' + _dmgPreview.tier + ' for ' + s + ' s';
+  };
+} catch (_) {}
+function _dmgPreviewTier(entity) {
+  const p = _dmgPreview;
+  if (!p || entity !== player) return 0;
+  const k = (performance.now() - p.t0) / 1000 / p.s;
+  if (k >= (p.all ? 4 : 1)) { _dmgPreview = null; return 0; }
+  return p.all ? 1 + Math.floor(k) : p.tier;
+}
 function _dmgTierOf(entity) {
+  const _pv = _dmgPreviewTier(entity);
+  if (_pv) return _pv;
   const maxHp = entity.maxHealth || (entity.chassis && entity.chassis.maxHealth) || 1;
   const hpFrac = Math.max(0, (entity.health || 0) / maxHp);
   if (hpFrac >= 1.0) return 0;
@@ -28717,8 +28741,8 @@ function _dmgTierOf(entity) {
   // shield, so a wreck that disengages still looks like a wreck) and is kept here as OPT-IN only,
   // because it also changes every bot and peer — a shielded but badly hurt enemy would smoke, which
   // is a real combat-readability change nobody asked for.
-  //   window.__dmgFX = { burnThroughShield: true }   // heavy tiers ignore the shield
-  //   window.__dmgFX = { burnThroughShield: true, heavyAt: 0.25 }   // fire only, not smoke
+  //   window.__dmgFX = { burnThroughShield: true }   // stages 3-4 (electric, fire) ignore the shield
+  //   window.__dmgFX = { burnThroughShield: true, heavyAt: 0.25 }   // fire only
   const _dk = (typeof window !== 'undefined' && window.__dmgFX) || null;
   if ((entity.shield || 0) > 0.5) {
     const _burnThrough = !!(_dk && _dk.burnThroughShield) &&
@@ -28753,7 +28777,7 @@ function emitDamageState(entity, dt) {
   if (entity._cloaked) return;
   if (entity.mesh && entity.mesh.visible === false) return;
   // (v48.17) the stage is _dmgTierOf's - the one rule the recorder reads too (see the shield note there)
-  const tier = _dmgTierOf(entity) - 1;   // 0 sparking .. 3 fire; -1 = none
+  const tier = _dmgTierOf(entity) - 1;   // 0 smoke .. 3 fire (v53.78 order); -1 = none
   if (tier < 0) return;
   // Emit cadence: faster as damage worsens. tier 0 = 110ms, tier 3 = 45ms.
   if (entity._dmgEmitTimer == null) entity._dmgEmitTimer = 0;
@@ -28769,7 +28793,8 @@ function emitDamageState(entity, dt) {
 }
 // (v48.17) the damage-state effects themselves, split out of emitDamageState so a replay can run them on a
 // replayed hull. `entity` needs only position, velocity, team and chassis.hullLength - the replay hands it a
-// stand-in built from the recorded pose. `tier` 0 sparking / 1 electric / 2 smoke / 3 fire.
+// stand-in built from the recorded pose. `tier` (v53.78) 0 smoke / 1 smoke + sparks / 2 smoke + electric /
+// 3 fire.
 function _dmgStateEmit(entity, tier) {
   // Pick a random point on the hull as the emit anchor (scratch ; no alloc).
   const hullR = (entity.chassis && entity.chassis.hullLength) ? entity.chassis.hullLength * 0.45 : 45;
@@ -28779,7 +28804,38 @@ function _dmgStateEmit(entity, tier) {
     entity.position.z + (Math.random() - 0.5) * hullR * 2
   );
   const pos = _emitPos;
-  if (tier === 0) {
+  // ⭐⭐ (v53.78) SMOKE IS THE BASE OF EVERY STAGE, AND EACH STAGE ADDS TO IT. Owner, seeing the four side by
+  // side (in LSS_AR): "it doesn't look right... it should be first smoke, then smoke and sparks, then smoke
+  // and bigger sparks (the elcricity), and then smoke and fire". It was sparking -> electric -> smoke -> fire:
+  // four DIFFERENT looks, so a hurt hull changed costume at every band instead of getting worse, and the
+  // lightest hit (sparks) was the busiest-looking stage. Now the plume is always there and each band adds
+  // one thing: 0 smoke alone (no ember - a hot glint would read as the next stage), 1 + the sparks,
+  // 2 + the arcs, 3 the fire branch. The bands (_dmgTierOf) and the cadence (110 -> 44 ms) did not change,
+  // so the plume thickens as the damage worsens (~3 -> ~8 puffs a second), and a replay re-emits the new
+  // order from the same recorded stage.
+  // ⚠ (v53.79) THE PLUME IS THE FIRE STAGE'S 'cloud' SMOKE (_dmgSmokePuff), NOT THE OLD SMOKE STAGE'S PARTICLE. The
+  // legacy particle pool is ADDITIVE (`_ptsMat`), and that smoke was a dark brown (0x4a3a30): it adds almost
+  // no light, so as the base of stage 1 it showed NOTHING - measured on 53.78's first cut, Vortex in third
+  // person over the Overworld, `__dmgPreview(1)`: not a trace on the hull. The old stage only ever read as
+  // smoke through its ember. The fire stage's volumetric puff (v42.04) is real dark smoke and was already
+  // tuned and pooled, so every stage now shares ONE plume medium, and stage 4's smoke is the same smoke.
+  if (tier <= 2) {
+    _dmgSmokePuff(entity, pos, hullR, _dmgShaderOk(entity), tier);
+    // The ember inside the plume base (the old smoke stage's accent) comes in with the sparks.
+    if (tier >= 1) {
+      game.particles.push({
+        position: pos.clone(),
+        velocity: _pVel(
+          (Math.random() - 0.5) * 60,
+          20 + Math.random() * 50,
+          (Math.random() - 0.5) * 60
+        ),
+        life: 0.35 + Math.random() * 0.25, maxLife: 0.6,
+        color: 0xff8833, size: 3 + Math.random() * 2,
+      });
+    }
+  }
+  if (tier === 1) {
     // SPARKING: a fountain of hot bright sparks pops off the hull. Bigger
     // count + faster outward velocity than v10 so the bloom pass reliably
     // smears them into a visible cluster of glints at any range. Reads as
@@ -28801,7 +28857,7 @@ function _dmgStateEmit(entity, tier) {
         life: 0.22, maxLife: 0.22, color: 0xffe070, size: 3,
       });
     }
-  } else if (tier === 1) {
+  } else if (tier === 2) {
     // ELECTRIC: 2-3 simultaneous cyan arcs jump across the hull surface
     // each emit. Bigger reach + thicker bolts so the player reads "this
     // ship is shorting out hard" from any angle. Reads as "internal
@@ -28839,33 +28895,9 @@ function _dmgStateEmit(entity, tier) {
         life: 0.22, maxLife: 0.22, color: 0xbbeeff, size: 2.4,
       });
     }
-  } else if (tier === 2) {
-    // SMOKE: thicker plumes rising off the hull, with an orange ember
-    // accent so the smoke reads as "fire venting through the breach"
-    // rather than ambient haze. Bigger size + lighter base color so the
-    // plume catches some bloom.
-    game.particles.push({
-      position: pos.clone(),
-      velocity: _pVel(
-        (Math.random() - 0.5) * 35,
-        35 + Math.random() * 55,
-        (Math.random() - 0.5) * 35
-      ),
-      life: 1.0 + Math.random() * 0.7, maxLife: 1.7,
-      color: 0x4a3a30, size: 9 + Math.random() * 5,
-    });
-    // Hot ember inside the plume base ; bright accent that reads at distance.
-    game.particles.push({
-      position: pos.clone(),
-      velocity: _pVel(
-        (Math.random() - 0.5) * 60,
-        20 + Math.random() * 50,
-        (Math.random() - 0.5) * 60
-      ),
-      life: 0.35 + Math.random() * 0.25, maxLife: 0.6,
-      color: 0xff8833, size: 3 + Math.random() * 2,
-    });
-  } else {
+  } else if (tier === 3) {
+    // (v53.78) the old SMOKE-only branch was here; its plume is the base above every stage now. ⚠ This
+    // must stay `tier === 3`, not a bare `else`: tier 0 (smoke only) has no branch and would fall into it.
     // ⚠⚠ (v42.03) tier 3 ; FIRE — SHADER FLAME, NOT DOTS. Owner: "make the fire stage of the ship look
     // more like flames navier stokes rolling off the hull rather than dots".
     // The old version pushed 3 billboarded sprites per emit into the legacy `game.particles` pool.
@@ -28958,47 +28990,76 @@ function _dmgStateEmit(entity, tier) {
         });
       }
     }
-    // Trailing smoke. (v42.04) On the shader path this is a `cloud` burst too, so the whole tier-3
-    // look is one medium - a sprite plume behind a volumetric flame is exactly the seam that made the
-    // old effect read as dots. Spawned on only a THIRD of emits and given a longer, larger, slower
-    // puff: smoke wants to be sparse and persistent where flame is dense and brief, and it keeps the
-    // sustained mesh count down (~23 emits/sec becomes ~8 smoke puffs/sec).
-    if (_didShader) {
-      if (Math.random() < 0.34) {
-        const _sm = spawnFXBurst('cloud', { x: pos.x, y: pos.y + 18, z: pos.z },
-          hullR * 0.75, 1.1 + Math.random() * 0.5,
-          { startScale: 0.4, endScale: 2.0, segs: 8 });
-        if (_sm) {
-          if (_sm.material && _sm.material.uniforms && _sm.material.uniforms.uBaseColor) {
-            _sm.material.uniforms.uBaseColor.value.setHex(0x2a2420);
-          }
-          const _sfx = game.effects && game.effects[game.effects.length - 1];
-          if (_sfx && _sfx.mesh === _sm && _sfx.wakeVel) {
-            // Smoke lags the flame: less of the airflow, more buoyancy.
-            const _v2 = entity.velocity;
-            const _sp2 = _v2 ? Math.hypot(_v2.x, _v2.y, _v2.z) : 0;
-            const _d2 = _sp2 * 0.3;
-            _sfx.wakeVel.set(
-              (_sp2 > 30 ? -_v2.x / _sp2 : 0) * _d2 + (Math.random() - 0.5) * 24,
-              (_sp2 > 30 ? -_v2.y / _sp2 : 1) * _d2 + 40,
-              (_sp2 > 30 ? -_v2.z / _sp2 : 0) * _d2 + (Math.random() - 0.5) * 24
-            );
-          }
+    // Trailing smoke: the plume every stage shares since v53.79 (_dmgSmokePuff, below).
+    _dmgSmokePuff(entity, pos, hullR, _didShader, 3);
+  }
+}
+// (v53.79) May this hull's damage FX use the shader media? The fire stage's own rule, shared so the base plume
+// follows it: the `window.__fireFX.shader` A/B and the `maxDist` gate (5000 u - past it nobody resolves the
+// volume, and the cheap sprites read fine).
+function _dmgShaderOk(entity) {
+  const _fk = (typeof window !== 'undefined' && window.__fireFX) || null;
+  if (_fk && _fk.shader === false) return false;
+  if (typeof spawnFXBurst !== 'function') return false;
+  let _camD2 = 0;
+  try { _camD2 = (typeof camera !== 'undefined' && camera) ? camera.position.distanceToSquared(entity.position) : 0; } catch (_) {}
+  const _maxD = (_fk && _fk.maxDist != null) ? _fk.maxDist : 5000;
+  return _camD2 < _maxD * _maxD;
+}
+// (v53.79) THE DAMAGE PLUME - one puff of it, the base of every damage stage. It is the fire stage's trailing
+// smoke from v42.04, moved here unchanged so every stage shares it: on the shader path a `cloud` burst on only a
+// THIRD of emits, longer, larger and slower than a flame puff (smoke wants to be sparse and persistent where flame
+// is dense and brief, and it keeps the sustained mesh count down: the 44-110 ms emit cadence becomes ~3-8 puffs a
+// second), lagging the airflow and rising; past the distance gate (or on a potato) the old sprite fallback.
+// ⚠ (v53.80) THE PLUME GROWS AND DARKENS WITH THE STAGE. The fire stage's puff at full size (hullR x 0.75, out to 2x: wider
+// than the hull) on a HOVERING stage-1 ship piled into a dark mass bigger than the ship, straight up the
+// third-person line of sight (53.79 first cut, `__dmgPreview(1)` over the Overworld). Light damage is a light grey
+// wisp; only the fire stage keeps v42.04's full, near-black puff.
+// Knobs (live): `window.__dmgFX.smokeP` (default 0.34) = the share of emits that puff;
+// `.smokeSize` = per-stage size x [0.45, 0.6, 0.78, 1]; `.smokeCol` = per-stage tint [grey .. 0x2a2420].
+const _DMG_SMOKE_SIZE = [0.45, 0.6, 0.78, 1];
+const _DMG_SMOKE_COL = [0x5e5854, 0x4a4440, 0x38322e, 0x2a2420];
+function _dmgSmokePuff(entity, pos, hullR, shader, tier) {
+  const _t = Math.max(0, Math.min(3, tier | 0));
+  if (shader) {
+    const _dk = (typeof window !== 'undefined' && window.__dmgFX) || null;
+    if (Math.random() < ((_dk && _dk.smokeP != null) ? _dk.smokeP : 0.34)) {
+      const _sz = (_dk && _dk.smokeSize && _dk.smokeSize[_t] != null) ? _dk.smokeSize[_t] : _DMG_SMOKE_SIZE[_t];
+      const _sm = spawnFXBurst('cloud', { x: pos.x, y: pos.y + 18 * _sz, z: pos.z },
+        hullR * 0.75 * _sz, 1.1 + Math.random() * 0.5,
+        { startScale: 0.4, endScale: 2.0, segs: 8 });
+      if (_sm) {
+        // ⚠ a POOLED material (_acquireFXBurstMaterial): the tint is safe only because _releaseFXBurstMaterial
+        // resets uBaseColor on the way back in - the same contract the fire's red tint relies on (v43.82).
+        if (_sm.material && _sm.material.uniforms && _sm.material.uniforms.uBaseColor) {
+          _sm.material.uniforms.uBaseColor.value.setHex((_dk && _dk.smokeCol && _dk.smokeCol[_t] != null) ? _dk.smokeCol[_t] : _DMG_SMOKE_COL[_t]);
+        }
+        const _sfx = game.effects && game.effects[game.effects.length - 1];
+        if (_sfx && _sfx.mesh === _sm && _sfx.wakeVel) {
+          // Smoke lags the flame: less of the airflow, more buoyancy.
+          const _v2 = entity.velocity;
+          const _sp2 = _v2 ? Math.hypot(_v2.x, _v2.y, _v2.z) : 0;
+          const _d2 = _sp2 * 0.3;
+          _sfx.wakeVel.set(
+            (_sp2 > 30 ? -_v2.x / _sp2 : 0) * _d2 + (Math.random() - 0.5) * 24,
+            (_sp2 > 30 ? -_v2.y / _sp2 : 1) * _d2 + 40,
+            (_sp2 > 30 ? -_v2.z / _sp2 : 0) * _d2 + (Math.random() - 0.5) * 24
+          );
         }
       }
-    } else {
-      // Sprite fallback (far / potato) - see the note above.
-      game.particles.push({
-        position: { x: pos.x, y: pos.y + 18, z: pos.z },
-        velocity: _pVel(
-          (Math.random() - 0.5) * 28,
-          50 + Math.random() * 50,
-          (Math.random() - 0.5) * 28
-        ),
-        life: 1.0 + Math.random() * 0.6, maxLife: 1.6,
-        color: 0x252525, size: 10 + Math.random() * 5,
-      });
     }
+  } else {
+    // Sprite fallback (far / potato).
+    game.particles.push({
+      position: { x: pos.x, y: pos.y + 18, z: pos.z },
+      velocity: _pVel(
+        (Math.random() - 0.5) * 28,
+        50 + Math.random() * 50,
+        (Math.random() - 0.5) * 28
+      ),
+      life: 1.0 + Math.random() * 0.6, maxLife: 1.6,
+      color: 0x252525, size: 10 + Math.random() * 5,
+    });
   }
 }
 
@@ -37837,8 +37898,8 @@ function _rplSample(kc) {
     // doomed heartbeat
     // (v48.03) the third field is FLAGS: 1 = doomed, 2 = cloaked (the hull's last _setShipMeshOpacity,
     // stamped by the wrapper in _rplInstallTaps). 48.01-48.02 files carry 0/1 there, which reads the same.
-    // (v48.17) ...and the DAMAGE STAGE the hull is showing (bits 2-4, _dmgTierOf: 0 none, 1 sparking,
-    // 2 electric, 3 smoke, 4 fire - the live emitter's own rule, shield-up-hides-it included) and whether it
+    // (v48.17) ...and the DAMAGE STAGE the hull is showing (bits 2-4, _dmgTierOf: 0 none, then by v53.78's
+    // order 1 smoke, 2 + sparks, 3 + electric, 4 fire - the live emitter's own rule, shield-up-hides-it included) and whether it
     // is BURNING (bit 5, Pyro's fire damage over time). _rplDmgTick replays both on the replayed hull.
     if (alive) {
       const sh = _rplShieldOf(m);
@@ -39729,7 +39790,7 @@ function _rplStudioFrame(now) {
       const clk = !!(S.dm & 2);
       if (P.cloak !== clk) { P.cloak = clk; try { _setShipMeshOpacity(m, clk ? _RPL_CLOAK_OP : 1.0); } catch (_) {} }
       animateShipMesh(m, spd, ch.flightSpeed || ch.maxSpeed || 400, false, Math.max(dtRep, 1e-4), !!(S.dm & 1));
-      _rplDmgTick(P, P.A, _rplP, _rplP2, S.dm, dtRep);   // (v48.17) sparking, arcs, smoke, fire, the Pyro burn
+      _rplDmgTick(P, P.A, _rplP, _rplP2, S.dm, dtRep);   // (v48.17) smoke, + sparks, + arcs, fire (v53.78 order), the Pyro burn
     } catch (_) {}
   }
   _rplWfxReplay(st, st.rt, dtRep);   // (v48.06) the traps, walls, gas, flame chains standing at the playhead
@@ -40471,7 +40532,7 @@ if (typeof window !== 'undefined') window.__replay = {
              follow: s.follow, puppets: Object.keys(s.pup).length, shotsDrawn: (s.pmPool || []).filter(sl => sl.vis).length,
              shields: Object.keys(s.pup).filter(k => s.pup[k].sh).map(k => k + ':' + s.pup[k].sh),
              cloaked: Object.keys(s.pup).filter(k => s.pup[k].cloak),
-             // (v48.17) each hull's recorded damage stage at the playhead (1 sparking .. 4 fire, +burn: Pyro fire)
+             // (v48.17) each hull's recorded damage stage at the playhead (1 smoke .. 4 fire by v53.78's order, +burn: Pyro fire)
              damage: Object.keys(s.pup).map(k => { const f = _rplStateAt(s.pup[k].A, s.rt).dm; const g = (f >> 2) & 7; return (g || (f & 32)) ? (k + ':' + g + ((f & 32) ? '+burn' : '')) : null; }).filter(Boolean),
              worldFx: Object.keys(s.wv || {}).map(id => s.R.wf[id] ? s.R.wf[id].k : '?'),
              evI: s.evI, ev: s.R.ev.length, lib: s.libOpen, hidden: s.hidden.length,

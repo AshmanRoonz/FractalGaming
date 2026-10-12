@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.77";
+const LSS_BUILD = "53.80";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -13900,7 +13900,25 @@ const _emitArcB = new THREE.Vector3();
 const _botFireOrigin = new THREE.Vector3();
 const _botFireDir = new THREE.Vector3();
 const _botSpreadDir = new THREE.Vector3();
+let _dmgPreview = null;
+try {
+  if (typeof window !== 'undefined') window.__dmgPreview = function (stage, seconds) {
+    const s = Math.max(0.5, +seconds || 4), t0 = performance.now();
+    if (!stage) { _dmgPreview = null; return 'off'; }
+    _dmgPreview = stage === 'all' ? { t0, s, all: true } : { t0, s, tier: Math.max(1, Math.min(4, stage | 0)) };
+    return stage === 'all' ? 'stages 1-4, ' + s + ' s each' : 'stage ' + _dmgPreview.tier + ' for ' + s + ' s';
+  };
+} catch (_) {}
+function _dmgPreviewTier(entity) {
+  const p = _dmgPreview;
+  if (!p || entity !== player) return 0;
+  const k = (performance.now() - p.t0) / 1000 / p.s;
+  if (k >= (p.all ? 4 : 1)) { _dmgPreview = null; return 0; }
+  return p.all ? 1 + Math.floor(k) : p.tier;
+}
 function _dmgTierOf(entity) {
+  const _pv = _dmgPreviewTier(entity);
+  if (_pv) return _pv;
   const maxHp = entity.maxHealth || (entity.chassis && entity.chassis.maxHealth) || 1;
   const hpFrac = Math.max(0, (entity.health || 0) / maxHp);
   if (hpFrac >= 1.0) return 0;
@@ -13921,7 +13939,7 @@ function emitDamageState(entity, dt) {
   if (entity.alive === false || entity.shipState === 'dead') return;
   if (entity._cloaked) return;
   if (entity.mesh && entity.mesh.visible === false) return;
-  const tier = _dmgTierOf(entity) - 1;   // 0 sparking .. 3 fire; -1 = none
+  const tier = _dmgTierOf(entity) - 1;   // 0 smoke .. 3 fire (v53.78 order); -1 = none
   if (tier < 0) return;
   if (entity._dmgEmitTimer == null) entity._dmgEmitTimer = 0;
   entity._dmgEmitTimer -= dt;
@@ -13938,7 +13956,22 @@ function _dmgStateEmit(entity, tier) {
     entity.position.z + (Math.random() - 0.5) * hullR * 2
   );
   const pos = _emitPos;
-  if (tier === 0) {
+  if (tier <= 2) {
+    _dmgSmokePuff(entity, pos, hullR, _dmgShaderOk(entity), tier);
+    if (tier >= 1) {
+      game.particles.push({
+        position: pos.clone(),
+        velocity: _pVel(
+          (Math.random() - 0.5) * 60,
+          20 + Math.random() * 50,
+          (Math.random() - 0.5) * 60
+        ),
+        life: 0.35 + Math.random() * 0.25, maxLife: 0.6,
+        color: 0xff8833, size: 3 + Math.random() * 2,
+      });
+    }
+  }
+  if (tier === 1) {
     if (typeof v8SpawnSparks === 'function') {
       v8SpawnSparks(pos, 8, 1.1, 320, 0xffd060, 0xffffff);
     }
@@ -13953,7 +13986,7 @@ function _dmgStateEmit(entity, tier) {
         life: 0.22, maxLife: 0.22, color: 0xffe070, size: 3,
       });
     }
-  } else if (tier === 1) {
+  } else if (tier === 2) {
     if (typeof spawnLightningBolt === 'function') {
       const arcs = 3;
       for (let k = 0; k < arcs; k++) {
@@ -13981,28 +14014,7 @@ function _dmgStateEmit(entity, tier) {
         life: 0.22, maxLife: 0.22, color: 0xbbeeff, size: 2.4,
       });
     }
-  } else if (tier === 2) {
-    game.particles.push({
-      position: pos.clone(),
-      velocity: _pVel(
-        (Math.random() - 0.5) * 35,
-        35 + Math.random() * 55,
-        (Math.random() - 0.5) * 35
-      ),
-      life: 1.0 + Math.random() * 0.7, maxLife: 1.7,
-      color: 0x4a3a30, size: 9 + Math.random() * 5,
-    });
-    game.particles.push({
-      position: pos.clone(),
-      velocity: _pVel(
-        (Math.random() - 0.5) * 60,
-        20 + Math.random() * 50,
-        (Math.random() - 0.5) * 60
-      ),
-      life: 0.35 + Math.random() * 0.25, maxLife: 0.6,
-      color: 0xff8833, size: 3 + Math.random() * 2,
-    });
-  } else {
+  } else if (tier === 3) {
     const _fk = (typeof window !== 'undefined' && window.__fireFX) || null;
     const _shaderFire = !(_fk && _fk.shader === false);
     let _camD2 = 0;
@@ -14052,40 +14064,57 @@ function _dmgStateEmit(entity, tier) {
         });
       }
     }
-    if (_didShader) {
-      if (Math.random() < 0.34) {
-        const _sm = spawnFXBurst('cloud', { x: pos.x, y: pos.y + 18, z: pos.z },
-          hullR * 0.75, 1.1 + Math.random() * 0.5,
-          { startScale: 0.4, endScale: 2.0, segs: 8 });
-        if (_sm) {
-          if (_sm.material && _sm.material.uniforms && _sm.material.uniforms.uBaseColor) {
-            _sm.material.uniforms.uBaseColor.value.setHex(0x2a2420);
-          }
-          const _sfx = game.effects && game.effects[game.effects.length - 1];
-          if (_sfx && _sfx.mesh === _sm && _sfx.wakeVel) {
-            const _v2 = entity.velocity;
-            const _sp2 = _v2 ? Math.hypot(_v2.x, _v2.y, _v2.z) : 0;
-            const _d2 = _sp2 * 0.3;
-            _sfx.wakeVel.set(
-              (_sp2 > 30 ? -_v2.x / _sp2 : 0) * _d2 + (Math.random() - 0.5) * 24,
-              (_sp2 > 30 ? -_v2.y / _sp2 : 1) * _d2 + 40,
-              (_sp2 > 30 ? -_v2.z / _sp2 : 0) * _d2 + (Math.random() - 0.5) * 24
-            );
-          }
+    _dmgSmokePuff(entity, pos, hullR, _didShader, 3);
+  }
+}
+function _dmgShaderOk(entity) {
+  const _fk = (typeof window !== 'undefined' && window.__fireFX) || null;
+  if (_fk && _fk.shader === false) return false;
+  if (typeof spawnFXBurst !== 'function') return false;
+  let _camD2 = 0;
+  try { _camD2 = (typeof camera !== 'undefined' && camera) ? camera.position.distanceToSquared(entity.position) : 0; } catch (_) {}
+  const _maxD = (_fk && _fk.maxDist != null) ? _fk.maxDist : 5000;
+  return _camD2 < _maxD * _maxD;
+}
+const _DMG_SMOKE_SIZE = [0.45, 0.6, 0.78, 1];
+const _DMG_SMOKE_COL = [0x5e5854, 0x4a4440, 0x38322e, 0x2a2420];
+function _dmgSmokePuff(entity, pos, hullR, shader, tier) {
+  const _t = Math.max(0, Math.min(3, tier | 0));
+  if (shader) {
+    const _dk = (typeof window !== 'undefined' && window.__dmgFX) || null;
+    if (Math.random() < ((_dk && _dk.smokeP != null) ? _dk.smokeP : 0.34)) {
+      const _sz = (_dk && _dk.smokeSize && _dk.smokeSize[_t] != null) ? _dk.smokeSize[_t] : _DMG_SMOKE_SIZE[_t];
+      const _sm = spawnFXBurst('cloud', { x: pos.x, y: pos.y + 18 * _sz, z: pos.z },
+        hullR * 0.75 * _sz, 1.1 + Math.random() * 0.5,
+        { startScale: 0.4, endScale: 2.0, segs: 8 });
+      if (_sm) {
+        if (_sm.material && _sm.material.uniforms && _sm.material.uniforms.uBaseColor) {
+          _sm.material.uniforms.uBaseColor.value.setHex((_dk && _dk.smokeCol && _dk.smokeCol[_t] != null) ? _dk.smokeCol[_t] : _DMG_SMOKE_COL[_t]);
+        }
+        const _sfx = game.effects && game.effects[game.effects.length - 1];
+        if (_sfx && _sfx.mesh === _sm && _sfx.wakeVel) {
+          const _v2 = entity.velocity;
+          const _sp2 = _v2 ? Math.hypot(_v2.x, _v2.y, _v2.z) : 0;
+          const _d2 = _sp2 * 0.3;
+          _sfx.wakeVel.set(
+            (_sp2 > 30 ? -_v2.x / _sp2 : 0) * _d2 + (Math.random() - 0.5) * 24,
+            (_sp2 > 30 ? -_v2.y / _sp2 : 1) * _d2 + 40,
+            (_sp2 > 30 ? -_v2.z / _sp2 : 0) * _d2 + (Math.random() - 0.5) * 24
+          );
         }
       }
-    } else {
-      game.particles.push({
-        position: { x: pos.x, y: pos.y + 18, z: pos.z },
-        velocity: _pVel(
-          (Math.random() - 0.5) * 28,
-          50 + Math.random() * 50,
-          (Math.random() - 0.5) * 28
-        ),
-        life: 1.0 + Math.random() * 0.6, maxLife: 1.6,
-        color: 0x252525, size: 10 + Math.random() * 5,
-      });
     }
+  } else {
+    game.particles.push({
+      position: { x: pos.x, y: pos.y + 18, z: pos.z },
+      velocity: _pVel(
+        (Math.random() - 0.5) * 28,
+        50 + Math.random() * 50,
+        (Math.random() - 0.5) * 28
+      ),
+      life: 1.0 + Math.random() * 0.6, maxLife: 1.6,
+      color: 0x252525, size: 10 + Math.random() * 5,
+    });
   }
 }
 
@@ -21820,7 +21849,7 @@ function _rplStudioFrame(now) {
       const clk = !!(S.dm & 2);
       if (P.cloak !== clk) { P.cloak = clk; try { _setShipMeshOpacity(m, clk ? _RPL_CLOAK_OP : 1.0); } catch (_) {} }
       animateShipMesh(m, spd, ch.flightSpeed || ch.maxSpeed || 400, false, Math.max(dtRep, 1e-4), !!(S.dm & 1));
-      _rplDmgTick(P, P.A, _rplP, _rplP2, S.dm, dtRep);   // (v48.17) sparking, arcs, smoke, fire, the Pyro burn
+      _rplDmgTick(P, P.A, _rplP, _rplP2, S.dm, dtRep);   // (v48.17) smoke, + sparks, + arcs, fire (v53.78 order), the Pyro burn
     } catch (_) {}
   }
   _rplWfxReplay(st, st.rt, dtRep);   // (v48.06) the traps, walls, gas, flame chains standing at the playhead

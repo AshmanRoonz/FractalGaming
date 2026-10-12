@@ -1,0 +1,1559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LSS_AR</title>
+<!--
+  LSS_AR 0.01 - THE RC FEEL TEST. The first file of the LSS_AR fork.
+
+  Owner (2026-10-12): "I am thinking about forking for an AR mode. In AR mode, it would be remote control ships. You
+  can make the ships big or small as you want. Inside the house make them fit on the tabletop, or bigger to fill a
+  room... There would be no need for drawing any scenery... We could map real world objects/walls/floor for indoor
+  boundaries/collision."
+  Then the four answers that shape the fork: "same room only, ever" / "pure rc only" / "quest indoors first" /
+  "fork LSS, LSS_AR". And the controls: "controls for quest would have to switch from nudge look to the right
+  controller gyro (not right stick)" and "your ship could have a laser beam infront to help aim (only visible to self)".
+
+  WHAT THIS FILE IS FOR. Before any of LSS's 188k-line engine is carried over, answer the one question nobody can
+  answer on paper: is flying an LSS hull by remote control, from OUTSIDE the ship, fun - and at what size, with which
+  aim and which movement frame. One file on purpose (the ship_lab_xr.html pattern): Quest 3 passthrough
+  (immersive-ar) or, on a desktop, a sim of a room with a table that runs the same collision, occlusion and shadow
+  code against hand-made planes.
+
+  WHAT IS LSS AND WHAT IS NEW.
+  - The hulls are LSS's SHIPPED files (ships/m/<ship>.glb, the lean set LSS gives a standalone Quest - lss.map.md
+    v38.96), fetched from ../LSS/ in the repo or from the live site (it answers Access-Control-Allow-Origin: * for
+    GLBs, checked 2026-10-12), so the fork copies no art.
+  - The numbers are LSS's: CHASSIS (speeds, acceleration, dashes, hull sizes), LOADOUTS (each ship's main gun), the
+    class colours, the +-0.45 pi pitch clamp - copied below with the line they came from.
+  - Game units are LSS units. The ARENA group carries the scale (metres per unit), so physics, speeds and ranges never
+    change when the ships do: 1:1000 makes a 100 u Corvette 10 cm long and its 350 u/s cruise 35 cm/s.
+  - The Quest map keeps LSS's VR bindings (xrBindings ~L10160): right trigger fire, left trigger ALT (here: fine aim,
+    as ADS scales look in LSS), A dash, left stick-click up, right stick-click down, right stick left/right = ship
+    prev/next (LSS's VR stick pad), B = menu (here: SETUP). Grips / X / Y stay free for the abilities.
+  - NEW: AIM. In LSS VR the head nudges the aim (vrHeadAim: a 12 deg cone, rate x2). In RC the head is not in the
+    ship, so the RIGHT CONTROLLER'S ROTATION aims instead - three readings of "gyro" to A/B:
+      GYRO  (default) the controller turns, the ship turns: gain x2 yaw, x1.5 pitch, so a 90 deg wrist is a U-turn.
+      NUDGE LSS's own head-aim rule on the wrist: tilt from where you held it and the ship keeps turning (a rate).
+      POINT the ship turns to aim at whatever your controller points at.
+  - NEW: MOVE frame. RC's classic trap is the ship flying TOWARD you, when left and right swap.
+      VIEW  (default, "headless" in drone terms) the left stick moves the ship in YOUR frame, the aim is separate.
+      SHIP  LSS's own frame: forward along the nose, strafe along the wing.
+  - NEW: the LASER SIGHT from the guns along the nose, stopping on a target, a wall or the table - a laser-pointer dot
+    on your real furniture. Local only: when multiplayer comes, it is never sent.
+  - NEW: the room. Every detected plane (Space Setup on the Quest) becomes three things - a collider (5 spheres a
+    hull), a depth-only occluder (the table hides a ship flying under it), and, if horizontal, a shadow catcher
+    (ShadowMaterial: the one cue that says "it is on my table"). Walls / floor / ceiling are ONE-SIDED (always push
+    toward the room); a table is two-sided, so you can fly under it.
+  - NO HEALTH BARS. Owner: "no health bars above ships, they have animated health states". A hull shows its health
+    the LSS way (_dmgTierOf / _dmgStateEmit, v53.78 order): smoke < 100 %, smoke + sparks < 75 %, smoke + electric
+    < 50 %, smoke + fire < 25 %. Owner: "first smoke, then smoke and sparks, then smoke and bigger sparks (the
+    elcricity), and then smoke and fire".
+  - Quest depth sensing (three r165's WebXRDepthSensing, for hands and pets in front of a ship) is requested and OFF
+    by default - the sensor depth is noisy against the plane-exact shadows. SETUP -> DEPTH tries it.
+
+  QUEST: B opens SETUP in front of you (point + trigger to click, or point at a surface + trigger to move the arena
+  there, both grips to stretch the ships). Right stick up/down also resizes while flying.
+  DESKTOP: click the view to fly with the mouse (it plays the right controller), Esc frees the mouse. WASD move,
+  Space / C up / down, left mouse fire, right mouse fine aim, Shift dash, [ ] ship, - = size, 1 2 3 aim mode,
+  V move frame, L laser, arrows walk round the table, H hides this panel.
+  HOOKS: window.ARL (state / input / tick / render / click / place) and window.__arK (every knob, live).
+-->
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #0c1017; color: #cfe0f7; font: 13px/1.45 system-ui, "Segoe UI", sans-serif; overflow: hidden; }
+  #c { position: fixed; inset: 0; width: 100%; height: 100%; display: block; outline: none; }
+  #ui { position: fixed; left: 12px; top: 12px; width: min(380px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow: auto;
+        background: rgba(9, 14, 23, 0.86); border: 1px solid #253650; border-radius: 10px; padding: 12px 14px; z-index: 2; box-sizing: border-box; }
+  #ui.hide { display: none; }
+  .hd { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+  .hd b { font-size: 17px; letter-spacing: .04em; color: #e8f1ff; }
+  .hd .sub { color: #7f93b0; }
+  button { font: inherit; color: #e8f1ff; background: #1b2638; border: 1px solid #2f4566; border-radius: 6px; padding: 5px 9px; cursor: pointer; }
+  button:hover { background: #24344d; }
+  button.on { background: #2f6fd8; border-color: #4f8cf0; }
+  button:disabled { opacity: .5; cursor: default; }
+  #btn-ar { width: 100%; padding: 10px; font-size: 15px; font-weight: 700; letter-spacing: .05em; margin-bottom: 6px; }
+  .row { display: flex; align-items: center; gap: 6px; margin: 5px 0; flex-wrap: wrap; }
+  .row .lbl { width: 46px; color: #7f93b0; font-weight: 600; font-size: 12px; }
+  .row .val { min-width: 120px; text-align: center; }
+  .note { color: #9fb2cc; margin: 4px 0 8px; }
+  .keys { color: #7f93b0; font-size: 12px; margin-top: 8px; border-top: 1px solid #1f2d42; padding-top: 8px; }
+  #stat { margin-top: 8px; color: #9fd0ff; font-variant-numeric: tabular-nums; white-space: pre-line; }
+  #toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); background: rgba(9, 14, 23, .9); border: 1px solid #2f4566;
+           border-radius: 8px; padding: 8px 14px; color: #e8f1ff; font-weight: 600; letter-spacing: .03em; z-index: 3; opacity: 0; transition: opacity .25s; pointer-events: none; }
+</style>
+</head>
+<body>
+<canvas id="c" tabindex="0"></canvas>
+<div id="ui">
+  <div class="hd"><b>LSS_AR</b><span id="build"></span><span class="sub">RC feel test</span></div>
+  <button id="btn-ar" disabled>CHECKING FOR AR...</button>
+  <div class="note" id="ar-note"></div>
+  <div id="desk-rows"></div>
+  <div class="keys">Desktop sim: click the view to fly with the mouse (it stands in for the right controller), Esc frees it.
+    WASD move · Space / C up / down · left mouse fire · right mouse fine aim · Shift dash · [ ] ship · - = size ·
+    1 2 3 aim mode · V move frame · L laser · arrows walk round the table · H hide this panel</div>
+  <div id="stat"></div>
+</div>
+<div id="toast"></div>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.min.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.165.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+const AR_BUILD = '0.03';
+document.getElementById('build').textContent = AR_BUILD;
+const QS = new URLSearchParams(location.search);
+const UA = navigator.userAgent;
+const IS_QUEST = /OculusBrowser|Quest/i.test(UA);
+const IS_SMALL = IS_QUEST || /Android|iPhone|iPad|Mobile/i.test(UA);
+const ASSETS = QS.get('assets') || (/\/LSS_AR\//i.test(location.pathname) ? '../LSS/' : 'https://lss.fractalreality.ca/');
+const SHIP_SET = QS.has('hq') ? '' : 'm/';
+const D2R = Math.PI / 180;
+const PITCH_MAX = Math.PI * 0.45;                    // LSS clamps player.euler.x to +-0.45 pi (~L121637)
+
+// ================================================================ LSS DATA (copied: this fork does not load lss.js)
+// CHASSIS: index-working.html ~L9015. LOADOUTS weapons: ~L9799. Colours: LSS.CLASS_COLORS ~L9052.
+const CHASSIS = {
+  FRIGATE:     { flightSpeed: 450, strafeSpeed: 350, verticalSpeed: 350, acceleration: 1200, deceleration: 800,
+                 maxDashes: 3, dashSpeed: 900, dashDuration: 0.4, dashCooldown: 4, hullWidth: 60, hullHeight: 25, hullLength: 80 },
+  CORVETTE:    { flightSpeed: 350, strafeSpeed: 280, verticalSpeed: 280, acceleration: 800, deceleration: 600,
+                 maxDashes: 2, dashSpeed: 750, dashDuration: 0.5, dashCooldown: 5, hullWidth: 80, hullHeight: 30, hullLength: 100 },
+  DREADNOUGHT: { flightSpeed: 250, strafeSpeed: 180, verticalSpeed: 180, acceleration: 500, deceleration: 400,
+                 maxDashes: 1, dashSpeed: 550, dashDuration: 0.6, dashCooldown: 7, hullWidth: 110, hullHeight: 45, hullLength: 140 },
+};
+// sfx / tracer are this file's own (a look, not a balance number)
+const SHIPS = {
+  BLASTER:  { chassis: 'DREADNOUGHT', color: 0x44eeff, sfx: 'gat',  tr: [0.8, 0.05], weapon: { name: 'Gatling Cannon',    mode: 'hitscan',    damage: 85,   fireRate: 0.05, range: 2600,  projSpeed: 0,   pellets: 1, splash: 0,   spread: 0.04 } },
+  PUNCTURE: { chassis: 'FRIGATE',     color: 0xffee44, sfx: 'rail', tr: [2.6, 0.3],  weapon: { name: 'Sodium Railgun',    mode: 'hitscan',    damage: 1000, fireRate: 1.5,  range: 10000, projSpeed: 0,   pellets: 1, splash: 50 } },
+  PYRO:     { chassis: 'DREADNOUGHT', color: 0xff3322, sfx: 'thump',tr: [1, 0.1],    weapon: { name: 'Thermite Launcher', mode: 'projectile', damage: 900,  fireRate: 1.2,  range: 3800,  projSpeed: 600, pellets: 1, splash: 300 } },
+  SLAYER:   { chassis: 'FRIGATE',     color: 0x44ff66, sfx: 'shot', tr: [1, 0.1],    weapon: { name: 'Shotgun',           mode: 'spread',     damage: 200,  fireRate: 0.85, range: 1400,  projSpeed: 350, pellets: 8, splash: 0,   spread: 0.07 } },
+  SYPHON:   { chassis: 'CORVETTE',    color: 0x4488ff, sfx: 'zap',  tr: [1.1, 0.06], weapon: { name: 'Zapper',            mode: 'hitscan',    damage: 240,  fireRate: 0.09, range: 4400,  projSpeed: 0,   pellets: 1, splash: 0 } },
+  TRACKER:  { chassis: 'CORVETTE',    color: 0xff8800, sfx: 'thump',tr: [1, 0.1],    weapon: { name: 'Tracking Bolt',     mode: 'projectile', damage: 660,  fireRate: 0.85, range: 4800,  projSpeed: 900, pellets: 1, splash: 220 } },
+  VORTEX:   { chassis: 'CORVETTE',    color: 0xaa55ff, sfx: 'zap',  tr: [1.4, 0.08], weapon: { name: 'Energy Blaster',    mode: 'hitscan',    damage: 380,  fireRate: 0.25, range: 4400,  projSpeed: 0,   pellets: 1, splash: 0 } },
+};
+const SHIP_ORDER = Object.keys(SHIPS);
+
+// ================================================================ KNOBS (window.__arK, live)
+const K = {
+  ship: 'VORTEX',
+  scale: 0.001,          // metres per game unit: 1:1000 = a 100 u Corvette 10 cm long
+  speed: 1.0,            // tempo: multiplies every LSS speed and acceleration (and bolt speed)
+  aim: 'gyro',           // 'gyro' | 'nudge' | 'point'
+  move: 'view',          // 'view' (headless) | 'ship' (LSS)
+  gyroYaw: 2.0, gyroPitch: 1.5,
+  adsK: 0.4,             // left trigger (LSS's ALT / ADS) multiplies the aim gain: fine aim
+  nudgeSens: 2.0, nudgeCone: 35, nudgeDead: 3,   // LSS vrHeadAim's rate model: rad/s per rad, then a cone (deg) for a wrist
+  aimSmooth: 0.045,      // s: how fast the hull follows the aim
+  pointDist: 1.6,        // m: POINT aims here when the controller points at nothing
+  laser: true,
+  depthOcc: false,
+  targets: 4, targetHP: 3000, targetSpeed: 170,
+  vol: 0.55,
+};
+const SAVE = 'lss_ar_k';
+try { const s = JSON.parse(localStorage.getItem(SAVE) || '{}'); for (const k of ['ship', 'scale', 'speed', 'aim', 'move', 'gyroYaw', 'gyroPitch', 'laser', 'vol']) if (s[k] !== undefined) K[k] = s[k]; } catch (_) {}
+if (!SHIPS[K.ship]) K.ship = 'VORTEX';
+if (!['gyro', 'nudge', 'point'].includes(K.aim)) K.aim = 'gyro';
+if (!['view', 'ship'].includes(K.move)) K.move = 'view';
+K.scale = Math.min(1 / 20, Math.max(1 / 5000, +K.scale || 0.001));
+let _saveT = 0;
+function saveK() {
+  clearTimeout(_saveT);
+  _saveT = setTimeout(() => { try { localStorage.setItem(SAVE, JSON.stringify({ ship: K.ship, scale: K.scale, speed: K.speed, aim: K.aim, move: K.move, gyroYaw: K.gyroYaw, gyroPitch: K.gyroPitch, laser: K.laser, vol: K.vol })); } catch (_) {} }, 400);
+}
+window.__arK = K;
+
+// ================================================================ SMALL MATHS
+const V = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
+const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+const wrapPi = (a) => { a = (a + Math.PI) % (2 * Math.PI); if (a < 0) a += 2 * Math.PI; return a - Math.PI; };
+const yawOf = (d) => Math.atan2(-d.x, -d.z);                       // forward (0,0,-1) = yaw 0; +yaw turns LEFT
+const pitchOf = (d) => Math.asin(clamp(d.y / (d.length() || 1), -1, 1));
+const dirOf = (yaw, pitch, out) => out.set(-Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch));
+const _v1 = V(), _v2 = V(), _v3 = V(), _v4 = V(), _v5 = V(), _v6 = V(), _v7 = V(), _q1 = new THREE.Quaternion();
+const _e1 = new THREE.Euler(0, 0, 0, 'YXZ');
+const Y_UP = V(0, 1, 0);
+function approach(v, target, rate, dt) {   // move v toward target by at most rate*dt
+  _v7.subVectors(target, v); const l = _v7.length(), m = rate * dt;
+  if (l > m) _v7.multiplyScalar(m / l);
+  v.add(_v7);
+}
+
+// ================================================================ RENDERER / SCENE
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.xr.enabled = true;
+
+const scene = new THREE.Scene();
+const BG = new THREE.Color(0x0c1017);
+scene.background = BG;
+const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.02, 60);
+scene.add(camera);
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;   // a neutral room: the Quest gives WebXR no light estimate
+scene.add(new THREE.HemisphereLight(0xe8eeff, 0x2a2622, 0.55));
+const sun = new THREE.DirectionalLight(0xffffff, 1.5);
+sun.castShadow = true;
+sun.shadow.mapSize.set(IS_SMALL ? 1024 : 2048, IS_SMALL ? 1024 : 2048);
+Object.assign(sun.shadow.camera, { left: -2, right: 2, top: 2, bottom: -2, near: 0.2, far: 8 });
+sun.shadow.bias = -0.0003;
+scene.add(sun, sun.target);
+// Near-overhead on purpose: a drop shadow right under a hull is how you read its height above the table, and a table's
+// own (virtual) shadow then falls under the table, where the real floor is darker anyway.
+const SUN_OFF = V(0.3, 3.0, 0.2);
+function updateSun() {
+  sun.target.position.copy(arena.position); sun.position.copy(arena.position).add(SUN_OFF);
+  sun.target.updateMatrixWorld(); sun.shadow.camera.updateProjectionMatrix();
+}
+
+// THE ARENA: game units inside, metres outside. Yaw-only rotation + uniform scale, so a direction converts with the yaw
+// alone and a length with K.scale alone.
+const arena = new THREE.Group();
+arena.visible = false;
+scene.add(arena);
+const arenaQinv = new THREE.Quaternion();
+function arenaSync() { arena.scale.setScalar(K.scale); arena.updateMatrixWorld(true); arenaQinv.copy(arena.quaternion).invert(); }
+const toArenaDir = (vW) => vW.applyQuaternion(arenaQinv);
+const toWorldDir = (vA) => vA.applyQuaternion(arena.quaternion);
+
+// ---------------------------------------------------------------- glow sprite texture (sparks, engines, muzzle)
+const glowTex = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 64; const g = c.getContext('2d');
+  const r = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  r.addColorStop(0, 'rgba(255,255,255,1)'); r.addColorStop(0.25, 'rgba(255,255,255,0.75)'); r.addColorStop(0.6, 'rgba(255,255,255,0.18)'); r.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = r; g.fillRect(0, 0, 64, 64);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+})();
+const _glowMats = new Map();
+function glowMat(color) {
+  let m = _glowMats.get(color);
+  if (!m) _glowMats.set(color, m = new THREE.SpriteMaterial({ map: glowTex, color, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true }));
+  return m;
+}
+const UNIT_CYL = new THREE.CylinderGeometry(1, 1, 1, 8, 1, true);   // along +Y, centred: scaled per beam
+
+// ================================================================ THE ROOM: planes -> colliders, occluders, shadow catchers
+// A plane record has the shape WebXR hands over (XRPlane: a pose + a polygon in the pose's XZ, normal = its +Y), so the
+// desktop room below runs the same code as the headset.
+const planes = new Map();
+const OCC_MAT = new THREE.MeshBasicMaterial({ colorWrite: false, side: THREE.DoubleSide });
+const CATCH_MAT = new THREE.ShadowMaterial({ opacity: 0.38, side: THREE.DoubleSide, depthWrite: false });
+let headW = V(0, 1.5, 1.2);
+const headQ = new THREE.Quaternion();
+function newPlaneRec(key, label, desk) {
+  const rec = { key, label: (label || '').toLowerCase(), desk: !!desk, M: new THREE.Matrix4(), inv: new THREE.Matrix4(), n: V(0, 1, 0),
+                poly: new Float32Array(0), c2: [0, 0], cw: V(), area: 0, horizontal: false, oneSided: false, inSign: 1, isTable: false, cat: null, t: -1 };
+  rec.occ = new THREE.Mesh(new THREE.BufferGeometry(), OCC_MAT);
+  rec.occ.matrixAutoUpdate = false; rec.occ.renderOrder = -10; rec.occ.frustumCulled = false;
+  // ⚠ The desktop room DRAWS its table and floor, and a depth-only plane exactly on a drawn surface z-fights it: the
+  // table top lost the depth test in a sawtooth blotch half a metre wide that read as shadow acne (0.01, measured: it
+  // stayed with every caster switched off). The drawn meshes occlude by themselves, so the stand-in planes skip it.
+  rec.occ.visible = !desk;
+  scene.add(rec.occ);
+  return rec;
+}
+function polyGeo(rec, y) {
+  const contour = []; for (let i = 0; i < rec.poly.length; i += 2) contour.push(new THREE.Vector2(rec.poly[i], rec.poly[i + 1]));
+  let faces = []; try { faces = THREE.ShapeUtils.triangulateShape(contour, []); } catch (_) {}
+  // triangulateShape drops a closing duplicate point FROM the array it is given, so build the vertices after it ran
+  const a = new Float32Array(contour.length * 3);
+  for (let i = 0; i < contour.length; i++) { a[i * 3] = contour[i].x; a[i * 3 + 1] = y; a[i * 3 + 2] = contour[i].y; }
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(a, 3));
+  // ⚠ NORMALS ARE NOT OPTIONAL FOR THE SHADOW CATCHER: three's shadow lookup offsets the receiver along its normal, and
+  // with no normal attribute that is normalize(0) = NaN, so ShadowMaterial drew nothing at all (0.01, measured).
+  const nrm = new Float32Array(contour.length * 3); for (let i = 0; i < contour.length; i++) nrm[i * 3 + 1] = 1;
+  g.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
+  const idx = []; for (const f of faces) idx.push(f[0], f[1], f[2]);
+  g.setIndex(idx); g.computeBoundingSphere(); return g;
+}
+function planeSetPolygon(rec, pts) {
+  rec.poly = Float32Array.from(pts);
+  let A = 0, cx = 0, cz = 0; const p = rec.poly, n = p.length / 2;
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n, cr = p[i * 2] * p[j * 2 + 1] - p[j * 2] * p[i * 2 + 1];
+    A += cr; cx += (p[i * 2] + p[j * 2]) * cr; cz += (p[i * 2 + 1] + p[j * 2 + 1]) * cr;
+  }
+  rec.area = Math.abs(A / 2);
+  if (Math.abs(A) > 1e-9) rec.c2 = [cx / (3 * A), cz / (3 * A)];
+  else { let sx = 0, sz = 0; for (let i = 0; i < n; i++) { sx += p[i * 2]; sz += p[i * 2 + 1]; } rec.c2 = [sx / Math.max(1, n), sz / Math.max(1, n)]; }
+  rec.occ.geometry.dispose(); rec.occ.geometry = polyGeo(rec, 0);
+  if (rec.cat) { rec.cat.geometry.dispose(); rec.cat.geometry = polyGeo(rec, 0.0015); }
+}
+function planeSetPose(rec, m) {
+  if (m.isMatrix4) rec.M.copy(m); else rec.M.fromArray(m);
+  rec.inv.copy(rec.M).invert();
+  rec.n.set(0, 1, 0).transformDirection(rec.M);
+  rec.cw.set(rec.c2[0], 0, rec.c2[1]).applyMatrix4(rec.M);
+  rec.occ.matrix.copy(rec.M); rec.occ.matrixWorldNeedsUpdate = true;
+  classify(rec);
+  if (rec.cat) { rec.cat.matrix.copy(rec.M); rec.cat.matrixWorldNeedsUpdate = true; }
+}
+function classify(rec) {
+  const L = rec.label;
+  rec.horizontal = Math.abs(rec.n.y) > 0.85;
+  const h = rec.cw.y;
+  // Walls / floor / ceiling hold the room in from ONE side: the side your head is on. Anything else (a table, a couch)
+  // is two-sided, so a ship can fly under the table. No label (ARCore): verticals and the lowest / highest are room.
+  if (/floor|ceiling|wall/.test(L)) rec.oneSided = true;
+  else if (!L || L === 'other') rec.oneSided = !rec.horizontal || h < 0.15 || h > 2.0;
+  else rec.oneSided = false;
+  rec.isTable = /table|desk/.test(L);
+  // A table / couch blocks the (virtual) light, or a ship over the table also shadows the floor UNDER it (0.01, seen in
+  // the sim). Walls / floor / ceiling never cast. The light is near-overhead, so what the table throws lands under it.
+  rec.occ.castShadow = !rec.oneSided;
+  _v1.copy(headW).applyMatrix4(rec.inv); rec.inSign = _v1.y >= 0 ? 1 : -1;
+  if (rec.horizontal && !rec.cat) {
+    rec.cat = new THREE.Mesh(polyGeo(rec, 0.0015), CATCH_MAT);
+    rec.cat.matrixAutoUpdate = false; rec.cat.receiveShadow = true; rec.cat.renderOrder = -5; rec.cat.frustumCulled = false;
+    rec.cat.matrix.copy(rec.M); rec.cat.matrixWorldNeedsUpdate = true; scene.add(rec.cat);
+  }
+}
+function removePlane(rec) {
+  scene.remove(rec.occ); rec.occ.geometry.dispose();
+  if (rec.cat) { scene.remove(rec.cat); rec.cat.geometry.dispose(); }
+}
+function inPoly(p, x, z) {
+  let c = false;
+  for (let i = 0, j = p.length - 2; i < p.length; j = i, i += 2) {
+    const xi = p[i], zi = p[i + 1], xj = p[j], zj = p[j + 1];
+    if (((zi > z) !== (zj > z)) && (x < (xj - xi) * (z - zi) / (zj - zi) + xi)) c = !c;
+  }
+  return c;
+}
+
+// ---------------------------------------------------------------- the desktop room (a stand-in for Space Setup)
+const desk = new THREE.Group();
+scene.add(desk);
+{
+  const fl = new THREE.Mesh(new THREE.PlaneGeometry(6, 6), new THREE.MeshStandardMaterial({ color: 0x1a212b, roughness: 0.95 }));
+  fl.rotation.x = -Math.PI / 2; desk.add(fl);
+  const grid = new THREE.GridHelper(6, 24, 0x2b3a50, 0x1d2735); grid.position.y = 0.001; desk.add(grid);
+  const wood = new THREE.MeshStandardMaterial({ color: 0x6a4a34, roughness: 0.75 });
+  const top = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.04, 0.8), wood); top.position.y = 0.72; top.castShadow = true; desk.add(top);
+  for (const [x, z] of [[-0.65, -0.35], [0.65, -0.35], [-0.65, 0.35], [0.65, 0.35]]) {
+    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.7, 0.05), wood); leg.position.set(x, 0.35, z); desk.add(leg);
+  }
+  const wm = new THREE.MeshStandardMaterial({ color: 0x141a23, roughness: 1 });
+  const back = new THREE.Mesh(new THREE.PlaneGeometry(6, 2.6), wm); back.position.set(0, 1.3, -1.9); desk.add(back);
+  const left = new THREE.Mesh(new THREE.PlaneGeometry(6, 2.6), wm); left.position.set(-2.4, 1.3, 0); left.rotation.y = Math.PI / 2; desk.add(left);
+  const right = new THREE.Mesh(new THREE.PlaneGeometry(6, 2.6), wm); right.position.set(2.4, 1.3, 0); right.rotation.y = -Math.PI / 2; desk.add(right);
+}
+const DESK_PLANES = [   // label, position, rotation (XYZ), polygon half extents (w along local x, d along local z)
+  ['floor', [0, 0, 0], [0, 0, 0], 3, 3],
+  ['table', [0, 0.74, 0], [0, 0, 0], 0.7, 0.4],
+  ['wall', [0, 1.3, -1.9], [Math.PI / 2, 0, 0], 3, 1.3],      // +Y -> +Z: faces into the room
+  ['wall', [-2.4, 1.3, 0], [0, 0, -Math.PI / 2], 1.3, 3],     // +Y -> +X
+  ['wall', [2.4, 1.3, 0], [0, 0, Math.PI / 2], 1.3, 3],       // +Y -> -X
+  ['ceiling', [0, 2.6, 0], [Math.PI, 0, 0], 3, 3],
+];
+function deskPlanesOn(on) {
+  for (const [k, rec] of [...planes]) if (rec.desk) { removePlane(rec); planes.delete(k); }
+  desk.visible = on;
+  if (!on) return;
+  DESK_PLANES.forEach(([label, p, r, hw, hd], i) => {
+    const rec = newPlaneRec('desk' + i, label, true);
+    planeSetPolygon(rec, [-hw, -hd, hw, -hd, hw, hd, -hw, hd]);
+    const M = new THREE.Matrix4().compose(V(...p), new THREE.Quaternion().setFromEuler(new THREE.Euler(...r)), V(1, 1, 1));
+    planeSetPose(rec, M);
+    planes.set(rec.key, rec);
+  });
+}
+
+// ================================================================ COLLISION + RAYS
+// ⚠ Collision runs in PLANE space (metres): world = arena.localToWorld(arena point), plane = rec.inv x world.
+function collideBody(B) {
+  const s = K.scale, rm = B.r * s;
+  let touched = false;
+  for (const rec of planes.values()) {
+    let best = 0, sg = 1;
+    for (const c of B.sph) {
+      _v1.set(c[0], c[1], c[2]).applyQuaternion(B.quat).add(B.pos);
+      arena.localToWorld(_v1).applyMatrix4(rec.inv);
+      if (!inPoly(rec.poly, _v1.x, _v1.z)) continue;
+      const d = _v1.y;
+      let pen, g;
+      if (rec.oneSided) { g = rec.inSign; pen = rm - d * g; }                 // past the wall counts in full
+      else { if (Math.abs(d) >= rm) continue; g = d >= 0 ? 1 : -1; pen = rm - Math.abs(d); }
+      if (pen > best) { best = pen; sg = g; }
+    }
+    if (best > 0) {
+      _v2.copy(rec.n).multiplyScalar(sg); toArenaDir(_v2);
+      B.pos.addScaledVector(_v2, best / s);
+      const vn = B.vel.dot(_v2); if (vn < 0) B.vel.addScaledVector(_v2, -vn * 1.25);
+      touched = true;
+    }
+  }
+  // a room-sized box in metres, for when the room has no planes (or a gap in them)
+  const xz = 4 / s, lo = -1.6 / s, hi = 2.4 / s;
+  if (B.pos.x < -xz || B.pos.x > xz) { B.pos.x = clamp(B.pos.x, -xz, xz); B.vel.x = 0; }
+  if (B.pos.z < -xz || B.pos.z > xz) { B.pos.z = clamp(B.pos.z, -xz, xz); B.vel.z = 0; }
+  if (B.pos.y < lo || B.pos.y > hi) { B.pos.y = clamp(B.pos.y, lo, hi); B.vel.y = 0; }
+  return touched;
+}
+const RC = { t: 0, kind: null, target: null, point: V(), nW: V() };
+const _ra = V(), _rb = V();
+// Ray in ARENA space (o, unit d, len in units) against live targets and every plane. Fills and returns the shared RC.
+function raycast(o, d, len, skip) {
+  RC.t = len; RC.kind = null; RC.target = null;
+  for (const T of targets) {
+    if (!T.alive || T === skip) continue;
+    _v1.subVectors(T.pos, o); const tc = _v1.dot(d); if (tc < 0 || tc > RC.t + T.rb) continue;
+    const d2 = _v1.lengthSq() - tc * tc, r2 = T.rb * T.rb; if (d2 > r2) continue;
+    const th = tc - Math.sqrt(r2 - d2), t = th > 0 ? th : tc;
+    if (t < RC.t) { RC.t = t; RC.kind = 'target'; RC.target = T; }
+  }
+  arena.localToWorld(_ra.copy(o)); arena.localToWorld(_rb.copy(d).multiplyScalar(RC.t).add(o));
+  for (const rec of planes.values()) {
+    _v2.copy(_ra).applyMatrix4(rec.inv); _v3.copy(_rb).applyMatrix4(rec.inv);
+    if ((_v2.y > 0) === (_v3.y > 0) || _v2.y === _v3.y) continue;
+    const f = _v2.y / (_v2.y - _v3.y), x = _v2.x + (_v3.x - _v2.x) * f, z = _v2.z + (_v3.z - _v2.z) * f;
+    if (!inPoly(rec.poly, x, z)) continue;
+    const t = RC.t * f;
+    if (t < RC.t) { RC.t = t; RC.kind = 'plane'; RC.target = null; RC.nW.copy(rec.n).multiplyScalar(_v2.y > 0 ? 1 : -1); _rb.lerpVectors(_ra, _rb, f); }
+  }
+  RC.point.copy(d).multiplyScalar(RC.t).add(o);
+  return RC;
+}
+
+// ================================================================ HULLS
+const loader = new GLTFLoader();
+const protos = {}, protoWait = {};
+function loadProto(name) {
+  if (protos[name]) return Promise.resolve(protos[name]);
+  if (protoWait[name]) return protoWait[name];
+  return (protoWait[name] = (async () => {
+    const gltf = await loader.loadAsync(ASSETS + 'ships/' + SHIP_SET + name.toLowerCase() + '.glb?v=ar' + AR_BUILD);
+    const model = gltf.scene; model.updateMatrixWorld(true);
+    const bb = new THREE.Box3(), marks = {};
+    model.traverse((o) => {
+      if (o.isMesh) {
+        o.geometry.computeBoundingBox(); bb.union(o.geometry.boundingBox.clone().applyMatrix4(o.matrixWorld));
+        o.castShadow = true;
+        const ms = Array.isArray(o.material) ? o.material : [o.material];
+        for (const m of ms) if (m && m.transparent && m.opacity < 0.5) m.depthWrite = false;   // LSS v38.94: glass by look
+      } else if (o !== model && !o.children.length) marks[o.name] = V().setFromMatrixPosition(o.matrixWorld);
+    });
+    const ch = CHASSIS[SHIPS[name].chassis];
+    const k = ch.hullLength / Math.max(1e-6, bb.max.x - bb.min.x), c = bb.getCenter(V());
+    // model space: nose -X, up +Y (lss.map.md, asset pipeline). Ship frame: nose -Z. Ry(-90 deg) takes -X to -Z.
+    const fit = new THREE.Matrix4().makeRotationY(-Math.PI / 2).multiply(new THREE.Matrix4().makeScale(k, k, k)).multiply(new THREE.Matrix4().makeTranslation(-c.x, -c.y, -c.z));
+    model.position.set(-c.x, -c.y, -c.z);
+    const inner = new THREE.Group(); inner.scale.setScalar(k); inner.add(model);
+    const root = new THREE.Group(); root.rotation.y = -Math.PI / 2; root.add(inner);
+    const pt = (v) => v.clone().applyMatrix4(fit);
+    const guns = Object.keys(marks).filter((n) => /^gun\d+$/i.test(n)).sort((a, b) => parseInt(a.slice(3)) - parseInt(b.slice(3))).map((n) => pt(marks[n]));
+    const thr = Object.keys(marks).filter((n) => /^thruster\d+$/i.test(n)).map((n) => pt(marks[n]));
+    const nose = V(0, 0, -ch.hullLength / 2);
+    const laser = guns.length ? guns.reduce((a, g) => a.add(g), V()).multiplyScalar(1 / guns.length) : nose.clone();
+    const L = ch.hullLength, W = ch.hullWidth, r = Math.max(ch.hullHeight * 0.6, 12);
+    const sph = [[0, 0, -0.3 * L], [0, 0, 0], [0, 0, 0.3 * L], [-0.32 * W, 0, 0.05 * L], [0.32 * W, 0, 0.05 * L]];
+    return (protos[name] = { name, root, guns: guns.length ? guns : [nose], thr, laser, nose, sph, r, rb: 0.42 * L, ch });
+  })());
+}
+function makeBody(name, enemy) {
+  const pr = protos[name];
+  const g = new THREE.Group(); g.rotation.order = 'YXZ';
+  const vis = pr.root.clone(true);
+  let mats = null;
+  if (enemy) {   // its own materials: a red cast, and a flash when hit
+    mats = [];
+    vis.traverse((o) => { if (o.isMesh) { o.material = o.material.clone(); if (o.material.emissive) { o.material.emissive.setHex(0x3a0505); mats.push(o.material); } } });
+  }
+  g.add(vis);
+  const glows = pr.thr.map((t) => { const s = new THREE.Sprite(glowMat(enemy ? 0xff5533 : SHIPS[name].color)); s.position.copy(t); g.add(s); return s; });
+  arena.add(g);
+  return { name, pr, ch: pr.ch, g, vis, glows, mats, pos: V(), vel: V(), yaw: 0, pitch: 0, roll: 0, quat: new THREE.Quaternion(), fwd: V(0, 0, -1),
+           sph: pr.sph, r: pr.r, rb: pr.rb, alive: true };
+}
+function bodySync(B, t) {
+  B.g.position.copy(B.pos); B.g.rotation.set(B.pitch, B.yaw, B.roll); B.quat.setFromEuler(B.g.rotation);
+  dirOf(B.yaw, B.pitch, B.fwd);
+  const thr = clamp(B.vel.length() / (B.ch.flightSpeed * K.speed), 0, 1.4);
+  B.vis.position.y = Math.sin(t * 2.3 + B.pos.x * 0.01) * B.ch.hullHeight * 0.05 * (1 - Math.min(1, thr));   // an idle RC hover
+  for (const s of B.glows) { const k = B.ch.hullWidth * (0.22 + 0.26 * thr) * (0.9 + 0.2 * Math.random()); s.scale.set(k, k, 1); }
+}
+function disposeBody(B) {
+  arena.remove(B.g);
+  if (B.mats) for (const m of B.mats) m.dispose();
+  engineStop(B);
+}
+
+// ================================================================ PLAYER + TARGETS
+let P = null;
+const targets = [];
+let kills = 0;
+const placed = { ok: false, rec: null, half: 0.4, anchor: null, wantAnchor: false, gen: 0, t0: 0 };
+function spawnPlayer() {
+  const keep = P ? { pos: P.pos.clone(), vel: P.vel.clone(), yaw: P.yaw, pitch: P.pitch, aimYaw: P.aimYaw, aimPitch: P.aimPitch } : null;
+  if (P) disposeBody(P);
+  P = makeBody(K.ship, false);
+  Object.assign(P, { aimYaw: 0, aimPitch: 0, fireT: 0, gunIdx: 0, dash: { n: P.ch.maxDashes, t: 0, rech: 0, dir: V() } });
+  if (keep) { P.pos.copy(keep.pos); P.vel.copy(keep.vel); P.yaw = keep.yaw; P.pitch = keep.pitch; P.aimYaw = keep.aimYaw; P.aimPitch = keep.aimPitch; }
+  else P.pos.set(0, P.ch.hullHeight * 2.2, 0);
+  bodySync(P, 0);
+  engineStart(P, 1);
+}
+function zone() {   // where the target drones roam: over the table, never smaller than a few hull lengths
+  const s = K.scale;
+  const h = Math.max(placed.half * 0.85 / s, 320);
+  return { hx: h, hz: h * 0.8, y0: 45, y1: Math.max(260, 0.42 / s) };
+}
+function pickWaypoint(T) {
+  const z = zone();
+  T.wp.set((Math.random() * 2 - 1) * z.hx, z.y0 + Math.random() * (z.y1 - z.y0), (Math.random() * 2 - 1) * z.hz - z.hz * 0.25);
+  T.wpT = 3 + Math.random() * 4;
+}
+function spawnTargets() {
+  for (const T of targets) disposeBody(T);
+  targets.length = 0;
+  const hulls = SHIP_ORDER.filter((n) => n !== K.ship && protos[n]);
+  for (let i = 0; i < K.targets && hulls.length; i++) {
+    const T = makeBody(hulls[i % hulls.length], true);
+    Object.assign(T, { hp: K.targetHP, max: K.targetHP, wp: V(), wpT: 0, deadT: 0, flash: 0, pop: 1, dmgT: 0 });
+    pickWaypoint(T); T.pos.copy(T.wp); pickWaypoint(T);
+    T.yaw = Math.random() * Math.PI * 2;
+    bodySync(T, 0);
+    engineStart(T, 0.35);
+    targets.push(T);
+  }
+}
+// NO HEALTH BARS. Owner: "no health bars above ships, they have animated health states". A hull shows its health
+// the LSS way, by what it does - see dmgState() below the particles.
+function resetTargets() { kills = 0; spawnTargets(); }
+
+function placeAt(pW, rec) {
+  const dx = pW.x - headW.x, dz = pW.z - headW.z;
+  const yaw = dx * dx + dz * dz > 1e-4 ? Math.atan2(-dx, -dz) : 0;   // the arena's forward points AWAY from you
+  arena.position.copy(pW); arena.rotation.set(0, yaw, 0); arenaSync();
+  if (placed.anchor) { try { placed.anchor.delete(); } catch (_) {} }
+  placed.anchor = null; placed.wantAnchor = !!session; placed.gen++;
+  placed.ok = true; placed.rec = rec; placed.half = rec ? Math.sqrt(rec.area) / 2 : 0.4;
+  arena.visible = true;
+  updateSun();
+  if (P) { P.pos.set(0, P.ch.hullHeight * 2.2, 0); P.vel.set(0, 0, 0); P.yaw = P.aimYaw = 0; P.pitch = P.aimPitch = 0; }
+  for (const T of targets) { pickWaypoint(T); T.pos.copy(T.wp); T.vel.set(0, 0, 0); pickWaypoint(T); }
+  toast((rec ? (rec.isTable ? 'ON THE TABLE' : 'ON A SURFACE') : 'NO TABLE FOUND: ON THE FLOOR') + ' · ' + scaleLabel());
+}
+function tryAutoPlace(force) {
+  let best = null, bestS = Infinity;
+  for (const rec of planes.values()) {
+    if (!rec.horizontal) continue;
+    const h = rec.cw.y, dist = Math.hypot(rec.cw.x - headW.x, rec.cw.z - headW.z);
+    let s;
+    if (rec.isTable && dist < 4) s = dist - 100;
+    else if (!rec.oneSided && h > 0.3 && h < 1.3 && rec.area > 0.1 && dist < 3) s = dist;
+    else continue;
+    if (s < bestS) { bestS = s; best = rec; }
+  }
+  if (best) { placeAt(best.cw.clone(), best); return true; }
+  if (force) {
+    let fy = 0; for (const rec of planes.values()) if (rec.horizontal && rec.oneSided && rec.cw.y < 0.3) fy = rec.cw.y;
+    headFlatFwd(_v1); placeAt(V(headW.x + _v1.x, fy, headW.z + _v1.z), null); return true;
+  }
+  return false;
+}
+function placeByRay(oW, dW) {   // SETUP: point at a surface + trigger
+  let bestT = 8, best = null;
+  _ra.copy(oW); _rb.copy(dW).multiplyScalar(8).add(oW);
+  for (const rec of planes.values()) {
+    if (!rec.horizontal) continue;
+    _v2.copy(_ra).applyMatrix4(rec.inv); _v3.copy(_rb).applyMatrix4(rec.inv);
+    if ((_v2.y > 0) === (_v3.y > 0)) continue;
+    const f = _v2.y / (_v2.y - _v3.y);
+    if (!inPoly(rec.poly, _v2.x + (_v3.x - _v2.x) * f, _v2.z + (_v3.z - _v2.z) * f)) continue;
+    if (f * 8 < bestT) { bestT = f * 8; best = rec; }
+  }
+  if (best) { placeAt(_v4.copy(dW).multiplyScalar(bestT).add(oW).clone(), best); return true; }
+  return false;
+}
+function headFlatFwd(out) {   // your facing, flat; looking straight down, your head's UP is the way you face
+  out.set(0, 0, -1).applyQuaternion(headQ); out.y = 0;
+  if (out.lengthSq() < 0.06) { out.set(0, 1, 0).applyQuaternion(headQ); out.y = 0; }
+  if (out.lengthSq() < 1e-6) out.set(0, 0, -1);
+  return out.normalize();
+}
+
+// ================================================================ INPUT (one shape for the headset, the desktop and ARL)
+const IN = { lx: 0, ly: 0, up: false, down: false, fire: false, ads: false, dashEdge: false, dYaw: 0, dPitch: 0, nYaw: 0, nPitch: 0,
+             pointA: null, hasRay: false };
+const rayO = V(), rayD = V(0, 0, -1), _pointA = V();
+const G = { primed: false, yaw: 0, pitch: 0, n0: null, needCenter: true };
+// GYRO / NUDGE from a controller direction (world). Deltas for GYRO; the offset from a neutral for NUDGE.
+function gyroFrom(dW) {
+  IN.dYaw = IN.dPitch = 0; IN.nYaw = IN.nPitch = 0;
+  if (!dW) { G.primed = false; return; }
+  _v6.copy(dW); toArenaDir(_v6);
+  const y = yawOf(_v6), p = pitchOf(_v6);
+  if (G.primed) { if (Math.abs(_v6.y) < 0.96) IN.dYaw = wrapPi(y - G.yaw); IN.dPitch = p - G.pitch; }
+  G.yaw = y; G.pitch = p; G.primed = true;
+  if (!G.n0 || G.needCenter) { G.n0 = [y, p]; G.needCenter = false; }
+  const dz = K.nudgeDead * D2R, cone = K.nudgeCone * D2R, f = (o) => Math.sign(o) * clamp(Math.abs(o) - dz, 0, cone);
+  IN.nYaw = f(wrapPi(y - G.n0[0])); IN.nPitch = f(p - G.n0[1]);
+}
+// POINT: what the controller ray hits (a target, a surface) out to 8 m, else a point K.pointDist out. ⚠ The search must
+// reach past K.pointDist: a ray cut at 1.6 m never touched a drone 2.3 m away, and aiming at a point short of it
+// along your ray is a different direction FROM THE SHIP (0.01 mock test: 4 s of fire, 0 damage).
+function pointFrom(oW, dW) {
+  arena.worldToLocal(_v4.copy(oW)); _v5.copy(dW); toArenaDir(_v5);
+  const rc = raycast(_v4, _v5, 8 / K.scale, null);
+  if (!rc.kind) rc.point.copy(_v5).multiplyScalar(K.pointDist / K.scale).add(_v4);
+  else if (rc.kind === 'target') rc.point.copy(rc.target.pos);   // pointing at a ship means its centre, not where the ray grazed it (7-19 deg off)
+  IN.pointA = _pointA.copy(rc.point);
+  return rc;
+}
+
+// ---------------------------------------------------------------- desktop: keyboard + mouse
+const KEYS = new Set();
+const MS = { dx: 0, dy: 0, fire: false, ads: false, cx: 0, cy: 0, dash: false };
+const NV = { y: 0, p: 0 };   // desktop NUDGE: a virtual wrist offset that springs back
+const ORB = { yaw: 0, dist: 1.2 };
+addEventListener('keydown', (e) => {
+  if (e.repeat) { KEYS.add(e.code); return; }
+  KEYS.add(e.code);
+  const c = e.code;
+  if (c === 'ShiftLeft' || c === 'ShiftRight') MS.dash = true;
+  else if (c === 'BracketLeft') cycleShip(-1);
+  else if (c === 'BracketRight') cycleShip(1);
+  else if (c === 'Minus') click('scale:-');
+  else if (c === 'Equal') click('scale:+');
+  else if (c === 'Digit1') click('aim:gyro');
+  else if (c === 'Digit2') click('aim:nudge');
+  else if (c === 'Digit3') click('aim:point');
+  else if (c === 'KeyV') click(K.move === 'view' ? 'move:ship' : 'move:view');
+  else if (c === 'KeyL') click('laser');
+  else if (c === 'KeyH') document.getElementById('ui').classList.toggle('hide');
+  else if (c === 'KeyR') click('targets');
+  if (/^(Space|Arrow)/.test(c)) e.preventDefault();
+});
+addEventListener('keyup', (e) => KEYS.delete(e.code));
+addEventListener('blur', () => { KEYS.clear(); MS.fire = MS.ads = false; });
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+canvas.addEventListener('mousedown', (e) => {
+  auInit();
+  if (document.pointerLockElement !== canvas && K.aim !== 'point') { try { canvas.requestPointerLock(); } catch (_) {} }
+  if (e.button === 0) MS.fire = true; else if (e.button === 2) MS.ads = true;
+});
+addEventListener('mouseup', (e) => { if (e.button === 0) MS.fire = false; else if (e.button === 2) MS.ads = false; });
+addEventListener('mousemove', (e) => {
+  if (document.pointerLockElement === canvas) { MS.dx += e.movementX; MS.dy += e.movementY; }
+  MS.cx = e.clientX; MS.cy = e.clientY;
+});
+const SIM = { on: false, v: {} };   // ARL.input(): held values that override the devices
+function desktopInput(dt) {
+  IN.lx = (KEYS.has('KeyD') ? 1 : 0) - (KEYS.has('KeyA') ? 1 : 0);
+  IN.ly = (KEYS.has('KeyS') ? 1 : 0) - (KEYS.has('KeyW') ? 1 : 0);
+  IN.up = KEYS.has('Space'); IN.down = KEYS.has('KeyC') || KEYS.has('ControlLeft');
+  IN.fire = MS.fire; IN.ads = MS.ads; IN.dashEdge = MS.dash; MS.dash = false;
+  // the mouse plays the right controller's rotation: right = turn right, up = nose up
+  IN.dYaw = -MS.dx * 0.0035; IN.dPitch = -MS.dy * 0.0035; MS.dx = MS.dy = 0;
+  const cone = K.nudgeCone * D2R, dz = K.nudgeDead * D2R, f = (o) => Math.sign(o) * clamp(Math.abs(o) - dz, 0, cone);
+  NV.y = clamp(NV.y + IN.dYaw, -cone, cone) * Math.exp(-dt * 2.5); NV.p = clamp(NV.p + IN.dPitch, -cone, cone) * Math.exp(-dt * 2.5);
+  IN.nYaw = f(NV.y); IN.nPitch = f(NV.p);
+  // ORBIT: walk round the table
+  if (KEYS.has('ArrowLeft')) ORB.yaw -= dt * 1.2;
+  if (KEYS.has('ArrowRight')) ORB.yaw += dt * 1.2;
+  if (KEYS.has('ArrowUp')) ORB.dist = Math.max(0.35, ORB.dist - dt * 0.8);
+  if (KEYS.has('ArrowDown')) ORB.dist = Math.min(3.0, ORB.dist + dt * 0.8);
+  IN.hasRay = false; IN.pointA = null;
+  if (K.aim === 'point' && placed.ok) {
+    const r = canvas.getBoundingClientRect(), locked = document.pointerLockElement === canvas;
+    const nx = locked ? 0 : ((MS.cx - r.left) / r.width) * 2 - 1, ny = locked ? 0 : -(((MS.cy - r.top) / r.height) * 2 - 1);
+    _v1.set(nx, ny, 0.5).unproject(camera).sub(camera.position).normalize();
+    rayO.copy(camera.position); rayD.copy(_v1); IN.hasRay = true;
+    pointFrom(rayO, rayD);
+  }
+}
+function applySim() {
+  if (!SIM.on) return;
+  for (const k in SIM.v) IN[k] = SIM.v[k];
+  if (SIM.v.dashEdge) SIM.v.dashEdge = false;
+}
+function deskCamera() {
+  const c = arena.visible ? arena.position : V(0, 0.74, 0);
+  camera.position.set(c.x + Math.sin(ORB.yaw) * ORB.dist, c.y + 0.42 + ORB.dist * 0.18, c.z + Math.cos(ORB.yaw) * ORB.dist);
+  camera.lookAt(c.x, c.y + 0.08, c.z);
+  camera.updateMatrixWorld();
+  headW.copy(camera.position); headQ.copy(camera.quaternion);
+}
+
+// ================================================================ THE STEP
+function stepPlayer(dt, t) {
+  const ch = P.ch, sp = K.speed;
+  // ---- AIM: the right controller's rotation (LSS VR's head nudge, moved to the wrist)
+  const gain = IN.ads ? K.adsK : 1;
+  if (K.aim === 'gyro') { P.aimYaw += IN.dYaw * K.gyroYaw * gain; P.aimPitch += IN.dPitch * K.gyroPitch * gain; }
+  else if (K.aim === 'nudge') { P.aimYaw += IN.nYaw * K.nudgeSens * gain * dt; P.aimPitch += IN.nPitch * K.nudgeSens * gain * dt; }
+  else if (K.aim === 'point' && IN.pointA) {
+    _v1.subVectors(IN.pointA, P.pos);
+    if (_v1.lengthSq() > 25) { P.aimYaw = P.yaw + wrapPi(yawOf(_v1) - P.yaw); P.aimPitch = pitchOf(_v1); }
+  }
+  P.aimPitch = clamp(P.aimPitch, -PITCH_MAX, PITCH_MAX);
+  const k = 1 - Math.exp(-dt / Math.max(0.005, K.aimSmooth)), yaw0 = P.yaw;
+  P.yaw += wrapPi(P.aimYaw - P.yaw) * k;
+  P.pitch += (P.aimPitch - P.pitch) * k;
+  const yawRate = wrapPi(P.yaw - yaw0) / Math.max(dt, 1e-4);
+  dirOf(P.yaw, P.pitch, P.fwd);
+  // ---- MOVE
+  let lx = IN.lx, ly = IN.ly; const m = Math.hypot(lx, ly);
+  if (m < 0.15) lx = ly = 0; else if (m > 1) { lx /= m; ly /= m; }
+  const vert = (IN.up ? 1 : 0) - (IN.down ? 1 : 0);
+  const want = _v2.set(0, 0, 0);
+  if (K.move === 'view') {
+    // HEADLESS: the stick in YOUR frame. The speed blends LSS's forward and strafe speeds by how well the move lines up
+    // with the nose, so a ship still flies fastest the way it points.
+    headFlatFwd(_v3); toArenaDir(_v3);
+    _v4.set(_v3.x * -ly + -_v3.z * lx, 0, _v3.z * -ly + _v3.x * lx);
+    const mag = _v4.length();
+    if (mag > 1e-4) {
+      _v4.multiplyScalar(1 / mag);
+      _v5.set(P.fwd.x, 0, P.fwd.z); const nl = _v5.length(), c = nl > 1e-4 ? _v4.dot(_v5) / nl : 0;
+      const vmax = c >= 0 ? ch.strafeSpeed + (ch.flightSpeed - ch.strafeSpeed) * c : ch.strafeSpeed + (ch.flightSpeed * 0.6 - ch.strafeSpeed) * -c;
+      want.addScaledVector(_v4, vmax * Math.min(1, mag) * sp);
+    }
+    want.y += vert * ch.verticalSpeed * sp;
+  } else {
+    // SHIP: LSS's own frame (updatePlayerMovement): forward along the nose, back at 0.6, strafe along the wing, and
+    // "pilot-perspective up" for vertical
+    _q1.setFromEuler(_e1.set(P.pitch, P.yaw, 0, 'YXZ'));
+    _v4.set(1, 0, 0).applyQuaternion(_q1); _v5.set(0, 1, 0).applyQuaternion(_q1);
+    want.addScaledVector(P.fwd, -ly * (ly < 0 ? ch.flightSpeed : ch.flightSpeed * 0.6) * sp);
+    want.addScaledVector(_v4, lx * ch.strafeSpeed * sp);
+    want.addScaledVector(_v5, vert * ch.verticalSpeed * sp);
+  }
+  // ---- DASH (LSS: maxDashes charges, one back every dashCooldown)
+  const D = P.dash;
+  if (D.n < ch.maxDashes) { D.rech += dt; if (D.rech >= ch.dashCooldown) { D.n++; D.rech = 0; } }
+  if (IN.dashEdge && D.n > 0 && D.t <= 0) { D.n--; D.t = ch.dashDuration; D.dir.copy(want.lengthSq() > 100 ? want : P.fwd).normalize(); sfxDash(P.pos); }
+  if (D.t > 0) { D.t -= dt; P.vel.copy(D.dir).multiplyScalar(ch.dashSpeed * sp); }
+  else approach(P.vel, want, (want.lengthSq() >= P.vel.lengthSq() ? ch.acceleration : ch.deceleration) * sp, dt);
+  P.pos.addScaledVector(P.vel, dt);
+  collideBody(P);
+  // ---- BANK: into a strafe and into a turn (cosmetic: the RC tell)
+  const vLat = P.vel.x * Math.cos(P.yaw) - P.vel.z * Math.sin(P.yaw);
+  const rollT = clamp(-vLat / Math.max(1, ch.strafeSpeed * sp) * 0.5 + yawRate * 0.12, -0.8, 0.8);
+  P.roll += (rollT - P.roll) * (1 - Math.exp(-dt * 6));
+  bodySync(P, t);
+}
+function stepTarget(T, dt, t) {
+  if (!T.alive) {
+    T.deadT -= dt;
+    if (T.deadT <= 0) { T.alive = true; T.hp = T.max; pickWaypoint(T); T.pos.copy(T.wp); T.vel.set(0, 0, 0); pickWaypoint(T); T.pop = 0; T.g.visible = true; }
+    return;
+  }
+  T.wpT -= dt;
+  if (T.wpT <= 0 || T.pos.distanceTo(T.wp) < 60) pickWaypoint(T);
+  const sp = K.targetSpeed * K.speed;
+  _v1.subVectors(T.wp, T.pos); const d = _v1.length();
+  if (d > 1e-3) _v1.multiplyScalar(Math.min(1, d / 220) * sp / d);
+  approach(T.vel, _v1, 320 * K.speed, dt);
+  T.pos.addScaledVector(T.vel, dt);
+  collideBody(T);
+  const v = T.vel.length(), yaw0 = T.yaw;
+  if (v > 8) {
+    const kk = 1 - Math.exp(-dt * 2.5);
+    T.yaw += wrapPi(yawOf(T.vel) - T.yaw) * kk;
+    T.pitch += (clamp(pitchOf(T.vel), -0.5, 0.5) * 0.6 - T.pitch) * kk;
+  }
+  T.roll += (clamp(wrapPi(T.yaw - yaw0) / Math.max(dt, 1e-4) * 0.15, -0.7, 0.7) - T.roll) * (1 - Math.exp(-dt * 4));
+  T.pop = Math.min(1, T.pop + dt * 3);
+  T.g.scale.setScalar(0.2 + 0.8 * T.pop * T.pop);
+  if (T.flash > 0) { T.flash -= dt; const f = Math.max(0, T.flash) / 0.09; for (const mt of T.mats) mt.emissive.setRGB(0.23 + 0.6 * f, 0.02 + 0.55 * f, 0.02 + 0.5 * f); }
+  bodySync(T, t);
+}
+function separate() {   // ships push each other apart (a bounding sphere ~0.42 hull length each)
+  const all = [P, ...targets.filter((T) => T.alive)];
+  for (let i = 0; i < all.length; i++) for (let j = i + 1; j < all.length; j++) {
+    const a = all[i], b = all[j]; _v1.subVectors(b.pos, a.pos); const d = _v1.length(), r = a.rb + b.rb;
+    if (d >= r || d < 1e-6) continue;
+    _v1.multiplyScalar((r - d) / d * 0.5); a.pos.sub(_v1); b.pos.add(_v1);
+  }
+}
+
+// ================================================================ WEAPONS + FX
+const bolts = [], fx = [], decals = [];
+function fxAdd(obj, life, upd) { arena.add(obj); fx.push({ obj, life, max: life, upd }); }
+function fxTick(dt) {
+  for (let i = fx.length - 1; i >= 0; i--) {
+    const f = fx[i]; f.life -= dt;
+    if (f.life <= 0) {
+      arena.remove(f.obj);
+      if (f.obj.userData.ownGeo) f.obj.geometry.dispose();
+      if (f.obj.userData.ownMat) f.obj.material.dispose();
+      fx.splice(i, 1); continue;
+    }
+    if (f.upd) f.upd(f, dt, 1 - f.life / f.max);
+  }
+  for (let i = decals.length - 1; i >= 0; i--) {
+    const d = decals[i]; d.life -= dt;
+    if (d.life <= 0) { arena.remove(d.m); d.m.material.dispose(); decals.splice(i, 1); continue; }
+    d.m.material.opacity = 0.55 * Math.min(1, d.life / 1.5);
+  }
+}
+// sizes that should read the same to the eye at any scale: metres per metre of viewing distance, back to units
+function eyeSize(pA, perMetre, floorM) {
+  arena.localToWorld(_v6.copy(pA));
+  return perMetre * Math.max(floorM, _v6.distanceTo(headW)) / K.scale;
+}
+function beamMesh(color, opacity) {
+  const m = new THREE.Mesh(UNIT_CYL, new THREE.MeshBasicMaterial({ color, transparent: true, opacity, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }));
+  m.userData.ownMat = true; m.frustumCulled = false; return m;
+}
+function placeBeam(m, a, b, r) {
+  _v1.subVectors(b, a); const len = _v1.length();
+  m.position.addVectors(a, b).multiplyScalar(0.5);
+  if (len > 1e-6) m.quaternion.setFromUnitVectors(Y_UP, _v1.multiplyScalar(1 / len));
+  m.scale.set(r, Math.max(len, 1e-3), r);
+}
+function tracer(a, b, color, rk, life) {
+  const m = beamMesh(color, 0.9), r = eyeSize(a, 0.0013, 0.35) * rk;
+  placeBeam(m, a, b, r);
+  fxAdd(m, life, (f, dt, k) => { m.material.opacity = 0.9 * (1 - k); m.scale.x = m.scale.z = r * (1 - 0.5 * k); });
+}
+// ---------------------------------------------------------------- PARTICLES: three pooled point clouds, one draw each
+// GLOW = sparks and embers (additive), FIRE = flame puffs (additive), SMOKE (normal blending, so it still reads over a
+// bright real table, where additive light washes out). Sizes are GAME UNITS, so LSS's own particle sizes carry over.
+const puffTex = (() => {   // a cloudy puff with structure, so flame and smoke are not dots (LSS v42.03: "rather than dots")
+  const c = document.createElement('canvas'); c.width = c.height = 128; const g = c.getContext('2d');
+  let s = 1234567; const rnd = () => ((s = (s * 16807) % 2147483647) / 2147483647);
+  g.globalCompositeOperation = 'lighter';
+  for (let i = 0; i < 28; i++) {
+    const a = rnd() * Math.PI * 2, d = rnd() * 30, x = 64 + Math.cos(a) * d, y = 64 + Math.sin(a) * d, r = 12 + rnd() * 26;
+    const gr = g.createRadialGradient(x, y, 0, x, y, r); gr.addColorStop(0, 'rgba(255,255,255,0.24)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = gr; g.fillRect(0, 0, 128, 128);
+  }
+  g.globalCompositeOperation = 'destination-in';
+  const e = g.createRadialGradient(64, 64, 18, 64, 64, 64); e.addColorStop(0, 'rgba(0,0,0,1)'); e.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = e; g.fillRect(0, 0, 128, 128);
+  return new THREE.CanvasTexture(c);
+})();
+const PART_VS = `
+attribute vec3 aCol; attribute float aSize; attribute float aAlpha; attribute float aAng;
+uniform float uScale; uniform float uHalfH;
+varying vec3 vCol; varying float vAlpha; varying float vAng;
+void main() {
+  vCol = aCol; vAlpha = aAlpha; vAng = aAng;
+  vec4 mv = modelViewMatrix * vec4(position, 1.0);
+  gl_PointSize = aAlpha <= 0.0 ? 0.0 : aSize * uScale * projectionMatrix[1][1] * uHalfH / max(0.001, -mv.z);
+  gl_Position = projectionMatrix * mv;
+}`;
+const PART_FS = `
+uniform sampler2D uMap;
+varying vec3 vCol; varying float vAlpha; varying float vAng;
+void main() {
+  vec2 p = gl_PointCoord - 0.5; float c = cos(vAng), s = sin(vAng);
+  vec4 t = texture2D(uMap, vec2(c * p.x - s * p.y, s * p.x + c * p.y) + 0.5);
+  gl_FragColor = vec4(vCol * t.rgb, vAlpha * t.a);
+  #include <tonemapping_fragment>
+  #include <colorspace_fragment>
+}`;
+const POOLS = [];
+function makePool(n, map, blending, toneMapped, order) {
+  const A = { pos: new Float32Array(n * 3), col: new Float32Array(n * 3), size: new Float32Array(n), alpha: new Float32Array(n), ang: new Float32Array(n) };
+  const geo = new THREE.BufferGeometry();
+  for (const [k, a, s] of [['position', A.pos, 3], ['aCol', A.col, 3], ['aSize', A.size, 1], ['aAlpha', A.alpha, 1], ['aAng', A.ang, 1]]) {
+    geo.setAttribute(k, new THREE.BufferAttribute(a, s).setUsage(THREE.DynamicDrawUsage));   // wraps the array, never copies
+  }
+  const mat = new THREE.ShaderMaterial({ uniforms: { uMap: { value: map }, uScale: { value: K.scale }, uHalfH: { value: 400 } },
+    vertexShader: PART_VS, fragmentShader: PART_FS, transparent: true, depthWrite: false, blending, toneMapped });
+  const pts = new THREE.Points(geo, mat); pts.frustumCulled = false; pts.renderOrder = order; arena.add(pts);
+  const P = { n, A, geo, mat, head: 0, live: false, vel: new Float32Array(n * 3), life: new Float32Array(n), max: new Float32Array(n),
+              s0: new Float32Array(n), s1: new Float32Array(n), c0: new Float32Array(n * 3), c1: new Float32Array(n * 3),
+              a0: new Float32Array(n), drag: new Float32Array(n), grav: new Float32Array(n), spin: new Float32Array(n) };
+  POOLS.push(P); return P;
+}
+const PSMOKE = makePool(700, puffTex, THREE.NormalBlending, true, 2);
+const PFIRE = makePool(800, puffTex, THREE.AdditiveBlending, false, 3);
+const PGLOW = makePool(1600, glowTex, THREE.AdditiveBlending, false, 3);
+const _pc0 = new THREE.Color(), _pc1 = new THREE.Color();
+// one particle: position (arena units), velocity (u/s), life (s), size start -> end (u), colour start -> end, alpha,
+// drag (1/s), gravity (u/s^2, negative rises), spin (rad/s)
+function emitP(P, x, y, z, vx, vy, vz, life, s0, s1, c0, c1, a0, drag, grav, spin) {
+  const i = P.head, i3 = i * 3; P.head = (i + 1) % P.n; P.live = true;
+  const A = P.A;
+  A.pos[i3] = x; A.pos[i3 + 1] = y; A.pos[i3 + 2] = z; P.vel[i3] = vx; P.vel[i3 + 1] = vy; P.vel[i3 + 2] = vz;
+  P.life[i] = P.max[i] = life; P.s0[i] = s0; P.s1[i] = s1; A.size[i] = s0;
+  _pc0.setHex(c0); _pc1.setHex(c1);
+  P.c0[i3] = _pc0.r; P.c0[i3 + 1] = _pc0.g; P.c0[i3 + 2] = _pc0.b; P.c1[i3] = _pc1.r; P.c1[i3 + 1] = _pc1.g; P.c1[i3 + 2] = _pc1.b;
+  A.col[i3] = _pc0.r; A.col[i3 + 1] = _pc0.g; A.col[i3 + 2] = _pc0.b;
+  P.a0[i] = a0; A.alpha[i] = 0; P.drag[i] = drag; P.grav[i] = grav; P.spin[i] = spin; A.ang[i] = Math.random() * 6.2832;
+}
+function tickPools(dt) {
+  for (const P of POOLS) {
+    if (!P.live) continue;
+    const A = P.A; let any = false;
+    for (let i = 0; i < P.n; i++) {
+      if (P.life[i] <= 0) continue;
+      P.life[i] -= dt;
+      if (P.life[i] <= 0) { A.alpha[i] = 0; continue; }
+      any = true;
+      const i3 = i * 3, k = 1 - P.life[i] / P.max[i], dr = Math.exp(-P.drag[i] * dt);
+      P.vel[i3] *= dr; P.vel[i3 + 1] = P.vel[i3 + 1] * dr - P.grav[i] * dt; P.vel[i3 + 2] *= dr;
+      A.pos[i3] += P.vel[i3] * dt; A.pos[i3 + 1] += P.vel[i3 + 1] * dt; A.pos[i3 + 2] += P.vel[i3 + 2] * dt;
+      A.size[i] = P.s0[i] + (P.s1[i] - P.s0[i]) * k;
+      A.col[i3] = P.c0[i3] + (P.c1[i3] - P.c0[i3]) * k; A.col[i3 + 1] = P.c0[i3 + 1] + (P.c1[i3 + 1] - P.c0[i3 + 1]) * k; A.col[i3 + 2] = P.c0[i3 + 2] + (P.c1[i3 + 2] - P.c0[i3 + 2]) * k;
+      // fade in fast, HOLD, fade late: a linear fade spent the puff's alpha while it was still small, so smoke and flame
+      // only ever showed as their small early selves - dots (0.01, seen in the sim)
+      A.alpha[i] = P.a0[i] * Math.min(1, 0.2 + k * 6) * Math.pow(1 - k, 0.8);
+      A.ang[i] += P.spin[i] * dt;
+    }
+    for (const k in P.geo.attributes) P.geo.attributes[k].needsUpdate = true;
+    P.live = any;
+  }
+  for (let i = 0; i < ARC.n; i++) {   // arcs fade (additive: dimming IS fading) and flicker
+    if (ARC.life[i] <= 0) continue;
+    ARC.life[i] -= dt;
+    const f = ARC.life[i] <= 0 ? 0 : (ARC.life[i] / ARC.max[i]) * (0.55 + 0.45 * Math.random()), j = i * 6;
+    for (let q = 0; q < 6; q++) ARC.col[j + q] = ARC.base[j + q] * f;
+  }
+  ARC.geo.attributes.color.needsUpdate = true; ARC.geo.attributes.position.needsUpdate = true;
+}
+function partUniforms() {
+  let h;
+  if (renderer.xr.isPresenting) { const c = renderer.xr.getCamera().cameras[0]; h = c && c.viewport ? c.viewport.w : 1600; }
+  else h = renderer.getDrawingBufferSize(_v7).y;
+  for (const P of POOLS) { P.mat.uniforms.uScale.value = K.scale; P.mat.uniforms.uHalfH.value = h * 0.5; }
+}
+// ---------------------------------------------------------------- lightning arcs: one LineSegments pool
+const ARC = { n: 900, head: 0 };
+ARC.pos = new Float32Array(ARC.n * 6); ARC.col = new Float32Array(ARC.n * 6); ARC.base = new Float32Array(ARC.n * 6);
+ARC.life = new Float32Array(ARC.n); ARC.max = new Float32Array(ARC.n);
+ARC.geo = new THREE.BufferGeometry();
+ARC.geo.setAttribute('position', new THREE.BufferAttribute(ARC.pos, 3).setUsage(THREE.DynamicDrawUsage));
+ARC.geo.setAttribute('color', new THREE.BufferAttribute(ARC.col, 3).setUsage(THREE.DynamicDrawUsage));
+ARC.mesh = new THREE.LineSegments(ARC.geo, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }));
+ARC.mesh.frustumCulled = false; ARC.mesh.renderOrder = 3; arena.add(ARC.mesh);
+const _arcA = V(), _arcB = V(), _arcP = V(), _arcQ = V();
+function arc(a, b, color, life) {   // a jagged bolt a -> b in 6 kinks, plus a hot point at each end
+  _pc0.setHex(color); const len = a.distanceTo(b), segs = 6;
+  _arcP.copy(a);
+  for (let s = 1; s <= segs; s++) {
+    _arcQ.lerpVectors(a, b, s / segs);
+    if (s < segs) _arcQ.x += (Math.random() - 0.5) * len * 0.3, _arcQ.y += (Math.random() - 0.5) * len * 0.3, _arcQ.z += (Math.random() - 0.5) * len * 0.3;
+    const i = ARC.head, j = i * 6; ARC.head = (i + 1) % ARC.n;
+    ARC.pos[j] = _arcP.x; ARC.pos[j + 1] = _arcP.y; ARC.pos[j + 2] = _arcP.z; ARC.pos[j + 3] = _arcQ.x; ARC.pos[j + 4] = _arcQ.y; ARC.pos[j + 5] = _arcQ.z;
+    for (let q = 0; q < 6; q += 3) { ARC.base[j + q] = _pc0.r * 2; ARC.base[j + q + 1] = _pc0.g * 2; ARC.base[j + q + 2] = _pc0.b * 2; }
+    ARC.life[i] = ARC.max[i] = life;
+    _arcP.copy(_arcQ);
+  }
+  for (const e of [a, b]) emitP(PGLOW, e.x, e.y, e.z, 0, 0, 0, 0.12, 7, 3, 0xddf6ff, color, 1, 0, 0, 0);
+}
+function sparks(pA, color, n, speed) {   // impacts and kills
+  for (let i = 0; i < n; i++) {
+    _v1.randomDirection().multiplyScalar(speed * (0.3 + Math.random()));
+    emitP(PGLOW, pA.x, pA.y, pA.z, _v1.x, _v1.y, _v1.z, 0.3 + Math.random() * 0.3, 6, 2, 0xffffff, color, 1, 2, 500, 0);
+  }
+}
+// ---------------------------------------------------------------- THE ANIMATED HEALTH STATES (LSS's, ported)
+// index-working.html _dmgTierOf (~L28705) + emitDamageState / _dmgStateEmit (~L28733), in LSS v53.78's order: a hull
+// under 100 % SMOKES, under 75 % smokes and SPARKS, under 50 % smokes and arcs ELECTRIC, under 25 % BURNS (with its
+// smoke), and emits faster the worse it gets (110 -> 44 ms).
+// Two changes for AR, both because you look at these hulls from 30 cm: the emit point is a random point INSIDE the hull's
+// own box (LSS takes a world-axis box round its centre, which on a long hull puts some of it in the air beside the ship),
+// and the fire stage vents a puff of dark smoke every other emit - additive flame alone washes out over a bright table.
+// (LSS also hides all of it while the shield is up, v42.06; these drones have no shield yet.)
+function dmgTier(B) { const f = B.hp / B.max; return f >= 1 ? 0 : f < 0.25 ? 4 : f < 0.5 ? 3 : f < 0.75 ? 2 : 1; }
+function dmgState(B, dt) {
+  if (!B.alive || !B.g.visible) return;
+  const tier = dmgTier(B) - 1;
+  if (tier < 0) return;
+  B.dmgT -= dt;
+  if (B.dmgT > 0) return;
+  B.dmgT = 0.11 - tier * 0.022;
+  const ch = B.ch, hullR = ch.hullLength * 0.45;
+  _v1.set((Math.random() - 0.5) * ch.hullWidth * 0.7, (Math.random() - 0.5) * ch.hullHeight * 0.8, (Math.random() - 0.5) * ch.hullLength * 0.85)
+    .applyQuaternion(B.quat).add(B.pos);
+  const x = _v1.x, y = _v1.y, z = _v1.z, R = () => Math.random() - 0.5;
+  // SMOKE IS THE BASE OF EVERY STAGE (LSS v53.78; owner: "it should be first smoke, then smoke and sparks, then smoke
+  // and bigger sparks (the elcricity), and then smoke and fire"). The fire stage trails its own smoke below.
+  // The plume grows and darkens with the stage, as in LSS 53.80: light damage is a light grey wisp, never a wall of
+  // smoke over a hovering ship.
+  if (tier <= 2) {
+    const g = [0.6, 0.75, 0.9][tier], col = [0x6a6460, 0x4e4844, 0x3a3430][tier];
+    for (let k = 0; k < 2; k++) {
+      const sz = hullR * (0.3 + Math.random() * 0.15) * g;
+      emitP(PSMOKE, x + R() * sz * 0.5, y, z + R() * sz * 0.5, R() * 35 - B.vel.x * 0.15, 35 + Math.random() * 45, R() * 35 - B.vel.z * 0.15,
+            1.2 + Math.random() * 0.8, sz, sz * 3, col, 0x2a2622, 0.5, 0.4, -12, R() * 1.5);
+    }
+    // the ember comes in with the sparks: on smoke alone a hot glint would read as the next stage
+    if (tier >= 1) emitP(PGLOW, x, y, z, R() * 60, 20 + Math.random() * 50, R() * 60, 0.35 + Math.random() * 0.25, 3 + Math.random() * 2, 1.5, 0xff8833, 0xff3311, 1, 1, 0, 0);
+  }
+  if (tier === 1) {          // + SPARKS: hot sparks pop off the hull
+    for (let k = 0; k < 8; k++) { _v2.randomDirection().multiplyScalar(320 * (0.35 + Math.random() * 0.65)); emitP(PGLOW, x, y, z, _v2.x, _v2.y, _v2.z, 0.22 + Math.random() * 0.18, 4.5, 1.5, 0xffffff, 0xffb040, 1, 2.5, 300, 0); }
+    for (let k = 0; k < 4; k++) emitP(PGLOW, x, y, z, R() * 220, R() * 220, R() * 220, 0.22, 3, 2, 0xffe070, 0xff9030, 1, 1, 0, 0);
+  } else if (tier === 2) {   // + ELECTRIC: three cyan arcs jump across the hull
+    for (let k = 0; k < 3; k++) {
+      _arcA.set(x + R() * hullR * 0.5, y + R() * hullR * 0.4, z + R() * hullR * 0.5);
+      _arcB.set(x + R() * hullR * 1.8, y + R() * hullR * 1.2, z + R() * hullR * 1.8);
+      arc(_arcA, _arcB, 0x66e0ff, 0.28);
+    }
+    for (let k = 0; k < 5; k++) emitP(PGLOW, x, y, z, R() * 130, R() * 130, R() * 130, 0.22, 2.4, 1.2, 0xbbeeff, 0x66e0ff, 1, 1, 0, 0);
+  } else if (tier === 3) {   // FIRE: flame puffs that grow and stream AFT off a moving hull (rise when it hovers).
+    // ⚠ `tier === 3`, never a bare else: tier 0 (smoke alone) has no branch of its own and would fall in here.
+    const sp = B.vel.length(), fs = hullR * 0.3;
+    let ax = 0, ay = 1, az = 0;
+    if (sp > 30) { ax = -B.vel.x / sp; ay = -B.vel.y / sp; az = -B.vel.z / sp; }
+    const drift = sp * 0.10 + 22;
+    for (let k = 0; k < 2; k++) {
+      const o = k * fs * 0.6;   // the second tongue starts a little aft of the first
+      emitP(PFIRE, x + ax * o, y + ay * o, z + az * o, ax * drift + R() * 40, ay * drift + R() * 40 + 18, az * drift + R() * 40, 0.28 + Math.random() * 0.14,
+            fs * 0.8, fs * 3.2, 0xfff2c8, 0xff3a08, 0.9, 0.5, -20, R() * 3);
+    }
+    B.smokeFlip = !B.smokeFlip;
+    if (B.smokeFlip) emitP(PSMOKE, x, y, z, ax * drift * 0.6 + R() * 25, 30 + Math.random() * 40, az * drift * 0.6 + R() * 25, 1.0 + Math.random() * 0.6, fs * 1.2, fs * 4, 0x3a2e26, 0x1e1a18, 0.5, 0.5, -15, R() * 1.5);
+  }
+}
+function flash(pA, color, size, life) {
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, toneMapped: false }));
+  s.userData.ownMat = true; s.position.copy(pA);
+  fxAdd(s, life, (f, dt, k) => { const z = size * (0.5 + k); s.scale.set(z, z, 1); s.material.opacity = 1 - k; });
+}
+function scorch(pA, nW) {   // a mark on the real table / wall where a round landed
+  _v1.copy(nW); toArenaDir(_v1);
+  const r = Math.max(8, 0.003 / K.scale);
+  const m = new THREE.Mesh(new THREE.CircleGeometry(r, 14), new THREE.MeshBasicMaterial({ color: 0x050302, transparent: true, opacity: 0.55, depthWrite: false, toneMapped: false }));
+  m.position.copy(pA).addScaledVector(_v1, 0.6); m.quaternion.setFromUnitVectors(V(0, 0, 1), _v1); m.renderOrder = -4;
+  arena.add(m); decals.push({ m, life: 4 + Math.random() });
+  if (decals.length > 40) { const d = decals.shift(); arena.remove(d.m); d.m.geometry.dispose(); d.m.material.dispose(); }
+}
+function impact(rc, color, big) {
+  const p = rc.point.clone();
+  sparks(p, color, big ? 18 : 8, big ? 320 : 200);
+  flash(p, color, big ? 70 : 28, 0.12);
+  if (rc.kind === 'plane') scorch(p, rc.nW);
+}
+function damage(T, dmg, pA) {
+  if (!T || !T.alive) return;
+  T.hp -= dmg; T.flash = 0.09; sfxHit();
+  if (T.hp <= 0) {
+    T.alive = false; T.deadT = 2.6; T.g.visible = false; kills++;
+    const c = T.pos.clone(), L = T.ch.hullLength, R = () => Math.random() - 0.5;
+    sparks(c, 0xffaa55, 44, 420); flash(c, 0xffcc88, L * 2.2, 0.45); flash(c, 0xff5522, L * 1.3, 0.8);
+    for (let i = 0; i < 18; i++) {
+      _v2.randomDirection().multiplyScalar(60 + Math.random() * 160).addScaledVector(T.vel, 0.3);
+      emitP(PFIRE, c.x + R() * L * 0.3, c.y + R() * L * 0.2, c.z + R() * L * 0.3, _v2.x, _v2.y, _v2.z, 0.45 + Math.random() * 0.4, L * 0.25, L * 0.9, 0xfff0c0, 0xff2a00, 0.95, 1.5, -30, R() * 3);
+    }
+    for (let i = 0; i < 12; i++) {
+      _v2.randomDirection().multiplyScalar(30 + Math.random() * 70);
+      emitP(PSMOKE, c.x + R() * L * 0.3, c.y, c.z + R() * L * 0.3, _v2.x, _v2.y + 40, _v2.z, 1.5 + Math.random(), L * 0.3, L * 1.2, 0x3a2e26, 0x1a1816, 0.7, 0.8, -10, R() * 1.5);
+    }
+    sfxBoom(c); PANEL.dirty = true;
+  }
+}
+function splash(pA, radius, dmg, skip) {
+  for (const T of targets) if (T.alive && T !== skip) { const d = T.pos.distanceTo(pA); if (d < radius + T.rb) damage(T, dmg * (1 - Math.max(0, d - T.rb) / radius), pA); }
+}
+function jitter(dir, spread, out) {
+  if (!spread) return out.copy(dir);
+  _v1.set(Math.random() * 2 - 1, Math.random() * 2 - 1, Math.random() * 2 - 1).multiplyScalar(spread);
+  return out.copy(dir).add(_v1).normalize();
+}
+function stepFire(dt) {
+  P.fireT -= dt;
+  if (!IN.fire || P.fireT > 0) return;
+  const S = SHIPS[P.name], W = S.weapon;
+  P.fireT = W.fireRate;
+  const gun = P.pr.guns[P.gunIdx++ % P.pr.guns.length];
+  const o = _v5.copy(gun).applyQuaternion(P.quat).add(P.pos).clone();
+  const n = W.pellets || 1, spread = W.spread || 0;
+  for (let i = 0; i < n; i++) {
+    const d = jitter(P.fwd, spread, V());
+    if (W.mode === 'hitscan') {
+      const rc = raycast(o, d, W.range, null);
+      tracer(o, rc.point, S.color, S.tr[0], S.tr[1]);
+      if (rc.kind) { const tg = rc.target; impact(rc, S.color, W.damage >= 900); if (tg) damage(tg, W.damage, rc.point); if (W.splash) splash(rc.point, W.splash, W.damage * 0.4, tg); }
+    } else {
+      const spd = W.projSpeed * K.speed;
+      const core = new THREE.Sprite(glowMat(S.color)); const tail = beamMesh(S.color, 0.7);
+      core.position.copy(o); arena.add(core, tail);
+      bolts.push({ pos: o.clone(), vel: d.multiplyScalar(spd), life: W.range / Math.max(1, spd), dmg: W.damage, splash: W.splash, color: S.color, core, tail, big: W.damage >= 900 });
+    }
+  }
+  flash(o, S.color, P.ch.hullWidth * 0.45, 0.06);
+  sfxShot(o, S.sfx);
+}
+function stepBolts(dt) {
+  for (let i = bolts.length - 1; i >= 0; i--) {
+    const b = bolts[i]; b.life -= dt;
+    const a = _v6.copy(b.pos), len = b.vel.length() * dt;
+    const rc = raycast(a, _v4.copy(b.vel).normalize(), len, null);
+    const end = (hit) => {
+      arena.remove(b.core, b.tail); b.tail.material.dispose(); bolts.splice(i, 1);
+      if (hit) { const tg = rc.target; impact(rc, b.color, b.big); if (tg) damage(tg, b.dmg, rc.point); if (b.splash) splash(rc.point, b.splash, b.dmg * 0.5, tg); }
+    };
+    if (rc.kind) { end(true); continue; }
+    b.pos.addScaledVector(b.vel, dt);
+    if (b.life <= 0) { end(false); continue; }
+    const r = eyeSize(b.pos, 0.0016, 0.35);
+    b.core.position.copy(b.pos); b.core.scale.set(r * 7, r * 7, 1);
+    _v4.copy(b.vel).normalize().multiplyScalar(-Math.min(60, b.vel.length() * 0.06)).add(b.pos);
+    placeBeam(b.tail, _v4, b.pos, r);
+  }
+}
+
+// ---------------------------------------------------------------- THE LASER SIGHT (owner: "only visible to self")
+// Local by construction: nothing here is ever sent. From the guns' centre along the nose to the first thing it meets.
+const laser = {
+  core: beamMesh(0xffffff, 0.85), glow: null,
+  dot: new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color: 0xffffff, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, toneMapped: false })),
+  pip: new THREE.Mesh(new THREE.SphereGeometry(1, 10, 8), new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false })),
+};
+laser.glow = beamMesh(0xffffff, 0.35);
+laser.dot.renderOrder = 3; laser.pip.renderOrder = 3;
+arena.add(laser.core, laser.glow, laser.dot, laser.pip);
+function updateLaser() {
+  const on = K.laser && !!P && !PANEL.open;
+  for (const m of [laser.core, laser.glow, laser.dot, laser.pip]) m.visible = on;
+  if (!on) return;
+  const col = SHIPS[P.name].color;
+  laser.glow.material.color.setHex(col); laser.dot.material.color.setHex(col);
+  const o = _v5.copy(P.pr.laser).applyQuaternion(P.quat).add(P.pos);
+  const range = Math.min(SHIPS[P.name].weapon.range, 6 / K.scale);
+  const rc = raycast(o, P.fwd, range, null);
+  const r = eyeSize(o, 0.0007, 0.35);
+  placeBeam(laser.core, o, rc.point, r); placeBeam(laser.glow, o, rc.point, r * 3.2);
+  const hitSomething = !!rc.kind, dr = eyeSize(rc.point, 0.004, 0.35);
+  laser.dot.position.copy(rc.point); laser.dot.scale.set(dr * (hitSomething ? 3.2 : 1.6), dr * (hitSomething ? 3.2 : 1.6), 1);
+  laser.pip.position.copy(rc.point); laser.pip.scale.setScalar(dr * 0.45); laser.pip.visible = hitSomething;
+  laser.pip.material.color.setHex(rc.kind === 'target' ? 0xff4433 : 0xffffff);
+}
+
+// ================================================================ AUDIO (tiny synth, spatial)
+const AU = { ctx: null, out: null, noise: null };
+function auInit() {
+  if (AU.ctx) { if (AU.ctx.state === 'suspended') AU.ctx.resume().catch(() => {}); return; }
+  try {
+    const C = new (window.AudioContext || window.webkitAudioContext)(); AU.ctx = C;
+    AU.out = C.createGain(); AU.out.gain.value = K.vol; AU.out.connect(C.destination);
+    const buf = C.createBuffer(1, C.sampleRate, C.sampleRate), d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    AU.noise = buf;
+    if (P) engineStart(P, 1);
+    for (const T of targets) engineStart(T, 0.35);
+  } catch (_) { AU.ctx = null; }
+}
+function setPos(p, w) { if (p.positionX) { p.positionX.value = w.x; p.positionY.value = w.y; p.positionZ.value = w.z; } else p.setPosition(w.x, w.y, w.z); }
+function panAt(pA) {
+  const C = AU.ctx, p = C.createPanner();
+  p.panningModel = 'HRTF'; p.distanceModel = 'inverse'; p.refDistance = 0.3; p.maxDistance = 40; p.rolloffFactor = 1;
+  setPos(p, arena.localToWorld(_v6.copy(pA))); p.connect(AU.out); return p;
+}
+function tone(pA, type, f0, f1, dur, vol) {
+  if (!AU.ctx) return; const C = AU.ctx, t = C.currentTime;
+  const o = C.createOscillator(), g = C.createGain(); o.type = type;
+  o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0008, t + dur);
+  o.connect(g); g.connect(pA ? panAt(pA) : AU.out); o.start(t); o.stop(t + dur + 0.02);
+}
+function noise(pA, freq, q, dur, vol, type = 'bandpass') {
+  if (!AU.ctx) return; const C = AU.ctx, t = C.currentTime;
+  const s = C.createBufferSource(), f = C.createBiquadFilter(), g = C.createGain();
+  s.buffer = AU.noise; f.type = type; f.frequency.value = freq; f.Q.value = q;
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0008, t + dur);
+  s.connect(f); f.connect(g); g.connect(pA ? panAt(pA) : AU.out); s.start(t, Math.random() * 0.5); s.stop(t + dur + 0.02);
+}
+function sfxShot(pA, kind) {
+  if (kind === 'zap') tone(pA, 'square', 1500, 320, 0.08, 0.10);
+  else if (kind === 'rail') { tone(pA, 'sawtooth', 2600, 110, 0.32, 0.16); noise(pA, 3000, 1, 0.06, 0.2); }
+  else if (kind === 'gat') noise(pA, 1900, 2, 0.035, 0.22);
+  else if (kind === 'shot') { noise(pA, 900, 0.7, 0.12, 0.35, 'lowpass'); tone(pA, 'triangle', 300, 90, 0.1, 0.12); }
+  else tone(pA, 'triangle', 520, 170, 0.14, 0.2);
+}
+function sfxHit() { tone(null, 'sine', 2300, 1900, 0.04, 0.05); }
+function sfxBoom(pA) { noise(pA, 700, 0.5, 0.75, 0.6, 'lowpass'); tone(pA, 'sine', 120, 40, 0.5, 0.3); }
+function sfxDash(pA) { noise(pA, 1200, 0.8, 0.25, 0.18); }
+function engineStart(B, vol) {
+  if (!AU.ctx || B.eng) return;
+  const C = AU.ctx, o1 = C.createOscillator(), o2 = C.createOscillator(), f = C.createBiquadFilter(), g = C.createGain(), p = panAt(B.pos);
+  o1.type = 'sawtooth'; o2.type = 'square'; o2.detune.value = 18; f.type = 'lowpass'; f.frequency.value = 500; g.gain.value = 0;
+  o1.connect(f); o2.connect(f); f.connect(g); g.connect(p); o1.start(); o2.start();
+  B.eng = { o1, o2, f, g, p, vol };
+}
+function engineStop(B) { if (!B.eng) return; try { B.eng.o1.stop(); B.eng.o2.stop(); B.eng.p.disconnect(); } catch (_) {} B.eng = null; }
+function engineTick(B) {
+  const e = B.eng; if (!e) return;
+  const C = AU.ctx, t = C.currentTime, thr = B.alive ? clamp(B.vel.length() / (B.ch.flightSpeed * K.speed), 0, 1.5) : 0;
+  e.o1.frequency.setTargetAtTime(52 + 110 * thr, t, 0.08); e.o2.frequency.setTargetAtTime(52 + 110 * thr, t, 0.08);
+  e.f.frequency.setTargetAtTime(320 + 1500 * thr, t, 0.08);
+  e.g.gain.setTargetAtTime(B.alive ? e.vol * (0.035 + 0.05 * thr) : 0, t, 0.1);
+  setPos(e.p, arena.localToWorld(_v6.copy(B.pos)));
+}
+function auTick() {
+  if (!AU.ctx) return;
+  AU.out.gain.value = K.vol;
+  const L = AU.ctx.listener, f = _v1.set(0, 0, -1).applyQuaternion(headQ), u = _v2.set(0, 1, 0).applyQuaternion(headQ);
+  if (L.positionX) {
+    L.positionX.value = headW.x; L.positionY.value = headW.y; L.positionZ.value = headW.z;
+    L.forwardX.value = f.x; L.forwardY.value = f.y; L.forwardZ.value = f.z; L.upX.value = u.x; L.upY.value = u.y; L.upZ.value = u.z;
+  } else { L.setPosition(headW.x, headW.y, headW.z); L.setOrientation(f.x, f.y, f.z, u.x, u.y, u.z); }
+  if (P) engineTick(P);
+  for (const T of targets) engineTick(T);
+}
+
+// ================================================================ SETUP PANEL (headset) + desktop rows
+const PW = 640, PH = 640;
+const PANEL = { open: false, dirty: true, hover: null, hits: [] };
+PANEL.canvas = document.createElement('canvas'); PANEL.canvas.width = PW; PANEL.canvas.height = PH;
+PANEL.ctx = PANEL.canvas.getContext('2d');
+PANEL.tex = new THREE.CanvasTexture(PANEL.canvas); PANEL.tex.colorSpace = THREE.SRGBColorSpace;
+PANEL.mesh = new THREE.Mesh(new THREE.PlaneGeometry(0.34, 0.34), new THREE.MeshBasicMaterial({ map: PANEL.tex, transparent: true, depthTest: false, toneMapped: false }));
+PANEL.mesh.renderOrder = 999; PANEL.mesh.visible = false; scene.add(PANEL.mesh);
+function scaleLabel() {
+  const len = (P ? P.ch.hullLength : 100) * K.scale;
+  return '1:' + Math.round(1 / K.scale) + ' · ship ' + (len < 1 ? (len * 100).toFixed(len < 0.1 ? 1 : 0) + ' cm' : len.toFixed(1) + ' m');
+}
+function depthAvailable() { return !!(session && session.enabledFeatures && session.enabledFeatures.includes('depth-sensing')); }
+function panelDraw() {
+  const c = PANEL.ctx; PANEL.hits.length = 0; PANEL.dirty = false;
+  c.clearRect(0, 0, PW, PH);
+  c.fillStyle = 'rgba(9,14,24,0.93)'; c.beginPath(); c.roundRect(0, 0, PW, PH, 28); c.fill();
+  c.strokeStyle = '#2d4466'; c.lineWidth = 3; c.stroke();
+  c.fillStyle = '#cfe0f7'; c.font = 'bold 30px system-ui, sans-serif'; c.textBaseline = 'middle'; c.textAlign = 'left';
+  c.fillText('LSS_AR ' + AR_BUILD + ' · SETUP', 26, 40);
+  const B = (x, y, w, h, label, on, id, dim) => {
+    c.fillStyle = on ? '#2f6fd8' : PANEL.hover === id ? '#2d4060' : '#1b2638'; c.beginPath(); c.roundRect(x, y, w, h, 10); c.fill();
+    c.fillStyle = dim ? '#5c6b80' : '#eef5ff'; c.font = '600 22px system-ui, sans-serif'; c.textAlign = 'center'; c.fillText(label, x + w / 2, y + h / 2 + 1); c.textAlign = 'left';
+    if (id) PANEL.hits.push({ x, y, w, h, id });
+  };
+  const L = (y, t) => { c.fillStyle = '#7f93b0'; c.font = '600 20px system-ui, sans-serif'; c.fillText(t, 26, y + 25); };
+  const T = (x, y, t) => { c.fillStyle = '#eef5ff'; c.font = '600 22px system-ui, sans-serif'; c.textAlign = 'center'; c.fillText(t, x, y + 25); c.textAlign = 'left'; };
+  B(PW - 76, 16, 54, 48, '✕', false, 'close');
+  let y = 84;
+  L(y, 'AIM');  B(120, y, 160, 50, 'GYRO', K.aim === 'gyro', 'aim:gyro'); B(290, y, 160, 50, 'NUDGE', K.aim === 'nudge', 'aim:nudge'); B(460, y, 156, 50, 'POINT', K.aim === 'point', 'aim:point'); y += 64;
+  L(y, 'MOVE'); B(120, y, 245, 50, 'VIEW (headless)', K.move === 'view', 'move:view'); B(375, y, 241, 50, 'SHIP (like LSS)', K.move === 'ship', 'move:ship'); y += 64;
+  L(y, 'SHIP'); B(120, y, 60, 50, '◀', false, 'ship:prev'); T(368, y, K.ship + ' · ' + SHIPS[K.ship].weapon.name); B(556, y, 60, 50, '▶', false, 'ship:next'); y += 64;
+  L(y, 'SIZE'); B(120, y, 60, 50, '−', false, 'scale:-'); T(368, y, scaleLabel()); B(556, y, 60, 50, '+', false, 'scale:+'); y += 64;
+  L(y, 'GAIN'); B(120, y, 60, 50, '−', false, 'gain:-'); T(368, y, 'gyro x' + K.gyroYaw.toFixed(2) + ' · tempo x' + K.speed.toFixed(2)); B(556, y, 60, 50, '+', false, 'gain:+'); y += 64;
+  L(y, 'SHOW'); B(120, y, 160, 50, 'LASER', K.laser, 'laser'); B(290, y, 160, 50, depthAvailable() ? 'DEPTH' : 'DEPTH n/a', K.depthOcc && depthAvailable(), 'depth', !depthAvailable());
+  B(460, y, 156, 50, 'RESPAWN', false, 'targets'); y += 64;
+  L(y, 'ROOM'); B(120, y, 245, 50, 'SCAN ROOM', false, 'scan', !(session && session.initiateRoomCapture)); B(375, y, 241, 50, 'TEMPO ±', false, 'tempo'); y += 70;
+  c.fillStyle = '#9fb2cc'; c.font = '20px system-ui, sans-serif';
+  c.fillText('point at a surface + trigger: move the arena there', 26, y); y += 28;
+  c.fillText('both grips: stretch the ships · B: back to flying', 26, y); y += 34;
+  c.fillStyle = '#9fd0ff';
+  c.fillText('kills ' + kills + ' · planes ' + planes.size + (placed.rec && placed.rec.isTable ? ' · on the TABLE' : '') + ' · ' + fpsTxt, 26, y);
+  PANEL.tex.needsUpdate = true;
+}
+function panelToggle(open) {
+  PANEL.open = open === undefined ? !PANEL.open : open;
+  PANEL.mesh.visible = PANEL.open && !!session;
+  if (PANEL.open && session) {
+    headFlatFwd(_v1);
+    PANEL.mesh.position.copy(headW).addScaledVector(_v1, 0.5); PANEL.mesh.position.y -= 0.14;
+    PANEL.mesh.lookAt(headW); PANEL.mesh.updateMatrixWorld(true);
+    PANEL.dirty = true;
+  }
+  G.primed = false;   // the hand that pointed at the panel must not swing the ship on the way back
+}
+const _pinv = new THREE.Matrix4();
+function panelPick(oW, dW) {
+  _pinv.copy(PANEL.mesh.matrixWorld).invert();
+  _v1.copy(oW).applyMatrix4(_pinv); _v2.copy(dW).transformDirection(_pinv);
+  if (Math.abs(_v2.z) < 1e-6) return null;
+  const t = -_v1.z / _v2.z; if (t < 0) return null;
+  const x = _v1.x + _v2.x * t, y = _v1.y + _v2.y * t;
+  if (Math.abs(x) > 0.17 || Math.abs(y) > 0.17) return null;
+  const px = (x / 0.34 + 0.5) * PW, py = (0.5 - y / 0.34) * PH;
+  const h = PANEL.hits.find((r) => px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h);
+  return { id: h ? h.id : '', dist: t, point: _v3.copy(oW).addScaledVector(dW, t).clone() };
+}
+function setScale(s) {
+  K.scale = clamp(s, 1 / 5000, 1 / 20); arenaSync(); saveK(); PANEL.dirty = true; deskRefresh();
+}
+let switching = false;
+async function cycleShip(dir) {
+  if (switching) return; switching = true;
+  const i = SHIP_ORDER.indexOf(K.ship), name = SHIP_ORDER[(i + dir + SHIP_ORDER.length) % SHIP_ORDER.length];
+  try { await loadProto(name); K.ship = name; spawnPlayer(); saveK(); toast(name + ' · ' + SHIPS[name].weapon.name); } catch (e) { toast('could not load ' + name); console.warn(e); }
+  switching = false; PANEL.dirty = true; deskRefresh();
+}
+function click(id) {
+  const [k, v] = id.split(':');
+  if (k === 'aim') { K.aim = v; if (v === 'nudge') { G.needCenter = true; NV.y = NV.p = 0; } if (v === 'point' && document.pointerLockElement) document.exitPointerLock(); toast('AIM: ' + v.toUpperCase()); }
+  else if (k === 'move') { K.move = v; toast('MOVE: ' + (v === 'view' ? 'VIEW (headless)' : 'SHIP (like LSS)')); }
+  else if (k === 'ship') cycleShip(v === 'next' ? 1 : -1);
+  else if (k === 'scale') setScale(K.scale * (v === '+' ? 1.25 : 0.8));
+  else if (k === 'gain') { K.gyroYaw = clamp(Math.round((K.gyroYaw + (v === '+' ? 0.25 : -0.25)) * 100) / 100, 0.5, 5); K.gyroPitch = Math.round(K.gyroYaw * 75) / 100; }
+  else if (id === 'tempo') { K.speed = K.speed >= 1.4 ? 0.5 : Math.round((K.speed + 0.25) * 100) / 100; toast('TEMPO x' + K.speed.toFixed(2)); }
+  else if (id === 'laser') K.laser = !K.laser;
+  else if (id === 'depth') { if (depthAvailable()) K.depthOcc = !K.depthOcc; }
+  else if (id === 'targets') resetTargets();
+  else if (id === 'scan') { try { if (session && session.initiateRoomCapture) session.initiateRoomCapture(); } catch (e) { console.warn(e); } }
+  else if (id === 'close') panelToggle(false);
+  saveK(); PANEL.dirty = true; deskRefresh();
+}
+// desktop rows mirror the panel
+const deskRows = document.getElementById('desk-rows');
+function deskRefresh() {
+  const b = (id, label, on) => `<button data-id="${id}" class="${on ? 'on' : ''}">${label}</button>`;
+  deskRows.innerHTML =
+    `<div class="row"><span class="lbl">AIM</span>${b('aim:gyro', 'GYRO', K.aim === 'gyro')}${b('aim:nudge', 'NUDGE', K.aim === 'nudge')}${b('aim:point', 'POINT', K.aim === 'point')}</div>` +
+    `<div class="row"><span class="lbl">MOVE</span>${b('move:view', 'VIEW (headless)', K.move === 'view')}${b('move:ship', 'SHIP (like LSS)', K.move === 'ship')}</div>` +
+    `<div class="row"><span class="lbl">SHIP</span>${b('ship:prev', '◀')}<span class="val">${K.ship}</span>${b('ship:next', '▶')}</div>` +
+    `<div class="row"><span class="lbl">SIZE</span>${b('scale:-', '−')}<span class="val">${scaleLabel()}</span>${b('scale:+', '+')}</div>` +
+    `<div class="row"><span class="lbl">GAIN</span>${b('gain:-', '−')}<span class="val">gyro x${K.gyroYaw.toFixed(2)}</span>${b('gain:+', '+')}</div>` +
+    `<div class="row"><span class="lbl">SHOW</span>${b('laser', 'LASER', K.laser)}${b('targets', 'RESPAWN')}${b('tempo', 'TEMPO x' + K.speed.toFixed(2))}</div>`;
+}
+deskRows.addEventListener('click', (e) => { const t = e.target.closest('button[data-id]'); if (t) { auInit(); click(t.dataset.id); } });
+deskRefresh();
+
+// ---------------------------------------------------------------- toast (HTML on desktop, a card in front of you in AR)
+const TO = { canvas: document.createElement('canvas'), t: 0 };
+TO.canvas.width = 768; TO.canvas.height = 96;
+TO.tex = new THREE.CanvasTexture(TO.canvas); TO.tex.colorSpace = THREE.SRGBColorSpace;
+TO.mesh = new THREE.Mesh(new THREE.PlaneGeometry(0.48, 0.06), new THREE.MeshBasicMaterial({ map: TO.tex, transparent: true, depthTest: false, toneMapped: false }));
+TO.mesh.renderOrder = 998; TO.mesh.visible = false; scene.add(TO.mesh);
+const toastEl = document.getElementById('toast');
+let _toastT = 0;
+function toast(msg) {
+  toastEl.textContent = msg; toastEl.style.opacity = 1; clearTimeout(_toastT); _toastT = setTimeout(() => { toastEl.style.opacity = 0; }, 2200);
+  if (!session) return;
+  const c = TO.canvas.getContext('2d'); c.clearRect(0, 0, 768, 96);
+  c.fillStyle = 'rgba(9,14,24,0.9)'; c.beginPath(); c.roundRect(0, 0, 768, 96, 22); c.fill();
+  c.fillStyle = '#eef5ff'; c.font = '600 34px system-ui, sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText(msg, 384, 50);
+  TO.tex.needsUpdate = true;
+  headFlatFwd(_v1); TO.mesh.position.copy(headW).addScaledVector(_v1, 0.75); TO.mesh.position.y -= 0.02; TO.mesh.lookAt(headW);
+  TO.mesh.visible = true; TO.t = 2.4;
+}
+
+// ================================================================ WEBXR
+let session = null, refSpace = null;
+const BTN = {};
+const SC = { on: false, d0: 1, s0: 0.001 };
+const rayLine = new THREE.Line(new THREE.BufferGeometry().setFromPoints([V(), V(0, 0, -1)]), new THREE.LineBasicMaterial({ color: 0x9fd0ff, transparent: true, opacity: 0.55, depthTest: false }));
+rayLine.renderOrder = 997; rayLine.frustumCulled = false; rayLine.visible = false; scene.add(rayLine);
+function setRay(o, e) { const a = rayLine.geometry.attributes.position.array; a[0] = o.x; a[1] = o.y; a[2] = o.z; a[3] = e.x; a[4] = e.y; a[5] = e.z; rayLine.geometry.attributes.position.needsUpdate = true; }
+const arBtn = document.getElementById('btn-ar'), arNote = document.getElementById('ar-note');
+if (navigator.xr && navigator.xr.isSessionSupported) {
+  navigator.xr.isSessionSupported('immersive-ar').then((ok) => {
+    arBtn.disabled = !ok; arBtn.textContent = ok ? 'START AR (passthrough)' : 'AR NOT AVAILABLE HERE';
+    arNote.textContent = ok ? 'Space Setup gives the table, walls and floor. B opens SETUP in the headset.' : 'This is the desktop sim. On the Quest 3, open this page in the browser and press START AR.';
+  }).catch(() => { arBtn.textContent = 'AR NOT AVAILABLE HERE'; });
+} else { arBtn.textContent = 'NO WEBXR HERE'; arNote.textContent = 'This is the desktop sim. WebXR needs https or localhost.'; }
+arBtn.addEventListener('click', startAR);
+async function startAR() {
+  if (session) { session.end(); return; }
+  auInit();
+  const tries = [
+    // gpu-optimized ONLY: three r165 reads the depth through XRWebGLBinding every frame once the feature is granted, and
+    // that call throws for a cpu-optimized grant. float32 first because its occlusion shader samples ONE channel (.r).
+    // ⚠ UNVERIFIED in a headset (no r165 example requests depth); a bad dict only drops us to the next try.
+    { requiredFeatures: ['local-floor'], optionalFeatures: ['plane-detection', 'anchors', 'depth-sensing'],
+      depthSensing: { usagePreference: ['gpu-optimized'], dataFormatPreference: ['float32', 'luminance-alpha', 'unsigned-short'] } },
+    { requiredFeatures: ['local-floor'], optionalFeatures: ['plane-detection', 'anchors'] },
+    { requiredFeatures: ['local-floor'] },
+  ];
+  let s = null, err = null;
+  for (const init of tries) { try { s = await navigator.xr.requestSession('immersive-ar', init); break; } catch (e) { err = e; } }
+  if (!s) { toast('AR failed: ' + ((err && err.message) || err)); return; }
+  session = s;
+  session.addEventListener('end', onEnd);
+  renderer.xr.setReferenceSpaceType('local-floor');
+  try { await renderer.xr.setSession(session); } catch (e) { toast('AR failed: ' + e.message); session = null; return; }
+  refSpace = renderer.xr.getReferenceSpace();
+  scene.background = null; renderer.setClearColor(0x000000, 0);
+  deskPlanesOn(false);
+  placed.ok = false; placed.t0 = 0; arena.visible = false; G.primed = false; G.needCenter = true;
+  arBtn.textContent = 'EXIT AR';
+  console.info('[lss_ar] session features:', session.enabledFeatures);
+  toast('LOOKING FOR YOUR TABLE...');
+}
+function onEnd() {
+  if (placed.anchor) { try { placed.anchor.delete(); } catch (_) {} }
+  session = null; refSpace = null; placed.anchor = null;
+  // the room's planes go with the session (0.01: they outlived it - still colliding and still occluding the desktop room)
+  for (const [k, rec] of [...planes]) if (!rec.desk) { removePlane(rec); planes.delete(k); }
+  scene.background = BG; renderer.setClearColor(0x000000, 1);
+  PANEL.open = false; PANEL.mesh.visible = false; TO.mesh.visible = false; rayLine.visible = false;
+  deskPlanesOn(true); deskCamera(); placeAt(planes.get('desk1').cw.clone(), planes.get('desk1'));
+  arBtn.textContent = 'START AR (passthrough)';
+  onResize();
+}
+function xrPlanes(frame) {
+  const det = frame.detectedPlanes; if (!det) return;
+  const seen = new Set();
+  for (const pl of det) {
+    const pose = frame.getPose(pl.planeSpace, refSpace); if (!pose) continue;
+    seen.add(pl);
+    let rec = planes.get(pl);
+    if (!rec) { rec = newPlaneRec(pl, pl.semanticLabel || '', false); planes.set(pl, rec); PANEL.dirty = true; }
+    if (rec.t !== pl.lastChangedTime) { rec.t = pl.lastChangedTime; const pts = []; for (const q of pl.polygon) pts.push(q.x, q.z); planeSetPolygon(rec, pts); }
+    planeSetPose(rec, pose.transform.matrix);
+  }
+  for (const [k, rec] of [...planes]) if (!rec.desk && !seen.has(k)) { removePlane(rec); planes.delete(k); }
+}
+function xrFrame(frame, dt) {
+  const vp = frame.getViewerPose(refSpace);
+  if (vp) { const t = vp.transform; headW.set(t.position.x, t.position.y, t.position.z); headQ.set(t.orientation.x, t.orientation.y, t.orientation.z, t.orientation.w); }
+  xrPlanes(frame);
+  if (!placed.ok) {
+    if (!placed.t0) placed.t0 = performance.now();
+    if (!(planes.size && tryAutoPlace(false)) && performance.now() - placed.t0 > 3000) tryAutoPlace(true);
+  }
+  if (placed.wantAnchor && frame.createAnchor && session.enabledFeatures && session.enabledFeatures.includes('anchors')) {
+    placed.wantAnchor = false; const gen = placed.gen, q = arena.quaternion, p = arena.position;
+    try {
+      frame.createAnchor(new XRRigidTransform({ x: p.x, y: p.y, z: p.z }, { x: q.x, y: q.y, z: q.z, w: q.w }), refSpace)
+        .then((a) => { if (gen === placed.gen) placed.anchor = a; else { try { a.delete(); } catch (_) {} } }).catch(() => {});
+    } catch (_) {}
+  }
+  if (placed.anchor) {   // the anchor holds the arena to the room through a recentre
+    const ap = frame.getPose(placed.anchor.anchorSpace, refSpace);
+    if (ap) {
+      const t = ap.transform; arena.position.set(t.position.x, t.position.y, t.position.z);
+      _q1.set(t.orientation.x, t.orientation.y, t.orientation.z, t.orientation.w); _v1.set(0, 0, -1).applyQuaternion(_q1);
+      arena.rotation.set(0, yawOf(_v1), 0); arenaSync(); updateSun();
+    }
+  }
+  xrInput(frame, dt);
+  // depth occlusion (three r165 draws its own depth mesh first whenever the feature is on): ours to switch
+  const dm = depthAvailable() && renderer.xr.getDepthSensingMesh ? renderer.xr.getDepthSensingMesh() : null;
+  const dOn = !!(dm && K.depthOcc);
+  if (dm) dm.visible = dOn;
+  if (CATCH_MAT.depthTest === dOn) { CATCH_MAT.depthTest = !dOn; CATCH_MAT.needsUpdate = true; laser.dot.material.depthTest = !dOn; laser.pip.material.depthTest = !dOn; }
+}
+function xrInput(frame, dt) {
+  let L = null, R = null;
+  for (const s of session.inputSources) { if (!s.gamepad) continue; if (s.handedness === 'left') L = s; else if (s.handedness === 'right') R = s; }
+  const lg = L && L.gamepad, rg = R && R.gamepad;
+  const ax = (g, i) => (g && g.axes && g.axes[i]) || 0, bv = (g, i) => (g && g.buttons[i] && g.buttons[i].value) || 0, bp = (g, i) => !!(g && g.buttons[i] && g.buttons[i].pressed);
+  let lx = ax(lg, 2), ly = ax(lg, 3); if (!lx && !ly) { lx = ax(lg, 0); ly = ax(lg, 1); }
+  let rx = ax(rg, 2), ry = ax(rg, 3); if (!rx && !ry) { rx = ax(rg, 0); ry = ax(rg, 1); }
+  // xr-standard: 0 trigger, 1 grip, 3 stick press, 4 A/X, 5 B/Y
+  const now = { rT: bv(rg, 0) > 0.5, lT: bv(lg, 0) > 0.5, rG: bv(rg, 1) > 0.5, lG: bv(lg, 1) > 0.5, lS: bp(lg, 3), rS: bp(rg, 3), A: bp(rg, 4), B: bp(rg, 5) };
+  const edge = (k) => now[k] && !BTN[k];
+  IN.hasRay = false;
+  const rp = R ? frame.getPose(R.targetRaySpace, refSpace) : null;
+  if (rp) { const t = rp.transform; rayO.set(t.position.x, t.position.y, t.position.z); _q1.set(t.orientation.x, t.orientation.y, t.orientation.z, t.orientation.w); rayD.set(0, 0, -1).applyQuaternion(_q1); IN.hasRay = true; }
+  if (edge('B')) panelToggle();
+  IN.lx = lx; IN.ly = ly; IN.up = now.lS; IN.down = now.rS; IN.ads = now.lT;
+  IN.pointA = null; rayLine.visible = false;
+  if (PANEL.open) {
+    IN.fire = false; IN.dashEdge = false;
+    const hit = IN.hasRay ? panelPick(rayO, rayD) : null;
+    const hv = hit ? hit.id : null; if (hv !== PANEL.hover) { PANEL.hover = hv; PANEL.dirty = true; }
+    if (IN.hasRay) { rayLine.visible = true; setRay(rayO, hit ? hit.point : _v2.copy(rayD).multiplyScalar(1.5).add(rayO)); }
+    if (edge('rT')) { if (hit) { if (hit.id) click(hit.id); } else if (IN.hasRay && !placeByRay(rayO, rayD)) toast('POINT AT A TABLE OR THE FLOOR'); }
+    // both grips: stretch the ships like a photo
+    const lp = L && L.gripSpace ? frame.getPose(L.gripSpace, refSpace) : null, rpg = R && R.gripSpace ? frame.getPose(R.gripSpace, refSpace) : null;
+    if (now.lG && now.rG && lp && rpg) {
+      const a = lp.transform.position, b = rpg.transform.position, d = Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+      if (!SC.on) { SC.on = true; SC.d0 = Math.max(0.03, d); SC.s0 = K.scale; } else setScale(SC.s0 * d / SC.d0);
+    } else SC.on = false;
+    gyroFrom(null);
+  } else {
+    IN.fire = now.rT; IN.dashEdge = edge('A');
+    // the right stick is LSS's VR pad: left / right = ship prev / next (edge, dominant axis); up / down = size here
+    const horiz = Math.abs(rx) > Math.abs(ry), dir = horiz && rx < -0.7 ? -1 : horiz && rx > 0.7 ? 1 : 0;
+    if (dir && dir !== BTN.rsDir) cycleShip(dir);
+    BTN.rsDir = dir;
+    if (!horiz && Math.abs(ry) > 0.5) setScale(K.scale * Math.exp(-ry * 1.1 * dt));
+    gyroFrom(IN.hasRay ? rayD : null);
+    if (K.aim === 'point' && IN.hasRay && placed.ok) {
+      const rc = pointFrom(rayO, rayD);
+      rayLine.visible = true; setRay(rayO, arena.localToWorld(_v2.copy(rc.point)));
+    }
+  }
+  for (const k in now) BTN[k] = now[k];
+}
+
+// ================================================================ LOOP
+let last = performance.now(), fpsTxt = '', _fpsN = 0, _fpsT = 0, _statT = 0;
+const statEl = document.getElementById('stat');
+function step(dt, t) {
+  if (!placed.ok || !P) return;
+  stepPlayer(dt, t);
+  for (const T of targets) stepTarget(T, dt, t);
+  separate();
+  stepFire(dt);
+  stepBolts(dt);
+  for (const T of targets) dmgState(T, dt);
+  fxTick(dt);
+  tickPools(dt);
+  updateLaser();
+  auTick();
+}
+let MOCK = false;   // ARL.xr.begin(): the mock headset owns the frames, the desktop loop stands aside
+renderer.setAnimationLoop((time, frame) => {
+  const now = performance.now(), dt = Math.min(0.05, (now - last) / 1000); last = now;
+  if (MOCK) return;
+  if (frame && session) xrFrame(frame, dt);
+  else { deskCamera(); desktopInput(dt); }
+  applySim();
+  step(dt, now / 1000);
+  if (TO.t > 0) { TO.t -= dt; if (TO.t <= 0) TO.mesh.visible = false; }
+  if (PANEL.open && session && PANEL.dirty) panelDraw();
+  partUniforms();
+  renderer.render(scene, camera);
+  _fpsN++; _fpsT += dt;
+  if (_fpsT >= 0.5) { fpsTxt = Math.round(_fpsN / _fpsT) + ' fps'; _fpsN = 0; _fpsT = 0; }
+  _statT -= dt;
+  if (_statT <= 0 && P) {
+    _statT = 0.25;
+    statEl.textContent = `${K.ship} · ${scaleLabel()}\naim ${K.aim.toUpperCase()} · move ${K.move.toUpperCase()} · dashes ${P.dash.n}\nkills ${kills} · planes ${planes.size} · ${fpsTxt}`;
+  }
+});
+function onResize() {
+  if (renderer.xr.isPresenting) return;
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight);
+}
+addEventListener('resize', onResize);
+
+// ================================================================ BOOT
+(async () => {
+  deskPlanesOn(true);
+  deskCamera();
+  try { await loadProto(K.ship); }
+  catch (e) { toast('could not load the hulls from ' + ASSETS + ' - see the console'); console.error('[lss_ar] hull load failed', e); return; }
+  spawnPlayer();
+  placeAt(planes.get('desk1').cw.clone(), planes.get('desk1'));
+  const others = SHIP_ORDER.filter((n) => n !== K.ship);
+  await Promise.allSettled(others.map(loadProto));
+  spawnTargets();
+  deskRefresh();
+})();
+
+// ================================================================ HOOKS
+window.ARL = {
+  K,
+  get P() { return P; }, targets, planes, PANEL, placed, arena,
+  state() {
+    return P && { build: AR_BUILD, ship: K.ship, scale: K.scale, aim: K.aim, move: K.move, placed: placed.ok, onTable: !!(placed.rec && placed.rec.isTable),
+      pos: P.pos.toArray().map(Math.round), vel: P.vel.toArray().map(Math.round), yaw: +P.yaw.toFixed(3), pitch: +P.pitch.toFixed(3),
+      dashes: P.dash.n, kills, bolts: bolts.length, fx: fx.length, planes: planes.size,
+      targets: targets.map((T) => ({ ship: T.name, alive: T.alive, hp: Math.round(T.hp), pos: T.pos.toArray().map(Math.round) })),
+      laser: { on: laser.core.visible, len: Math.round(laser.core.scale.y) } };
+  },
+  input(v) { if (v === false) { SIM.on = false; SIM.v = {}; return; } SIM.on = true; Object.assign(SIM.v, v); },
+  tick(n = 1, dt = 1 / 72) { for (let i = 0; i < n; i++) { applySim(); step(dt, performance.now() / 1000 + i * dt); } return this.state(); },
+  render() { deskCamera(); partUniforms(); renderer.render(scene, camera); },
+  hurt(i, frac) { const T = targets[i]; if (T) { T.hp = T.max * frac; T.dmgT = 0; } return T && dmgTier(T); },
+  click, place: () => placeAt(planes.get('desk1').cw.clone(), planes.get('desk1')),
+  orbit(yaw, dist) { ORB.yaw = yaw; if (dist) ORB.dist = dist; },
+  // A MOCK HEADSET, for a pane with no WebXR: a fake session + frames (getViewerPose / getPose / detectedPlanes /
+  // inputSources / createAnchor) through the REAL xrFrame / xrInput. Run begin -> frames -> end inside ONE javascript
+  // call: the desktop loop would otherwise interleave its own camera and input between mock frames.
+  xr: {
+    begin(mock) { MOCK = true; session = mock; refSpace = {}; deskPlanesOn(false); placed.ok = false; placed.t0 = 0; arena.visible = false; G.primed = false; G.needCenter = true; },
+    frame(f, dt = 1 / 72) { xrFrame(f, dt); applySim(); step(dt, performance.now() / 1000); if (PANEL.open && session && PANEL.dirty) panelDraw(); return { placed: placed.ok, onTable: !!(placed.rec && placed.rec.isTable), anchored: !!placed.anchor, panel: PANEL.open, hover: PANEL.hover, panelAt: PANEL.mesh.position.toArray() }; },
+    render() { partUniforms(); renderer.render(scene, camera); },
+    end() { MOCK = false; onEnd(); },
+  },
+};
+</script>
+</body>
+</html>
