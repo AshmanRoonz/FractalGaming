@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.80";
+const LSS_BUILD = "53.81";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -50547,7 +50547,14 @@ if (typeof window !== 'undefined') {
              hull: (_shipPreview3D && _shipPreview3D.lastKey) || null, confirmed: !!(game && game._ssConfirmed) };
   };
   window.__pickerDraw = (dt) => {
-    try { if (dt > 0) _PSEAT.last = performance.now() - dt * 1000; _spinShipPreview(); _lssRenderPicker(); } catch (e) { return String(e); }
+    try {
+      if (dt > 0) {
+        const t0 = performance.now() - dt * 1000;
+        _PSEAT.last = t0;
+        try { if (_HBAY.last) _HBAY.last = t0; if (_shipPreview3D._lastAnimT) _shipPreview3D._lastAnimT = t0; } catch (_) {}
+      }
+      _spinShipPreview(); _lssRenderPicker();
+    } catch (e) { return String(e); }
     return window.__pickerSeat();
   };
   window.__pickerSeatObj = _PSEAT;               // dev: the picker pilot's state (root, body, fx, phase)
@@ -51825,10 +51832,33 @@ function _ssPrevRelease(root) {
   } catch (_) {}
 }
 
+function _ssPrevBuildRoot(key, proto) {
+  const modelRoot = proto.clone(true);
+  modelRoot.traverse(child => {
+    if (child.isMesh) {
+      const mats = Array.isArray(child.material) ? child.material : [child.material];
+      const newMats = mats.map(m => {
+        if (!m) return m;
+        const copy = m.clone();
+        _ssPrevOwnTextures(copy);   // (v39.20) preview-owned texture handles — see above
+        if (copy.emissive) copy.emissive.setHex(0x121a26);
+        if ('emissiveIntensity' in copy) copy.emissiveIntensity = 0.45;
+        return copy;
+      });
+      child.material = newMats.length === 1 ? newMats[0] : newMats;
+      child.castShadow = false;
+      child.receiveShadow = false;
+    }
+  });
+  try { _applyShipSkin(modelRoot, _getStoredSkinId(key), _getStoredTrim(key)); } catch (_) {}
+  try { Object.defineProperty(modelRoot.userData, '_pvEng', { value: _lssPreviewEngines(modelRoot, key, proto), writable: true, configurable: true, enumerable: false }); } catch (_) {}
+  return modelRoot;
+}
+
 function _applyShipPreviewModel(key) {
   const s = _shipPreview3D;
   if (!(s.renderer || s.ready)) return;
-  if (s.pendingKey !== key) return; 
+  if (s.pendingKey !== key) return;
   const proto = shipModelCache.loaded && shipModelCache.loaded[key];
   if (!proto) {
     if (shipModelCache.ready && typeof shipModelCache.ready.then === 'function') {
@@ -51838,35 +51868,19 @@ function _applyShipPreviewModel(key) {
     }
     return;
   }
-  if (s.lastKey === key && s.model) return; 
+  if (s.lastKey === key && s.model) return;
   if (!s.modelByKey) s.modelByKey = Object.create(null);
+  const _hbOn = _hbayLive(s);
+  if (_hbOn) _hbayEnsure(s);
   if (s.model) {
-    s.scene.remove(s.model);
+    if (!_hbOn) s.scene.remove(s.model);
     s.model = null;
   }
   s.lastKey = key;
   let modelRoot = s.modelByKey[key];
   if (!modelRoot) {
     try { window.__pvBuild = { at: performance.now(), done: 0 }; } catch (_) {}
-    modelRoot = proto.clone(true);
-    modelRoot.traverse(child => {
-      if (child.isMesh) {
-        const mats = Array.isArray(child.material) ? child.material : [child.material];
-        const newMats = mats.map(m => {
-          if (!m) return m;
-          const copy = m.clone();
-          _ssPrevOwnTextures(copy);   // (v39.20) preview-owned texture handles — see above
-          if (copy.emissive) copy.emissive.setHex(0x121a26);
-          if ('emissiveIntensity' in copy) copy.emissiveIntensity = 0.45;
-          return copy;
-        });
-        child.material = newMats.length === 1 ? newMats[0] : newMats;
-        child.castShadow = false;
-        child.receiveShadow = false;
-      }
-    });
-    try { _applyShipSkin(modelRoot, _getStoredSkinId(key), _getStoredTrim(key)); } catch (_) {}
-    try { Object.defineProperty(modelRoot.userData, '_pvEng', { value: _lssPreviewEngines(modelRoot, key, proto), writable: true, configurable: true, enumerable: false }); } catch (_) {}
+    modelRoot = _ssPrevBuildRoot(key, proto);   // (v53.81) the recipe, shared with the hangar's bays
     try {
       if (typeof s.renderer.compileAsync === 'function') {
         s.renderer.compileAsync(modelRoot, s.camera, s.scene).catch(() => {});
@@ -51878,7 +51892,7 @@ function _applyShipPreviewModel(key) {
     } catch (_) {}
     let _prevEvict = false;
     try { _prevEvict = !!(typeof _fxSmallDevice === 'function' && _fxSmallDevice()); } catch (_) {}
-    if (_prevEvict) {
+    if (_prevEvict && !_hbOn) {
       for (const k in s.modelByKey) {
         if (k !== key) { _ssPrevRelease(s.modelByKey[k]); delete s.modelByKey[k]; }
       }
@@ -51887,31 +51901,47 @@ function _applyShipPreviewModel(key) {
     try { if (window.__pvBuild) window.__pvBuild.done = performance.now(); } catch (_) {}
   }
   try { _applyShipSkin(modelRoot, _getStoredSkinId(key), _getStoredTrim(key)); } catch (_) {}
-  const _pvE = modelRoot.userData._pvEng;
-  if (_pvE && _pvE.parent === modelRoot) modelRoot.remove(_pvE);
-  const box = new THREE.Box3().setFromObject(modelRoot);
-  if (_pvE) modelRoot.add(_pvE);
-  const sz = box.getSize(new THREE.Vector3());
-  const maxDim = Math.max(sz.x, sz.y, sz.z) || 100;
+  let maxDim = 100;
+  const _hbRec = _hbOn ? _hbayRec(key, modelRoot) : null;
+  if (_hbRec) maxDim = _hbRec.size;
+  else {
+    const _pvE = modelRoot.userData._pvEng;
+    if (_pvE && _pvE.parent === modelRoot) modelRoot.remove(_pvE);
+    const box = new THREE.Box3().setFromObject(modelRoot);
+    if (_pvE) modelRoot.add(_pvE);
+    const sz = box.getSize(new THREE.Vector3());
+    maxDim = Math.max(sz.x, sz.y, sz.z) || 100;
+  }
   const cam = s.camera;
+  const _hbSwap = !!(_hbRec && _HBAY.sel && _HBAY.sel !== key && _HBAY.ships[_HBAY.sel] && _HBAY.ships[_HBAY.sel].ready);
+  if (_hbSwap) {
+    s.camRTo = Math.hypot(maxDim * 0.35, maxDim * 2.0);
+    s.camElev0 = Math.atan2(maxDim * 0.35, maxDim * 2.0);
+  } else {
   cam.position.set(0, maxDim * 0.35, maxDim * 2.0);
   cam.lookAt(0, 0, 0);
   s.camR = Math.hypot(maxDim * 0.35, maxDim * 2.0);
+  s.camRTo = s.camR;
   s.camElev0 = Math.atan2(maxDim * 0.35, maxDim * 2.0);
-  modelRoot.rotation.set(0, 0, 0);
+  if (!_hbRec) modelRoot.rotation.set(0, 0, 0);   // (v53.81) in the hangar its pose is the hangar's (_hbayFrame)
   s.yaw = 0;
   s.pitch = 0;
+  }
   const _stage = () => {
     if (s.lastKey !== key || s.pendingKey !== key) return;   // superseded while compiling
-    if (s.model && s.model !== modelRoot) { try { s.scene.remove(s.model); } catch (_) {} }
-    s.scene.add(modelRoot);
+    if (_hbOn && _hbayLive(s)) _hbayStage(s, key, modelRoot);
+    else {
+      if (s.model && s.model !== modelRoot) { try { s.scene.remove(s.model); } catch (_) {} }
+      s.scene.add(modelRoot);
+    }
     s.model = modelRoot;
     try { if (typeof _lssPrimeTick === 'function') _lssPrimeTick(8); } catch (_) {}
   };
   let _p = null;
   try {
     const _r = s.renderer || (s.oneCtx ? renderer : null);
-    if (_r && typeof _r.compileAsync === 'function') _p = _r.compileAsync(modelRoot, s.camera, s.scene);
+    const _tgt = (_hbOn && _HBAY.scene) ? _HBAY.scene : s.scene;
+    if (_r && typeof _r.compileAsync === 'function') _p = _r.compileAsync(modelRoot, s.camera, _tgt);
   } catch (_) { _p = null; }
   if (_p && typeof _p.then === 'function') _p.then(_stage).catch(_stage);
   else _stage();
@@ -51984,7 +52014,9 @@ function _spinShipPreview() {
     _previewRotate(gpX * s.GAMEPAD_ROT_RATE * dt,
                    gpY * s.GAMEPAD_ROT_RATE * dt * _previewPitchSign());
   }
-  if (!userActive) {
+  let _hbHeld = false;
+  try { _hbHeld = _hbayOrbit(dt, userActive); } catch (_) {}
+  if (!userActive && !_hbHeld) {
     _previewRotate(s.rotationSpeed, 0);
   }
   _previewPlaceCamera();
@@ -52005,6 +52037,403 @@ function _previewPlaceCamera() {
   cam.up.set(0, 1, 0);
   cam.lookAt(0, 0, 0);
 }
+
+const _HBAY_K = {
+  on: true,
+  vp: [0.558, 0.414],         // the picture's vanishing point (hangar.png, 0..1 from its top left)
+  floor: 210,                 // the picture's floor, units under the eye
+  hover: 120,                 // the parked hulls' undersides over that floor
+  aisle: 230,                 // the rows' hull centres, either side of the centre line
+  rows: [1300, 1750, 2200],   // the three spots of a row, distance down the hangar from the eye
+  dur: 1.7,                   // s, one flight (spot <-> stage)
+  lag: 0.15,                  // the picked ship leaves this much of a flight after the stage ship has
+  lift: 0.5,                  // the ship going home rides this much of its size higher (the two pass in the aisle)
+  light: 0.45,                // the parked hulls' light, x the stage rig's
+  env: 0.45,                  // ...and their environment reflections
+  bob: 0.02, bobT: 6.5, sway: 1.2,   // floating: height x the hull's size, period (s), roll / pitch (deg)
+  litT: 1.4,                  // s, the hangar lights coming on
+  grid: false,                // dev: the frame's floor drawn over the picture
+};
+const _HBAY_SPOTS = 6;        // left row near -> far, then right row near -> far
+const _HBAY = { scene: null, L: null, ships: Object.create(null), order: [], sel: null, building: false, built: false,
+                litA: 0, last: 0, wasLive: false, broken: false, grid: null,
+                qh: new THREE.Quaternion(), qhInv: new THREE.Quaternion(), zk: 1, stageP: new THREE.Vector3(), stageQ: new THREE.Quaternion() };
+const _hbV1 = new THREE.Vector3(), _hbV2 = new THREE.Vector3(), _hbV3 = new THREE.Vector3(), _hbV4 = new THREE.Vector3();
+const _hbV5 = new THREE.Vector3(), _hbV6 = new THREE.Vector3();
+const _hbQ0 = new THREE.Quaternion(), _hbQ1 = new THREE.Quaternion(), _hbQ2 = new THREE.Quaternion(), _hbQ3 = new THREE.Quaternion();
+const _hbM = new THREE.Matrix4();
+const _hbX = new THREE.Vector3(1, 0, 0), _hbY = new THREE.Vector3(0, 1, 0), _hbZ = new THREE.Vector3(0, 0, 1);
+const _hbEase = (p) => p * p * p * (p * (p * 6 - 15) + 10);   // smootherstep: still at both ends
+const _hbSm = (a, b, x) => { const u = Math.max(0, Math.min(1, (x - a) / (b - a))); return u * u * (3 - 2 * u); };
+function _hbayLive(s) {
+  try {
+    if (!_HBAY_K.on || _HBAY.broken) return false;
+    s = s || _shipPreview3D;
+    return !!(s && s.oneCtx && s.ready && s.scene && s.camera);
+  } catch (_) { return false; }
+}
+function _hbayFail(e) {
+  if (_HBAY.broken) return;
+  _HBAY.broken = true;
+  try { console.warn('[hangar] off for this session after an error:', e && (e.stack || e.message || e)); } catch (_) {}
+  try { _hbayAdopt(_shipPreview3D, false); } catch (_) {}
+}
+function _hbayEnsure(s) {
+  const H = _HBAY;
+  if (!H.scene) {
+    const sc = new THREE.Scene();
+    sc.environment = (s.scene && s.scene.environment) || null;   // the stage's sky (the same texture = the same programs)
+    sc.matrixWorldAutoUpdate = false;   // updated once a frame by _hbayDraw: each pass would walk all seven hulls again
+    const L = {};
+    L.amb = new THREE.AmbientLight(0xffffff, 0);
+    L.key = new THREE.DirectionalLight(0xbfd9ff, 0);
+    L.fill = new THREE.DirectionalLight(0xffb066, 0);
+    L.rim = new THREE.DirectionalLight(0xffaa00, 0);
+    L.hemi = new THREE.HemisphereLight(0x8fb4e6, 0x3a2a1a, 0);
+    for (const k in L) sc.add(L[k]);
+    H.scene = sc; H.L = L;
+    H.order = Object.keys(LOADOUTS);
+  }
+  if (!H.building) { H.building = true; _hbayBuildAll(s).catch((e) => _hbayFail(e)); }
+}
+function _hbayRec(key, root) {
+  const H = _HBAY;
+  let r = H.ships[key];
+  if (r && r.root === root) return r;
+  root.rotation.set(0, 0, 0);   // as the stage has always shown it (_applyShipPreviewModel)
+  const par = root.parent, pe = root.userData && root.userData._pvEng;
+  if (par) par.remove(root);
+  if (pe && pe.parent === root) root.remove(pe);
+  root.updateMatrixWorld(true);   // no parent: its matrixWorld IS its own transform
+  const box = new THREE.Box3().setFromObject(root);
+  if (pe) root.add(pe);
+  if (par) par.add(root);
+  const sz = box.getSize(new THREE.Vector3());
+  const size = Math.max(sz.x, sz.y, sz.z) || 100;
+  const pivot = (r && r.pivot) || new THREE.Group();
+  pivot.name = 'lss_hangar_' + key;
+  r = { key, root, pivot, ready: false, size, halfH: sz.y * 0.5, camR: Math.hypot(size * 0.35, size * 2.0),
+        center: box.getCenter(new THREE.Vector3()), ph: Math.random() * 6.2832, ph2: Math.random() * 6.2832, depth: 0,
+        slot: r ? r.slot : -1,   // the spot it belongs in (-1: the stage)
+        at: null,                // where it is settled: 'stage', a spot, or null (not placed yet)
+        fl: null,                // the flight it is on
+        posH: new THREE.Vector3(), qH: new THREE.Quaternion(), velH: new THREE.Vector3(), w: 0, eng: 0 };
+  H.ships[key] = r;
+  return r;
+}
+function _hbayHome(r) {
+  const H = _HBAY;
+  if (r.pivot.parent !== H.scene) H.scene.add(r.pivot);
+  if (r.root.parent !== r.pivot) r.pivot.add(r.root);
+}
+function _hbayRecOf(root) {
+  if (!root) return null;
+  for (const k in _HBAY.ships) { const r = _HBAY.ships[k]; if (r && r.root === root) return r; }
+  return null;
+}
+function _hbayFreeSpot(me) {
+  const H = _HBAY, used = new Array(_HBAY_SPOTS).fill(false);
+  for (const k in H.ships) { const o = H.ships[k]; if (o && o !== me && o.slot >= 0 && o.slot < _HBAY_SPOTS) used[o.slot] = true; }
+  for (let i = 0; i < _HBAY_SPOTS; i++) if (!used[i]) return i;
+  return -1;
+}
+async function _hbayBuildAll(s) {
+  const H = _HBAY;
+  try { if (shipModelCache.ready && typeof shipModelCache.ready.then === 'function') await shipModelCache.ready; } catch (_) {}
+  if (!s.modelByKey) s.modelByKey = Object.create(null);
+  for (const key of H.order) {
+    if (H.broken) return;
+    const proto = shipModelCache.loaded && shipModelCache.loaded[key];
+    if (!proto) continue;
+    let root = s.modelByKey[key];
+    if (!root) { root = _ssPrevBuildRoot(key, proto); s.modelByKey[key] = root; }
+    const rec = _hbayRec(key, root);
+    if (rec.ready) continue;   // the stage hull: staged by _applyShipPreviewModel
+    _hbayHome(rec);
+    try {
+      root.visible = true; rec.pivot.visible = true;
+      const job = renderer.compileAsync ? renderer.compileAsync(root, s.camera, H.scene) : null;
+      if (job) await Promise.race([job.catch(() => {}), new Promise((r) => setTimeout(r, 6000))]);
+    } catch (_) {}
+    try { if (typeof _lssPrimeTick === 'function') _lssPrimeTick(8); } catch (_) {}   // the first-use query, while nobody looks
+    rec.ready = true;   // _hbayFrame gives it a spot (or the stage, if it was picked meanwhile)
+    await new Promise((r) => setTimeout(r, 40));   // a breath between hulls
+  }
+  H.built = true;
+}
+function _hbayFly(r, toStage) {
+  const K = _HBAY_K;
+  if (r.at === null && !r.fl) { r.at = toStage ? 'stage' : r.slot; r.w = toStage ? 1 : 0; return; }
+  const fromSpot = !r.fl && typeof r.at === 'number', fromStage = !r.fl && r.at === 'stage';
+  const side = (s) => (s >= 0 && s < _HBAY_SPOTS) ? ((s < 3) ? -1 : 1) : 0;
+  const d0 = new THREE.Vector3();
+  if (fromSpot) d0.set(-side(r.at), 0, 0);                                    // out of the spot nose-first, toward the aisle
+  else if (fromStage) d0.set(toStage ? 0 : side(r.slot) * 0.5, 0, -1).normalize();   // back up the aisle, toward its row
+  else if (r.velH.lengthSq() > 1) d0.copy(r.velH).normalize();               // mid-air: on along the way it was going
+  else d0.set(0, 0, toStage ? 1 : -1);
+  r.fl = { t: toStage ? -(+K.lag || 0) : 0, toStage, p0: r.posH.clone(), q0: r.qH.clone(), w0: r.w, d0, fromSpot };
+  r.at = null;
+}
+function _hbayStage(s, key, root) {
+  const H = _HBAY;
+  const r = _hbayRec(key, root);
+  _hbayHome(r);
+  root.visible = true;
+  r.ready = true;
+  if (H.sel === key) { if (r.at !== 'stage' && !(r.fl && r.fl.toStage)) { r.slot = -1; _hbayFly(r, true); } return; }
+  const prev = H.sel ? H.ships[H.sel] : null;
+  const spot = r.slot;
+  H.sel = key;
+  r.slot = -1;
+  if (!prev || !prev.ready || (prev.at === null && !prev.fl)) {   // nothing on the stage yet (the session's first hull)
+    if (r.fl) r.fl = null;
+    r.at = 'stage'; r.w = 1; r.eng = 1;
+  } else _hbayFly(r, true);
+  if (prev && prev !== r) {
+    prev.slot = (spot >= 0) ? spot : _hbayFreeSpot(prev);
+    _hbayFly(prev, false);
+  }
+}
+function _hbayAdopt(s, on) {
+  const H = _HBAY;
+  if (!s) return;
+  const home = on ? H.scene : s.scene;
+  if (!home) return;
+  if (!on) H.wasLive = false;
+  const m = s.model;
+  if (m) {
+    const r = on ? _hbayRecOf(m) : null;
+    if (r) _hbayHome(r);
+    else if (!on && m.parent !== home) { home.add(m); m.visible = true; }   // off: back in the stage scene, its own transform
+  }
+  try { if (_PSEAT.root && _PSEAT.root.parent && _PSEAT.root.parent !== home) home.add(_PSEAT.root); } catch (_) {}
+}
+function _hbayOrbit(dt, userActive) {
+  const s = _shipPreview3D, H = _HBAY;
+  if (!_hbayLive(s)) return false;
+  if (s.camRTo > 0 && s.camR !== s.camRTo) {
+    s.camR += (s.camRTo - s.camR) * (1 - Math.exp(-dt / 0.3));
+    if (Math.abs(s.camRTo - s.camR) < 0.01) s.camR = s.camRTo;
+  }
+  const r = H.sel && H.ships[H.sel];
+  if (!r || !r.fl || !r.fl.toStage) return false;
+  if (userActive) return true;
+  const k = 1 - Math.exp(-dt / 0.28);
+  s.yaw -= s.yaw * k;       // yaw is kept in [-pi, pi]: toward 0 is the short way round
+  s.pitch -= s.pitch * k;
+  return true;
+}
+function _hbayFrameSetup(s) {
+  const H = _HBAY, K = _HBAY_K, cam = s.camera;
+  const tanH = Math.tan(cam.fov * Math.PI / 360), asp = cam.aspect || 1;
+  const tex = s.backdrop && s.backdrop.material && s.backdrop.material.map;   // the picture's crop (_previewFitBackdrop)
+  const rx = (tex && tex.repeat.x) || 1, ry = (tex && tex.repeat.y) || 1, ox = tex ? tex.offset.x : 0, oy = tex ? tex.offset.y : 0;
+  const im = tex && tex.image, ia = (im && im.width && im.height) ? im.width / im.height : 1672 / 941;
+  const vp = Array.isArray(K.vp) ? K.vp : [0.558, 0.414];
+  const vx = (+vp[0] - ox) / rx, vy = ((1 - +vp[1]) - oy) / ry;   // on the screen, 0..1, y up
+  const f = _hbV1.set((vx * 2 - 1) * tanH * asp, (vy * 2 - 1) * tanH, -1).normalize();   // toward the vanishing point
+  const rt = _hbV2.crossVectors(f, _hbY).normalize();
+  const up = _hbV3.crossVectors(rt, f);
+  _hbM.makeBasis(rt, up, _hbV4.copy(f).negate());
+  H.qh.setFromRotationMatrix(_hbM);
+  H.qhInv.copy(H.qh).invert();
+  H.zk = (asp > ia) ? ia / asp : 1;
+  H.stageP.set(0, 0, 0).applyMatrix4(cam.matrixWorldInverse).applyQuaternion(H.qhInv);
+  H.stageQ.copy(cam.quaternion).invert().premultiply(H.qhInv);
+}
+function _hbaySpotPose(r, k, t, outP, outQ) {
+  const K = _HBAY_K, H = _HBAY;
+  const side = (k < 3) ? -1 : 1, rows = Array.isArray(K.rows) ? K.rows : [950, 1400, 1850];
+  const D = Math.max(80, +rows[k % 3] || 1200) * H.zk;
+  const T = Math.max(0.5, +K.bobT || 6.5), D2R = Math.PI / 180;
+  outP.set(side * (+K.aisle || 0), -(+K.floor || 0) + (+K.hover || 0) + r.halfH + (+K.bob || 0) * r.size * Math.sin(t * 6.2832 / T + r.ph), -D);
+  outQ.setFromAxisAngle(_hbY, side < 0 ? Math.PI : 0);   // facing the middle: the left row's noses right, the right row's left
+  const sw = (+K.sway || 0) * D2R;
+  if (sw) {
+    _hbQ3.setFromAxisAngle(_hbX, sw * Math.sin(t * 6.2832 / (T * 1.37) + r.ph2)); outQ.multiply(_hbQ3);        // roll (nose -X)
+    _hbQ3.setFromAxisAngle(_hbZ, sw * 0.6 * Math.sin(t * 6.2832 / (T * 0.83) + r.ph)); outQ.multiply(_hbQ3);   // pitch
+  }
+  outP.sub(_hbV6.copy(r.center).applyQuaternion(outQ));   // the pivot, with the hull's centre on the spot
+}
+function _hbayFlyPose(r, te, endP, endQ, outP, outQ) {
+  const fl = r.fl, K = _HBAY_K;
+  const P0 = fl.p0, P3 = endP, L = _hbV4.copy(P3).sub(P0).length();
+  const side = fl.toStage ? 0 : ((r.slot < 3) ? -1 : 1);
+  const lift = fl.toStage ? 0 : (+K.lift || 0) * r.size;
+  const a0 = fl.fromSpot ? Math.max(60, Math.abs(P0.x - P3.x) * 0.9) : L * 0.3;
+  const P1 = _hbV5.copy(fl.d0).multiplyScalar(a0).add(P0);
+  const P2 = _hbV6.copy(P3);
+  if (fl.toStage) P2.z -= L * 0.35;
+  else P2.x -= side * Math.max(60, Math.abs(P3.x) * 0.9);
+  if (lift) { P1.y += lift; P2.y += lift; }
+  const u = 1 - te, b0 = u * u * u, b1 = 3 * u * u * te, b2 = 3 * u * te * te, b3 = te * te * te;
+  outP.copy(P0).multiplyScalar(b0).addScaledVector(P1, b1).addScaledVector(P2, b2).addScaledVector(P3, b3);
+  _hbQ2.setFromAxisAngle(_hbY, fl.toStage ? Math.PI / 2 : -Math.PI / 2);
+  outQ.copy(fl.q0).slerp(_hbQ2, _hbSm(0, 0.45, te)).slerp(endQ, _hbSm(0.55, 1, te));
+}
+function _hbayFrame(s) {
+  const H = _HBAY, K = _HBAY_K, cam = s.camera;
+  _hbayEnsure(s);
+  const now = performance.now();
+  let dt = H.last ? (now - H.last) / 1000 : 0;
+  H.last = now;
+  const snap = !H.wasLive || dt > 0.5;
+  if (!H.wasLive) {
+    H.wasLive = true;
+    if (s.model && s.lastKey && s.modelByKey && s.modelByKey[s.lastKey] === s.model) {
+      const r0 = _hbayRec(s.lastKey, s.model); r0.ready = true; r0.slot = -1;
+      if (H.sel && H.sel !== s.lastKey && H.ships[H.sel]) H.ships[H.sel].slot = -1;
+      H.sel = s.lastKey;
+    }
+  }
+  dt = Math.min(0.1, Math.max(0, dt));
+  _hbayAdopt(s, true);
+  if (H.built) H.litA = snap ? 1 : Math.min(1, H.litA + dt / Math.max(0.05, +K.litT || 1));
+  cam.updateMatrixWorld();
+  _hbayFrameSetup(s);
+  const t = now / 1000, step = dt / Math.max(0.1, +K.dur || 1.5);
+  for (const k of H.order) {
+    const r = H.ships[k];
+    if (!r || !r.ready) continue;
+    if (k === H.sel) {
+      r.slot = -1;
+      if (r.fl ? !r.fl.toStage : (r.at !== null && r.at !== 'stage')) _hbayFly(r, true);   // picked while parked / heading home
+    } else if (r.slot < 0) { r.slot = _hbayFreeSpot(r); if (r.slot < 0) continue; if (r.at === 'stage' || (r.fl && r.fl.toStage)) _hbayFly(r, false); }
+    if (r.at === null && !r.fl) { r.at = (k === H.sel) ? 'stage' : r.slot; r.w = (k === H.sel) ? 1 : 0; }
+    if (snap && r.fl) { r.at = r.fl.toStage ? 'stage' : r.slot; r.w = r.fl.toStage ? 1 : 0; r.fl = null; }
+    const pv = r.pivot;
+    _hbV1.copy(r.posH);
+    if (r.at === 'stage' && !r.fl) {
+      r.posH.copy(H.stageP); r.qH.copy(H.stageQ); r.w = 1;
+      pv.position.set(0, 0, 0); pv.quaternion.identity();
+    } else {
+      if (r.fl) {
+        r.fl.t += step;
+        const te = _hbEase(Math.max(0, Math.min(1, r.fl.t)));
+        if (r.fl.toStage) { _hbV3.copy(H.stageP); _hbQ1.copy(H.stageQ); }
+        else _hbaySpotPose(r, r.slot, t, _hbV3, _hbQ1);
+        _hbayFlyPose(r, te, _hbV3, _hbQ1, r.posH, r.qH);
+        r.w = r.fl.w0 + ((r.fl.toStage ? 1 : 0) - r.fl.w0) * te;
+        if (r.fl.t >= 1) { r.at = r.fl.toStage ? 'stage' : r.slot; r.fl = null; }
+      } else _hbaySpotPose(r, r.at, t, r.posH, r.qH);
+      pv.position.copy(r.posH).applyQuaternion(H.qh).applyMatrix4(cam.matrixWorld);
+      pv.quaternion.copy(cam.quaternion).multiply(H.qh).multiply(r.qH);
+    }
+    if (dt > 0) r.velH.copy(r.posH).sub(_hbV1).divideScalar(dt);
+    r.depth = -_hbV2.copy(r.posH).applyQuaternion(H.qh).z;
+    const ew = (k === H.sel || r.fl) ? 1 : 0;
+    r.eng = snap ? ew : (ew > r.eng ? Math.min(ew, r.eng + dt / 0.35) : Math.max(ew, r.eng - dt / 0.7));
+  }
+  if (K.grid) {
+    if (!H.grid) { H.grid = new THREE.GridHelper(4000, 20, 0x00ffff, 0xff00ff); H.grid.raycast = _lssNoRaycast; H.scene.add(H.grid); }
+    _hbV1.set(0, -(+K.floor || 0), -2200 * H.zk).applyQuaternion(H.qh).applyMatrix4(cam.matrixWorld);
+    H.grid.position.copy(_hbV1);
+    H.grid.quaternion.copy(cam.quaternion).multiply(H.qh);
+    H.grid.scale.set(1, 1, H.zk);
+  }
+  for (const k of H.order) {
+    const r = H.ships[k];
+    if (!r || !r.ready) continue;
+    const fx = r.root.userData && r.root.userData._pvEng;
+    if (!fx) continue;
+    fx.visible = r.eng > 0.01;
+    if (fx.visible) _lssPreviewEnginesTick(fx, cam, r.eng);
+  }
+}
+function _hbayLight(s, w, lit) {
+  const H = _HBAY, K = _HBAY_K, L = H.L, S = s.lights, cam = s.camera;
+  if (!L || !S) return;
+  _hbQ0.setFromAxisAngle(_hbX, s.camElev0 || 0);   // the default framing: the camera pitched down by its elevation
+  const kL = (+K.light || 0) * lit, kE = (+K.env || 0) * lit;
+  const iL = kL + (1 - kL) * w;
+  const dir = (src, out) => {
+    _hbV3.copy(src).normalize();                                                // the stage's, in the world
+    out.copy(_hbV3).applyQuaternion(_hbQ0).applyQuaternion(cam.quaternion);    // the parked one: the framing's, carried round
+    out.lerp(_hbV3, w);
+    if (out.lengthSq() < 0.04) out.copy(_hbV3);
+    return out.normalize();
+  };
+  for (const n of ['key', 'fill', 'rim']) {
+    const sl = S[n], l = L[n];
+    if (!sl || !l) continue;
+    dir(sl.position, l.position).multiplyScalar(100);   // the targets stay at the origin, as the stage's do
+    l.color.copy(sl.color); l.intensity = sl.intensity * iL;
+    l.updateMatrixWorld();
+  }
+  if (S.amb && L.amb) { L.amb.color.copy(S.amb.color); L.amb.intensity = S.amb.intensity * iL; }
+  if (S.hemi && L.hemi) {
+    dir(S.hemi.position, L.hemi.position);
+    L.hemi.color.copy(S.hemi.color); L.hemi.groundColor.copy(S.hemi.groundColor); L.hemi.intensity = S.hemi.intensity * iL;
+    L.hemi.updateMatrixWorld();
+  }
+  const e0 = (s.scene && s.scene.environmentIntensity != null) ? s.scene.environmentIntensity : 1;
+  H.scene.environmentIntensity = e0 * (kE + (1 - kE) * w);
+}
+function _hbayDraw(s) {
+  const H = _HBAY, sc = H.scene, cam = s.camera;
+  if (!sc) return;
+  _hbayAdopt(s, true);   // a seat built this frame was added to the stage scene: he is drawn with his hull
+  const all = [], parked = [], fly = [];
+  let hero = null;
+  for (const k of H.order) {
+    const r = H.ships[k];
+    if (!r || !r.pivot) continue;
+    all.push(r);
+    if (!r.ready || r.root.parent !== r.pivot) continue;
+    if (r.fl) fly.push(r);
+    else if (r.at === 'stage') hero = r;
+    else if (typeof r.at === 'number') parked.push(r);
+  }
+  const seat = (_PSEAT.root && _PSEAT.root.parent === sc) ? _PSEAT.root : null;
+  const seatVis = seat ? seat.visible : false;
+  const grid = H.grid, gridOn = !!(grid && _HBAY_K.grid);
+  sc.updateMatrixWorld();
+  const ac = renderer.autoClear;
+  renderer.autoClear = false;   // over the stage's frame: its depth (none - the picture writes none) and colour stay
+  try {
+    const pass = (list, w, lit, withGrid) => {
+      let seatIn = false;
+      for (const r of all) r.pivot.visible = false;
+      for (const r of list) { r.pivot.visible = true; if (seat && _PSEAT.model === r.root) seatIn = true; }
+      if (seat) seat.visible = seatVis && seatIn;
+      if (grid) grid.visible = !!withGrid;
+      _hbayLight(s, w, lit);
+      renderer.render(sc, cam);
+    };
+    if ((parked.length && H.litA > 0.004) || gridOn) pass(H.litA > 0.004 ? parked : [], 0, H.litA, gridOn);
+    fly.sort((a, b) => b.depth - a.depth);
+    for (const r of fly) pass([r], r.w, H.litA, false);
+    if (hero) pass([hero], 1, 1, false);
+  } finally {
+    renderer.autoClear = ac;
+    for (const r of all) r.pivot.visible = true;
+    if (seat) seat.visible = seatVis;
+    if (grid) grid.visible = gridOn;
+  }
+}
+if (typeof window !== 'undefined') window.__hangar = {
+  K: _HBAY_K,
+  state() {
+    const H = _HBAY, s = _shipPreview3D;
+    const out = { on: _hbayLive(s), broken: H.broken, sel: H.sel, built: H.built, lit: +H.litA.toFixed(2), camR: s && +(+s.camR || 0).toFixed(1), zk: +H.zk.toFixed(3), ships: {} };
+    for (const k of H.order) {
+      const r = H.ships[k];
+      if (!r) { out.ships[k] = null; continue; }
+      let px = null;
+      try {
+        if (s && s.camera && r.pivot) {
+          r.pivot.updateWorldMatrix(true, false);
+          const v = r.center.clone().applyMatrix4(r.pivot.matrixWorld).project(s.camera);   // the centre is in pivot space
+          px = [Math.round((v.x * 0.5 + 0.5) * innerWidth), Math.round((1 - (v.y * 0.5 + 0.5)) * innerHeight)];
+        }
+      } catch (_) {}
+      out.ships[k] = { spot: r.slot, at: r.at, fly: r.fl ? { t: +r.fl.t.toFixed(2), toStage: r.fl.toStage } : null, w: +r.w.toFixed(2),
+                       eng: +r.eng.toFixed(2), ready: r.ready, size: Math.round(r.size), depth: Math.round(r.depth), px };
+    }
+    return out;
+  },
+  pick(key) { try { previewLoadout(String(key).toUpperCase()); } catch (e) { return String(e); } return _HBAY.sel; },
+};
 
 function _lssRenderPicker() {
   const s = _shipPreview3D;
@@ -52029,10 +52458,16 @@ function _lssRenderPicker() {
       _previewFitBackdrop(aspect);
       s._bgFitted = true;
     }
-    try { const _pe = s.model && s.model.userData && s.model.userData._pvEng; if (_pe) _lssPreviewEnginesTick(_pe, s.camera); } catch (_) {}
+    const _hb = _hbayLive(s);
+    if (_hb) { try { _hbayFrame(s); } catch (e) { _hbayFail(e); } }
+    else {
+      try { if (_HBAY.scene) _hbayAdopt(s, false); } catch (_) {}
+      try { const _pe = s.model && s.model.userData && s.model.userData._pvEng; if (_pe) { _pe.visible = true; _lssPreviewEnginesTick(_pe, s.camera); } } catch (_) {}
+    }
     try { _lssPickerSeatTick(); } catch (_) {}   // (v52.06) CONFIRM beams the pilot into the stage hull
     renderer.setRenderTarget(null);
     renderer.render(s.scene, s.camera);
+    if (_hb) { try { _hbayDraw(s); } catch (e) { _hbayFail(e); } }
     try { _lssPickerStandDraw(s); } catch (_) {}   // (v53.20) ...out of where he stood beside it (the new face)
     try { _lssPilotsDraw(s); } catch (_) {}        // (v53.44) the CUSTOMIZE line-up, into its box, over all of it
     return true;
@@ -53010,6 +53445,7 @@ if (typeof window !== 'undefined') window.__themeLift = function (cfg) {
   };
   try { visit(scene); } catch (_) {}
   try { if (_shipPreview3D && _shipPreview3D.scene) visit(_shipPreview3D.scene); } catch (_) {}
+  try { if (_HBAY.scene) visit(_HBAY.scene); } catch (_) {}   // (v53.81) the hangar's hulls (the stage hull lives there too)
   const out = { on: _THEME_LIFT.on, applied: n };
   for (const k in _THEME_LIFT) if (k !== 'on') out[k] = Object.assign({}, _THEME_LIFT[k]);
   return out;
@@ -54255,15 +54691,16 @@ function _lssPreviewEngines(modelRoot, key, proto) {
     return fx;
   } catch (e) { try { console.warn('[ship-preview] engines failed:', e && e.message); } catch (_) {} return null; }
 }
-let _pvEngT = -1;
-function _lssPreviewEnginesTick(fx, cam) {
+function _lssPreviewEnginesTick(fx, cam, amt) {
   const now = ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now()) / 1000;
-  const dt = (_pvEngT > 0) ? Math.min(0.1, Math.max(0, now - _pvEngT)) : 1 / 60;
-  _pvEngT = now;
-  const key = fx.userData.engineFlameKey, K = _engineFlameKnobs(), pw = 0.8;
+  const ud = fx.userData;
+  const dt = (ud._pvT > 0) ? Math.min(0.1, Math.max(0, now - ud._pvT)) : 1 / 60;
+  ud._pvT = now;
+  const a = (amt != null && isFinite(amt)) ? Math.max(0, Math.min(1, +amt)) : 1;
+  const key = fx.userData.engineFlameKey, K = _engineFlameKnobs(), pw = 0.8 * a;
   const st = _engineStyle({ style: 'ship' }, key, null);   // the stage ship's own pick ('' = orbs)
   const ok = ((_ENGINE_ORB_K[key] != null) ? +_ENGINE_ORB_K[key] : 1) / (fx.userData.orbK0 || 1);
-  const sc = (0.7 + pw * 0.9) * (1 + Math.sin(now * 18) * 0.05 * pw) * ok * _engineOrbKForStyle(st, K);
+  const sc = (0.7 + pw * 0.9) * (1 + Math.sin(now * 18) * 0.05 * pw) * ok * _engineOrbKForStyle(st, K) * a;
   for (const g of fx.userData.engineGlows) g.scale.setScalar(sc);
   const m = fx.userData.orbMat;
   if (m && m.uniforms && m.uniforms.uIntensity) m.uniforms.uIntensity.value = 0.5 + pw;
