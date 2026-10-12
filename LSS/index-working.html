@@ -8425,6 +8425,12 @@ function _lssOff(n) { try { return !!(window.__lssOff && (window.__lssOff.all ||
 // matrices are computed once here; visibility, castShadow and instance buffers are untouched and keep
 // working. ⚠ ONLY for objects nothing ever moves again - a frozen object that is later repositioned
 // silently stays where it was. `?off=freeze` restores the old behaviour for an A/B without a rebuild.
+// ⚠⚠ (v53.69) "SKIPPED BY THE WALK ENTIRELY" WAS NOT TRUE UNTIL v53.69. The scene root had matrixAutoUpdate on,
+// so three's walk reached every child with force = true and never read the frozen root's
+// matrixWorldAutoUpdate - only the no-compose half of this freeze ever paid. The root no longer forces (see the
+// note at `const scene`), so a frozen root really is skipped now - which also means a child ADDED to a frozen
+// root after this call, or a frozen root moved later, never gets its world matrix: thaw it first (the crushed
+// sky island in the campaign does: matrixAutoUpdate + matrixWorldAutoUpdate back on, under a moving pivot).
 function _lssFreezeStatic(root) {
   if (!root || _lssOff('freeze')) return root;
   try {
@@ -8660,7 +8666,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.68";
+const LSS_BUILD = "53.77";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -28338,8 +28344,11 @@ function _sjSlot() {
   }
   _sjTextures();
   _sjGeometry();
-  const mk = (tex) => new THREE.MeshBasicMaterial({ map: tex, color: 0xffffff, transparent: true,
-    blending: THREE.AdditiveBlending, depthTest: false, depthWrite: false, fog: false, side: THREE.DoubleSide });
+  // (v53.70) ONE PASS (v48.45's _lssAddOnePass family: additive, depthWrite off, unlit Basic, DoubleSide - the order
+  // of the two sides cannot change an additive sum). Built after v48.45, so it was drawn twice a slot with two
+  // program re-keys (three's transparent DoubleSide split bumps material.version before each side).
+  const mk = (tex) => _lssAddOnePass(new THREE.MeshBasicMaterial({ map: tex, color: 0xffffff, transparent: true,
+    blending: THREE.AdditiveBlending, depthTest: false, depthWrite: false, fog: false, side: THREE.DoubleSide }));
   const jet = new THREE.Mesh(_sjGeoJet, mk(_sjTexJet));
   const star = new THREE.Mesh(_sjGeoStar, mk(_sjTexStar));
   for (const m of [jet, star]) { m.renderOrder = 9999; m.frustumCulled = false; m.visible = false; scene.add(m); }
@@ -29261,6 +29270,54 @@ function cleanupPendingHits() {
 // ---- THREE.JS SETUP ----
 
 const scene = new THREE.Scene();
+// ⭐⭐⭐ (v53.69) THE ROOT DOES NOT MOVE, SO IT MUST NOT FORCE THE WALK. Owner: "What could we be doing more
+// efficiently ... especially with the overworld". three r165 renders by calling scene.updateMatrixWorld(), and
+// Object3D.updateMatrixWorld RECOMPOSES a node whose matrixAutoUpdate is on - which raises its
+// matrixWorldNeedsUpdate - and then walks its children with force = true. A Scene is born with matrixAutoUpdate
+// on, so every frame the ROOT forced the whole tree: the per-child `matrixWorldAutoUpdate === true || force`
+// test never got to say no, and v49.50's _lssFreezeStatic - which sets matrixWorldAutoUpdate = false on a frozen
+// root precisely so this walk would skip it - has never skipped anything. Only its matrixAutoUpdate = false half
+// (no compose) ever worked, and that is all its 1.10 -> 0.80 ms measured. Measured on 53.68 in the overworld
+// (MEGA, volumetric weather, the owner flying): ONE walk a frame, 0.89 ms, ~2,840 objects; in a synchronous A/B
+// 0.34 ms as it was -> 0.22 with the root not forcing -> 0.11 with the parked families below skipped too.
+// The root sits at the origin with an identity transform and nothing in this file moves it. AUDITED before the
+// force went (the walk now reaches a node only when its own flags ask): every `matrixAutoUpdate = false` site in
+// the main scene either updates itself where it moves (the sky dome and the water planes call updateMatrix +
+// updateMatrixWorld), raises matrixWorldNeedsUpdate after writing .matrix (the seat bodies in _lssSeatPlace, the
+// picker / hangar pilots, the XR cover rig, the VSC overlay), or is an identity / build-once transform (the
+// Panini mask, the arena and set-piece meshes, the mushroom instancers); the one frozen root that moves later -
+// a crushed sky island - is thawed and re-parented under an auto-updating pivot, which forces its own subtree.
+// ⚠ THE RULE FROM HERE ON: a node with matrixAutoUpdate = false that you MOVE must raise matrixWorldNeedsUpdate
+// (or update itself) - the root no longer does it for you - and a frozen root (_lssFreezeStatic) that moves must
+// be thawed first.
+// ...AND THE PARKED FAMILIES. A top-level child with `__walkPark = true` is skipped while it is hidden: it draws
+// nothing, and the frame it shows again it is walked before it is drawn (this runs at the start of every render).
+// OPT-IN, never "anything hidden": in first person the player's own hull is hidden (renderFrame) while its gun
+// markers are still read, and an entity hull hidden mid-fight can still be hit-tested against its matrixWorld.
+// Flagged: the lightning pool (_initLightningPool, 192 meshes) and the explosion mesh pool (_acquireExplosionMesh) -
+// pure FX, parked between uses. A forced call (`updateMatrixWorld(true)`: the warm paths) walks
+// everything, flags or not. A direct property, not userData: clone() JSON-copies userData (v49.56).
+// A/B, live: window.__walk = { rootForce: 1 } is the pre-53.69 walk exactly; { skipHidden: 0 } walks the parked
+// families again.
+scene.matrixAutoUpdate = false;
+scene.updateMatrixWorld = function (force) {
+  this._lssWalkN = (this._lssWalkN | 0) + 1;   // (v53.71) _swMirrorTop reads it: did the mirror's render walk the frame?
+  let W = null; try { W = window.__walk || null; } catch (_) {}
+  if (W && W.rootForce) force = true;
+  if (this.matrixAutoUpdate) this.updateMatrix();
+  if (this.matrixWorldNeedsUpdate || force) {
+    this.matrixWorld.copy(this.matrix);   // the root has no parent
+    this.matrixWorldNeedsUpdate = false;
+    force = true;
+  }
+  const skip = !force && !(W && W.skipHidden === 0);
+  const ch = this.children;
+  for (let i = 0, l = ch.length; i < l; i++) {
+    const c = ch[i];
+    if (skip && c.visible === false && c.__walkPark === true) continue;
+    if (c.matrixWorldAutoUpdate === true || force === true) c.updateMatrixWorld(force);
+  }
+};
 // (v48.45) main-scene render hooks: the idle shield gate (see _esGateBefore). Nothing else assigns these.
 scene.onBeforeRender = function (r, s, cam) {
   try { _esGateBefore(); } catch (_) {}
@@ -34304,13 +34361,22 @@ window._v8updateCinemaFlyover = _v8updateCinemaFlyover;
 
 const postFX = { enabled: true };
 
+// (v53.70) MEMOISED. A user-agent regex per call, from 41 call sites - some per frame, and _swHubView calls it
+// from inside the chunk streamer's loop: 0.4 % of all main-thread samples in the 53.68 overworld profile, for an
+// answer that cannot change until a reload (a device-emulation switch reloads the page anyway). Cached on the
+// function object, not a module const: this is called during boot, before a const's line would have run (the
+// v39.02 TDZ rule).
 function isStandaloneQuest() {
+  if (isStandaloneQuest._v !== undefined) return isStandaloneQuest._v;
+  let v = false;
   try {
     const ua = (navigator && navigator.userAgent) ? navigator.userAgent : '';
-    return /\bQuest\b|OculusBrowser|MetaQuest/i.test(ua);
+    v = /\bQuest\b|OculusBrowser|MetaQuest/i.test(ua);
   } catch (_) {
-    return false;
+    v = false;
   }
+  isStandaloneQuest._v = v;
+  return v;
 }
 
 // ⚠⚠ (v41.42) "IS VR RUNNING THE CHEAP WATER?" - not "is this VR". Owner: "i also want the water
@@ -35235,6 +35301,8 @@ function _lssSupersampleTick(ts) {
     // (v44.90) the payoff verdict is about THIS scene, so it dies with it. Every round re-tests
     // once (two steps and back, ~1 s) rather than carrying a stale conclusion into a new map.
     S.pf.nSum = 0; S.pf.nN = 0; S.pf.sSum = 0; S.pf.sN = 0; S.pf.latched = false;
+    S.pf.probe = 0; S.pf.probeAt = 0;   // (v53.73) a new scene earns its own probe
+    S.pf.t0 = 0; S.pf.ring = []; S.pf.shedWins = 0;   // (v53.75) ...its own launch exclusion and its own cooldown ladder
     return;
   }
   // ⚠ (v40.13) THE FILTER WAS HIDING THE ONLY FRAMES THAT MATTERED. Everything over 250 ms is
@@ -35360,7 +35428,14 @@ function _lssSupersampleTick(ts) {
     //   whichever bucket is live and its decay lands in the other, so over enough ticks the
     //   comparison is between the two RESOLUTIONS, not between a bad moment and its aftermath.
     const _P = S.pf;
-    if (sc >= 0) { _P.nSum += S.ema; _P.nN++; } else { _P.sSum += S.ema; _P.sN++; }
+    // (v53.75) NOT DURING THE LAUNCH'S STREAMING BURST. The world streams for seconds after the curtain lifts (the v47.07
+    // note: minutes, at a lower rate), and the round opens at native - so the first native samples were the launch's
+    // heaviest frames. Measured, the owner's 53.74 flight: 7 native ticks from the opening seconds read 12.73 ms against
+    // a settled shed's 8.5-9.1, the ledger called the shed a win on that, and with nN already past 6 nothing ever asked
+    // native again (80 % of 9,600 frames at the -0.6 floor). The first 8 s of a round record nothing.
+    if (!_P.t0) _P.t0 = ts;
+    const _warm = (ts - _P.t0) < 8000;
+    if (!_warm) { if (sc >= 0) { _P.nSum += S.ema; _P.nN++; } else { _P.sSum += S.ema; _P.sN++; } }
     if (!_P.latched && _P.nN >= 6 && _P.sN >= 6) {
       const _nat = _P.nSum / _P.nN, _sub = _P.sSum / _P.sN;
       _P.nat = +_nat.toFixed(2); _P.sub = +_sub.toFixed(2);
@@ -35373,8 +35448,48 @@ function _lssSupersampleTick(ts) {
     // between the player and a slideshow. If a latched scene then cannot hold the frame at native -
     // 40% over budget, the same bar the shed itself uses - the verdict is wrong for this scene and
     // is torn up, counters and all, so the shed gets to try again and prove itself on the numbers.
-    if (_P.latched && sc >= 0 && S.ema > period * 1.40) {
-      _P.latched = false; _P.nSum = 0; _P.nN = 0; _P.sSum = 0; _P.sN = 0; _P.unlatched++;
+    // ⚠ (v53.73) ...AND "40 % OVER" IS MEASURED AGAINST WHAT THE VERDICT SAW, NOT ONLY AGAINST THE PANEL. On a frame that
+    // is CPU-bound at ~10 ms on a 144 Hz panel (the owner's overworld flight, 53.68) native IS 1.4 x 6.94 ms over the
+    // panel - the same as shed - so the bare test tore up every verdict the moment it was made. The verdict stands until
+    // native gets clearly worse than the native it measured (the scene changed: a city, a forest), then it is re-tested.
+    // ⚠ (v53.74) ...AND SUSTAINED: three decision ticks in a row (1.5 s), the audit's own "two failures, never one" rule.
+    // Measured in the owner's flight on 53.73: a streaming hitch lifts the EMA to 20-31 ms for a tick or two, and the
+    // single-tick test tore up both fresh verdicts within 2 s - the picture pumped, native for a moment, then 70 % again.
+    const _vOver = !!(_P.latched && sc >= 0 && S.ema > Math.max(period * 1.40, (_P.nat || 0) * 1.25));
+    _P.vN = _vOver ? (_P.vN || 0) + 1 : 0;
+    if (_vOver && _P.vN >= 3) {
+      _P.latched = false; _P.nSum = 0; _P.nN = 0; _P.sSum = 0; _P.sN = 0; _P.unlatched++; _P.vN = 0;
+    }
+    // ⭐⭐ (v53.73) THE AUDIT ASKS NATIVE, ONCE, WHEN IT HAS NO ANSWER. Owner: "do 1 to 6" (the 53.68 review, item 6).
+    // The ledger needs ticks at BOTH resolutions, and the only road back to native is the creep, which needs the EMA
+    // under budget - so a steadily over-budget frame parks at the floor and the audit never hears from native: the
+    // owner's whole 37 s overworld flight sat at -0.6 (1344x756 of a 1920x1080 screen) with `pf` reading nN 0, sN 1026,
+    // and hovering it went straight back to native at 137 fps. v44.90 measured the hub's whole shed range buying
+    // ~0.5 fps. So when it has sat below native for 6 s (12 ticks) with no native samples, it CREEPS up to native at the
+    // shed's own 0.1 a tick (never v44.93's jump: a 4x load swing in one tick is rubberbanding) and holds there for six
+    // ticks (3 s) of samples; then the ledger above decides exactly as it always has. Once a round in practice (the nN it
+    // collected stays), never more often than every 30 s, aborted by a stall. DESKTOP ONLY: phones, the Quest and the
+    // Xbox are fill-bound and keep the shed untouched. window.__ssProbe = 0 turns it off; __ss.pf.probes counts them.
+    // ⭐ (v53.75) THE PROBE DECIDES ON A LOCAL A/B, NOT ON THE ROUND'S MEANS. Round means compare DIFFERENT MOMENTS: native
+    // samples come from the launch (above) or from calm stretches (the creep only climbs while the EMA is under budget),
+    // shed samples from everything else - so in flight the ledger answered "the shed pays" on scenery, not resolution.
+    // A probe now compares the six below-native ticks right before it (`ring`) with native hold ticks 2-6 (the first
+    // still mixes the step) and decides itself: native within the audit's own margin (8 %) of the shed it just left ->
+    // latched, the pixels stay; otherwise back down, and the next probe waits 2, then 4, then 8 minutes (`shedWins`) so a
+    // genuinely fill-bound scene is not pumped. The old "only when it has no native samples" gate is gone - stale native
+    // samples were exactly what kept it from asking. `__ss.pf.prLast` = [shed ms, native ms] of the last probe.
+    let _isSmall = false; try { _isSmall = (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) || isStandaloneQuest(); } catch (_) {}
+    const _prOn = !_isSmall && !(typeof window !== 'undefined' && window.__ssProbe === 0);
+    const _stNow = !!(S.stallT && (ts - S.stallT) < 4000);
+    if (!_P.ring) _P.ring = [];
+    if (sc < 0 && !_P.probe && !_warm) { _P.ring.push(S.ema); if (_P.ring.length > 6) _P.ring.shift(); }
+    else if (sc >= 0 && !_P.probe) _P.ring.length = 0;   // only a run of shed ticks right before the probe counts
+    const _cool = (_P.shedWins > 0) ? Math.min(480000, 120000 * Math.pow(2, _P.shedWins - 1)) : 30000;
+    if (_prOn && !_P.latched && !_P.probe && sc < 0 && !_stNow && !_warm && _P.ring.length >= 6 &&
+        (ts - (_P.probeAt || -1e9)) > _cool) {
+      _P.probe = -1;   // -1 = creeping up; > 0 = native ticks still to sample
+      _P.probeAt = ts; _P.probes = (_P.probes || 0) + 1;
+      _P.prShed = _P.ring.reduce((s, x) => s + x, 0) / _P.ring.length; _P.prNatS = 0; _P.prNatN = 0;
     }
   }
   // Latched = the pixels go back now, not over the 3 s creep - a viewport change is free (v39.49b).
@@ -35386,6 +35501,28 @@ function _lssSupersampleTick(ts) {
   // strongest evidence available that this machine cannot hold what it is being asked to draw.
   const _stalled = !!(S.stallT && (ts - S.stallT) < 4000);
   const _over = _stalled || S.ema > period * 1.10, _far = _stalled || S.ema > period * 1.40;
+  // (v53.73) THE NATIVE PROBE, while it runs, owns the step (see THE AUDIT ASKS NATIVE above): creep 0.1 a tick to
+  // native, then hold it for the sampled ticks. A stall aborts it; a verdict (latched) ends it.
+  if (S.pf && S.pf.probe) {
+    const _Q = S.pf;
+    if (_stalled || _Q.latched) _Q.probe = 0;
+    else {
+      if (_Q.probe < 0) { sc = Math.min(0, sc + 0.1); if (sc >= 0) _Q.probe = 6; }
+      else {
+        if (_Q.probe < 6) { _Q.prNatS += S.ema; _Q.prNatN++; }   // (v53.75) hold ticks 2-6: the first still mixes the step
+        _Q.probe--;
+        if (sc < 0) sc = 0;
+        if (_Q.probe === 0) {   // (v53.75) the verdict - see THE PROBE DECIDES ON A LOCAL A/B
+          const nat = _Q.prNatN ? _Q.prNatS / _Q.prNatN : Infinity, sub = _Q.prShed || 0;
+          _Q.prLast = [+sub.toFixed(2), +nat.toFixed(2)];
+          if (sub > 0 && nat <= sub * (1 + _pfNeedRaw)) { _Q.latched = true; _Q.nat = +nat.toFixed(2); _Q.sub = +sub.toFixed(2); _Q.shedWins = 0; _Q.vN = 0; }
+          else _Q.shedWins = (_Q.shedWins || 0) + 1;
+        }
+      }
+      if (sc !== S.scale) { S.scale = sc; S.steps++; }
+      return;
+    }
+  }
   // (v39.51) BELOW NATIVE IS A BURST RESPONSE, NOT A RATCHET. Measured in the owner's session (144 Hz,
   // plugged in): 141 fps with the scene parked at the -0.6 floor (1344x707 on a 1920 canvas). Every
   // shed doubled the hold (up to 60 ticks = 30 s with no creep-back) and the backoff never reset, so
@@ -36267,6 +36404,10 @@ function _waterRefractBind(rnd, scn, cam) {
     if (!_waterRefractWanted()) return;
     const rt = rnd.getRenderTarget();
     if (!rt || rt !== postFX.rtScene || rt.samples > 0) return;
+    // (v53.72) ONE COPY A RENDER. The sheet draws in two pieces now (its core child and the wedge arc - see _SW_SHEET),
+    // and this runs before each. The second must REUSE the first copy: a fresh one would hold the first piece's water,
+    // and the refraction source is the opaque frame. render.frame is bumped once per render() call.
+    if (postFX._rcF === rnd.info.render.frame && postFX._rcRT === rt && postFX._rcArm != null) { u.uRefract.value = postFX._rcArm; return; }
     // (v39.86) COPY THE LIVE RECTANGLE, NOT THE WHOLE TARGET. copyFramebufferToTexture copies
     // `texture.image` worth of pixels, so sizing the copy to `rt` blitted the entire allocated scene
     // target every frame - and on MEGA that target is 4608x2592 (11.9 MP) while the v39.49 adaptive
@@ -36358,7 +36499,8 @@ function _waterRefractBind(rnd, scn, cam) {
     if (W.murkTint != null && u.uMurkTint) u.uMurkTint.value = +W.murkTint;           // (v41.62)
     const I = window.__waterRefractInfo || (window.__waterRefractInfo = { frames: 0 });
     I.frames++; I.res = [bw, bh]; I.target = [rt.width, rt.height]; I.live = [A.w, A.h]; I.k = u.uRefractK.value; I.inline = true;
-  } catch (_) { u.uRefract.value = 0.0; }
+    postFX._rcF = rnd.info.render.frame; postFX._rcRT = rt; postFX._rcArm = u.uRefract.value;   // (v53.72) see ONE COPY A RENDER
+  } catch (_) { u.uRefract.value = 0.0; postFX._rcArm = null; }
 }
 // ============================================================================
 // (v42.91) CONFORMAL PANINI - THE JS HALF.
@@ -36710,6 +36852,30 @@ if (typeof window !== 'undefined') {
   };
 }
 
+// ⭐⭐ (v53.71) THE LAKE MIRROR AT RENDER DEPTH 0. Runs the water's mirror logic (cadence, pass-only lifts, the
+// Reflector's render - mesh._reflRun, see the note above it in _swBuildHubWater) right BEFORE renderPostFX's scene
+// pass instead of nested inside it, so the mirror shares the main pass's render state and its lights `version`: no
+// lit material re-keys its program on the way into and out of the mirror (53.68: ~13 of 42 re-keys a frame).
+// Only where the nested call would have happened: the hub water exists, is in the scene, visible all the way up, in
+// the camera's layers, and no XR session (XR keeps the nested path - its cameras are the headset's). Marks the water
+// `_reflTopDone` for the pass that follows, so its onBeforeRender does not run the cadence a second time.
+// Returns true when the frame's scene walk happened inside the mirror's render (renderPostFX then pins its own).
+// A/B: window.__water.mirrorTop = 0 restores the nested mirror exactly.
+function _swMirrorTop() {
+  const w = (typeof game !== 'undefined' && game) ? game._hubWater : null;
+  if (!w || typeof w._reflRun !== 'function' || !w.parent) return false;
+  try { if (window.__water && window.__water.mirrorTop === 0) return false; } catch (_) {}
+  if (renderer.xr && renderer.xr.isPresenting) return false;
+  for (let p = w; p && p !== scene; p = p.parent) if (!p.visible) return false;
+  if (!w.layers.test(camera.layers)) return false;
+  camera.updateWorldMatrix(true, false);   // the cadence test reads cam.matrixWorld before any walk has run this frame
+  const n0 = scene._lssWalkN | 0;
+  w._reflTopRun = true;
+  try { w._reflRun(renderer, scene, camera, w.geometry, w.material, null); }
+  finally { w._reflTopRun = false; }
+  w._reflTopDone = true;
+  return (scene._lssWalkN | 0) !== n0;
+}
 function renderPostFX() {
   _lssPaniniSync();   // (v42.91) keep the Panini uniform matched to the live FOV/aspect
   // Low-quality gate: skip the three bloom passes (bright-extract + horizontal
@@ -36852,11 +37018,23 @@ function renderPostFX() {
     }
   }
   if (window.__f8seg) window.__f8seg('scene');   // (v40.59) shadow map + world + mirror + water live in here
+  // (v53.71) the lake mirror FIRST, as its own top-level render - see _swMirrorTop. When its render did the frame's
+  // scene walk, the main pass skips its own (nothing moves between the two calls; the restore is the finally's
+  // first line, the v48.33 pin rule).
+  let _mtWalked = false, _mtW = null;
+  try { _mtW = (typeof game !== 'undefined' && game) ? game._hubWater : null; _mtWalked = _swMirrorTop(); }
+  catch (e) { if (!window.__mirrorTopErr) { window.__mirrorTopErr = String((e && e.stack) || e); console.warn('[water] top-level mirror threw:', e); } }
   renderer.setRenderTarget(postFX.rtScene);
   const _pmOn = _panMaskBegin();   // (v48.60) the Panini lens mask - see _PAN_MASK
+  const _mtPin = !!(_mtWalked && scene.matrixWorldAutoUpdate === true);
+  if (_mtPin) scene.matrixWorldAutoUpdate = false;
   try {
     renderer.render(scene, camera);   // (v39.79) the water is back inside this pass; it binds its own refraction source
-  } finally { if (_pmOn) _panMaskEnd(); }
+  } finally {
+    if (_mtPin) scene.matrixWorldAutoUpdate = true;   // (v53.71) FIRST
+    if (_mtW) _mtW._reflTopDone = false;
+    if (_pmOn) _panMaskEnd();
+  }
   // (v36.74) ADS ship overlay: while third-person zoom is engaged the ship
   // lives on layer 5 (skipped by the pass above) and is drawn here from the
   // un-zoomed camera into the SAME target — before post, so bloom/grade/fog
@@ -56481,6 +56659,227 @@ function _endlessCloudsTick(dt) {
   }
 }
 let _hubWaterDisp = null;
+// ⭐⭐ (v53.72) THE SHEET'S FLAT RING, COARSE - AND ITS WEDGES, CULLED. Owner: "do 1 to 6" (the 53.68 overworld review,
+// item 5). The displaced sheet was 1,179,648 triangles every frame with frustumCulled off, 5 ripple-texture fetches a
+// vertex, drawn whole whichever way you look.
+// 1. THE RING. v41.69's warp gives the inner +/-4000 80 % of the 768 grid lines at 13.02 u a quad, and the other 20 % -
+//    77 lines a side, ~108 u apart - to the 4,000-12,288 band, which mostly exists to carry colour to the horizon. Past
+//    the ripple window's furthest reach that band is PROVABLY FLAT (winFade = 0 outside the window: disp, vDisp, vFoam and
+//    the normal's slope terms all carry it), and every other varying the sheet hands its fragment shader is AFFINE in the
+//    vertex position there - vWP, vRipUv, the projective vReflUv (uReflMatrix * vec4(p - uReflEye, 0), divided per pixel)
+//    and fog_vertex's view depth - so perspective-correct interpolation reproduces them exactly at ANY tessellation;
+//    vSlopeK, read off the clamped edge texels, is constant along each radial line and keeps its columns.
+//    ⚠ THE WINDOW'S FURTHEST REACH IS NOT 4,000: _swRippleTick re-centres it only after the ship has moved bounds/4, so
+//    its edge can be ~6,250 u from this sheet's centre (see _swSheetGeoRing). So: EVERY legacy line out to that reach, at
+//    exactly its old position (bit-identical), and 8 coarse lines a side from there to 12,288 - a regular, non-uniform
+//    grid, no T-junctions: ~903 k triangles instead of 1,179,648 (-23 %). swQuad (the snap lattice) is unchanged.
+// 2. THE WEDGES - the clipmap's v48.62 cull, for the sheet. The index is laid out [core][w0..w15]: a +/-500 u core
+//    around the sheet's centre (the ship) that every view needs, then 16 angular wedges by quad-centre angle, each in
+//    8x8 tiles for the vertex cache. Every render keeps the wedges whose exact footprint box is not wholly outside one
+//    of the camera's four SIDE planes (never near/far) and draws the shortest cyclic arc that holds them in TWO draws:
+//    the sheet itself takes [w_first .. ] and a core child mesh (same buffers, same material) takes [core][w0 .. w_last]
+//    - so a wrapping arc needs no second copy of the 9.5 MB index (the clipmap stores its wedges twice). Without the
+//    core a wedge cannot be culled at all: every pie slice's box contains the centre, and the centre is in view.
+//    The refraction copy is taken ONCE per render for both draws (_waterRefractBind) - it must be the opaque frame.
+// A/B: window.__water.sheetRing = 0 + window.__sheetGeo() rebuilds the legacy grid live (and back with sheetRing = 8);
+// window.__water.sheetWedge = 0 draws every wedge; window.__sheetWedgeInfo(reset) reports the kept share.
+const _SW_SHEET = { ring: 8, core: 500, W: 16 };
+function _swSheetGeoLegacy(_dispHalf, _dispSeg, _dispInner, _dispFrac) {
+  const geo = new THREE.PlaneGeometry(2, 2, _dispSeg, _dispSeg);   // unit grid, warped below
+  {
+    const _pa = geo.attributes.position, _pv = _pa.array;
+    const _warp = function (u) {
+      const sg = (u < 0) ? -1 : 1, m = Math.min(1, Math.abs(u));
+      return sg * ((m <= _dispFrac)
+        ? (m / _dispFrac) * _dispInner
+        : _dispInner + ((m - _dispFrac) / Math.max(1e-4, 1 - _dispFrac)) * (_dispHalf - _dispInner));
+    };
+    for (let _i = 0; _i < _pv.length; _i += 3) { _pv[_i] = _warp(_pv[_i]); _pv[_i + 1] = _warp(_pv[_i + 1]); }
+    _pa.needsUpdate = true;
+    geo.computeBoundingSphere();
+    // (v41.70) the inner region's quad size, so _swRippleTick can snap the sheet to its own lattice.
+    geo.userData.swQuad = _dispInner / Math.max(1, (_dispFrac * _dispSeg * 0.5));
+  }
+  return geo;
+}
+function _swSheetGeoRing(half, seg, ringN, inner, frac) {
+  // The kept lines are the LEGACY warp's own values, computed the way PlaneGeometry + the warp computed them (the grid
+  // coordinate rounded to float32, warped in double, stored as float32), so every kept vertex is bit-identical to the old
+  // sheet's: columns x = warp(fround(i*2/seg - 1)), rows (PlaneGeometry stores -y) warp(fround(-(i*2/seg - 1))).
+  // ⚠⚠ WHICH LINES ARE KEPT: NOT ONLY THE +/-4,000 WINDOW. The ripple window is +/-bounds/2 around R.center, and
+  // _swRippleTick re-centres it only once the ship is bounds/4 (2,000 u) away - while this sheet follows the ship. So the
+  // window's faded edge can sit up to 6,000 u (+ a 250 u recentre texel) from the sheet's centre, and real waves can be
+  // drawn out there: measured at a 150 u offset, the band 3,997-4,100 still carried winFade ~0.03 (16 screen rows moved by
+  // up to 13/255 when it was coarse). So every legacy line out to 0.75 x bounds + bounds/32 (6,250 u) stays exactly
+  // where it was, and only the band past THAT - which no window position can ever reach - goes coarse.
+  const warp = (u) => { const sg = (u < 0) ? -1 : 1, m = Math.min(1, Math.abs(u));
+    return sg * ((m <= frac) ? (m / frac) * inner : inner + ((m - frac) / Math.max(1e-4, 1 - frac)) * (half - inner)); };
+  let _rb = 8000; try { if (typeof _SW_RIPPLE_BOUNDS === 'number') _rb = _SW_RIPPLE_BOUNDS; } catch (_) {}
+  const fineTo = _rb * 0.75 + _rb / 32;
+  const sw = 2 / seg;
+  let i0 = 0;   // the first legacy column at or inside -fineTo, then ONE more out so the kept lines cover fineTo
+  while (i0 < seg / 2 && -Math.fround(warp(Math.fround(i0 * sw - 1))) > fineTo) i0++;
+  i0 = Math.max(0, i0 - 1);
+  const i1 = seg - i0;
+  const colX = [], rowY = [];
+  for (let i = i0; i <= i1; i++) { colX.push(Math.fround(warp(Math.fround(i * sw - 1)))); rowY.push(Math.fround(warp(Math.fround(-(i * sw - 1))))); }
+  const edge = -colX[0];   // ~6,263: the last kept legacy line
+  if (!(edge < half - 1)) ringN = 0;   // nothing left to coarsen: the kept lines already reach the edge
+  const outer = (j) => edge + (j / ringN) * (half - edge);
+  const X = [], Y = [];
+  for (let j = ringN; j >= 1; j--) { X.push(Math.fround(-outer(j))); Y.push(Math.fround(outer(j))); }
+  for (let k = 0; k < colX.length; k++) { X.push(colX[k]); Y.push(rowY[k]); }
+  for (let j = 1; j <= ringN; j++) { X.push(Math.fround(outer(j))); Y.push(Math.fround(-outer(j))); }
+  // world-relative z of row iy is -Y[iy] (the mesh is rotated -90 deg about x: local y -> world -z)
+  const T = X, Tz = Y.map((y) => -y);
+  const S = T.length - 1, R = S + 1, NV = R * R;
+  const pos = new Float32Array(NV * 3), nrm = new Float32Array(NV * 3), uv = new Float32Array(NV * 2);
+  // PlaneGeometry's own vertex order: row iy (local y from +half down), column ix (x from -half up)
+  for (let iy = 0; iy < R; iy++) for (let ix = 0; ix < R; ix++) {
+    const v = iy * R + ix;
+    pos[v * 3] = X[ix]; pos[v * 3 + 1] = Y[iy];
+    nrm[v * 3 + 2] = 1;
+    uv[v * 2] = ix / S; uv[v * 2 + 1] = 1 - iy / S;
+  }
+  const W = _SW_SHEET.W, CORE = _SW_SHEET.core, TL = 8, core = [], bucket = [];
+  for (let w = 0; w < W; w++) bucket.push([]);
+  const box = new Float32Array(W * 4);
+  for (let w = 0; w < W; w++) { box[w * 4] = Infinity; box[w * 4 + 1] = -Infinity; box[w * 4 + 2] = Infinity; box[w * 4 + 3] = -Infinity; }
+  for (let ty = 0; ty < S; ty += TL) for (let tx = 0; tx < S; tx += TL) {
+    const ye = Math.min(ty + TL, S), xe = Math.min(tx + TL, S);
+    for (let iy = ty; iy < ye; iy++) for (let ix = tx; ix < xe; ix++) {
+      const xc = (T[ix] + T[ix + 1]) * 0.5, zc = (Tz[iy] + Tz[iy + 1]) * 0.5;   // world-relative x / z
+      const a = iy * R + ix, b = (iy + 1) * R + ix, c = (iy + 1) * R + ix + 1, d = iy * R + ix + 1;   // PlaneGeometry's winding
+      if (Math.max(Math.abs(xc), Math.abs(zc)) < CORE) { core.push(a, b, d, b, c, d); continue; }
+      let w = Math.floor((Math.atan2(zc, xc) + Math.PI) / (2 * Math.PI) * W); if (w >= W) w = W - 1; if (w < 0) w = 0;
+      bucket[w].push(a, b, d, b, c, d);
+      if (T[ix] < box[w * 4]) box[w * 4] = T[ix]; if (T[ix + 1] > box[w * 4 + 1]) box[w * 4 + 1] = T[ix + 1];
+      if (Tz[iy] < box[w * 4 + 2]) box[w * 4 + 2] = Tz[iy]; if (Tz[iy + 1] > box[w * 4 + 3]) box[w * 4 + 3] = Tz[iy + 1];
+    }
+  }
+  let total = core.length; for (let w = 0; w < W; w++) total += bucket[w].length;
+  const index = new Uint32Array(total), start = new Int32Array(W + 1);
+  index.set(core, 0);
+  let o = core.length;
+  for (let w = 0; w < W; w++) { start[w] = o; index.set(bucket[w], o); o += bucket[w].length; }
+  start[W] = o;
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
+  g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  g.setIndex(new THREE.BufferAttribute(index, 1));
+  g.computeBoundingSphere();
+  g.userData.swQuad = inner / Math.max(1, (frac * seg * 0.5));   // the inner lattice - the legacy formula, the same snap step
+  g.userData.sheetW = { W, coreCount: core.length, start, box, tris: total / 3 };
+  g.setDrawRange(core.length, start[W] - core.length);   // every wedge until the first render picks an arc
+  return g;
+}
+function _swSheetGeoMake(half, seg, inner, frac) {
+  let ring = _SW_SHEET.ring;
+  try { if (window.__water && window.__water.sheetRing != null) ring = window.__water.sheetRing | 0; } catch (_) {}
+  // the ring reproduces the warp's inner lines only at the warp's own defaults - anything else keeps the warp
+  if (!(ring > 0) || inner !== 4000 || frac !== 0.80 || seg !== 768 || half !== 12288) return _swSheetGeoLegacy(half, seg, inner, frac);
+  return _swSheetGeoRing(half, seg, ring, inner, frac);
+}
+// Per render (from the sheet's onBeforeRender): pick the arc and give the two draws their ranges. Stamped by
+// renderer.info.render.frame, which three bumps once per render() call - so the sheet and its core child, in
+// whichever order the transparent sort draws them, share one decision, and a second render in the frame decides again.
+const _swSwM = new THREE.Matrix4(), _swSwF = new THREE.Frustum(), _swSwVis = new Uint8Array(32);
+const _SWW = { renders: 0, kept: 0, total: 0 };
+function _swSheetWedges(sheet, rnd, cam) {
+  const geo = sheet.geometry, W = geo && geo.userData && geo.userData.sheetW, cm = sheet._coreMesh;   // direct properties, not userData (the clone trap)
+  if (!W || !cm) return;
+  const f = rnd.info.render.frame;
+  if (sheet._wF === f) return;
+  sheet._wF = f;
+  const cg = cm.geometry, n = W.W, ST = W.start;
+  const full = () => { cg.drawRange.start = 0; cg.drawRange.count = W.coreCount; geo.drawRange.start = ST[0]; geo.drawRange.count = ST[n] - ST[0]; };
+  try {
+    if ((window.__water && window.__water.sheetWedge === 0) || !cam || !cam.projectionMatrix || cam.isArrayCamera ||
+        (typeof game !== 'undefined' && game && game.bendWorld)) { full(); return; }
+    _swSwM.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+    _swSwF.setFromProjectionMatrix(_swSwM);
+    const e = sheet.matrixWorld.elements, px = e[12], py = e[13], pz = e[14];
+    let H = 400; try { const du = sheet.material.uniforms.uDispScale; if (du) H = Math.abs(du.value) + 120; } catch (_) {}
+    const y0 = py - H, y1 = py + H, B = W.box, PL = _swSwF.planes;
+    let anyV = false, allV = true;
+    for (let w = 0; w < n; w++) {
+      const bx0 = px + B[w * 4], bx1 = px + B[w * 4 + 1], bz0 = pz + B[w * 4 + 2], bz1 = pz + B[w * 4 + 3];
+      let v = 1;
+      for (let k = 0; k < 4; k++) {
+        const pn = PL[k].normal, c = PL[k].constant;
+        const x = pn.x > 0 ? bx1 : bx0, y = pn.y > 0 ? y1 : y0, z = pn.z > 0 ? bz1 : bz0;
+        if (pn.x * x + pn.y * y + pn.z * z + c < 0) { v = 0; break; }
+      }
+      _swSwVis[w] = v;
+      if (v) anyV = true; else allV = false;
+    }
+    _SWW.renders++; _SWW.total += n;
+    if (allV) { _SWW.kept += n; full(); return; }
+    if (!anyV) { cg.drawRange.start = 0; cg.drawRange.count = W.coreCount; geo.drawRange.start = ST[0]; geo.drawRange.count = 0; return; }
+    let bestLen = 0, bestEnd = 0, run = 0;   // the longest cyclic run of hidden wedges; the arc is everything else
+    for (let t = 0; t < 2 * n; t++) { if (!_swSwVis[t % n]) { run++; if (run > bestLen) { bestLen = run; bestEnd = t; } } else run = 0; }
+    if (bestLen > n) bestLen = n;
+    const first = (bestEnd + 1) % n, cnt = n - bestLen, last = first + cnt;   // wedges first .. last-1 (mod n)
+    _SWW.kept += cnt;
+    if (last <= n) {   // no wrap: the core alone, and the arc in one piece
+      cg.drawRange.start = 0; cg.drawRange.count = W.coreCount;
+      geo.drawRange.start = ST[first]; geo.drawRange.count = ST[last] - ST[first];
+    } else {           // wraps past w15: the core child also takes w0 .. last-n-1, which follow it in the index
+      cg.drawRange.start = 0; cg.drawRange.count = ST[last - n];
+      geo.drawRange.start = ST[first]; geo.drawRange.count = ST[n] - ST[first];
+    }
+  } catch (_) { full(); }
+}
+// The core child: a second Mesh over the SAME attribute and index buffers (its own BufferGeometry wrapper, so it has its
+// own drawRange) and the SAME material, parented to the sheet so it moves, hides (the mirror pass, the underwater swap)
+// and leaves the scene with it. Its hooks ARE the sheet's: the uniforms are shared, the wedge decision and the
+// refraction copy are both once per render, and onAfterRender disarms uRefract after each of the two draws.
+// On the legacy grid (no sheetW) it is hidden and the sheet draws everything, as before.
+function _swSheetCoreAttach(sheet) {
+  const g = sheet.geometry, W = g && g.userData && g.userData.sheetW;
+  let cm = sheet._coreMesh;
+  if (!W) { if (cm) cm.visible = false; return; }
+  const cg = new THREE.BufferGeometry();
+  for (const k in g.attributes) cg.setAttribute(k, g.attributes[k]);
+  cg.setIndex(g.index);
+  cg.boundingSphere = g.boundingSphere;
+  cg.setDrawRange(0, W.coreCount);
+  g.addEventListener('dispose', () => { try { cg.dispose(); } catch (_) {} });   // its VAOs; the buffers are the sheet's
+  if (!cm) {
+    cm = new THREE.Mesh(cg, sheet.material);
+    cm.name = 'sheetCore';
+    cm.renderOrder = sheet.renderOrder; cm.frustumCulled = false;
+    cm.userData = { isHubWater: true, isSheetCore: true };
+    cm.onBeforeRender = function (rnd, scn, cam, g2, m2, grp) { sheet.onBeforeRender.call(sheet, rnd, scn, cam, g2, m2, grp); };
+    cm.onAfterRender = function () { try { sheet.onAfterRender.call(sheet); } catch (_) {} };
+    sheet.add(cm);
+    sheet._coreMesh = cm;
+  } else {
+    cm.geometry = cg;
+  }
+  cm.visible = true;
+}
+if (typeof window !== 'undefined') {
+  // A/B: rebuild the live sheet's geometry from the current window.__water.sheetRing (0 = the legacy warped grid)
+  window.__sheetGeo = function () {
+    const s = (typeof _hubWaterDisp !== 'undefined') ? _hubWaterDisp : null;
+    if (!s) return 'no sheet';
+    const old = s.geometry;
+    const W2 = window.__water || {};
+    const g = _swSheetGeoMake(12288, 768, (W2.dispInner != null) ? +W2.dispInner : 4000, (W2.dispFrac != null) ? +W2.dispFrac : 0.80);
+    s.geometry = g;
+    _swSheetCoreAttach(s);
+    try { old.dispose(); } catch (_) {}
+    const sw = g.userData.sheetW;
+    return { tris: sw ? sw.tris : (g.index ? g.index.count / 3 : 0), ring: !!sw };
+  };
+  window.__sheetWedgeInfo = function (reset) {
+    const r = { renders: _SWW.renders, wedgesKeptPct: _SWW.total ? +(100 * _SWW.kept / _SWW.total).toFixed(1) : null };
+    if (reset) { _SWW.renders = 0; _SWW.kept = 0; _SWW.total = 0; }
+    return r;
+  };
+}
 function _swBuildHubWaterDispGet(WL) {
   if (_hubWaterDisp) return _hubWaterDisp;
   if (typeof THREE === 'undefined' || !scene) return null;
@@ -56519,21 +56918,9 @@ function _swBuildHubWaterDispGet(WL) {
   const _dispHalf = 12288, _dispSeg = 768;
   const _dispInner = (window.__water && window.__water.dispInner != null) ? +window.__water.dispInner : 4000;
   const _dispFrac = (window.__water && window.__water.dispFrac != null) ? +window.__water.dispFrac : 0.80;
-  const geo = new THREE.PlaneGeometry(2, 2, _dispSeg, _dispSeg);   // unit grid, warped below
-  {
-    const _pa = geo.attributes.position, _pv = _pa.array;
-    const _warp = function (u) {
-      const sg = (u < 0) ? -1 : 1, m = Math.min(1, Math.abs(u));
-      return sg * ((m <= _dispFrac)
-        ? (m / _dispFrac) * _dispInner
-        : _dispInner + ((m - _dispFrac) / Math.max(1e-4, 1 - _dispFrac)) * (_dispHalf - _dispInner));
-    };
-    for (let _i = 0; _i < _pv.length; _i += 3) { _pv[_i] = _warp(_pv[_i]); _pv[_i + 1] = _warp(_pv[_i + 1]); }
-    _pa.needsUpdate = true;
-    geo.computeBoundingSphere();
-    // (v41.70) the inner region's quad size, so _swRippleTick can snap the sheet to its own lattice.
-    geo.userData.swQuad = _dispInner / Math.max(1, (_dispFrac * _dispSeg * 0.5));
-  }
+  // (v53.72) the geometry moved into _swSheetGeoMake: the ring + wedge build by default, this warped grid (verbatim, in
+  // _swSheetGeoLegacy) for window.__water.sheetRing = 0 or any non-default dispInner / dispFrac.
+  const geo = _swSheetGeoMake(_dispHalf, _dispSeg, _dispInner, _dispFrac);
   const mat = new THREE.ShaderMaterial({
     transparent: true, depthWrite: false, side: THREE.DoubleSide, fog: true,
     uniforms: THREE.UniformsUtils.merge([
@@ -57650,6 +58037,9 @@ function _swBuildHubWaterDispGet(WL) {
     // zero. Driving it to zero would mean giving the Reflector a lower renderOrder than this sheet,
     // which reorders two coplanar depth-writing planes and the underwater/overlay compositing with
     // them. Not a minimal change; deliberately not done here.
+    // (v53.71) ...and since v53.71 it IS zero: the mirror renders at the top level BEFORE the main pass (_swMirrorTop),
+    // so on a refresh frame this sheet always draws after the capture, whichever way the transparent sort falls.
+    try { _swSheetWedges(mesh, rnd, cam); } catch (_) {}   // (v53.72) this render's wedge arc, once - see _SW_SHEET
     try { _swHullCutBind(); } catch (_) {}   // (v49.54) the pose being drawn - see _swHullCutBind
     try {
       const _w = game._hubWater, _u = mesh.material.uniforms;
@@ -57667,6 +58057,7 @@ function _swBuildHubWaterDispGet(WL) {
     try { _waterRefractBind(rnd, scn, cam); } catch (_) {}
   };
   mesh.onAfterRender = function () { try { const u = mesh.material.uniforms; if (u && u.uRefract) u.uRefract.value = 0.0; } catch (_) {} };
+  _swSheetCoreAttach(mesh);   // (v53.72) the always-drawn core - see _SW_SHEET
   _hubWaterDisp = mesh;
   try { mat.uniforms.uSunDir = _swU.uSunDir; } catch (_) {}   // (v49.39) one sun (see the Reflector)
   try { for (const _k in _swHullCutU) mat.uniforms[_k] = _swHullCutU[_k]; } catch (_) {}   // (v49.54) shared, see _SW_HULLCUT_GLSL
@@ -57999,10 +58390,15 @@ function _swBuildHubWater(T) {
     const _reflInvScratch = new THREE.Matrix4();
     const _reflNrm = new THREE.Vector3(), _reflRot = new THREE.Matrix4();
     const _reflRP = new THREE.Vector3(), _reflCP = new THREE.Vector3();
-    mesh.onBeforeRender = function (rnd, scn, cam, geo2, mat2, grp) {
-      // (v49.54) FIRST, before any of the early returns below: the cut has to be posed on every frame this
-      // surface is drawn, not only on the frames the mirror refreshes. See _swHullCutBind.
-      try { _swHullCutBind(); } catch (_) {}
+    // ⭐⭐ (v53.71) THE MIRROR RENDERS AT THE TOP LEVEL, BEFORE THE MAIN PASS - see _swMirrorTop. This body used to BE
+    // the onBeforeRender, so the mirror's render(scene, virtualCamera) ran NESTED inside the main pass; three r165 keeps
+    // one render state per render DEPTH, its two lights states carry different `version`s, and every lit material drawn
+    // in both re-keyed its program going in and coming out (getParameters + getProgramCacheKey + a full uniform upload) -
+    // ~13 of the 42 re-keys a frame measured on 53.68, ~24 materials, every mirror refresh. Now renderPostFX calls this
+    // (as _reflRun) right before its scene render, at depth 0, sharing the main pass's render state; the onBeforeRender
+    // below only falls back to it when that did not happen this frame (the cinematic / potato / XR render paths, which
+    // never reach renderPostFX's scene pass).
+    mesh._reflRun = function (rnd, scn, cam, geo2, mat2, grp) {
       if (game && game._reflBenchOff) return;
 
 
@@ -58323,11 +58719,22 @@ function _swBuildHubWater(T) {
       // ⚠ The restore is the FIRST statement of the finally: a throw with the pin still set would
       // freeze every matrix in the scene. ⚠ A future onBeforeRender that MOVES an object must update
       // its own matrix (the _skyDome pattern). A/B: window.__water.mirrorWalk = 1 restores the walk.
-      const _mwPin = !!(scn && scn.matrixWorldAutoUpdate === true && !(window.__water && window.__water.mirrorWalk === 1));
+      // (v53.71) ...EXCEPT AT THE TOP LEVEL. _swMirrorTop runs this before the main pass has walked anything this frame,
+      // so here the mirror's own render IS the frame's walk (and renderPostFX pins the main pass's instead).
+      const _mwPin = !this._reflTopRun && !!(scn && scn.matrixWorldAutoUpdate === true && !(window.__water && window.__water.mirrorWalk === 1));
       if (_mwPin) scn.matrixWorldAutoUpdate = false;
+      // ⚠ (v53.76) THE MIRROR NEVER DRAWS THE SHADOW MAP. The stock Reflector turns shadowMap.autoUpdate off for its render
+      // but not needsUpdate - and _wxShadowCadence (v52.82) drives the map with needsUpdate on every 2nd frame. Nested, the
+      // main pass had always consumed it first; since v53.71 the mirror renders BEFORE the main pass, so on a frame where a
+      // mirror refresh and a shadow frame coincided the map was drawn from INSIDE the mirror's render - culled for the
+      // mirror's oblique virtual camera (_swTreeShadowCull) and filtered by its layers - and the main pass then skipped it.
+      // Held off for the mirror's render and handed back, so the main pass draws it exactly as before 53.71.
+      const _smNU = rnd.shadowMap.needsUpdate;
+      rnd.shadowMap.needsUpdate = false;
       try { _reflOBR.call(this, rnd, scn, cam, geo2, mat2, grp); }
       finally {
         if (_mwPin) scn.matrixWorldAutoUpdate = true;   // (v48.33) FIRST - see above
+        rnd.shadowMap.needsUpdate = _smNU;   // (v53.76) back to the main pass
         if (window.__f8seg) window.__f8seg('scene');   // (v40.59) back to the pass that contains us
         if (_wDv) _wD.visible = true;
         if (_wOv) _wO.visible = true;
@@ -58358,7 +58765,15 @@ function _swBuildHubWater(T) {
       }
       if (_underNow) { this.rotation.x = _rxWas; this.updateMatrix(); this.updateMatrixWorld(true); }   // (v44.26) back upright for the draw
     };
-    
+    mesh.onBeforeRender = function (rnd, scn, cam, geo2, mat2, grp) {
+      // (v49.54) FIRST, before any of the early returns: the cut has to be posed on every frame this
+      // surface is drawn, not only on the frames the mirror refreshes. See _swHullCutBind.
+      try { _swHullCutBind(); } catch (_) {}
+      // (v53.71) the top-level pass already ran the mirror (cadence included) for the render this draw belongs to
+      if (this._reflTopDone) return;
+      this._reflRun(rnd, scn, cam, geo2, mat2, grp);
+    };
+
     const undMat = new THREE.MeshBasicMaterial({ color: 0x12455a, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthWrite: false });   
     const und = new THREE.Mesh(geo.clone(), undMat);
     und.rotation.x = -Math.PI / 2; und.renderOrder = -1; und.frustumCulled = false; und.matrixAutoUpdate = false;   // (v38.67) -1 with the surface   
@@ -66560,7 +66975,61 @@ function _hubCityFrame(dt) {
     scene.fog.color.copy(_fb).lerp(hc.fogTint, k);
     if (typeof _swU !== 'undefined' && _swU.uAerialColor) _swU.uAerialColor.value.copy(scene.fog.color);
   }
+  try { _cityDomeCull(); } catch (_) {}   // (v53.70) see _cityDomeCull - here because this runs in the cinematic fork too
 }
+
+// ⭐ (v53.70) THE CITIES BEHIND THE DOME - v49.50's open item #2, done the sky islands' way. Measured on 53.68
+// from the hub: the six overworld cities sit 31-41 km out, wholly outside the weather dome (an opaque camera-centred
+// shell, r 20,500, drawn after the world - the v47.07 proof, _clipSkyOccluder), and every one still submitted its
+// opaque layers to be painted over, in the main pass and the mirror. Flying 25 km from the centre the hub city's
+// 873 k opaque triangles go the same way.
+// Only the OPAQUE, non-foliage direct children flip: the instanced tower / box / cylinder / solar / dish layers, the
+// ground disc and the skirt. The beams, searchlight cones, neon, rings and ads are transparent and stay (v49.50:
+// "beams are transparent and must stay"); park foliage belongs to _swFolVisExtra (userData._fol) and the traffic
+// holders to _hcTraffic. `visible`, not layers: three's Raycaster ignores visibility but tests layers, and the city
+// collision rays must keep hitting a far city.
+// Hidden only on a CHANGE of verdict, and a show restores exactly the meshes the hide turned off - never anything
+// another system hid in between. _clipSkyOccluder returns null whenever the proof does not hold (no dome, the
+// mirror's virtual camera possibly outside it, the bent world, window.__clipCull = 0), and null SHOWS everything.
+// The sphere is measured once per city over those meshes (they never move; the campaign giant's crush only
+// rewrites instances inside it). +600 u = a frame of camera travel, the islands' margin.
+// A/B: window.__cityCull = 0 shows them all again on the next frame; window.__cityCullInfo() reports.
+function _cityDomeCull() {
+  let off = false; try { off = window.__cityCull === 0; } catch (_) {}
+  const occ = off ? null : ((typeof _clipSkyOccluder === 'function') ? _clipSkyOccluder() : null);
+  const S = _cityDomeCull._s || (_cityDomeCull._s = { out: 0, meshes: 0 });
+  S.out = 0; S.meshes = 0;
+  const one = (grp) => {
+    if (!grp || !grp.userData) return;
+    const ud = grp.userData;
+    if (!ud._domeL) {
+      const L = [];
+      for (const o of grp.children) {
+        if (!o.isMesh || !o.material || Array.isArray(o.material)) continue;
+        if (o.material.transparent === true || (o.userData && o.userData._fol)) continue;
+        L.push(o);
+      }
+      let bs = null;
+      try { const b = new THREE.Box3(); for (const o of L) b.expandByObject(o); if (!b.isEmpty()) bs = b.getBoundingSphere(new THREE.Sphere()); } catch (_) { bs = null; }
+      ud._domeL = L; ud._domeBs = bs; ud._domeHid = null;
+    }
+    const bs = ud._domeBs;
+    const out = !!(occ && bs && (Math.hypot(bs.center.x - occ.x, bs.center.y - occ.y, bs.center.z - occ.z) - bs.radius) > occ.r + 600);
+    if (out) { S.out++; S.meshes += ud._domeL.length; }
+    if (out === !!ud._domeHid) return;
+    if (out) {
+      const hid = [];
+      for (const o of ud._domeL) if (o.visible) { o.visible = false; hid.push(o); }
+      ud._domeHid = hid;
+    } else {
+      for (const o of ud._domeHid) o.visible = true;
+      ud._domeHid = null;
+    }
+  };
+  if (game.hubCity) one(game.hubCity.group);
+  if (typeof OW !== 'undefined' && OW && OW.cities) for (let i = 0; i < OW.cities.length; i++) { const b = OW.cities[i].built; if (b) one(b.group); }
+}
+if (typeof window !== 'undefined') window.__cityCullInfo = () => Object.assign({}, _cityDomeCull._s || {});
 
 if (typeof window !== 'undefined') window.HUBCITY = { cfg: HUB_CITY, build: _hubCityBuild, init: _hubCityInit, dispose: _hubCityDispose, frame: _hubCityFrame, collide: _hubCityCollide, rayHit: _hubCityRayHit, traf: _HC_TRAF, sched: _hcPadSched };
 
@@ -85283,8 +85752,10 @@ function _lssAddEngineFlames(group, loadoutKey) {
   _sjTextures(); _sjGeometry();
   if (!_ripGeo) _ripGeo = new THREE.PlaneGeometry(2, 2);
   const cls = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS[loadoutKey] != null) ? LSS.CLASS_COLORS[loadoutKey] : 0xffcc66;
-  const mk = (tex) => new THREE.MeshBasicMaterial({ map: tex, color: 0xffffff, transparent: true, blending: THREE.AdditiveBlending,
-    depthTest: true, depthWrite: false, fog: false, side: THREE.DoubleSide });
+  // (v53.70) ONE PASS - see _sjSlot. Measured on 53.68 (PUNCTURE, overworld): these jet / star cards were the
+  // steady-state two-pass draws, 4 cards = 4 extra draws + 8 program re-keys a frame, and every hull carries them.
+  const mk = (tex) => _lssAddOnePass(new THREE.MeshBasicMaterial({ map: tex, color: 0xffffff, transparent: true, blending: THREE.AdditiveBlending,
+    depthTest: true, depthWrite: false, fog: false, side: THREE.DoubleSide }));
   const K = _engineFlameKnobs(), nRing = Math.max(1, Math.min(16, (K.rings | 0) || 7));
   const st0 = (K.on !== false) ? _engineStyle(K, loadoutKey) : '';   // (v51.03) per hull
   const flames = [];
@@ -95193,6 +95664,7 @@ function _makeExplosionMesh(type) {
 function _acquireExplosionMesh(type) {
   const pool = _EXPL_POOL[type];
   let mesh = (pool && pool.length) ? pool.pop() : _makeExplosionMesh(type);
+  mesh.__walkPark = true;   // (v53.69) every pool type: skipped by the scene walk while parked (hidden) - see the note at `const scene`
   if (!mesh.parent) scene.add(mesh);
   mesh.visible = true;
   mesh.rotation.set(0, 0, 0);
@@ -103847,6 +104319,12 @@ class BossPortal {
     this.alive = true;
     this.mesh = null;
     this._usedProto = false;
+    // (v53.77) EVERY PORTAL ASKS FOR ITS OWN GLB. The overworld's zone rifts are built straight from _hzPortalsFrame, which
+    // never requested cyanring.glb - it relied on startFreeFlight or the campaign picker having done it. A page that lands
+    // on free flight through the new face's mode pick (sessionStorage lss_land after a reload) does neither, so all six
+    // rifts kept this fallback torus for the whole session - owner: "the rift ring glb disappeared and i just saw a solid
+    // blue circle in its place". update() swaps the ring in the frame the GLB arrives. Idempotent (the loading latch).
+    try { _preloadCyanRing(); } catch (_) {}
     this._buildMesh();
   }
   _buildMesh() {
@@ -107531,6 +108009,7 @@ function _initLightningPool() {
     coreMesh.frustumCulled = false;
     haloMesh.renderOrder = 1;
     coreMesh.renderOrder = 1;
+    haloMesh.__walkPark = true; coreMesh.__walkPark = true;   // (v53.69) skipped by the scene walk while parked - see the note at `const scene`
     scene.add(haloMesh);
     scene.add(coreMesh);
     _lightningPool.push({
@@ -112162,7 +112641,8 @@ function _initDarkLightningPool() {
     const mesh = new THREE.Mesh(_LIGHTNING_CYL_GEO, mat);
     mesh.frustumCulled = false;
     mesh.visible = false;
-    mesh.renderOrder = 2;       
+    mesh.renderOrder = 2;
+    mesh.__walkPark = true;   // (v53.69) 256 parked meshes: skipped by the scene walk while hidden - see the note at `const scene`
     scene.add(mesh);
     _darkLightningPool.push({ mesh, mat, free: true });
   }
@@ -135646,33 +136126,74 @@ function _hlfLblK(name) {
   try { const o = window.__hudLbl; if (o && typeof o[name] === 'number') return o[name]; } catch (_) {}
   return _HLF_LBL[name];
 }
+// (v53.70) The plate's text width, measured ONCE per font + text on a scratch canvas (the same document's fonts, so
+// the same metrics as measuring on the HUD context) instead of a measureText every HUD draw. `ok` is whether the
+// font is actually loaded (document.fonts.check): a width measured on the fallback face is memoised separately and
+// never reused once Orbitron arrives - and it is in the layer key below for the same reason.
+function _hlfPlateW(font, text) {
+  const M = _hlfPlateW.M || (_hlfPlateW.M = new Map());
+  let ok = true;
+  try { ok = !(typeof document !== 'undefined' && document.fonts && typeof document.fonts.check === 'function') || document.fonts.check(font); } catch (_) { ok = true; }
+  const k = font + '|' + text + '|' + (ok ? 1 : 0);
+  let w = M.get(k);
+  if (w === undefined) {
+    const sc = _hlfPlateW.c || (_hlfPlateW.c = document.createElement('canvas').getContext('2d'));
+    sc.font = font;
+    w = sc.measureText(text).width;
+    if (M.size > 64) M.clear();   // a font size per resize - bounded
+    M.set(k, w);
+  }
+  return { w, ok };
+}
+// ⭐ (v53.70) NRG / AMMO GO THROUGH THE HUD LAYER CACHE. v48.38 left the plates out ("they would drag in the
+// Orbitron font-load and text-alpha traps"); the 53.68 overworld profile put _hlfFlatPlate at 0.8 % of all
+// main-thread samples (measureText + a stroked and a filled word, twice, every HUD draw), plus the GPU-process
+// text raster the layer cache exists to remove. The two traps, handled:
+//   - FONT LOAD: the key carries document.fonts.check(font), so a plate baked on the fallback face is keyed apart
+//     and is never hit again once Orbitron has loaded (check() is a lookup; it starts no load - the first LIVE
+//     draw does, exactly as before).
+//   - TEXT ALPHA: _hlTA() (Settings' HUD text opacity, window.__hudTextAlpha) and I.ga are both in the key, as are
+//     the plate's own geometry and the window.__hudLbl knobs (through the position and width they produce).
+// The run saves and restores, so the live draw leaves the context as it found it; a bake starts from the live
+// context's stroke / fill / lineWidth so the layer's exit-state replay is a no-op too. window.__hudLayerCache =
+// false draws it live again with everything else.
 function _hlfFlatPlate(I, rIn, rOut, endDeg, dir, rotDeg, text, sizeV) {
   const ctx = I.ctx, vm = I.vmin;
   const f = Math.max(7, vm * sizeV);
+  const font = '700 ' + f.toFixed(1) + 'px Orbitron, "Segoe UI", sans-serif';
+  const PW = _hlfPlateW(font, text);
   const r = rIn + (rOut - rIn) * _hlfLblK('radial');
-  ctx.save();
-  ctx.font = '700 ' + f.toFixed(1) + 'px Orbitron, "Segoe UI", sans-serif';
-  const w = ctx.measureText(text).width + f * 1.10, h = f * 1.75;
+  const w = PW.w + f * 1.10, h = f * 1.75;
   const mid = endDeg + dir * ((w / vm) / (r * _HL_D2R)) * (0.5 - _hlfLblK('slide'));
   const a = mid * _HL_D2R;
-  ctx.translate(I.cx + Math.cos(a) * r * vm, I.cy + Math.sin(a) * r * vm);
-  ctx.rotate(rotDeg * _HL_D2R);
-  ctx.globalAlpha = I.ga;
-  ctx.beginPath();
-  ctx.roundRect(-w / 2, -h / 2, w, h, Math.min(h * 0.30, vm * 0.45));
-  ctx.fillStyle = '#05080b';
-  ctx.fill();
-  // Same two-pass etch the arc labels use: near-black stroke under a light fill,
-  // so the word holds over the lit bar and the bare track alike.
-  ctx.globalAlpha = _hlTA();
-  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.lineJoin = 'round';
-  ctx.lineWidth = Math.max(1.6, f * 0.34);
-  ctx.strokeStyle = 'rgba(0,0,0,0.82)';
-  ctx.strokeText(text, 0, 0);
-  ctx.fillStyle = 'rgba(236,247,255,0.95)';
-  ctx.fillText(text, 0, 0);
-  ctx.restore();
+  const px = I.cx + Math.cos(a) * r * vm, py = I.cy + Math.sin(a) * r * vm;
+  const ta = _hlTA(), lw = Math.max(1.6, f * 0.34);
+  const draw = (c, baking) => {
+    if (baking) { c.strokeStyle = ctx.strokeStyle; c.fillStyle = ctx.fillStyle; c.lineWidth = ctx.lineWidth; }
+    c.save();
+    c.font = font;
+    c.translate(px, py);
+    c.rotate(rotDeg * _HL_D2R);
+    c.globalAlpha = I.ga;
+    c.beginPath();
+    c.roundRect(-w / 2, -h / 2, w, h, Math.min(h * 0.30, vm * 0.45));
+    c.fillStyle = '#05080b';
+    c.fill();
+    // Same two-pass etch the arc labels use: near-black stroke under a light fill,
+    // so the word holds over the lit bar and the bare track alike.
+    c.globalAlpha = ta;
+    c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.lineJoin = 'round';
+    c.lineWidth = lw;
+    c.strokeStyle = 'rgba(0,0,0,0.82)';
+    c.strokeText(text, 0, 0);
+    c.fillStyle = 'rgba(236,247,255,0.95)';
+    c.fillText(text, 0, 0);
+    c.restore();
+  };
+  const hd = Math.hypot(w, h) * 0.5 + lw + 4;   // the rotated plate's circumradius + the stroke + AA
+  const key = text + '|' + font + '|' + (PW.ok ? 1 : 0) + '|' + w + '|' + px + ',' + py + '|' + rotDeg + '|' + I.ga + '|' + ta;
+  _hlfLayer(ctx, 'plate:' + text, key, [px - hd, py - hd, px + hd, py + hd], 2, draw);
 }
 
 // Cell widths that are NOT equal: wider at the ends, narrower in the middle.
@@ -145059,6 +145580,10 @@ function _ssxMenuOpen(kind, anchor) {
 function _ssxModePick(t) {
   try {
     if (_lssRoomModeLocked()) return;
+    // (v53.77) the rift / race ring GLB, requested HERE so it has parsed before the launch prebake pins its program (the
+    // 99,268-char cyanring program - see _pinCombatEffectPrograms) - a mode picked on the face never runs startFreeFlight
+    // or the campaign picker, which were the only other boot-side requests. BossPortal asks too, as the backstop.
+    try { _preloadCyanRing(); } catch (_) {}
     if ((typeof LSS !== 'undefined' && LSS.MODE === 'campaign') || (game && game._campPicker)) {
       try { game._campPicker = false; game._ssxCampNew = false; } catch (_) {}
       try { CampaignMode.onTeardown(); } catch (_) {}

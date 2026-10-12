@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.68";
+const LSS_BUILD = "53.77";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -13671,8 +13671,8 @@ function _sjSlot() {
   }
   _sjTextures();
   _sjGeometry();
-  const mk = (tex) => new THREE.MeshBasicMaterial({ map: tex, color: 0xffffff, transparent: true,
-    blending: THREE.AdditiveBlending, depthTest: false, depthWrite: false, fog: false, side: THREE.DoubleSide });
+  const mk = (tex) => _lssAddOnePass(new THREE.MeshBasicMaterial({ map: tex, color: 0xffffff, transparent: true,
+    blending: THREE.AdditiveBlending, depthTest: false, depthWrite: false, fog: false, side: THREE.DoubleSide }));
   const jet = new THREE.Mesh(_sjGeoJet, mk(_sjTexJet));
   const star = new THREE.Mesh(_sjGeoStar, mk(_sjTexStar));
   for (const m of [jet, star]) { m.renderOrder = 9999; m.frustumCulled = false; m.visible = false; scene.add(m); }
@@ -14281,6 +14281,25 @@ function cleanupPendingHits() {
 
 
 const scene = new THREE.Scene();
+scene.matrixAutoUpdate = false;
+scene.updateMatrixWorld = function (force) {
+  this._lssWalkN = (this._lssWalkN | 0) + 1;   // (v53.71) _swMirrorTop reads it: did the mirror's render walk the frame?
+  let W = null; try { W = window.__walk || null; } catch (_) {}
+  if (W && W.rootForce) force = true;
+  if (this.matrixAutoUpdate) this.updateMatrix();
+  if (this.matrixWorldNeedsUpdate || force) {
+    this.matrixWorld.copy(this.matrix);   // the root has no parent
+    this.matrixWorldNeedsUpdate = false;
+    force = true;
+  }
+  const skip = !force && !(W && W.skipHidden === 0);
+  const ch = this.children;
+  for (let i = 0, l = ch.length; i < l; i++) {
+    const c = ch[i];
+    if (skip && c.visible === false && c.__walkPark === true) continue;
+    if (c.matrixWorldAutoUpdate === true || force === true) c.updateMatrixWorld(force);
+  }
+};
 scene.onBeforeRender = function (r, s, cam) {
   try { _esGateBefore(); } catch (_) {}
   try { _swTreeShadowCull(r, cam); } catch (_) {}   // (v48.47) see _swTreeShadowCull - its own try: dirLight is a later const
@@ -18068,12 +18087,16 @@ window._v8updateCinemaFlyover = _v8updateCinemaFlyover;
 const postFX = { enabled: true };
 
 function isStandaloneQuest() {
+  if (isStandaloneQuest._v !== undefined) return isStandaloneQuest._v;
+  let v = false;
   try {
     const ua = (navigator && navigator.userAgent) ? navigator.userAgent : '';
-    return /\bQuest\b|OculusBrowser|MetaQuest/i.test(ua);
+    v = /\bQuest\b|OculusBrowser|MetaQuest/i.test(ua);
   } catch (_) {
-    return false;
+    v = false;
   }
+  isStandaloneQuest._v = v;
+  return v;
 }
 
 function _swVrLite() {
@@ -18618,6 +18641,8 @@ function _lssSupersampleTick(ts) {
       (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active)) {
     S.ema = 0;
     S.pf.nSum = 0; S.pf.nN = 0; S.pf.sSum = 0; S.pf.sN = 0; S.pf.latched = false;
+    S.pf.probe = 0; S.pf.probeAt = 0;   // (v53.73) a new scene earns its own probe
+    S.pf.t0 = 0; S.pf.ring = []; S.pf.shedWins = 0;   // (v53.75) ...its own launch exclusion and its own cooldown ladder
     return;
   }
   if (dt > 250) {
@@ -18645,20 +18670,57 @@ function _lssSupersampleTick(ts) {
   const _pfOn = (typeof _pfNeedRaw === 'number') && _pfNeedRaw > 0;
   if (_pfOn) {
     const _P = S.pf;
-    if (sc >= 0) { _P.nSum += S.ema; _P.nN++; } else { _P.sSum += S.ema; _P.sN++; }
+    if (!_P.t0) _P.t0 = ts;
+    const _warm = (ts - _P.t0) < 8000;
+    if (!_warm) { if (sc >= 0) { _P.nSum += S.ema; _P.nN++; } else { _P.sSum += S.ema; _P.sN++; } }
     if (!_P.latched && _P.nN >= 6 && _P.sN >= 6) {
       const _nat = _P.nSum / _P.nN, _sub = _P.sSum / _P.sN;
       _P.nat = +_nat.toFixed(2); _P.sub = +_sub.toFixed(2);
       if (_sub > _nat * (1 - _pfNeedRaw)) _P.latched = true;
     }
-    if (_P.latched && sc >= 0 && S.ema > period * 1.40) {
-      _P.latched = false; _P.nSum = 0; _P.nN = 0; _P.sSum = 0; _P.sN = 0; _P.unlatched++;
+    const _vOver = !!(_P.latched && sc >= 0 && S.ema > Math.max(period * 1.40, (_P.nat || 0) * 1.25));
+    _P.vN = _vOver ? (_P.vN || 0) + 1 : 0;
+    if (_vOver && _P.vN >= 3) {
+      _P.latched = false; _P.nSum = 0; _P.nN = 0; _P.sSum = 0; _P.sN = 0; _P.unlatched++; _P.vN = 0;
+    }
+    let _isSmall = false; try { _isSmall = (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) || isStandaloneQuest(); } catch (_) {}
+    const _prOn = !_isSmall && !(typeof window !== 'undefined' && window.__ssProbe === 0);
+    const _stNow = !!(S.stallT && (ts - S.stallT) < 4000);
+    if (!_P.ring) _P.ring = [];
+    if (sc < 0 && !_P.probe && !_warm) { _P.ring.push(S.ema); if (_P.ring.length > 6) _P.ring.shift(); }
+    else if (sc >= 0 && !_P.probe) _P.ring.length = 0;   // only a run of shed ticks right before the probe counts
+    const _cool = (_P.shedWins > 0) ? Math.min(480000, 120000 * Math.pow(2, _P.shedWins - 1)) : 30000;
+    if (_prOn && !_P.latched && !_P.probe && sc < 0 && !_stNow && !_warm && _P.ring.length >= 6 &&
+        (ts - (_P.probeAt || -1e9)) > _cool) {
+      _P.probe = -1;   // -1 = creeping up; > 0 = native ticks still to sample
+      _P.probeAt = ts; _P.probes = (_P.probes || 0) + 1;
+      _P.prShed = _P.ring.reduce((s, x) => s + x, 0) / _P.ring.length; _P.prNatS = 0; _P.prNatN = 0;
     }
   }
   if (S.pf.latched && sc < 0) sc = 0;
   const _floor = S.pf.latched ? 0 : _floorRaw;
   const _stalled = !!(S.stallT && (ts - S.stallT) < 4000);
   const _over = _stalled || S.ema > period * 1.10, _far = _stalled || S.ema > period * 1.40;
+  if (S.pf && S.pf.probe) {
+    const _Q = S.pf;
+    if (_stalled || _Q.latched) _Q.probe = 0;
+    else {
+      if (_Q.probe < 0) { sc = Math.min(0, sc + 0.1); if (sc >= 0) _Q.probe = 6; }
+      else {
+        if (_Q.probe < 6) { _Q.prNatS += S.ema; _Q.prNatN++; }   // (v53.75) hold ticks 2-6: the first still mixes the step
+        _Q.probe--;
+        if (sc < 0) sc = 0;
+        if (_Q.probe === 0) {   // (v53.75) the verdict - see THE PROBE DECIDES ON A LOCAL A/B
+          const nat = _Q.prNatN ? _Q.prNatS / _Q.prNatN : Infinity, sub = _Q.prShed || 0;
+          _Q.prLast = [+sub.toFixed(2), +nat.toFixed(2)];
+          if (sub > 0 && nat <= sub * (1 + _pfNeedRaw)) { _Q.latched = true; _Q.nat = +nat.toFixed(2); _Q.sub = +sub.toFixed(2); _Q.shedWins = 0; _Q.vN = 0; }
+          else _Q.shedWins = (_Q.shedWins || 0) + 1;
+        }
+      }
+      if (sc !== S.scale) { S.scale = sc; S.steps++; }
+      return;
+    }
+  }
   if ((sc > 0 && _over) || (sc <= 0 && sc > _floor && _far)) {
     if (sc > 0) { sc = Math.max(0, sc - 0.2); S.hold = S.backoff; S.backoff = Math.min(60, S.backoff * 2); }
     else { sc = Math.max(_floor, sc - 0.2); S.hold = 2; }
@@ -19304,6 +19366,7 @@ function _waterRefractBind(rnd, scn, cam) {
     if (!_waterRefractWanted()) return;
     const rt = rnd.getRenderTarget();
     if (!rt || rt !== postFX.rtScene || rt.samples > 0) return;
+    if (postFX._rcF === rnd.info.render.frame && postFX._rcRT === rt && postFX._rcArm != null) { u.uRefract.value = postFX._rcArm; return; }
     const A = _lssSceneActive(rt);   // the live sub-rectangle (v39.49 supersample viewport)
     const bw = Math.max(128, Math.min(rt.width, Math.ceil(A.w / 128) * 128));
     const bh = Math.max(128, Math.min(rt.height, Math.ceil(A.h / 128) * 128));
@@ -19347,7 +19410,8 @@ function _waterRefractBind(rnd, scn, cam) {
     if (W.murkTint != null && u.uMurkTint) u.uMurkTint.value = +W.murkTint;           // (v41.62)
     const I = window.__waterRefractInfo || (window.__waterRefractInfo = { frames: 0 });
     I.frames++; I.res = [bw, bh]; I.target = [rt.width, rt.height]; I.live = [A.w, A.h]; I.k = u.uRefractK.value; I.inline = true;
-  } catch (_) { u.uRefract.value = 0.0; }
+    postFX._rcF = rnd.info.render.frame; postFX._rcRT = rt; postFX._rcArm = u.uRefract.value;   // (v53.72) see ONE COPY A RENDER
+  } catch (_) { u.uRefract.value = 0.0; postFX._rcArm = null; }
 }
 
 function _lssPaniniSync() {
@@ -19573,6 +19637,21 @@ if (typeof window !== 'undefined') {
   };
 }
 
+function _swMirrorTop() {
+  const w = (typeof game !== 'undefined' && game) ? game._hubWater : null;
+  if (!w || typeof w._reflRun !== 'function' || !w.parent) return false;
+  try { if (window.__water && window.__water.mirrorTop === 0) return false; } catch (_) {}
+  if (renderer.xr && renderer.xr.isPresenting) return false;
+  for (let p = w; p && p !== scene; p = p.parent) if (!p.visible) return false;
+  if (!w.layers.test(camera.layers)) return false;
+  camera.updateWorldMatrix(true, false);   // the cadence test reads cam.matrixWorld before any walk has run this frame
+  const n0 = scene._lssWalkN | 0;
+  w._reflTopRun = true;
+  try { w._reflRun(renderer, scene, camera, w.geometry, w.material, null); }
+  finally { w._reflTopRun = false; }
+  w._reflTopDone = true;
+  return (scene._lssWalkN | 0) !== n0;
+}
 function renderPostFX() {
   _lssPaniniSync();   // (v42.91) keep the Panini uniform matched to the live FOV/aspect
   const cinematicActive =
@@ -19667,11 +19746,20 @@ function renderPostFX() {
     }
   }
   if (window.__f8seg) window.__f8seg('scene');   // (v40.59) shadow map + world + mirror + water live in here
+  let _mtWalked = false, _mtW = null;
+  try { _mtW = (typeof game !== 'undefined' && game) ? game._hubWater : null; _mtWalked = _swMirrorTop(); }
+  catch (e) { if (!window.__mirrorTopErr) { window.__mirrorTopErr = String((e && e.stack) || e); console.warn('[water] top-level mirror threw:', e); } }
   renderer.setRenderTarget(postFX.rtScene);
   const _pmOn = _panMaskBegin();   // (v48.60) the Panini lens mask - see _PAN_MASK
+  const _mtPin = !!(_mtWalked && scene.matrixWorldAutoUpdate === true);
+  if (_mtPin) scene.matrixWorldAutoUpdate = false;
   try {
     renderer.render(scene, camera);   // (v39.79) the water is back inside this pass; it binds its own refraction source
-  } finally { if (_pmOn) _panMaskEnd(); }
+  } finally {
+    if (_mtPin) scene.matrixWorldAutoUpdate = true;   // (v53.71) FIRST
+    if (_mtW) _mtW._reflTopDone = false;
+    if (_pmOn) _panMaskEnd();
+  }
   if (window.__f8seg) window.__f8seg('ads');
   if (typeof game !== 'undefined' && game && game._adsOvOn && typeof _adsOverlayRender === 'function') _adsOverlayRender();
   if (typeof _gooRender === 'function') _gooRender(postFX.rtScene);
@@ -33076,12 +33164,8 @@ function _endlessCloudsTick(dt) {
   }
 }
 let _hubWaterDisp = null;
-function _swBuildHubWaterDispGet(WL) {
-  if (_hubWaterDisp) return _hubWaterDisp;
-  if (typeof THREE === 'undefined' || !scene) return null;
-  const _dispHalf = 12288, _dispSeg = 768;
-  const _dispInner = (window.__water && window.__water.dispInner != null) ? +window.__water.dispInner : 4000;
-  const _dispFrac = (window.__water && window.__water.dispFrac != null) ? +window.__water.dispFrac : 0.80;
+const _SW_SHEET = { ring: 8, core: 500, W: 16 };
+function _swSheetGeoLegacy(_dispHalf, _dispSeg, _dispInner, _dispFrac) {
   const geo = new THREE.PlaneGeometry(2, 2, _dispSeg, _dispSeg);   // unit grid, warped below
   {
     const _pa = geo.attributes.position, _pv = _pa.array;
@@ -33096,6 +33180,172 @@ function _swBuildHubWaterDispGet(WL) {
     geo.computeBoundingSphere();
     geo.userData.swQuad = _dispInner / Math.max(1, (_dispFrac * _dispSeg * 0.5));
   }
+  return geo;
+}
+function _swSheetGeoRing(half, seg, ringN, inner, frac) {
+  const warp = (u) => { const sg = (u < 0) ? -1 : 1, m = Math.min(1, Math.abs(u));
+    return sg * ((m <= frac) ? (m / frac) * inner : inner + ((m - frac) / Math.max(1e-4, 1 - frac)) * (half - inner)); };
+  let _rb = 8000; try { if (typeof _SW_RIPPLE_BOUNDS === 'number') _rb = _SW_RIPPLE_BOUNDS; } catch (_) {}
+  const fineTo = _rb * 0.75 + _rb / 32;
+  const sw = 2 / seg;
+  let i0 = 0;   // the first legacy column at or inside -fineTo, then ONE more out so the kept lines cover fineTo
+  while (i0 < seg / 2 && -Math.fround(warp(Math.fround(i0 * sw - 1))) > fineTo) i0++;
+  i0 = Math.max(0, i0 - 1);
+  const i1 = seg - i0;
+  const colX = [], rowY = [];
+  for (let i = i0; i <= i1; i++) { colX.push(Math.fround(warp(Math.fround(i * sw - 1)))); rowY.push(Math.fround(warp(Math.fround(-(i * sw - 1))))); }
+  const edge = -colX[0];   // ~6,263: the last kept legacy line
+  if (!(edge < half - 1)) ringN = 0;   // nothing left to coarsen: the kept lines already reach the edge
+  const outer = (j) => edge + (j / ringN) * (half - edge);
+  const X = [], Y = [];
+  for (let j = ringN; j >= 1; j--) { X.push(Math.fround(-outer(j))); Y.push(Math.fround(outer(j))); }
+  for (let k = 0; k < colX.length; k++) { X.push(colX[k]); Y.push(rowY[k]); }
+  for (let j = 1; j <= ringN; j++) { X.push(Math.fround(outer(j))); Y.push(Math.fround(-outer(j))); }
+  const T = X, Tz = Y.map((y) => -y);
+  const S = T.length - 1, R = S + 1, NV = R * R;
+  const pos = new Float32Array(NV * 3), nrm = new Float32Array(NV * 3), uv = new Float32Array(NV * 2);
+  for (let iy = 0; iy < R; iy++) for (let ix = 0; ix < R; ix++) {
+    const v = iy * R + ix;
+    pos[v * 3] = X[ix]; pos[v * 3 + 1] = Y[iy];
+    nrm[v * 3 + 2] = 1;
+    uv[v * 2] = ix / S; uv[v * 2 + 1] = 1 - iy / S;
+  }
+  const W = _SW_SHEET.W, CORE = _SW_SHEET.core, TL = 8, core = [], bucket = [];
+  for (let w = 0; w < W; w++) bucket.push([]);
+  const box = new Float32Array(W * 4);
+  for (let w = 0; w < W; w++) { box[w * 4] = Infinity; box[w * 4 + 1] = -Infinity; box[w * 4 + 2] = Infinity; box[w * 4 + 3] = -Infinity; }
+  for (let ty = 0; ty < S; ty += TL) for (let tx = 0; tx < S; tx += TL) {
+    const ye = Math.min(ty + TL, S), xe = Math.min(tx + TL, S);
+    for (let iy = ty; iy < ye; iy++) for (let ix = tx; ix < xe; ix++) {
+      const xc = (T[ix] + T[ix + 1]) * 0.5, zc = (Tz[iy] + Tz[iy + 1]) * 0.5;   // world-relative x / z
+      const a = iy * R + ix, b = (iy + 1) * R + ix, c = (iy + 1) * R + ix + 1, d = iy * R + ix + 1;   // PlaneGeometry's winding
+      if (Math.max(Math.abs(xc), Math.abs(zc)) < CORE) { core.push(a, b, d, b, c, d); continue; }
+      let w = Math.floor((Math.atan2(zc, xc) + Math.PI) / (2 * Math.PI) * W); if (w >= W) w = W - 1; if (w < 0) w = 0;
+      bucket[w].push(a, b, d, b, c, d);
+      if (T[ix] < box[w * 4]) box[w * 4] = T[ix]; if (T[ix + 1] > box[w * 4 + 1]) box[w * 4 + 1] = T[ix + 1];
+      if (Tz[iy] < box[w * 4 + 2]) box[w * 4 + 2] = Tz[iy]; if (Tz[iy + 1] > box[w * 4 + 3]) box[w * 4 + 3] = Tz[iy + 1];
+    }
+  }
+  let total = core.length; for (let w = 0; w < W; w++) total += bucket[w].length;
+  const index = new Uint32Array(total), start = new Int32Array(W + 1);
+  index.set(core, 0);
+  let o = core.length;
+  for (let w = 0; w < W; w++) { start[w] = o; index.set(bucket[w], o); o += bucket[w].length; }
+  start[W] = o;
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
+  g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  g.setIndex(new THREE.BufferAttribute(index, 1));
+  g.computeBoundingSphere();
+  g.userData.swQuad = inner / Math.max(1, (frac * seg * 0.5));   // the inner lattice - the legacy formula, the same snap step
+  g.userData.sheetW = { W, coreCount: core.length, start, box, tris: total / 3 };
+  g.setDrawRange(core.length, start[W] - core.length);   // every wedge until the first render picks an arc
+  return g;
+}
+function _swSheetGeoMake(half, seg, inner, frac) {
+  let ring = _SW_SHEET.ring;
+  try { if (window.__water && window.__water.sheetRing != null) ring = window.__water.sheetRing | 0; } catch (_) {}
+  if (!(ring > 0) || inner !== 4000 || frac !== 0.80 || seg !== 768 || half !== 12288) return _swSheetGeoLegacy(half, seg, inner, frac);
+  return _swSheetGeoRing(half, seg, ring, inner, frac);
+}
+const _swSwM = new THREE.Matrix4(), _swSwF = new THREE.Frustum(), _swSwVis = new Uint8Array(32);
+const _SWW = { renders: 0, kept: 0, total: 0 };
+function _swSheetWedges(sheet, rnd, cam) {
+  const geo = sheet.geometry, W = geo && geo.userData && geo.userData.sheetW, cm = sheet._coreMesh;   // direct properties, not userData (the clone trap)
+  if (!W || !cm) return;
+  const f = rnd.info.render.frame;
+  if (sheet._wF === f) return;
+  sheet._wF = f;
+  const cg = cm.geometry, n = W.W, ST = W.start;
+  const full = () => { cg.drawRange.start = 0; cg.drawRange.count = W.coreCount; geo.drawRange.start = ST[0]; geo.drawRange.count = ST[n] - ST[0]; };
+  try {
+    if ((window.__water && window.__water.sheetWedge === 0) || !cam || !cam.projectionMatrix || cam.isArrayCamera ||
+        (typeof game !== 'undefined' && game && game.bendWorld)) { full(); return; }
+    _swSwM.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+    _swSwF.setFromProjectionMatrix(_swSwM);
+    const e = sheet.matrixWorld.elements, px = e[12], py = e[13], pz = e[14];
+    let H = 400; try { const du = sheet.material.uniforms.uDispScale; if (du) H = Math.abs(du.value) + 120; } catch (_) {}
+    const y0 = py - H, y1 = py + H, B = W.box, PL = _swSwF.planes;
+    let anyV = false, allV = true;
+    for (let w = 0; w < n; w++) {
+      const bx0 = px + B[w * 4], bx1 = px + B[w * 4 + 1], bz0 = pz + B[w * 4 + 2], bz1 = pz + B[w * 4 + 3];
+      let v = 1;
+      for (let k = 0; k < 4; k++) {
+        const pn = PL[k].normal, c = PL[k].constant;
+        const x = pn.x > 0 ? bx1 : bx0, y = pn.y > 0 ? y1 : y0, z = pn.z > 0 ? bz1 : bz0;
+        if (pn.x * x + pn.y * y + pn.z * z + c < 0) { v = 0; break; }
+      }
+      _swSwVis[w] = v;
+      if (v) anyV = true; else allV = false;
+    }
+    _SWW.renders++; _SWW.total += n;
+    if (allV) { _SWW.kept += n; full(); return; }
+    if (!anyV) { cg.drawRange.start = 0; cg.drawRange.count = W.coreCount; geo.drawRange.start = ST[0]; geo.drawRange.count = 0; return; }
+    let bestLen = 0, bestEnd = 0, run = 0;   // the longest cyclic run of hidden wedges; the arc is everything else
+    for (let t = 0; t < 2 * n; t++) { if (!_swSwVis[t % n]) { run++; if (run > bestLen) { bestLen = run; bestEnd = t; } } else run = 0; }
+    if (bestLen > n) bestLen = n;
+    const first = (bestEnd + 1) % n, cnt = n - bestLen, last = first + cnt;   // wedges first .. last-1 (mod n)
+    _SWW.kept += cnt;
+    if (last <= n) {   // no wrap: the core alone, and the arc in one piece
+      cg.drawRange.start = 0; cg.drawRange.count = W.coreCount;
+      geo.drawRange.start = ST[first]; geo.drawRange.count = ST[last] - ST[first];
+    } else {           // wraps past w15: the core child also takes w0 .. last-n-1, which follow it in the index
+      cg.drawRange.start = 0; cg.drawRange.count = ST[last - n];
+      geo.drawRange.start = ST[first]; geo.drawRange.count = ST[n] - ST[first];
+    }
+  } catch (_) { full(); }
+}
+function _swSheetCoreAttach(sheet) {
+  const g = sheet.geometry, W = g && g.userData && g.userData.sheetW;
+  let cm = sheet._coreMesh;
+  if (!W) { if (cm) cm.visible = false; return; }
+  const cg = new THREE.BufferGeometry();
+  for (const k in g.attributes) cg.setAttribute(k, g.attributes[k]);
+  cg.setIndex(g.index);
+  cg.boundingSphere = g.boundingSphere;
+  cg.setDrawRange(0, W.coreCount);
+  g.addEventListener('dispose', () => { try { cg.dispose(); } catch (_) {} });   // its VAOs; the buffers are the sheet's
+  if (!cm) {
+    cm = new THREE.Mesh(cg, sheet.material);
+    cm.name = 'sheetCore';
+    cm.renderOrder = sheet.renderOrder; cm.frustumCulled = false;
+    cm.userData = { isHubWater: true, isSheetCore: true };
+    cm.onBeforeRender = function (rnd, scn, cam, g2, m2, grp) { sheet.onBeforeRender.call(sheet, rnd, scn, cam, g2, m2, grp); };
+    cm.onAfterRender = function () { try { sheet.onAfterRender.call(sheet); } catch (_) {} };
+    sheet.add(cm);
+    sheet._coreMesh = cm;
+  } else {
+    cm.geometry = cg;
+  }
+  cm.visible = true;
+}
+if (typeof window !== 'undefined') {
+  window.__sheetGeo = function () {
+    const s = (typeof _hubWaterDisp !== 'undefined') ? _hubWaterDisp : null;
+    if (!s) return 'no sheet';
+    const old = s.geometry;
+    const W2 = window.__water || {};
+    const g = _swSheetGeoMake(12288, 768, (W2.dispInner != null) ? +W2.dispInner : 4000, (W2.dispFrac != null) ? +W2.dispFrac : 0.80);
+    s.geometry = g;
+    _swSheetCoreAttach(s);
+    try { old.dispose(); } catch (_) {}
+    const sw = g.userData.sheetW;
+    return { tris: sw ? sw.tris : (g.index ? g.index.count / 3 : 0), ring: !!sw };
+  };
+  window.__sheetWedgeInfo = function (reset) {
+    const r = { renders: _SWW.renders, wedgesKeptPct: _SWW.total ? +(100 * _SWW.kept / _SWW.total).toFixed(1) : null };
+    if (reset) { _SWW.renders = 0; _SWW.kept = 0; _SWW.total = 0; }
+    return r;
+  };
+}
+function _swBuildHubWaterDispGet(WL) {
+  if (_hubWaterDisp) return _hubWaterDisp;
+  if (typeof THREE === 'undefined' || !scene) return null;
+  const _dispHalf = 12288, _dispSeg = 768;
+  const _dispInner = (window.__water && window.__water.dispInner != null) ? +window.__water.dispInner : 4000;
+  const _dispFrac = (window.__water && window.__water.dispFrac != null) ? +window.__water.dispFrac : 0.80;
+  const geo = _swSheetGeoMake(_dispHalf, _dispSeg, _dispInner, _dispFrac);
   const mat = new THREE.ShaderMaterial({
     transparent: true, depthWrite: false, side: THREE.DoubleSide, fog: true,
     uniforms: THREE.UniformsUtils.merge([
@@ -33492,6 +33742,7 @@ function _swBuildHubWaterDispGet(WL) {
   mesh.userData = { isHubWater: true, WL: WL };
   scene.add(mesh);
   mesh.onBeforeRender = function (rnd, scn, cam) {
+    try { _swSheetWedges(mesh, rnd, cam); } catch (_) {}   // (v53.72) this render's wedge arc, once - see _SW_SHEET
     try { _swHullCutBind(); } catch (_) {}   // (v49.54) the pose being drawn - see _swHullCutBind
     try {
       const _w = game._hubWater, _u = mesh.material.uniforms;
@@ -33506,6 +33757,7 @@ function _swBuildHubWaterDispGet(WL) {
     try { _waterRefractBind(rnd, scn, cam); } catch (_) {}
   };
   mesh.onAfterRender = function () { try { const u = mesh.material.uniforms; if (u && u.uRefract) u.uRefract.value = 0.0; } catch (_) {} };
+  _swSheetCoreAttach(mesh);   // (v53.72) the always-drawn core - see _SW_SHEET
   _hubWaterDisp = mesh;
   try { mat.uniforms.uSunDir = _swU.uSunDir; } catch (_) {}   // (v49.39) one sun (see the Reflector)
   try { for (const _k in _swHullCutU) mat.uniforms[_k] = _swHullCutU[_k]; } catch (_) {}   // (v49.54) shared, see _SW_HULLCUT_GLSL
@@ -33715,8 +33967,7 @@ function _swBuildHubWater(T) {
     const _reflInvScratch = new THREE.Matrix4();
     const _reflNrm = new THREE.Vector3(), _reflRot = new THREE.Matrix4();
     const _reflRP = new THREE.Vector3(), _reflCP = new THREE.Vector3();
-    mesh.onBeforeRender = function (rnd, scn, cam, geo2, mat2, grp) {
-      try { _swHullCutBind(); } catch (_) {}
+    mesh._reflRun = function (rnd, scn, cam, geo2, mat2, grp) {
       if (game && game._reflBenchOff) return;
 
 
@@ -33841,11 +34092,14 @@ function _swBuildHubWater(T) {
       const _rxWas = this.rotation.x;
       if (_underNow) { this.rotation.x = _rxWas + Math.PI; this.updateMatrix(); this.updateMatrixWorld(true); }
       this._reflFlipped = _underNow;
-      const _mwPin = !!(scn && scn.matrixWorldAutoUpdate === true && !(window.__water && window.__water.mirrorWalk === 1));
+      const _mwPin = !this._reflTopRun && !!(scn && scn.matrixWorldAutoUpdate === true && !(window.__water && window.__water.mirrorWalk === 1));
       if (_mwPin) scn.matrixWorldAutoUpdate = false;
+      const _smNU = rnd.shadowMap.needsUpdate;
+      rnd.shadowMap.needsUpdate = false;
       try { _reflOBR.call(this, rnd, scn, cam, geo2, mat2, grp); }
       finally {
         if (_mwPin) scn.matrixWorldAutoUpdate = true;   // (v48.33) FIRST - see above
+        rnd.shadowMap.needsUpdate = _smNU;   // (v53.76) back to the main pass
         if (window.__f8seg) window.__f8seg('scene');   // (v40.59) back to the pass that contains us
         if (_wDv) _wD.visible = true;
         if (_wOv) _wO.visible = true;
@@ -33869,7 +34123,12 @@ function _swBuildHubWater(T) {
       }
       if (_underNow) { this.rotation.x = _rxWas; this.updateMatrix(); this.updateMatrixWorld(true); }   // (v44.26) back upright for the draw
     };
-    
+    mesh.onBeforeRender = function (rnd, scn, cam, geo2, mat2, grp) {
+      try { _swHullCutBind(); } catch (_) {}
+      if (this._reflTopDone) return;
+      this._reflRun(rnd, scn, cam, geo2, mat2, grp);
+    };
+
     const undMat = new THREE.MeshBasicMaterial({ color: 0x12455a, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthWrite: false });   
     const und = new THREE.Mesh(geo.clone(), undMat);
     und.rotation.x = -Math.PI / 2; und.renderOrder = -1; und.frustumCulled = false; und.matrixAutoUpdate = false;   // (v38.67) -1 with the surface   
@@ -39705,7 +39964,45 @@ function _hubCityFrame(dt) {
     scene.fog.color.copy(_fb).lerp(hc.fogTint, k);
     if (typeof _swU !== 'undefined' && _swU.uAerialColor) _swU.uAerialColor.value.copy(scene.fog.color);
   }
+  try { _cityDomeCull(); } catch (_) {}   // (v53.70) see _cityDomeCull - here because this runs in the cinematic fork too
 }
+
+function _cityDomeCull() {
+  let off = false; try { off = window.__cityCull === 0; } catch (_) {}
+  const occ = off ? null : ((typeof _clipSkyOccluder === 'function') ? _clipSkyOccluder() : null);
+  const S = _cityDomeCull._s || (_cityDomeCull._s = { out: 0, meshes: 0 });
+  S.out = 0; S.meshes = 0;
+  const one = (grp) => {
+    if (!grp || !grp.userData) return;
+    const ud = grp.userData;
+    if (!ud._domeL) {
+      const L = [];
+      for (const o of grp.children) {
+        if (!o.isMesh || !o.material || Array.isArray(o.material)) continue;
+        if (o.material.transparent === true || (o.userData && o.userData._fol)) continue;
+        L.push(o);
+      }
+      let bs = null;
+      try { const b = new THREE.Box3(); for (const o of L) b.expandByObject(o); if (!b.isEmpty()) bs = b.getBoundingSphere(new THREE.Sphere()); } catch (_) { bs = null; }
+      ud._domeL = L; ud._domeBs = bs; ud._domeHid = null;
+    }
+    const bs = ud._domeBs;
+    const out = !!(occ && bs && (Math.hypot(bs.center.x - occ.x, bs.center.y - occ.y, bs.center.z - occ.z) - bs.radius) > occ.r + 600);
+    if (out) { S.out++; S.meshes += ud._domeL.length; }
+    if (out === !!ud._domeHid) return;
+    if (out) {
+      const hid = [];
+      for (const o of ud._domeL) if (o.visible) { o.visible = false; hid.push(o); }
+      ud._domeHid = hid;
+    } else {
+      for (const o of ud._domeHid) o.visible = true;
+      ud._domeHid = null;
+    }
+  };
+  if (game.hubCity) one(game.hubCity.group);
+  if (typeof OW !== 'undefined' && OW && OW.cities) for (let i = 0; i < OW.cities.length; i++) { const b = OW.cities[i].built; if (b) one(b.group); }
+}
+if (typeof window !== 'undefined') window.__cityCullInfo = () => Object.assign({}, _cityDomeCull._s || {});
 
 if (typeof window !== 'undefined') window.HUBCITY = { cfg: HUB_CITY, build: _hubCityBuild, init: _hubCityInit, dispose: _hubCityDispose, frame: _hubCityFrame, collide: _hubCityCollide, rayHit: _hubCityRayHit, traf: _HC_TRAF, sched: _hcPadSched };
 
@@ -53593,8 +53890,8 @@ function _lssAddEngineFlames(group, loadoutKey) {
   _sjTextures(); _sjGeometry();
   if (!_ripGeo) _ripGeo = new THREE.PlaneGeometry(2, 2);
   const cls = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS[loadoutKey] != null) ? LSS.CLASS_COLORS[loadoutKey] : 0xffcc66;
-  const mk = (tex) => new THREE.MeshBasicMaterial({ map: tex, color: 0xffffff, transparent: true, blending: THREE.AdditiveBlending,
-    depthTest: true, depthWrite: false, fog: false, side: THREE.DoubleSide });
+  const mk = (tex) => _lssAddOnePass(new THREE.MeshBasicMaterial({ map: tex, color: 0xffffff, transparent: true, blending: THREE.AdditiveBlending,
+    depthTest: true, depthWrite: false, fog: false, side: THREE.DoubleSide }));
   const K = _engineFlameKnobs(), nRing = Math.max(1, Math.min(16, (K.rings | 0) || 7));
   const st0 = (K.on !== false) ? _engineStyle(K, loadoutKey) : '';   // (v51.03) per hull
   const flames = [];
@@ -60357,6 +60654,7 @@ function _makeExplosionMesh(type) {
 function _acquireExplosionMesh(type) {
   const pool = _EXPL_POOL[type];
   let mesh = (pool && pool.length) ? pool.pop() : _makeExplosionMesh(type);
+  mesh.__walkPark = true;   // (v53.69) every pool type: skipped by the scene walk while parked (hidden) - see the note at `const scene`
   if (!mesh.parent) scene.add(mesh);
   mesh.visible = true;
   mesh.rotation.set(0, 0, 0);
@@ -67086,6 +67384,7 @@ class BossPortal {
     this.alive = true;
     this.mesh = null;
     this._usedProto = false;
+    try { _preloadCyanRing(); } catch (_) {}
     this._buildMesh();
   }
   _buildMesh() {
@@ -70006,6 +70305,7 @@ function _initLightningPool() {
     coreMesh.frustumCulled = false;
     haloMesh.renderOrder = 1;
     coreMesh.renderOrder = 1;
+    haloMesh.__walkPark = true; coreMesh.__walkPark = true;   // (v53.69) skipped by the scene walk while parked - see the note at `const scene`
     scene.add(haloMesh);
     scene.add(coreMesh);
     _lightningPool.push({
@@ -72614,7 +72914,8 @@ function _initDarkLightningPool() {
     const mesh = new THREE.Mesh(_LIGHTNING_CYL_GEO, mat);
     mesh.frustumCulled = false;
     mesh.visible = false;
-    mesh.renderOrder = 2;       
+    mesh.renderOrder = 2;
+    mesh.__walkPark = true;   // (v53.69) 256 parked meshes: skipped by the scene walk while hidden - see the note at `const scene`
     scene.add(mesh);
     _darkLightningPool.push({ mesh, mat, free: true });
   }
@@ -88041,31 +88342,56 @@ function _hlfLblK(name) {
   try { const o = window.__hudLbl; if (o && typeof o[name] === 'number') return o[name]; } catch (_) {}
   return _HLF_LBL[name];
 }
+function _hlfPlateW(font, text) {
+  const M = _hlfPlateW.M || (_hlfPlateW.M = new Map());
+  let ok = true;
+  try { ok = !(typeof document !== 'undefined' && document.fonts && typeof document.fonts.check === 'function') || document.fonts.check(font); } catch (_) { ok = true; }
+  const k = font + '|' + text + '|' + (ok ? 1 : 0);
+  let w = M.get(k);
+  if (w === undefined) {
+    const sc = _hlfPlateW.c || (_hlfPlateW.c = document.createElement('canvas').getContext('2d'));
+    sc.font = font;
+    w = sc.measureText(text).width;
+    if (M.size > 64) M.clear();   // a font size per resize - bounded
+    M.set(k, w);
+  }
+  return { w, ok };
+}
 function _hlfFlatPlate(I, rIn, rOut, endDeg, dir, rotDeg, text, sizeV) {
   const ctx = I.ctx, vm = I.vmin;
   const f = Math.max(7, vm * sizeV);
+  const font = '700 ' + f.toFixed(1) + 'px Orbitron, "Segoe UI", sans-serif';
+  const PW = _hlfPlateW(font, text);
   const r = rIn + (rOut - rIn) * _hlfLblK('radial');
-  ctx.save();
-  ctx.font = '700 ' + f.toFixed(1) + 'px Orbitron, "Segoe UI", sans-serif';
-  const w = ctx.measureText(text).width + f * 1.10, h = f * 1.75;
+  const w = PW.w + f * 1.10, h = f * 1.75;
   const mid = endDeg + dir * ((w / vm) / (r * _HL_D2R)) * (0.5 - _hlfLblK('slide'));
   const a = mid * _HL_D2R;
-  ctx.translate(I.cx + Math.cos(a) * r * vm, I.cy + Math.sin(a) * r * vm);
-  ctx.rotate(rotDeg * _HL_D2R);
-  ctx.globalAlpha = I.ga;
-  ctx.beginPath();
-  ctx.roundRect(-w / 2, -h / 2, w, h, Math.min(h * 0.30, vm * 0.45));
-  ctx.fillStyle = '#05080b';
-  ctx.fill();
-  ctx.globalAlpha = _hlTA();
-  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.lineJoin = 'round';
-  ctx.lineWidth = Math.max(1.6, f * 0.34);
-  ctx.strokeStyle = 'rgba(0,0,0,0.82)';
-  ctx.strokeText(text, 0, 0);
-  ctx.fillStyle = 'rgba(236,247,255,0.95)';
-  ctx.fillText(text, 0, 0);
-  ctx.restore();
+  const px = I.cx + Math.cos(a) * r * vm, py = I.cy + Math.sin(a) * r * vm;
+  const ta = _hlTA(), lw = Math.max(1.6, f * 0.34);
+  const draw = (c, baking) => {
+    if (baking) { c.strokeStyle = ctx.strokeStyle; c.fillStyle = ctx.fillStyle; c.lineWidth = ctx.lineWidth; }
+    c.save();
+    c.font = font;
+    c.translate(px, py);
+    c.rotate(rotDeg * _HL_D2R);
+    c.globalAlpha = I.ga;
+    c.beginPath();
+    c.roundRect(-w / 2, -h / 2, w, h, Math.min(h * 0.30, vm * 0.45));
+    c.fillStyle = '#05080b';
+    c.fill();
+    c.globalAlpha = ta;
+    c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.lineJoin = 'round';
+    c.lineWidth = lw;
+    c.strokeStyle = 'rgba(0,0,0,0.82)';
+    c.strokeText(text, 0, 0);
+    c.fillStyle = 'rgba(236,247,255,0.95)';
+    c.fillText(text, 0, 0);
+    c.restore();
+  };
+  const hd = Math.hypot(w, h) * 0.5 + lw + 4;   // the rotated plate's circumradius + the stroke + AA
+  const key = text + '|' + font + '|' + (PW.ok ? 1 : 0) + '|' + w + '|' + px + ',' + py + '|' + rotDeg + '|' + I.ga + '|' + ta;
+  _hlfLayer(ctx, 'plate:' + text, key, [px - hd, py - hd, px + hd, py + hd], 2, draw);
 }
 
 function _hlfUneven(n) {
@@ -94215,6 +94541,7 @@ function _ssxMenuOpen(kind, anchor) {
 function _ssxModePick(t) {
   try {
     if (_lssRoomModeLocked()) return;
+    try { _preloadCyanRing(); } catch (_) {}
     if ((typeof LSS !== 'undefined' && LSS.MODE === 'campaign') || (game && game._campPicker)) {
       try { game._campPicker = false; game._ssxCampNew = false; } catch (_) {}
       try { CampaignMode.onTeardown(); } catch (_) {}
