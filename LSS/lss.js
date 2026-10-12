@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.66";
+const LSS_BUILD = "53.68";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -33131,6 +33131,7 @@ function _swBuildHubWaterDispGet(WL) {
         uCW2: { value: new THREE.Vector4(0.6, 2.0, 70, 0.35) },   // (v48.87) + the breaking patches (scale u, share)
         uFoamAlb: { value: 0.45 }, uFoamAlbCol: { value: new THREE.Color(0.58, 0.74, 0.78) },   // (v41.56) 0.75 was a whitewash
         tDiffuse: { value: null }, uReflMatrix: { value: new THREE.Matrix4() }, uReflMix: { value: 1.0 }, uReflLive: { value: 0.0 }, uReflPerturb: { value: 4.0 }, uReflBright: { value: 1.6 },
+        uReflEye: { value: new THREE.Vector3() }, uReflDir: { value: 1.0 },
         uReflFar: { value: 9000.0 },
         uReflPar: { value: 0.0 }, uReflWave: { value: 0.0 },
         uReflOut: { value: 0.03 },
@@ -33157,6 +33158,7 @@ function _swBuildHubWaterDispGet(WL) {
     vertexShader: [
       'uniform sampler2D uRippleTex; uniform vec2 uRippleCenter; uniform float uRippleBounds; uniform float uDispScale; uniform float uGain; uniform float uCrestQ; uniform float uNormK; uniform mat4 uReflMatrix;',
       'uniform float uReflPar;',   // (v41.50) vertex-side; uReflWave is declared in the fragment
+      'uniform vec3 uReflEye; uniform float uReflDir;',   // (v53.68) vertex-side - see the vReflUv note
       'uniform float uTapW; uniform float uDispSmooth; uniform float uMaxSlope; uniform float uSlopeLimit;',   // (v41.61/67/71)
       'uniform vec2 uHullXZ; uniform float uHullR; uniform float uHullFade; uniform float uHullTop;',   // (v41.54)
       'float _swShape(float hh){ float sq = hh * (1.0 + uCrestQ * abs(hh)); float x = sq * uGain / max(uDispScale, 0.01); return uDispScale * (x / (1.0 + abs(x))); }',
@@ -33189,7 +33191,8 @@ function _swBuildHubWaterDispGet(WL) {
       '  float _hd = length(wp0.xz - uHullXZ);',
       '  float _hk = smoothstep(uHullR, uHullR + max(uHullFade, 1.0), _hd);',
       '  disp = mix(min(disp, uHullTop), disp, _hk);',
-      '  vReflUv = uReflMatrix * vec4(wp0 + vec3(0.0, disp * uReflPar, 0.0), 1.0);',
+      '  vec3 _rp = wp0 + vec3(0.0, disp * uReflPar, 0.0);',
+      '  vReflUv = (uReflDir > 0.5) ? uReflMatrix * vec4(_rp - uReflEye, 0.0) : uReflMatrix * vec4(_rp, 1.0);',
       '  vDisp = (h / (1.0 + abs(h))) * winFade;',
       '  float dL = mix(min(_swShape(hL), uHullTop), _swShape(hL), _hk), dR = mix(min(_swShape(hR), uHullTop), _swShape(hR), _hk);',
       '  float dDn = mix(min(_swShape(hD), uHullTop), _swShape(hD), _hk), dUp = mix(min(_swShape(hU), uHullTop), _swShape(hU), _hk);',
@@ -33496,6 +33499,8 @@ function _swBuildHubWaterDispGet(WL) {
         const _wm = _w.material && _w.material.uniforms;
         if (_wm && _wm.tDiffuse && _u.tDiffuse) _u.tDiffuse.value = _wm.tDiffuse.value;
         if (_u.uReflMatrix) _u.uReflMatrix.value.copy(_w._reflWorld);
+        if (_u.uReflEye && cam && cam.matrixWorld) { const _e = cam.matrixWorld.elements, _py = _w.matrixWorld.elements[13]; _u.uReflEye.value.set(_e[12], 2 * _py - _e[13], _e[14]); }
+        if (_u.uReflDir) _u.uReflDir.value = (window.__water && window.__water.reflDir === 0) ? 0.0 : 1.0;
       }
     } catch (_) {}
     try { _waterRefractBind(rnd, scn, cam); } catch (_) {}
@@ -43855,7 +43860,9 @@ const _WX2 = (function () {
     panoStep: 3,        // ...its march's step length x (its rays run the whole sky to distKm, with no ground to stop them).
     panoEvery: 2,       // ...marched every Nth frame: a whole sky every 16 x N frames (0.22 s at 144 Hz) - km-off clouds don't move
     mirrorEvery: 1,     // (v52.78) the mirror re-marches every Nth of ITS renders and composites its last image in between (1 = every one)
-    gpuT: 0,            // 1 = time each view's cloud pass on the GPU (TIME_ELAPSED, never waited on) -> __wx2Info().gpu
+    zfix: 1,            // ⭐ (v53.67) THE MIRROR'S DEPTH IS DECODED ALONG THE RAY IT WAS SAMPLED ON (F_CLOUD's uObl branch, F_COMP).
+    zOffX: null, zOffY: null,   // (v53.67) ...where inside its pixel the MSAA resolve took that depth, px from the centre (x right, y up).
+    gpuT: 0,          // 1 = time each view's cloud pass on the GPU (TIME_ELAPSED, never waited on) -> __wx2Info().gpu
     distKm: 30, visKm: 40,
     detail: 0, detQref: 1.0, detVref: 1.0,     // Milestone 2's fractal sub-grid detail (0 = off): strength, the edge band (q_c g/kg),
     bright: 0.5,        // cloud radiance into the scene target (linear, before the composite's ACES; 0.85 blew out to white, 51.67)
@@ -44423,7 +44430,8 @@ uniform vec2 uYBand;
 uniform float uMaxT, uHaze, uExt, uSmooth, uM, uTime, uBright, uShadow, uDbg;
 uniform int uK; uniform float uBand; uniform vec2 uFlipN;
 uniform float uObl, uDomeR; uniform vec4 uZRow; uniform vec3 uDomeO;   // (51.71) the water's mirror only: see the depth below
-uniform float uStepK;                                          // (51.73) step length x this: 1 in the main view, __wx2.mirrorStep in the mirror
+uniform vec3 uZFix;                                            // (v53.67) (on, the MSAA depth sample's offset in px): the mirror's decode
+uniform float uStepK;                                         // (51.73) step length x this: 1 in the main view, __wx2.mirrorStep in the mirror
 uniform float uLight;                                          // (v53.50) 1 = the sunlight volume, 0 = the old per-sample march toward the sun
 uniform vec2 uCB;                                              // (v52.80) the checkerboard: (this frame's parity, on) - see main()
 uniform vec3 uQuad; uniform float uJit;                        // (v53.51) THE QUARTER (F_RESOLVE4): (this frame's pixel in each 2x2
@@ -44555,15 +44563,22 @@ void main(){
   }
   // the opaque scene under this pixel, as a distance along the ray in sim units. The sky dome is opaque and writes depth at
   // ~20.5k u: that is SKY, not a wall, or every cloud past 1.6 km would stop dead against it.
-  float dz=uPano>0.5 ? 1.0 : texelFetch(tDepth, ivec2(uv*uDepthSize), 0).r, tGeo=1e9;
+  ivec2 dq=ivec2(uv*uDepthSize);                               // (v53.67) the depth texel read - the mirror decodes it along ITS ray
+  float dz=uPano>0.5 ? 1.0 : texelFetch(tDepth, dq, 0).r, tGeo=1e9;
   if (dz<1.0 && uObl<0.5){ float zn=dz*2.0-1.0, vz=2.0*uNear*uFar/(uFar+uNear-zn*(uFar-uNear)), tu=vz/max(-vd.z,1e-4);
     if (tu<uSkyT) tGeo=tu/uUpw; }
   // (51.71) THE WATER'S MIRROR. three's Reflector swaps its projection's depth row for an oblique clip plane (the water), so
   // the depth comes back through THAT row, not near/far. And the dome is pinned to the PLAYER's eye, 2 x (eye - water) above
   // this one, so behind-the-sky is where this ray leaves that sphere (the far root, inside it or out), not a fixed radius.
-  if (dz<1.0 && uObl>0.5){ float zn=dz*2.0-1.0, iz=1.0/max(-vd.z,1e-4);
-    float vz=uZRow.w/(zn-(uZRow.x*vd.x*iz+uZRow.y*vd.y*iz-uZRow.z)), tu=vz*iz;
-    float b=dot(uDomeO,rd), h=b*b-(dot(uDomeO,uDomeO)-uDomeR*uDomeR), tD=h>0.0 ? -b+sqrt(h) : 1e9;
+  // ⚠⚠ (v53.67) ...AND THAT ROW IS DECODED ALONG THE RAY THE DEPTH WAS SAMPLED ON (see the note above F_COMP: the oblique
+  // row's depth is mostly the ray's ANGLE to the water, so a ray a fraction of a pixel off reads a far ridge kilometres off).
+  // This texel's own centre sits up to half a depth texel from the texel read (the pass is 0.35 of the mirror: 2.86 to 1),
+  // and the MSAA resolve took its sample off THAT texel's centre (uZFix.yz) - the ray goes through the sample.
+  if (dz<1.0 && uObl>0.5){ vec3 vq=vd, rq=rd;
+    if (uZFix.x>0.5){ vec4 qh=uInvProj*vec4((vec2(dq)+0.5+uZFix.yz)/uDepthSize*2.0-1.0, 1.0, 1.0); vq=normalize(qh.xyz/qh.w); rq=normalize(mat3(uCamWorld)*vq); }
+    float zn=dz*2.0-1.0, iz=1.0/max(-vq.z,1e-4);
+    float vz=uZRow.w/(zn-(uZRow.x*vq.x*iz+uZRow.y*vq.y*iz-uZRow.z)), tu=vz*iz;
+    float b=dot(uDomeO,rq), h=b*b-(dot(uDomeO,uDomeO)-uDomeR*uDomeR), tD=h>0.0 ? -b+sqrt(h) : 1e9;
     if (vz>0.0 && tu<0.96*tD) tGeo=tu/uUpw; }
   vec3 bmin=vec3(-1e5,uYBand.x,-1e5), bmax=vec3(1e5,uYBand.y,1e5), inv=1.0/rd;
   vec3 t0=(bmin-ro)*inv, t1=(bmax-ro)*inv, tmn=min(t0,t1), tmx=max(t0,t1);
@@ -44751,24 +44766,36 @@ void main(){
 const F_COMP = `#version 300 es
 precision highp float; precision highp int; precision highp sampler2D;
 uniform sampler2D tCld, tDepth; uniform vec2 uInv, uCldRes, uDepthSize; uniform vec4 uZRow; uniform mat4 uInvProj; uniform float uEdge, uEdgeK;
+uniform vec3 uZFix;                                             // (v53.67) (on, the MSAA depth sample's offset in px)
 out vec4 o;
 float vz(float d, vec2 r){ float z=uZRow.w/((d*2.0-1.0)-(uZRow.x*r.x+uZRow.y*r.y-uZRow.z)); return z>0.0 ? z : 1e7; }
+// (v53.67) the ray (x/-z, y/-z) through a depth texel's own sample: px is that texel's centre in pixels of the depth copy
+vec2 rq(vec2 px){ vec4 h=uInvProj*vec4((px+uZFix.yz)*uInv*2.0-1.0, 1.0, 1.0); return h.xy/max(-h.z, 1e-6); }
 void main(){
   vec2 uv=gl_FragCoord.xy*uInv;
   if (uEdge<0.5){ o=texture(tCld, uv); return; }
   vec4 vh=uInvProj*vec4(uv*2.0-1.0, 1.0, 1.0); vec3 vd=normalize(vh.xyz/vh.w); vec2 r=vd.xy/max(-vd.z, 1e-4);
-  float zp=vz(texelFetch(tDepth, ivec2(gl_FragCoord.xy), 0).r, r);
+  bool fx=uZFix.x>0.5;
+  float zp=vz(texelFetch(tDepth, ivec2(gl_FragCoord.xy), 0).r, fx ? rq(gl_FragCoord.xy) : r);
   vec2 t=uv*uCldRes-0.5, b=floor(t), f=t-b; ivec2 ib=ivec2(b), mx=ivec2(uCldRes)-1;
   vec4 acc=vec4(0.0); float ws=0.0;
   for (int k=0;k<4;k++){
     ivec2 d=ivec2(k&1, k>>1), c=clamp(ib+d, ivec2(0), mx);
-    float zt=vz(texelFetch(tDepth, ivec2((vec2(c)+0.5)/uCldRes*uDepthSize), 0).r, r);
+    ivec2 q=ivec2((vec2(c)+0.5)/uCldRes*uDepthSize);           // the depth texel F_CLOUD read for that cloud texel
+    float zt=vz(texelFetch(tDepth, q, 0).r, fx ? rq(vec2(q)+0.5) : r);   // (v53.67) ...decoded along ITS ray, not this pixel's
     float e=min(abs(zt-zp)/(max(min(zt,zp), 1e-3)*uEdgeK), 1e3); e*=e;
     float w=((d.x==1 ? f.x : 1.0-f.x)*(d.y==1 ? f.y : 1.0-f.y)+0.02)/(1.0+e*e);   // +0.02: a matching texel counts even far off
     acc+=w*texelFetch(tCld, c, 0); ws+=w;
   }
   o=acc/ws;
 }`;
+const V_ZPLANE = `#version 300 es
+in vec2 aPos; uniform vec2 uG; void main(){ gl_Position = vec4(aPos, dot(uG, aPos), 1.0); }`;
+const F_ZPLANE = `#version 300 es
+precision highp float; out vec4 o; void main(){ o = vec4(1.0); }`;
+const F_ZREAD = `#version 300 es
+precision highp float; precision highp sampler2D; uniform sampler2D tD; out vec4 o;
+void main(){ o = vec4(texelFetch(tD, ivec2(gl_FragCoord.xy), 0).r, 0.0, 0.0, 1.0); }`;
 const F_RESOLVE = `#version 300 es
 precision highp float; precision highp int; precision highp sampler2D;
 uniform sampler2D tFresh, tHist, tDepth;
@@ -45261,6 +45288,7 @@ void main(){ wxMain(); gl_FragColor${pm === 'P' ? '' : '.a'}*=wxVeil(); }
         const QO = [[0, 0], [1, 1], [1, 0], [0, 1]];                // (v53.51) the quarter's Bayer order
         if (q4) { V.q4i = ((V.q4i | 0) + 1) & 3; V.jit = ((V.jit | 0) + 1) & 4095; }
         const cu = cloudUniforms(cam, aw, ah, lw, lh, eye);
+        cu.uZFix = zFixU(rt);                                       // (v53.67) the mirror decodes its depth along the sample's ray
         cu.uCB = [cb ? V.cbPar : 0, cb ? 1 : 0];                   // ALWAYS set: the mirror shares this program
         cu.uQuad = q4 ? [QO[V.q4i][0], QO[V.q4i][1], 1] : [0, 0, 0];   // (v53.51) ...and these
         cu.uJit = q4 ? V.jit : 0;
@@ -45286,9 +45314,9 @@ void main(){ wxMain(); gl_FragColor${pm === 'P' ? '' : '.a'}*=wxVeil(); }
       const pz = cam.projectionMatrix.elements;
       setU(PR.comp, { uInv: [1 / aw, 1 / ah], uCldRes: [V.outW || 1, V.outH || 1], uDepthSize: [aw, ah],
         uZRow: [pz[2], pz[6], pz[10], pz[14]], uInvProj: { m4: (eye || cam).projectionMatrixInverse.elements },
-        uEdge: +KN('edge') ? 1 : 0, uEdgeK: Math.max(0.01, +KN('edgeK') || 0.12) });
+        uEdge: +KN('edge') ? 1 : 0, uEdgeK: Math.max(0.01, +KN('edgeK') || 0.12), uZFix: zFixU(rt) });   // (v53.67) uZFix
       gl.drawArrays(gl.TRIANGLES, 0, 3);
-      if (eye) { S.drawnM++; drawBolt(cam, aw, ah, V, eye); }       // (51.83) owner: "bolts should appear in the water/reflections"
+      if (eye) { S.drawnM++; drawBolt(cam, aw, ah, V, eye); }     // (51.83) owner: "bolts should appear in the water/reflections"
       else { S.drawn++; drawBolt(cam, aw, ah, V, null); }          // (51.79) the lightning channel, main view
       if (panoArgs) {
         if (tq) { tqEnd(tq, 'main'); tq = null; }
@@ -45344,6 +45372,59 @@ void main(){ wxMain(); gl_FragColor${pm === 'P' ? '' : '.a'}*=wxVeil(); }
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     const fb = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fb); gl.framebufferTexture2D(gl.FRAMEBUFFER, F[3], gl.TEXTURE_2D, tex, 0);
     V.depthTex = { tex }; V.depthFbo = fb; V.depthW = w; V.depthH = h; V.depthTexFmt = fmt;
+  }
+  function zProbe() {
+    const n = 32, out = [-0.125, -0.375], made = [];
+    try {
+      const smp = Math.min(4, gl.getParameter(gl.MAX_SAMPLES) | 0);   // what three asks for the mirror's target (Reflector: 4)
+      if (smp < 2) return [0, 0];
+      const rb = (fmt) => { const r = gl.createRenderbuffer(); made.push(r); gl.bindRenderbuffer(gl.RENDERBUFFER, r); gl.renderbufferStorageMultisample(gl.RENDERBUFFER, smp, fmt, n, n); return r; };
+      const fbo = () => { const f = gl.createFramebuffer(); made.push(f); return f; };
+      const tx = (ifmt, fmt, type) => { const t = gl.createTexture(); made.push(t); gl.activeTexture(gl.TEXTURE0 + S.unit0); gl.bindTexture(gl.TEXTURE_2D, t);
+        gl.texImage2D(gl.TEXTURE_2D, 0, ifmt, n, n, 0, fmt, type, null);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST); return t; };
+      const fM = fbo(); gl.bindFramebuffer(gl.FRAMEBUFFER, fM);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, rb(gl.RGBA8));
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, rb(gl.DEPTH_COMPONENT24));
+      const dT = tx(gl.DEPTH_COMPONENT24, gl.DEPTH_COMPONENT, gl.UNSIGNED_INT), fD = fbo(); gl.bindFramebuffer(gl.FRAMEBUFFER, fD);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, dT, 0);
+      const cT = tx(gl.RGBA32F, gl.RGBA, gl.FLOAT), fC = fbo(); gl.bindFramebuffer(gl.FRAMEBUFFER, fC);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, cT, 0);
+      gl.disable(gl.BLEND); gl.disable(gl.CULL_FACE); gl.disable(gl.SCISSOR_TEST); gl.disable(gl.STENCIL_TEST);
+      gl.disable(gl.SAMPLE_ALPHA_TO_COVERAGE); gl.disable(gl.POLYGON_OFFSET_FILL); gl.colorMask(true, true, true, true);
+      gl.viewport(0, 0, n, n); gl.bindVertexArray(S.vao);
+      const buf = new Float32Array(n * n * 4);
+      const meas = (gx, gy) => {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fM);
+        gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.ALWAYS); gl.depthMask(true); gl.clearDepth(1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+        gl.useProgram(PR.zplane.p); gl.uniform2f(U(PR.zplane, 'uG'), gx, gy); gl.drawArrays(gl.TRIANGLES, 0, 3);
+        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, fM); gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, fD);
+        gl.blitFramebuffer(0, 0, n, n, 0, 0, n, n, gl.DEPTH_BUFFER_BIT, gl.NEAREST);   // draw()'s resolve, exactly
+        gl.disable(gl.DEPTH_TEST); gl.depthMask(false);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fC);
+        gl.useProgram(PR.zread.p); gl.activeTexture(gl.TEXTURE0 + S.unit0); gl.bindTexture(gl.TEXTURE_2D, dT); gl.uniform1i(U(PR.zread, 'tD'), S.unit0);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+        gl.readPixels(0, 0, n, n, gl.RGBA, gl.FLOAT, buf);
+        let s = 0, c = 0;
+        for (let j = 2; j < n - 2; j++) for (let i = 2; i < n - 2; i++) {
+          const X = (i + 0.5) / n * 2 - 1, Y = (j + 0.5) / n * 2 - 1;
+          s += (buf[(j * n + i) * 4] - (0.5 + 0.5 * (gx * X + gy * Y))) / ((gx + gy) / n); c++;
+        }
+        return s / c;
+      };
+      const ox = meas(0.25, 0), oy = meas(0, 0.25);
+      if (Number.isFinite(ox) && Number.isFinite(oy) && Math.abs(ox) <= 0.5 && Math.abs(oy) <= 0.5) { out[0] = +ox.toFixed(4); out[1] = +oy.toFixed(4); }
+      else console.warn('[wx2] zProbe read (' + ox + ', ' + oy + ') - keeping', out);
+    } catch (e) { console.warn('[wx2] zProbe failed - keeping the D3D11 offset:', e); }
+    finally {
+      for (const o of made) { try { if (o instanceof WebGLRenderbuffer) gl.deleteRenderbuffer(o); else if (o instanceof WebGLFramebuffer) gl.deleteFramebuffer(o); else gl.deleteTexture(o); } catch (_) {} }
+    }
+    console.log('[wx2] the MSAA depth resolve samples at (' + out[0] + ', ' + out[1] + ') px - the mirror decodes along it');
+    return out;
+  }
+  function zFixU(rt) {
+    const ms = !!(rt && rt.samples > 0), z = (S && S.zOff) || [-0.125, -0.375], ox = KN('zOffX'), oy = KN('zOffY');
+    return [+KN('zfix') ? 1 : 0, ms ? (ox != null ? +ox : z[0]) : 0, ms ? (oy != null ? +oy : z[1]) : 0];
   }
   function ensureCld(V, w, h) {
     if (V.cld && V.cldW === w && V.cldH === h) return;
@@ -45684,6 +45765,7 @@ void main(){ wxMain(); gl_FragColor${pm === 'P' ? '' : '.a'}*=wxVeil(); }
       resolve4: F_RESOLVE4,                                        // (v53.51) THE QUARTER, ACCUMULATED
       cloudL: F_CLOUDL,                                            // (v53.53) the mirror's variant: THE SKY PANORAMA's reader
       pscat: F_PSCAT,                                              // (v53.53) ...and its scatter
+      zplane: [F_ZPLANE, V_ZPLANE], zread: F_ZREAD,                // (v53.67) zProbe's two passes
       bub: F_BUB, elec: F_ELEC, bolt: [F_BOLT, V_BOLT] };
     PR = {}; for (const k in src) PR[k] = Array.isArray(src[k]) ? mkProg(src[k][0], src[k][1]) : mkProg(src[k]);
     try {
@@ -45798,6 +45880,7 @@ void main(){ wxMain(); gl_FragColor${pm === 'P' ? '' : '.a'}*=wxVeil(); }
         if (!ok) { S.phase = 'dead'; return; }
         console.log('[wx2] programs linked in ' + Math.round(performance.now() - S.t0) + ' ms');
         renderer.resetState(); unpackDefaults(); setupSims(); renderer.resetState();
+        S.zOff = zProbe(); renderer.resetState();                   // (v53.67) before the first draw - see zProbe
       }
       if (S.phase === 'dead' || document.hidden) return;
       renderer.resetState(); unpackDefaults(); gl.bindVertexArray(S.vao);
@@ -45880,7 +45963,8 @@ void main(){ wxMain(); gl_FragColor${pm === 'P' ? '' : '.a'}*=wxVeil(); }
       gov: S.gov ? { stepK: +S.gov.k.toFixed(2), gpuMed: +S.gov.med.toFixed(2), budget: +KN('gpuBudget') } : null,   // (v52.79)
       reproj: S.vMain.hist ? { mode: Math.round(+KN('reproj')), image: [S.vMain.histW, S.vMain.histH], historyUsed: !!S.vMain.cbOk } : null,   // (v52.80) (v53.51) mode 2 = the quarter
       mirror: { drawn: S.drawnM, pass: S.vMirror.cld ? [S.vMirror.cldW, S.vMirror.cldH] : null, depthFmt: S.vMirror.fmt || null,
-        pano: S.pano ? { size: [S.pano.w, S.pano.h], marched: S.pano.n, read: !!(S.pano.full && +KN('mirrorPano')) } : null },   // (v53.53)
+        zOff: S.zOff || null, zfix: +KN('zfix') ? 1 : 0,           // (v53.67) the MSAA depth sample zProbe measured; the decode on
+        pano:S.pano ? { size: [S.pano.w, S.pano.h], marched: S.pano.n, read: !!(S.pano.full && +KN('mirrorPano')) } : null },   // (v53.53)
       gpu: S.tq ? { main: tqStat(S.tq.main), mirror: tqStat(S.tq.mirror), pano: tqStat(S.tq.pano) } : null,   // (v53.53) + the panorama
       storm: S.storm ? { live: !!(S.sims[3] && S.sims[3].live), spinLeft: S.storm.spinLeft, band: S.sims[3] && S.sims[3].band, zT: S.cxStorm && S.cxStorm.zT,
         boxKm: S.cxStorm && S.cxStorm.H / 1000, presence: +stormPresence().toFixed(2),
@@ -45921,7 +46005,7 @@ void main(){ wxMain(); gl_FragColor${pm === 'P' ? '' : '.a'}*=wxVeil(); }
       renderer.resetState();
       return out;
     }
-    const V = S && S.vMain; if (!V || !V.cld) return null;
+    const V = S && (what === 'mirror' ? S.vMirror : S.vMain); if (!V || !V.cld) return null;   // (v53.67) 'mirror': the water's
     const w = V.cldW, h = V.cldH, buf = new Float32Array(w * h * 4);
     gl.bindFramebuffer(gl.FRAMEBUFFER, V.cld.fbo); gl.readPixels(0, 0, w, h, gl.RGBA, gl.FLOAT, buf); renderer.resetState();
     const rows = [], f = v => Number.isNaN(v) ? 'NaN' : +v.toFixed(4);
