@@ -266,6 +266,10 @@ The prologue changes that. It shows the player the city, the hack, the caverns a
 
 ## The script
 
+### THE INTRO (Ashman, 2026-10-13) - before the first scene
+
+*Verbatim ★: "FractalGaming.png in the LSS directory / That's the fractal reality/fractal gaming logo, put that at the start of the campaign, and under the logo, fade in the words... "Presents..." / fade to the next screen... / LSS_title.png will be next, draw syphon flying by from off the left to off the right.. and then fade to the campaign can start". In the game since v54.00: the logo fades up out of black, "Presents..." fades in under it, black; the title fades up and the Syphon flies across it under the words, left to right; black; the hangar talk. No voice. Since v54.04, Ashman's second take ★: "instead, make it hover up from the bottom, spinning backwards to frontwards while it rises to the middle of the screen, then it shoots off forward toward the camera" - it rises from under the screen, spinning round from its tail to its nose, hovers under the words, then shoots over the camera as the screen goes black. (v54.09, ★ "make syphon rotate only 180 degrees when he rises... from off screen facing away, to middle screen facing the cam": one half-turn on the way up.) (v54.10, ★ "put captain frostfang in syphon for that rising syphon intro": he is seated in its cockpit.)*
+
 ### PROLOGUE: THE HANGAR TALK (Ashman's script, 2026-10-12) - the campaign's first scene
 
 *Ashman's script, verbatim ★ ("we are going to make a new campaign scene with the 3 characters you can choose from, ashman, azure, and frostfang / this scene will be the new first scene"). In the game since v53.94: the three stand on the hangar's lit platform with their ships parked behind them, and the camera cuts between hangar.png and Ashman's three other angles of the same hangar.*

@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.99";
+const LSS_BUILD = "54.12";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -51634,6 +51634,100 @@ function _lssIdleBreath(body, t, phase, pid, lookYaw) {
   _lssIdleSet(B.lul, Q.Y, fr);
   _lssIdleSet(B.rul, Q.Y, -fr);
 }
+
+const _LSS_JAW = {
+  ashman:    { hinge: [0.055, 0.0], mouth: 0.035, blend: 0.02, low: -0.1, lowBlend: 0.04, front: 0.03, fBlend: 0.03, w: [0.05, 0.35], max: 0.14 },
+  azure:     { hinge: [0.055, 0.0], mouth: 0.035, blend: 0.02, low: -0.09, lowBlend: 0.03, front: 0.03, fBlend: 0.03, w: [0.05, 0.35], max: 0.14 },
+  frostfang: { hinge: [0.09, 0.05], mouth: 0.075, blend: 0.02, low: 0.005, lowBlend: 0.03, front: 0.13, fBlend: 0.05, w: [0.05, 0.35], max: 0.14 },
+  summoners: { hinge: [0.045, 0.0], mouth: 0.035, blend: 0.02, low: -0.03, lowBlend: 0.03, front: 0.03, fBlend: 0.03, w: [0.05, 0.35], max: 0.14 },
+};
+const _JAW_U = new WeakMap(), _JAW_M = new THREE.Matrix4();
+const _LSS_JAW_GLSL = [
+  'uniform float uJaw; uniform float uJawI; uniform float uJawN; uniform vec3 uJawH; uniform vec3 uJawU; uniform vec3 uJawF; uniform vec3 uJawX;',
+  'uniform vec3 uJawO; uniform vec4 uJawR; uniform vec4 uJawL;',
+  'vec3 lssJaw( vec3 p ) {',
+  '  if ( uJaw == 0.0 ) return p;',
+  '  vec3 d = p - uJawH;',
+  '  float u = dot( d, uJawU );',
+  '  float m = ( 1.0 - smoothstep( uJawR.x - uJawR.y, uJawR.x, u ) ) * smoothstep( uJawL.x - uJawL.y, uJawL.x, u )',
+  '          * smoothstep( uJawR.z, uJawR.z + uJawR.w, dot( d, uJawF ) );',
+  '  #ifdef USE_SKINNING',
+  '    float w = dot( vec4( lessThan( abs( skinIndex - vec4( uJawI ) ), vec4( 0.5 ) ) ), skinWeight )',
+  '            + dot( vec4( lessThan( abs( skinIndex - vec4( uJawN ) ), vec4( 0.5 ) ) ), skinWeight );',
+  '    m *= smoothstep( uJawL.z, uJawL.w, w );',
+  '  #endif',
+  '  if ( m <= 0.0 ) return p;',
+  '  float a = uJaw * m, c = cos( a ), s = sin( a );',
+  '  vec3 q = p - uJawO;',
+  '  q = q * c + cross( uJawX, q ) * s + uJawX * dot( uJawX, q ) * ( 1.0 - c );',   // Rodrigues: + turns U toward F, F toward -U
+  '  return uJawO + q;',
+  '}',
+].join('\n');
+function _lssJawOBC(shader) {
+  const J = _JAW_U.get(this);
+  if (!J) return;
+  Object.assign(shader.uniforms, J);
+  shader.vertexShader = shader.vertexShader
+    .replace('#include <common>', '#include <common>\n' + _LSS_JAW_GLSL)
+    .replace('#include <begin_vertex>', '#include <begin_vertex>\n\ttransformed = lssJaw( transformed );');
+}
+function _lssJawRig(body, id) {
+  if (!body || !_LSS_JAW[id]) return null;
+  let mesh = null;
+  body.traverse((o) => { if (!mesh && o.isSkinnedMesh && o.skeleton) mesh = o; });
+  if (!mesh) return null;
+  const sk = mesh.skeleton, names = sk.bones.map((b) => b.name), at = (re) => names.findIndex((n) => re.test(n));
+  const iH = at(/Head$/), iT = at(/HeadTop_End$/), iF = at(/headfront$/i), iN = at(/Neck$/);
+  if (iH < 0 || iT < 0 || !sk.boneInverses[iH] || !sk.boneInverses[iT]) return null;
+  const bp = (i) => new THREE.Vector3().setFromMatrixPosition(_JAW_M.copy(sk.boneInverses[i]).invert()).applyMatrix4(mesh.bindMatrixInverse);
+  const H = bp(iH), U = bp(iT).sub(H).normalize();
+  let F = (iF >= 0 && sk.boneInverses[iF]) ? bp(iF).sub(H) : new THREE.Vector3(0, 0, 1);
+  F.addScaledVector(U, -F.dot(U));
+  if (F.lengthSq() < 1e-10) F.set(0, 0, 1).addScaledVector(U, -U.z);
+  F.normalize();
+  const X = new THREE.Vector3().crossVectors(U, F).normalize();
+  const u = { uJaw: { value: 0 }, uJawI: { value: iH }, uJawN: { value: (iN >= 0) ? iN : iH }, uJawH: { value: H }, uJawU: { value: U },
+              uJawF: { value: F }, uJawX: { value: X }, uJawO: { value: new THREE.Vector3() }, uJawR: { value: new THREE.Vector4() },
+              uJawL: { value: new THREE.Vector4() } };
+  const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+  for (const m of mats) {
+    if (!m || _JAW_U.has(m)) continue;
+    _JAW_U.set(m, u);
+    const prev = m.onBeforeCompile;
+    if (prev && prev !== THREE.Material.prototype.onBeforeCompile && prev !== _lssJawOBC) {
+      const pk = String(m.customProgramCacheKey());
+      m.onBeforeCompile = function (s, r) { prev.call(this, s, r); _lssJawOBC.call(this, s, r); };
+      m.customProgramCacheKey = () => pk + '|lssJaw';
+    } else m.onBeforeCompile = _lssJawOBC;
+    m.needsUpdate = true;
+  }
+  const rig = { id, mesh, u, a: 0,
+    tune() {   // the knobs, live (cheap: a few vector ops)
+      const K = (window.__jaw && window.__jaw.knobs && window.__jaw.knobs[id]) || _LSS_JAW[id];
+      const h = K.hinge || [0, 0];
+      u.uJawO.value.copy(H).addScaledVector(U, +h[0] || 0).addScaledVector(F, +h[1] || 0);
+      u.uJawR.value.set(+K.mouth || 0, Math.max(1e-4, +K.blend || 0), +K.front || 0, Math.max(1e-4, +K.fBlend || 0));
+      const w = K.w || [0.05, 0.35];
+      u.uJawL.value.set((K.low != null) ? +K.low : -1, Math.max(1e-4, +K.lowBlend || 0), +w[0] || 0, Math.max((+w[0] || 0) + 1e-4, +w[1] || 0));
+      return K;
+    },
+    set(level) {   // 0..1 -> the opening
+      const K = rig.tune(), J = window.__jaw || {};
+      u.uJaw.value = (J.on === false) ? 0 : Math.max(0, +level || 0) * (+K.max || 0) * ((J.gain != null) ? +J.gain : 1);
+    },
+  };
+  rig.tune();
+  return rig;
+}
+function _lssJawDrive(rig, talking, dt) {
+  if (!rig) return;
+  let lv = 0;
+  if (talking) { try { lv = (window.CampMedia && window.CampMedia.voiceLevel) ? +window.CampMedia.voiceLevel() || 0 : 0; } catch (_) {} }
+  const k = 1 - Math.exp(-Math.max(0.001, dt || 0.016) / ((lv > rig.a) ? 0.035 : 0.08));
+  rig.a += (lv - rig.a) * k;
+  rig.set(rig.a);
+}
+try { window.__jaw = { knobs: _LSS_JAW, gain: 1, on: true, rig: _lssJawRig }; } catch (_) {}
 function _lssPilotsBgTex() {
   const c = document.createElement('canvas'); c.width = 4; c.height = 256;
   const x = c.getContext('2d'), g = x.createLinearGradient(0, 0, 0, 256);
@@ -107387,6 +107481,7 @@ try { window.__stormDuck = STORM_DUCK; } catch (_) {}
         src.onended = function () { if (_voiceSrc === src) _voiceSrc = null; };
         _voiceSrc = src;
         src.start(0);
+        try { _voiceNow = { src, ctx, t0: ctx.currentTime, env: _voiceEnv(buf) }; } catch (_) { _voiceNow = null; }   // (v54.04) the chins
         try { _lssStormDuck(audio, buf.duration || 0); } catch (_) {}   // (v52.67) the storm goes quiet under the line
         return buf.duration || 0;
       }
@@ -107398,8 +107493,38 @@ try { window.__stormDuck = STORM_DUCK; } catch (_) {}
     return 0;
   }
 
+  const _voiceEnvs = new WeakMap();
+  let _voiceNow = null;
+  function _voiceEnv(buf) {
+    let e = _voiceEnvs.get(buf);
+    if (e) return e;
+    const ch = buf.getChannelData(0), hop = Math.max(1, Math.round(buf.sampleRate / 100)), n = Math.ceil(ch.length / hop);
+    e = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const a = i * hop, b = Math.min(ch.length, a + 2 * hop);
+      let s = 0;
+      for (let j = a; j < b; j++) s += ch[j] * ch[j];
+      e[i] = Math.sqrt(s / Math.max(1, b - a));
+    }
+    const sorted = Array.from(e).sort((x, y) => x - y), ref = Math.max(1e-4, sorted[Math.floor(0.9 * (sorted.length - 1))] || 0);
+    for (let i = 0; i < n; i++) { const v = e[i] / ref; e[i] = (v <= 0.15) ? 0 : Math.min(1, (v - 0.15) / 0.85); }
+    _voiceEnvs.set(buf, e);
+    return e;
+  }
+  function _campVoiceLevel() {
+    const V = _voiceNow;
+    if (V && _voiceSrc && V.src === _voiceSrc) {
+      const lat = (V.ctx.outputLatency || V.ctx.baseLatency || 0);
+      const i = Math.floor((V.ctx.currentTime - V.t0 - lat) * 100);
+      return (i >= 0 && i < V.env.length) ? V.env[i] : 0;
+    }
+    if (_voiceEl && !_voiceEl.paused) { const t = _voiceEl.currentTime || 0; return Math.max(0, Math.sin(t * 29) * Math.sin(t * 11.3)); }
+    return 0;
+  }
+
   try {
-    window.CampMedia = { base: _campMediaBase, playVideo: _campPlayVideo, stopVideo: _campStopVideo, playVoice: _campPlayVoice, playVoiceUrl: _campPlayVoiceUrl, stopVoice: _campStopVoice, videoActive: function () { return _campVidPlaying; }, manifest: _campManifest, voiceUrl: _campVoiceUrl };
+    window.CampMedia = { base: _campMediaBase, playVideo: _campPlayVideo, stopVideo: _campStopVideo, playVoice: _campPlayVoice, playVoiceUrl: _campPlayVoiceUrl, stopVoice: _campStopVoice, videoActive: function () { return _campVidPlaying; }, manifest: _campManifest, voiceUrl: _campVoiceUrl,
+                         voiceLevel: _campVoiceLevel };   // (v54.04)
   } catch (_) {}
 })();
 
@@ -108170,10 +108295,58 @@ const CAMP_SEQS = {
       buildMax: 45,       // seconds the scene waits for its build behind the black veil, then goes on to the city without it
       vrD: 30,            // in a headset the picture hangs this far down the camera as a screen (_tkVr)
     },
+    intro: {
+      on: true,           // false: a brand-new campaign opens on the hangar talk again, as v53.94-99 did
+      logo: 'campaign_media/fractalgaming_logo.webp',    // build: the owner's FractalGaming.png (its WebP twin)
+      title: 'campaign_media/lss_title.webp',            // build: the owner's LSS_title.png (ditto)
+      fov: 36,            // the stage camera's vertical lens (deg)
+      black0: 0.5,        // black before the logo
+      logoIn: 1.6,        // the logo fading up
+      presGap: 0.5,       // ...then this long before "Presents..." starts fading in
+      presIn: 1.3,
+      logoHold: 2.2,      // both up
+      logoOut: 1.0,       // to black
+      logoH: 0.7,         // the logo's square, as a share of the screen's height (never wider than 0.86 of its width)
+      logoY: 0.06,        // its centre over the screen's middle (screen heights)
+      grow: 0.03,         // the whole card grows this much over its length (a slow push)
+      text: 'Presents...',
+      textEm: 0.056,      // its letters' em, as a share of the screen's height
+      textY: 0.53,        // its centre under the logo's centre (logo sizes; the art ends at 0.42)
+      textFont: 'Orbitron', textWeight: 500, textTrack: 0.32,    // build: the face, its weight, the letter spacing (em)
+      textCol: ['#7fe0ff', '#bf9bff'],
+      gap: 0.35,          // black between the two cards
+      titleIn: 1.2,
+      zoom: [1.0, 1.05],  // the picture's slow push-in over the card (x the cover crop)
+      riseAt: 0.3,        // seconds into the card (from the end of `gap`) it starts up, from under the bottom edge
+      rise: 2.8,          // ...the rise, slowing to a stop
+      spin: 0.5,
+      spinIn: 0.15,
+      hover: 0.7,         // nose-on in the middle, hovering, before it goes
+      spool: 0.3,         // the engines flaring before it moves
+      shoot: 1.0,         // seconds from the hover to the lens (accelerating)
+      blackAt: 0.6,       // share of that run at which the screen starts going black...
+      titleOut: 0.35,     // ...over this long, and on to the hangar
+      d: 34,              // its distance from the lens (m): ~27 % of the screen's width nose-on
+      y: -0.12,           // its hover height (half-screens: 0 the middle, - lower; the title's words sit above, ~+0.15..+0.33)
+      pass: [0, 2.4],     // where it goes past the lens: right, up (m) - its belly clears the lens (1.4 clipped through it)
+      bob: 0.22,          // its hover bob (m)
+      engRise: 0.35,      // its engines on the way up and in the hover (0..1); full burn when it shoots
+      k: 0.0836,          // metres per game unit (the hangar's: the Syphon is its game size, 14.3 m long, 10.7 m wide)
+      pilot: true,        // build: (v54.10) Captain Frostfang seated in it (false = it flies empty)
+      seatMax: 6,         // build: seconds the title waits for his seat file, then flies without him
+      hemi: [0x7f8fe8, 0x140f26, 1.2], key: [0xe2ecff, 3.0, 4, 12, 6], rimA: [0xb05cff, 2.2, -8, 3, -10], rimB: [0x45d0ff, 2.4, 9, 2, -8],
+      env: 1.0,
+      sfxRise: '', sfxGo: 'afterburner', sfxPass: 'dash',
+      buildMax: 8,        // seconds the logo waits for its picture (then on to the hangar without the intro)
+      titleMax: 12,       // seconds the title waits for its picture and hull after the logo card (then on without it)
+      vrD: 140,           // in a headset the title picture hangs this far down the camera as a screen (behind the Syphon)
+    },
+    drive: { on: true, c: 240, ref: 7, roll: 1, gain: 1.2, rush: 0.6 },
   };
   const O = { on: false, tok: 0, phase: '', st: null, key: null, focus: 3, viewHi: 'tp', t: 0, last: 0,
               gameshow: false, gsP: null, gs: null, _gsSkip: null,   // (v52.23) the gameshow stage
               talk: false, tkP: null, tk: null, _tkSkip: null, tkLast: 0, tkErr: 0,   // (v53.94) the hangar talk stage
+              intro: false, itP: null, it: null, _itSkip: null, itErr: 0,             // (v54.00) the logo and title before it
               cvP: null, cv: null, _cvSkip: null, cvLast: 0,          // (v52.31) the caverns stage
               orbOn: false, orbA: 0, headOn: false, headA: 0, spotOn: [], spotA: [], sweepT: -1, fuseT: -1,
               fuseFrom: null, camP: null, camL: null, fractal: null, buildP: null, failT: 0,
@@ -108608,9 +108781,9 @@ const CAMP_SEQS = {
     let pid = 'ashman';
     try { pid = _lssPilotId(); } catch (_) {}
     const d = _LSS_SEATS[pid];
-    if (pid === 'ashman' || !d) return { url: cfg.gs.pilot.url, art: (_LSS_SEATS.ashman && _LSS_SEATS.ashman.fullArt) || _LSS_SEAT_ART, clip: 'Stand_Talking_Angry' };
-    if (d.full) return { url: d.full, art: d.fullArt || d.art || _LSS_SEAT_ART, clip: d.stand || 'Stand_Talking_Angry' };
-    return { url: d.url, art: d.art || _LSS_SEAT_ART, clip: d.stand || 'Stand_Talking_Angry' };
+    if (pid === 'ashman' || !d) return { pid: 'ashman', url: cfg.gs.pilot.url, art: (_LSS_SEATS.ashman && _LSS_SEATS.ashman.fullArt) || _LSS_SEAT_ART, clip: 'Stand_Talking_Angry' };
+    if (d.full) return { pid, url: d.full, art: d.fullArt || d.art || _LSS_SEAT_ART, clip: d.stand || 'Stand_Talking_Angry' };
+    return { pid, url: d.url, art: d.art || _LSS_SEAT_ART, clip: d.stand || 'Stand_Talking_Angry' };
   }
   function _gsLoadChar(url, art) {
     if (_gsG[url]) return _gsG[url];
@@ -108663,7 +108836,16 @@ const CAMP_SEQS = {
     for (const who of ['pilot', 'summoners']) {
       const g = (who === 'pilot') ? gp : gm; if (!g) continue;
       const body = (typeof _wildRigClone === 'function') ? _wildRigClone(g.scene) : g.scene.clone(true);
-      body.traverse((o) => { if (o.isMesh) { o.frustumCulled = false; o.castShadow = false; o.receiveShadow = false; } });
+      const mats = [];
+      body.traverse((o) => {
+        if (!o.isMesh) return;
+        o.frustumCulled = false; o.castShadow = false; o.receiveShadow = false;
+        if (!o.isSkinnedMesh) return;
+        const arr = Array.isArray(o.material) ? o.material : [o.material];
+        const cl = arr.map((m) => { const c = m.clone(); mats.push(c); return c; });
+        o.material = Array.isArray(o.material) ? cl : cl[0];
+      });
+      const jaw = _lssJawRig(body, (who === 'pilot') ? ps.pid : 'summoners');
       const want = (who === 'pilot') ? ps.clip : 'Stand_Talking_Angry';   // (v53.64) the chosen pilot's own talking clip
       const clip = g.animations.find((c) => c.name === want) || g.animations.find((c) => c.name === 'Stand_Talking_Angry') || g.animations.find((c) => /stand|talk/i.test(c.name)) || g.animations[0];
       const mixer = new THREE.AnimationMixer(body);
@@ -108683,7 +108865,7 @@ const CAMP_SEQS = {
       blob.scale.set(0.95 / s, 0.62 / s, 1); blob.position.y = 0.004 / s;
       let head = _gsHead(body);
       if (head && !clip.tracks.some((tr) => tr.name.split('.')[0] === head.name && /quaternion$/.test(tr.name))) head = null;
-      people.push({ who, body, pivot, mixer, talk, rest, blob, head, w: G.listen, look: 0 });
+      people.push({ who, body, pivot, mixer, talk, rest, blob, head, w: G.listen, look: 0, jaw, mats });
     }
     if (!people.length) throw new Error('no characters');
     const gs = { scene, camera, tex, iw, ih, people, hemi, key, rimA, rimB, _fitKey: '', fit: null, urls: [ps.url, G.summoners.url] };
@@ -108763,6 +108945,7 @@ const CAMP_SEQS = {
       }
       p.look += (lw - p.look) * (dt ? ke : 1);
       if (p.head && Math.abs(p.look) > 1e-4) p.head.rotateY(p.look);
+      try { _lssJawDrive(p.jaw, who === p.who, dt); } catch (_) {}   // (v54.04) the chin, with the voice
     }
   }
   function _gsDispose(gs) {
@@ -108772,6 +108955,7 @@ const CAMP_SEQS = {
       try { p.mixer.stopAllAction(); p.mixer.uncacheRoot(p.body); } catch (_) {}
       try { p.body.traverse((o) => { if (o.isSkinnedMesh && o.skeleton && o.skeleton.dispose) o.skeleton.dispose(); }); } catch (_) {}
       try { p.blob.geometry.dispose(); p.blob.material.dispose(); } catch (_) {}
+      try { for (const m of (p.mats || [])) m.dispose(); } catch (_) {}   // (v54.04) its own copies (the textures are the GLB's, below)
     }
     try { gs.scene.background = null; gs.tex.dispose(); } catch (_) {}
     try { if (gs._vrPlane) { gs._vrPlane.geometry.dispose(); gs._vrPlane.material.map.dispose(); gs._vrPlane.material.dispose(); gs._vrPlane = null; } } catch (_) {}   // (v53.12)
@@ -108907,7 +109091,8 @@ const CAMP_SEQS = {
     const root = new THREE.Group(); root.name = 'lss_talk_' + id; root.add(wrap); root.add(fx);
     const s = P.h / H; root.scale.setScalar(s);
     const blob = _gsBlob(); root.add(blob); blob.scale.set(0.95 / s, 0.62 / s, 1); blob.position.y = 0.004 / s;
-    return { id, pid: id, char: body, body: wrap, root, fx, mats, mixer, talk, rest, blob, H, s, w: 0, look: 0, yaw: null,
+    const jaw = _lssJawRig(body, id);   // (v54.04) his chin, on the copies above (the voice opens it: _lssJawDrive)
+    return { id, pid: id, char: body, body: wrap, root, fx, mats, mixer, talk, rest, blob, H, s, w: 0, look: 0, yaw: null, jaw,
              phase: 'stand', t: 0, ph: i * 0.37, seat: null, beamAt: 0, beamed: false, seated: false, url: null };
   }
   function _tkSeat(id, S, g) {
@@ -109203,6 +109388,7 @@ const CAMP_SEQS = {
       p.look += (lookYaw - p.look) * (dt ? 1 - Math.exp(-dt * 3.5) : 1);
       p.root.updateMatrixWorld(true);
       try { _lssIdleBreath(p.char, tk.t, p.ph, p.pid, p.look); } catch (_) {}
+      try { _lssJawDrive(p.jaw, who === p.id && p.phase === 'stand', dt); } catch (_) {}   // (v54.04) his chin, with his voice
       if (p.phase === 'out') {
         p.t += dt;
         if (p.t >= _PSEAT_OUT) { p.phase = 'gone'; p.root.visible = false; continue; }
@@ -109221,6 +109407,7 @@ const CAMP_SEQS = {
       S.engA += (S.engW - S.engA) * (dt ? 1 - Math.exp(-dt * 5) : 1);
       if (S.eng) { S.eng.visible = S.engA > 0.01; if (S.eng.visible) { try { _lssPreviewEnginesTick(S.eng, tk.camera, S.engA); } catch (_) {} } }
       const k = +T.k || 0.0836, cw = _tkV4.copy(S.center).multiplyScalar(k).applyQuaternion(S.pivot.quaternion).add(S.pivot.position);
+      if (S.fl) { if (!S.db) S.db = _dbNew(); if (S.db) _dbTick(S.db, cw, tk.camera, S.engA, dt); }
       const hov = ((T.ships[S.key] && T.ships[S.key].at) || [0, 2, 0])[1] || 0;
       const up = Math.max(0, cw.y - S.halfH * k - hov);
       S.blob.position.set(cw.x, 0.012, cw.z);
@@ -109258,6 +109445,7 @@ const CAMP_SEQS = {
       }
     }
     for (const S of tk.shipList) {
+      if (S.db) { _dbRelease(S.db, 0.9); S.db = null; }   // (v54.12) its engine voice trails off under the narrator
       try { if (S.eng) S.eng.traverse((o) => { free(o); if (o.geometry && !(o.userData && o.userData._sharedGLBGeo)) o.geometry.dispose(); }); } catch (_) {}
       try { _ssPrevRelease(S.root); } catch (_) {}   // its texture handles and materials; never the shared geometry
       try { S.blob.geometry.dispose(); S.blob.material.dispose(); } catch (_) {}
@@ -109296,6 +109484,8 @@ const CAMP_SEQS = {
     try { if (window.__campPrologue) window.__campPrologue.skipUi(true); } catch (_) {}
     let skipped = false;
     const skipP = new Promise((r) => { O._tkSkip = () => { skipped = true; r(); }; });
+    { const w0 = performance.now(); while (live() && !(tk.t > 0) && performance.now() - w0 < 2000) await wait(0.03); }
+    if (!live()) return;
     _veilHide(+T.fadeIn || 1.6);
     await Promise.race([wait(+T.lead || 1.8), skipP]);
     const prevOnLine = (D && D.onLine) ? D.onLine((line) => { if (line && line.id && O.tk === tk) tk.cues.add(line.id); }) : null;
@@ -109342,6 +109532,448 @@ const CAMP_SEQS = {
     if (city) { setTimeout(() => { if (!O.on) _veilHide(0); }, 300); return; }
     try { start({ gameshow: true }); }
     catch (e) { console.warn('[talk] opening:', e && e.message); try { _veilHide(0.4); _campPickerSetup('camp_approach'); enterShipSelect(); } catch (_) {} }
+  }
+
+  const _dbV = new THREE.Vector3();
+  function _dbNew() {
+    if (cfg.drive.on === false) return null;
+    let ctx = null;
+    try { if (audio && audio.ctx && audio.initialized) ctx = audio.ctx; } catch (_) {}
+    if (!ctx) return null;
+    let hum = null, nz = null;
+    try { hum = _shipPhiLoop(ctx); nz = _flybyNoise(ctx); } catch (_) {}
+    if (!hum || !nz) return null;   // the cascade bakes on its first call: a voice next frame
+    try {
+      const t = ctx.currentTime;
+      const out = ctx.createGain(); out.gain.value = 0.0001;
+      const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 1500; lp.Q.value = 0.5;
+      const hg = ctx.createGain(); hg.gain.value = 1;
+      const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 900; bp.Q.value = 0.8;
+      const ng = ctx.createGain(); ng.gain.value = 0;
+      const pan = ctx.createStereoPanner ? ctx.createStereoPanner() : null;
+      const h = ctx.createBufferSource(); h.buffer = hum; h.loop = true;
+      const n = ctx.createBufferSource(); n.buffer = nz; n.loop = true;
+      h.connect(hg); hg.connect(lp);
+      n.connect(bp); bp.connect(ng); ng.connect(lp);
+      lp.connect(out);
+      const bus = audio.sfxBus || audio.masterGain || ctx.destination;
+      if (pan) { out.connect(pan); pan.connect(bus); } else out.connect(bus);
+      h.start(t, Math.random() * hum.duration * 0.9);
+      n.start(t, Math.random() * nz.duration * 0.9);
+      return { ctx, h, n, hg, ng, bp, lp, out, pan, d: -1, cl: 0, rate: 1, recede: 1, dead: false };
+    } catch (_) { return null; }
+  }
+  function _dbTick(v, P, cam, eng, dt) {
+    if (!v || v.dead) return;
+    const K = cfg.drive, t = v.ctx.currentTime;
+    const rel = _dbV.copy(P).applyMatrix4(cam.matrixWorldInverse);   // the camera's space: x right, y up, -z ahead
+    const d = Math.max(0.5, rel.length());
+    if (v.d >= 0 && dt > 0.001) { const cl = (v.d - d) / dt; v.cl += (cl - v.cl) * Math.min(1, dt * 12); }   // m/s, + = nearing
+    v.d = d;
+    const c = Math.max(60, +K.c || 240);
+    v.rate = Math.max(0.55, Math.min(1.8, c / Math.max(1, c - v.cl)));
+    v.recede = Math.max(0.55, Math.min(1, c / (c + Math.abs(v.cl))));   // where its pitch goes once it has gone by
+    const ref = Math.max(0.5, +K.ref || 7), att = ref / (ref + (+K.roll || 1) * Math.max(0, d - ref));
+    const e = Math.max(0, Math.min(1, +eng || 0));
+    const gT = Math.max(0, Math.min(1.6, (+K.gain || 0) * e * att));
+    const nT = (+K.rush || 0) * Math.min(1, Math.abs(v.cl) / 40) * att * (0.4 + 0.6 * e);   // the air: fast and near
+    const pn = Math.max(-1, Math.min(1, 0.9 * rel.x / Math.max(1, Math.abs(rel.z) + 0.3 * Math.abs(rel.y))));
+    try {
+      v.h.playbackRate.setTargetAtTime(v.rate * (0.85 + 0.35 * e), t, 0.05);   // the engine winds up with its level (the flyby's spool)
+      v.n.playbackRate.setTargetAtTime(v.rate, t, 0.05);
+      v.lp.frequency.setTargetAtTime(600 + 9000 * att, t, 0.08);              // far = muffled
+      v.ng.gain.setTargetAtTime(nT, t, 0.04);
+      if (v.pan) v.pan.pan.setTargetAtTime(pn, t, 0.05);
+      v.out.gain.cancelScheduledValues(t);
+      v.out.gain.setTargetAtTime(gT, t, 0.05);
+      v.out.gain.setTargetAtTime(0, t + 0.35, 0.12);   // dead-man: no tick for 0.35 s and it fades itself
+    } catch (_) {}
+  }
+  function _dbRelease(v, sec) {
+    if (!v || v.dead) return;
+    v.dead = true;
+    const s = Math.max(0.05, +sec || 0.8);
+    try {
+      const t = v.ctx.currentTime;
+      v.out.gain.cancelScheduledValues(t);
+      v.out.gain.setTargetAtTime(0, t, s / 4);
+      if (v.cl > 3) { v.h.playbackRate.setTargetAtTime(v.recede, t, s / 3); v.n.playbackRate.setTargetAtTime(v.recede, t, s / 3); }
+      v.h.stop(t + s + 0.2); v.n.stop(t + s + 0.2);
+    } catch (_) {}
+    setTimeout(() => { try { v.out.disconnect(); if (v.pan) v.pan.disconnect(); } catch (_) {} }, (s + 0.5) * 1000);
+  }
+  function _dbWarm() { try { if (audio && audio.ctx && audio.initialized) _shipPhiLoop(audio.ctx); } catch (_) {} }
+
+  const _itA = new THREE.Vector3(), _itB = new THREE.Vector3();
+  const _itV1 = new THREE.Vector3(), _itV2 = new THREE.Vector3(), _itV3 = new THREE.Vector3(), _itV4 = new THREE.Vector3();
+  const _itM = new THREE.Matrix4(), _itQ = new THREE.Quaternion(), _itQ2 = new THREE.Quaternion(), _itE = new THREE.Euler(0, 0, 0, 'YXZ');
+  const _itS = (u) => { u = (u < 0) ? 0 : ((u > 1) ? 1 : u); return u * u * (3 - 2 * u); };   // smoothstep, 0..1
+  const _itRamp = (t, t0, len) => _itS((t - t0) / Math.max(0.001, len));
+  async function _itText() {
+    const I = cfg.intro, W = 2048, H = 256, fam = I.textFont || 'Orbitron', wt = +I.textWeight || 500;
+    const s = String(I.text == null ? 'Presents...' : I.text);
+    const font = (em) => wt + ' ' + em + 'px "' + fam + '", Rajdhani, sans-serif';
+    try { if (document.fonts && document.fonts.load) await Promise.race([document.fonts.load(font(120), s), wait(2.5)]); } catch (_) {}
+    const c = document.createElement('canvas'); c.width = W; c.height = H;
+    const x = c.getContext('2d'), chars = Array.from(s);
+    let em = 120, tr = 0, ws = [], total = 0;
+    const measure = () => {
+      x.font = font(em); tr = (+I.textTrack || 0) * em;
+      ws = chars.map((ch) => x.measureText(ch).width);
+      total = ws.reduce((a, b) => a + b, 0) + tr * Math.max(0, chars.length - 1);
+    };
+    measure();
+    if (total > W * 0.9) { em = Math.max(16, Math.floor(em * W * 0.9 / total)); measure(); }   // a long line shrinks to fit
+    const col = I.textCol || ['#7fe0ff', '#bf9bff'], x0 = (W - total) / 2;
+    const gr = x.createLinearGradient(x0, 0, x0 + total, 0);
+    gr.addColorStop(0, col[0]); gr.addColorStop(1, col[1] || col[0]);
+    x.textBaseline = 'middle'; x.textAlign = 'left'; x.fillStyle = gr;
+    const draw = () => { let px = x0; chars.forEach((ch, i) => { x.fillText(ch, px, H / 2); px += ws[i] + tr; }); };
+    x.shadowColor = 'rgba(110, 150, 255, 0.75)'; x.shadowBlur = em * 0.28; draw();   // the glow...
+    x.shadowBlur = 0; x.shadowColor = 'rgba(0, 0, 0, 0)'; draw();                     // ...and the letters crisp over it
+    return { canvas: c, asp: W / H, emK: em / H };
+  }
+  async function _itBuild() {
+    const I = cfg.intro;
+    const [logoTex, txt] = await Promise.all([_gsTex('./' + I.logo), _itText()]);
+    if (!logoTex) throw new Error('no ' + I.logo);
+    logoTex.colorSpace = THREE.SRGBColorSpace;
+    const scene = new THREE.Scene(), blackBg = new THREE.Color(0x000000);
+    scene.background = blackBg;
+    const camera = new THREE.PerspectiveCamera(+I.fov || 36, 16 / 9, 0.1, 4000);   // at the origin, looking down -z
+    const plane = (tex, ro) => {
+      const m = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0,
+        depthTest: false, depthWrite: false, toneMapped: false, fog: false }));
+      m.renderOrder = ro; m.frustumCulled = false; m.visible = false; scene.add(m);
+      return m;
+    };
+    const logo = plane(logoTex, 10);
+    const textTex = new THREE.CanvasTexture(txt.canvas); textTex.colorSpace = THREE.SRGBColorSpace;
+    const text = plane(textTex, 11);
+    const fader = new THREE.Mesh(new THREE.SphereGeometry(4, 16, 12), new THREE.MeshBasicMaterial({ color: 0x000000, side: THREE.BackSide,
+      transparent: true, opacity: 1, depthTest: false, depthWrite: false, toneMapped: false, fog: false }));
+    fader.renderOrder = 1e6; fader.frustumCulled = false; scene.add(fader);
+    const L = {};
+    L.hemi = new THREE.HemisphereLight(0xffffff, 0x000000, 1); scene.add(L.hemi);
+    const dl = () => { const l = new THREE.DirectionalLight(0xffffff, 1); scene.add(l); scene.add(l.target); return l; };
+    L.key = dl(); L.rimA = dl(); L.rimB = dl();
+    const it = { scene, camera, D: 10, logo, text, fader, blackBg, L, textAsp: txt.asp, textEmK: txt.emK, title: null, env: null, S: null,
+                 card: 'black', t0: performance.now(), t: 0, black: 1, growK: 0, zoom: 1, freeze: null, skipF: null, sIn: false, sGo: false, sPass: false,
+                 vrOn: false, _vrPlane: null, _p: new THREE.Vector3(), titleP: null, seat: null, dom: null, domL: 0, domHeld: false,
+                 db: null, _lastPose: 0, _dead: false };
+    it.fit = (w, h) => _itFit(it, w, h);
+    it.vr = (on) => _itVr(it, on);
+    it.titleP = _itBuildTitle(it).catch((e) => { console.warn('[intro] title failed:', e && e.message, e); return false; });
+    _itPose(it);
+    return it;
+  }
+  async function _itBuildTitle(it) {
+    const I = cfg.intro;
+    try { if (shipModelCache.ready && typeof shipModelCache.ready.then === 'function') await shipModelCache.ready; } catch (_) {}
+    const tex = await _gsTex('./' + I.title);
+    if (it._dead) { if (tex) tex.dispose(); return false; }
+    if (!tex) throw new Error('no ' + I.title);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    it.title = { tex, iw: (tex.image && tex.image.width) || 1672, ih: (tex.image && tex.image.height) || 941, vrTex: null };
+    it.env = _tkEnv(tex);
+    if (it.env) it.scene.environment = it.env.texture;
+    it.scene.environmentIntensity = +I.env || 0;
+    const S = _tkHull('SYPHON');
+    if (!S) { console.warn('[intro] no SYPHON hull - the title alone'); return true; }
+    S.pivot = new THREE.Group(); S.pivot.name = 'lss_intro_SYPHON';
+    S.pivot.scale.setScalar(+I.k || 0.0836); S.pivot.add(S.root); it.scene.add(S.pivot);
+    it.S = S;
+    let sg = null;
+    try { sg = await Promise.race([_lssSeatLoad('frostfang'), wait(+I.seatMax || 6).then(() => null)]); } catch (_) {}
+    if (it._dead) { _itFreeTitle(it); return false; }
+    const seat = (I.pilot !== false && sg) ? _tkSeat('frostfang', S, sg) : null;
+    if (seat) { seat.phase = 'seated'; it.scene.add(seat.root); it.seat = seat; }
+    else if (I.pilot !== false) console.warn('[intro] no seat for Frostfang - the Syphon flies empty');
+    S.pivot.visible = true; if (S.eng) S.eng.visible = true;
+    { const T = _itTimes(); _itShip(it, T.r1 + 0.2, T); }   // hovering, nose-on
+    if (seat) { _tkSeatPlace(seat); _lssPickerSeatFx(seat); seat.mixer.update(0); }
+    let job = null;
+    try {
+      const pRT = renderer.getRenderTarget();
+      renderer.setRenderTarget(null);   // the stage draws to the canvas
+      job = renderer.compileAsync ? renderer.compileAsync(it.scene, it.camera) : null;
+      renderer.setRenderTarget(pRT);
+    } catch (_) {}
+    S.pivot.visible = false;
+    if (seat) seat.root.visible = false;
+    try { if (job) await job; } catch (_) {}
+    if (it._dead) { _itFreeTitle(it); return false; }
+    return true;
+  }
+  function _itLayout(it) {
+    const I = cfg.intro, cam = it.camera, D = it.D;
+    const vh = 2 * D * Math.tan(cam.fov * Math.PI / 360), vw = vh * cam.aspect;
+    const g = 1 + (+I.grow || 0) * it.growK;
+    const S0 = (+I.logoH || 0.7) * vh, sk = Math.min(1, 0.86 * vw / S0), S = S0 * sk * g;
+    const cy = (+I.logoY || 0) * vh;
+    it.logo.scale.set(S, S, 1); it.logo.position.set(0, cy, -D);
+    const th = (+I.textEm || 0.056) * vh * sk * g / Math.max(0.01, it.textEmK);   // the canvas's height for that em
+    it.text.scale.set(th * it.textAsp, th, 1); it.text.position.set(0, cy - S * (+I.textY || 0.53), -D);
+  }
+  function _itFit(it, w, h) {
+    const cam = it.camera, fov = +cfg.intro.fov || 36;
+    if (cam.aspect !== w / h || cam.fov !== fov) { cam.aspect = w / h; cam.fov = fov; cam.updateProjectionMatrix(); }
+    _itLayout(it);
+    const P = it.title; if (!P) return;
+    const iw = P.iw, ih = P.ih, s = Math.max(w / iw, h / ih), z = Math.max(1, it.zoom || 1);
+    const vw = w / s / z, vh = h / s / z;
+    P.tex.repeat.set(vw / iw, vh / ih);
+    P.tex.offset.set((iw - vw) / 2 / iw, 1 - ((ih - vh) / 2 + vh) / ih);   // flipY: v = 0 is the picture's bottom
+  }
+  function _itVr(it, on) {
+    _itLayout(it);
+    const P = it.title;
+    if (on && P && it.card === 'title') {
+      if (!it._vrPlane) {
+        const m = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ toneMapped: false, fog: false, depthWrite: false }));
+        m.renderOrder = -1; m.frustumCulled = false; it._vrPlane = m; it.scene.add(m);
+      }
+      if (!P.vrTex) { P.vrTex = P.tex.clone(); P.vrTex.repeat.set(1, 1); P.vrTex.offset.set(0, 0); P.vrTex.needsUpdate = true; }
+      const m = it._vrPlane, D = +cfg.intro.vrD || 140;
+      if (m.material.map !== P.vrTex) { m.material.map = P.vrTex; m.material.needsUpdate = true; }
+      const hh = 2 * D * Math.tan(it.camera.fov * Math.PI / 360);
+      m.scale.set(hh * P.iw / P.ih, hh, 1); m.position.set(0, 0, -D); m.visible = true;
+      it.vrOn = true;
+    } else if (it.vrOn) {
+      it.vrOn = false;
+      if (it._vrPlane) it._vrPlane.visible = false;
+    }
+  }
+  function _itTimes() {
+    const I = cfg.intro, g = +I.gap || 0, r0 = g + (+I.riseAt || 0), r1 = r0 + Math.max(0.2, +I.rise || 2.8);
+    const h1 = r1 + Math.max(0, +I.hover || 0), m0 = h1 + Math.max(0, +I.spool || 0), sh = Math.max(0.2, +I.shoot || 1);
+    const tB = m0 + sh * Math.sqrt(Math.min(1, Math.max(0, (I.blackAt != null) ? +I.blackAt : 0.6)));
+    return { g, r0, r1, h1, m0, sh, tB, end: tB + Math.max(0.05, +I.titleOut || 0.35) };
+  }
+  const _itOut3 = (x) => { x = (x < 0) ? 0 : ((x > 1) ? 1 : x); return 1 - (1 - x) * (1 - x) * (1 - x); };   // ease-out, cubic
+  function _itShip(it, t, T) {
+    const I = cfg.intro, S = it.S, k = +I.k || 0.0836, th = Math.tan(it.camera.fov * Math.PI / 360), d = +I.d || 34;
+    const halfL = 0.65 * S.size.x * k, halfH = 0.5 * S.size.y * k;
+    const yH = (+I.y || 0) * d * th, y0 = -(th * (d + halfL) + halfH + 0.5);
+    const x = (t - T.r0) / (T.r1 - T.r0), e = _itOut3(x);
+    const th0 = Math.min(t, T.m0);   // the hover's bob and sway hold still once the run begins (no jump at its start)
+    const bobW = _itS((th0 - T.r1 + 0.6) / 0.8);
+    const bob = (+I.bob || 0) * bobW * Math.sin((th0 - T.r0) * 6.2832 / 2.6);
+    const si = Math.min(0.9, Math.max(0, +I.spinIn || 0)), sx = Math.min(1, Math.max(0, (x - si) / (1 - si)));
+    const yaw = Math.PI / 2 - (+I.spin || 0) * 6.2832 * (1 - _itS(sx));
+    _itQ.setFromEuler(_itE.set(0.035 * bobW * Math.sin(th0 * 1.9), yaw, 0.02 * bobW * Math.sin(th0 * 2.7 + 1), 'YXZ'));
+    const P = it._p.set(0, y0 + (yH - y0) * e + bob, -d);
+    let eng = Math.max(0, Math.min(1, +I.engRise || 0));
+    if (t >= T.h1) eng += (1 - eng) * _itS((t - T.h1) / Math.max(0.05, T.m0 - T.h1));   // the spool
+    if (t >= T.m0) {   // the run
+      const s = (t - T.m0) / T.sh, u = s * s, pass = I.pass || [0, 0];
+      const A = _itA.set(0, yH + bob, -d), dir = _itB.set(+pass[0] || 0, +pass[1] || 0, 0).sub(A);
+      P.copy(A).addScaledVector(dir, u);
+      dir.normalize();
+      const xax = _itV1.copy(dir).negate(), zax = _itV2.crossVectors(xax, _tkY).normalize(), yax = _itV3.crossVectors(zax, xax).normalize();
+      _itM.makeBasis(xax, yax, zax);
+      _itQ.slerp(_itQ2.setFromRotationMatrix(_itM), Math.min(1, s * 3));
+      eng = 1;
+    }
+    S.pivot.quaternion.copy(_itQ);
+    S.pivot.position.copy(P).sub(_itV4.copy(S.center).multiplyScalar(k).applyQuaternion(S.pivot.quaternion));   // its centre on P
+    S.pivot.updateMatrixWorld(true);
+    S.engNow = eng;   // (v54.12) for its engine voice (_dbTick); it._p stays its centre
+    if (S.eng) { S.eng.visible = eng > 0.01; if (S.eng.visible) { try { _lssPreviewEnginesTick(S.eng, it.camera, eng); } catch (_) {} } }
+  }
+  function _itPose(it) {
+    const I = cfg.intro, now = performance.now();
+    const t = (it.freeze != null) ? +it.freeze : (now - it.t0) / 1000;
+    it.t = t;
+    const dtP = it._lastPose ? Math.min(0.1, (now - it._lastPose) / 1000) : 0;   // (v54.12) the engine voice's frame
+    it._lastPose = now;
+    let black = 1;
+    if (it.card === 'logo') {
+      const tp = (+I.black0 || 0) + (+I.logoIn || 0) + (+I.presGap || 0), tOut = tp + (+I.presIn || 0) + (+I.logoHold || 0);
+      const a = _itRamp(t, +I.black0 || 0, +I.logoIn || 1), p = _itRamp(t, tp, +I.presIn || 1);
+      it.logo.material.opacity = a; it.logo.visible = a > 0.001;
+      it.text.material.opacity = p; it.text.visible = p > 0.001;
+      it.growK = Math.min(1, Math.max(0, t / Math.max(0.1, tOut + (+I.logoOut || 0))));
+      black = _itRamp(t, tOut, +I.logoOut || 1);
+      if (it.dom) {
+        if (it.freeze != null) { for (const a of it.dom) { try { a.pause(); a.currentTime = Math.min(it.domL, t) * 1000; } catch (_) {} } it.domHeld = true; }
+        else if (it.domHeld) { it.domHeld = false; for (const a of it.dom) { try { a.currentTime = Math.min(it.domL, t) * 1000; a.play(); } catch (_) {} } }
+      }
+    } else {
+      it.logo.visible = false; it.text.visible = false;
+    }
+    if (it.card === 'title') {
+      const T = _itTimes();
+      black = Math.max(1 - _itRamp(t, T.g, +I.titleIn || 1), _itRamp(t, T.tB, +I.titleOut || 0.35));
+      const z = I.zoom || [1, 1];
+      it.zoom = z[0] + (z[1] - z[0]) * Math.min(1, Math.max(0, (t - T.g) / Math.max(0.1, T.end - T.g)));
+      const S = it.S;
+      if (S) {
+        const on = t >= T.r0 && t <= T.end + 0.2;
+        S.pivot.visible = on;
+        if (on) {
+          if (!it.sIn) { it.sIn = true; if (I.sfxRise) snd(I.sfxRise); }
+          if (!it.sGo && t >= T.h1) { it.sGo = true; if (I.sfxGo) snd(I.sfxGo); }
+          if (!it.sPass && t >= T.m0 + 0.92 * T.sh) { it.sPass = true; if (I.sfxPass) snd(I.sfxPass); }
+          _itShip(it, t, T);
+          if (!it.db) it.db = _dbNew();
+          if (it.db) _dbTick(it.db, it._p, it.camera, S.engNow, dtP);
+        } else if (it.db) { _dbRelease(it.db, 0.6); it.db = null; }
+        if (it.seat) {   // (v54.10) Frostfang rides it: his seat follows the hull's cockpit, his idle on the card's clock
+          it.seat.root.visible = on;
+          if (on) { _tkSeatPlace(it.seat); it.seat.mixer.setTime(Math.max(0, t)); }
+        }
+      }
+    } else if (it.S) { it.S.pivot.visible = false; if (it.seat) it.seat.root.visible = false; }
+    if (it.skipF) black = Math.max(black, it.skipF.from + (1 - it.skipF.from) * _itS((now - it.skipF.t0) / 1000 / it.skipF.len));
+    it.black = black;
+    it.fader.material.opacity = black; it.fader.visible = black > 0.001;
+    const bg = (it.card === 'title' && it.title && !it.vrOn) ? it.title.tex : it.blackBg;
+    if (it.scene.background !== bg) it.scene.background = bg;
+    const L = it.L, c3 = (l, a) => { l.color.setHex(a[0]); l.intensity = a[1]; if (a.length >= 5) l.position.set(a[2], a[3], a[4]); };
+    L.hemi.color.setHex(I.hemi[0]); L.hemi.groundColor.setHex(I.hemi[1]); L.hemi.intensity = I.hemi[2];
+    c3(L.key, I.key); c3(L.rimA, I.rimA); c3(L.rimB, I.rimB);
+    it.scene.environmentIntensity = +I.env || 0;
+  }
+  function _itWarm(it) {
+    const up = (t) => { if (t && t.isTexture) { try { renderer.initTexture(t); } catch (_) {} } };
+    const mats = (o) => {
+      for (const m of (Array.isArray(o.material) ? o.material : (o.material ? [o.material] : []))) {
+        for (const k in m) up(m[k]);
+        if (m.uniforms) for (const k in m.uniforms) up(m.uniforms[k] && m.uniforms[k].value);
+      }
+    };
+    if (it.title) up(it.title.tex);
+    if (it.S) it.S.root.traverse(mats);   // the engines hang under the root
+    if (it.seat) it.seat.root.traverse(mats);   // (v54.10) Frostfang
+  }
+  function _itFreeTitle(it) {
+    if (it.title) { try { it.title.tex.dispose(); if (it.title.vrTex) it.title.vrTex.dispose(); } catch (_) {} it.title = null; }
+    if (it.env) { try { it.env.dispose(); } catch (_) {} it.env = null; }
+    try { it.scene.environment = null; } catch (_) {}
+    const free = (o) => { if (o.material) { for (const m of (Array.isArray(o.material) ? o.material : [o.material])) { try { m.dispose(); } catch (_) {} } } };
+    const s = it.seat; it.seat = null;
+    if (s) {
+      try { s.mixer.stopAllAction(); s.mixer.uncacheRoot(s.body); } catch (_) {}
+      try { s.body.traverse((o) => { if (o.isSkinnedMesh && o.skeleton && o.skeleton.dispose) o.skeleton.dispose(); }); } catch (_) {}
+      try { for (const m of s.mats) m.dispose(); } catch (_) {}
+      try { s.fx.traverse((o) => { if (o.geometry) o.geometry.dispose(); free(o); }); } catch (_) {}
+      try { it.scene.remove(s.root); } catch (_) {}
+    }
+    const S = it.S; it.S = null;
+    if (S) {
+      try { if (S.eng) S.eng.traverse((o) => { free(o); if (o.geometry && !(o.userData && o.userData._sharedGLBGeo)) o.geometry.dispose(); }); } catch (_) {}
+      try { _ssPrevRelease(S.root); } catch (_) {}   // its texture handles and materials; never the shared geometry
+      try { it.scene.remove(S.pivot); } catch (_) {}
+    }
+  }
+  function _itDispose(it) {
+    if (!it || it._dead) return;
+    _itDomStop(it);    // (v54.11) the flat screen's logo card
+    if (it.db) { _dbRelease(it.db, 0.9); it.db = null; }   // (v54.12) its engines trail off as the hangar comes up
+    it._dead = true;   // a title still building frees its own parts when it lands (_itBuildTitle)
+    _itFreeTitle(it);
+    try { it.logo.material.map.dispose(); it.text.material.map.dispose(); } catch (_) {}
+    for (const m of [it.logo, it.text, it.fader, it._vrPlane]) { if (m) { try { m.geometry.dispose(); m.material.dispose(); } catch (_) {} } }
+    try { it.scene.background = null; it.scene.clear(); } catch (_) {}
+  }
+  function _itDom() {
+    let el = $('camp-intro');
+    if (el) return el;
+    try {
+      el = document.createElement('div'); el.id = 'camp-intro';
+      el.innerHTML = '<div class="ci-card"><img class="ci-logo" alt="" draggable="false"><div class="ci-text"></div></div>';
+      document.body.appendChild(el);
+    } catch (_) { return null; }
+    return el;
+  }
+  function _itDomPlay(it) {
+    const I = cfg.intro, el = _itDom(); if (!el) return;
+    const card = el.querySelector('.ci-card'), img = el.querySelector('.ci-logo'), tx = el.querySelector('.ci-text');
+    const lh = +I.logoH || 0.7, em = (+I.textEm || 0.056) * 100, col = I.textCol || ['#7fe0ff', '#bf9bff'];
+    const st = el.style;
+    st.setProperty('--ci-s', 'min(' + (lh * 100) + 'vh, 86vw)');
+    st.setProperty('--ci-y', ((+I.logoY || 0) * 100) + 'vh');
+    st.setProperty('--ci-em', 'min(' + em + 'vh, ' + (em * 0.86 / lh) + 'vw)');   // shrinks with the logo on a narrow screen
+    st.setProperty('--ci-ty', ((+I.textY || 0.53) * 100) + '%');
+    st.setProperty('--ci-tr', (+I.textTrack || 0) + 'em');
+    st.setProperty('--ci-w', String(+I.textWeight || 500));
+    st.setProperty('--ci-c0', col[0]); st.setProperty('--ci-c1', col[1] || col[0]);
+    if (I.textFont) tx.style.fontFamily = '"' + I.textFont + '", Rajdhani, sans-serif';
+    tx.textContent = String(I.text == null ? 'Presents...' : I.text);
+    const want = './' + I.logo;
+    if (img.getAttribute('src') !== want) img.setAttribute('src', want);   // the texture's own file: from the browser's cache
+    el.style.opacity = '1';
+    el.classList.add('on');
+    const b0 = +I.black0 || 0, tp = b0 + (+I.logoIn || 0) + (+I.presGap || 0), tOut = tp + (+I.presIn || 0) + (+I.logoHold || 0);
+    const L = Math.max(0.1, tOut + (+I.logoOut || 0)), f = (s) => Math.min(1, Math.max(0, s / L)), e = 'ease-in-out';
+    const fade = (a, b) => [{ opacity: 0, offset: 0 }, { opacity: 0, offset: f(a), easing: e }, { opacity: 1, offset: f(b) },
+                            { opacity: 1, offset: f(tOut), easing: e }, { opacity: 0, offset: 1 }];
+    _itDomStop(it, true);
+    try {
+      it.dom = [img.animate(fade(b0, b0 + (+I.logoIn || 0)), { duration: L * 1000, fill: 'forwards' }),
+                tx.animate(fade(tp, tp + (+I.presIn || 0)), { duration: L * 1000, fill: 'forwards' }),
+                card.animate([{ transform: 'translate(-50%, -50%) scale(1)' }, { transform: 'translate(-50%, -50%) scale(' + (1 + (+I.grow || 0)) + ')' }],
+                             { duration: L * 1000, fill: 'forwards', easing: 'linear' })];
+      it.domL = L;
+    } catch (_) { it.dom = null; }
+  }
+  function _itDomSkip(it, sec) {
+    const el = $('camp-intro'); if (!el || !el.classList.contains('on')) return;
+    let from = 1; try { from = parseFloat(getComputedStyle(el).opacity) || 0; } catch (_) {}
+    el.style.opacity = '0';
+    try { el.animate([{ opacity: from }, { opacity: 0 }], { duration: (sec || 0.3) * 1000, easing: 'ease-in-out' }); } catch (_) {}
+  }
+  function _itDomStop(it, keep) {
+    if (it && it.dom) { for (const a of it.dom) { try { a.cancel(); } catch (_) {} } it.dom = null; }
+    if (keep) return;
+    const el = $('camp-intro'); if (el) { el.classList.remove('on'); el.style.opacity = '1'; }
+  }
+  async function _introScene(live) {
+    const I = cfg.intro;
+    O.phase = 'intro'; _ui('intro');
+    let it = null;
+    try { it = await Promise.race([O.itP, wait(+I.buildMax || 8).then(() => null)]); } catch (e) { console.warn('[intro] build failed:', e && e.message); }
+    if (!live()) return;   // _end frees it
+    if (!it) {
+      console.warn('[intro] no logo - on to the hangar');
+      if (O.itP) O.itP.then((x) => { if (x && x !== O.it) _itDispose(x); });   // a slow build still gets freed
+      return;
+    }
+    O.it = it;
+    try { if (window.__campPrologue) window.__campPrologue.skipUi(true); } catch (_) {}
+    const card = async (name, len) => {
+      let skipped = false;
+      const sp = new Promise((r) => { O._itSkip = () => { skipped = true; r(); }; });
+      it.card = name; it.t0 = performance.now(); it.skipF = null; it.sIn = false; it.sGo = false; it.sPass = false;
+      if (name === 'logo') _itDomPlay(it);
+      await Promise.race([wait(len), sp]);
+      while (!skipped && live() && it.freeze != null) await Promise.race([wait(0.25), sp]);   // dev: a held card
+      O._itSkip = null;
+      if (skipped && live()) {
+        it.skipF = { t0: performance.now(), from: it.black, len: 0.3 };
+        if (name === 'logo') _itDomSkip(it, 0.3);
+        await wait(0.35);
+      }
+    };
+    await card('logo', (+I.black0 || 0) + (+I.logoIn || 0) + (+I.presGap || 0) + (+I.presIn || 0) + (+I.logoHold || 0) + (+I.logoOut || 0) + 0.05);
+    _itDomStop(it);
+    if (!live()) return;
+    let ok = false;
+    try { ok = await Promise.race([it.titleP, wait(+I.titleMax || 6).then(() => false)]); } catch (_) {}
+    if (!live()) return;
+    if (ok && it.title) {
+      _itWarm(it);   // on black
+      it.skipF = null;
+      _veilHide(0);   // the stage is black under it (its fader): every fade of the title card is in the scene
+      await card('title', _itTimes().end + 0.05);
+      if (!live()) return;
+    } else console.warn('[intro] the title was not ready - on to the hangar');
+    O._itSkip = null;
+    try { if (window.__campPrologue) window.__campPrologue.skipUi(false); } catch (_) {}
+    _veilShow(false);   // black over black: the hangar talk lifts it (its fadeIn) once its stage is ready
+    it.card = 'black'; it.skipF = null;
+    if (O.it === it) { O.it = null; _itDispose(it); }
   }
 
   function _cvHash(x, y, z) {
@@ -109772,6 +110404,7 @@ const CAMP_SEQS = {
   }
   function skip() {
     if (!O.on) return false;
+    if (O.phase === 'intro') { if (O._itSkip) { const f = O._itSkip; O._itSkip = null; f(); } return true; }
     if (O.phase === 'talk' && O._tkSkip) { const f = O._tkSkip; O._tkSkip = null; f(); return true; }
     if (O.phase === 'talk_end') { try { window.CampDialogue.clear(); } catch (_) {} return true; }
     if (O.phase === 'caverns' && O._cvSkip) { const f = O._cvSkip; O._cvSkip = null; f(); return true; }
@@ -109782,6 +110415,10 @@ const CAMP_SEQS = {
 
   function tick() {
     if (!O.on) return;
+    if (O.phase === 'intro') {      // (v54.00) the logo and the title (a wall clock of their own: no dt here)
+      if (O.it) { try { _itPose(O.it); } catch (e) { if (!O.itErr) { O.itErr = 1; console.warn('[intro] pose:', e && e.message, e); } } }
+      return;
+    }
     if (O.phase === 'talk') {       // (v53.94) the hangar talk
       const now = performance.now();
       const dt = Math.min(0.05, O.tkLast ? (now - O.tkLast) / 1000 : 0.016);
@@ -109908,6 +110545,7 @@ const CAMP_SEQS = {
   }
   function stage() {
     if (!O.on) return null;
+    if (O.phase === 'intro') return O.it || _blankStage();       // (v54.00) the logo and the title
     if (O.phase === 'talk') return O.tk || _blankStage();        // (v53.94) the hangar talk (nothing yet = the black veil's frame)
     if (O.phase === 'talk_end') return _blankStage();            // (v53.94) the narrator, over black
     if (O.phase === 'caverns') return O.cv || _blankStage();     // (v52.31)
@@ -109939,7 +110577,8 @@ const CAMP_SEQS = {
   }
   function onConfirm() {
     if (!O.on) return false;
-    if (O.phase === 'gameshow' || O.phase === 'caverns' || O.phase === 'meanwhile' || O.phase === 'talk' || O.phase === 'talk_end') { skip(); return true; }   // (v52.23/31, v53.94) Start / CONFIRM cuts the scene short
+    if (O.phase === 'gameshow' || O.phase === 'caverns' || O.phase === 'meanwhile' || O.phase === 'talk' || O.phase === 'talk_end' ||
+        O.phase === 'intro') { skip(); return true; }   // (v52.23/31, v53.94, v54.00) Start / CONFIRM cuts the scene short
     if (O.phase === 'choose' && O._getIn) { const f = O._getIn; O._getIn = null; f(); return true; }
     if (O.phase === 'perk' && O._perkPick) { const f = O._perkPick; O._perkPick = null; f(); return true; }   // (v49.67)
     if (O.phase === 'view' && O._viewPick) { const f = O._viewPick; O._viewPick = null; f(O.viewHi); return true; }
@@ -109958,13 +110597,14 @@ const CAMP_SEQS = {
       return true;
     }
     return (O.phase === 'fuse' || O.phase === 'launch' || O.phase === 'arrive' || O.phase === 'gameshow' || O.phase === 'caverns' || O.phase === 'meanwhile' ||
-            O.phase === 'talk' || O.phase === 'talk_end');   // (v53.94)
+            O.phase === 'talk' || O.phase === 'talk_end' || O.phase === 'intro');   // (v53.94, v54.00)
   }
 
   async function _run(tok) {
     const live = () => O.on && tok === O.tok;
     const D = window.CampDialogue;
     if (O.talk) {
+      if (O.intro) { await _introScene(live); if (!live()) return; }   // (v54.00) the logo and the title first
       await _talkScene(live);
       if (live()) _talkHandoff();
       return;
@@ -110063,6 +110703,8 @@ const CAMP_SEQS = {
     if (O.cvP) { const p = O.cvP; O.cvP = null; p.then((c) => { if (c) _cvDispose(c); }); }   // a build that never got its scene
     O._tkSkip = null; if (O.tk) { const t = O.tk; O.tk = null; _tkDispose(t); }   // (v53.94) the hangar talk, likewise
     if (O.tkP) { const p = O.tkP; O.tkP = null; p.then((t) => { if (t) _tkDispose(t); }); }
+    O._itSkip = null; if (O.it) { const t = O.it; O.it = null; _itDispose(t); }   // (v54.00) the intro, likewise
+    if (O.itP) { const p = O.itP; O.itP = null; p.then((t) => { if (t) _itDispose(t); }); }
     try { document.body.classList.remove('lss-cine-title'); } catch (_) {}
     _hsDrop(); O.hsCam = false; O.hsMk = null;
     try { document.body.classList.remove('lss-cine-subs'); if (window.__campPrologue) window.__campPrologue.skipUi(false); } catch (_) {}
@@ -110089,6 +110731,10 @@ const CAMP_SEQS = {
     try { if (typeof lssAutoFullscreen === 'function') lssAutoFullscreen(); } catch (_) {}   // still inside the CAMPAIGN click
     _campPickerSetup('camp_approach');
     O.talk = !!(opts && opts.talk) && cfg.talk.on !== false;   // (v53.94)
+    O.intro = O.talk && !!cfg.intro && cfg.intro.on !== false && !(opts && opts.intro === false);
+    O.it = null; O._itSkip = null; O.itErr = 0;
+    if (O.talk) _dbWarm();   // (v54.12) the ships' engine voice, baked before the first drive-by
+    O.itP = O.intro ? _itBuild().catch((e) => { console.warn('[intro] build failed:', e && e.message, e); return null; }) : null;
     O.tk = null; O._tkSkip = null; O.tkLast = 0; O.tkErr = 0;
     O.tkP = O.talk ? _tkBuild().catch((e) => { console.warn('[talk] build failed:', e && e.message, e); return null; }) : null;
     O.gameshow = !O.talk && !!(opts && opts.gameshow); O.gs = null; O._gsSkip = null; O.gsLast = 0; O.gsErr = 0;
@@ -110125,9 +110771,15 @@ const CAMP_SEQS = {
                          pilot: HS.phase, pilotT: +HS.t.toFixed(2),   // (v52.28) the GET IN beam: off / warm / in / seated
                          talk: O.tk ? { shot: O.tk.shot, pic: O.tk.pic, ev: O.tk.ev, zoom: +O.tk.zoom.toFixed(3), t: +O.tk.t.toFixed(1),
                                         people: O.tk.people.map((p) => p.id + ':' + p.phase + (p.seat ? '/' + p.seat.phase : '')),
-                                        ships: O.tk.shipList.filter((S) => S.hero).map((S) => S.key + ':' + S.engA.toFixed(2) + (S.fl ? ' fly' : '')) } : (O.talk ? 'building' : null) });
+                                        ships: O.tk.shipList.filter((S) => S.hero).map((S) => S.key + ':' + S.engA.toFixed(2) + (S.fl ? ' fly' : '')) } : (O.talk ? 'building' : null),
+                         intro: O.it ? { card: O.it.card, t: +O.it.t.toFixed(2), black: +O.it.black.toFixed(2), title: !!O.it.title, ship: !!O.it.S,
+                                         shipOn: !!(O.it.S && O.it.S.pivot.visible) } : (O.intro && O.phase === 'black' ? 'building' : null) });
   const gameshow = () => { if (O.on) return 'the opening is running'; start({ gameshow: true }); return 'the gameshow, then the hangar'; };
-  const talk = () => { if (O.on) return 'the opening is running'; start({ talk: true }); return 'the hangar talk, then the city'; };
+  const talk = (intro) => {
+    if (O.on) return 'the opening is running';
+    start({ talk: true, intro: intro !== false });
+    return (O.intro ? 'the intro, ' : '') + 'the hangar talk, then the city';
+  };
   const talkOn = () => cfg.talk.on !== false;
   const beam = (on) => {
     if (!O.on || !O.st) return 'no hangar';
@@ -110138,7 +110790,7 @@ const CAMP_SEQS = {
     return 'beaming into ' + (S && S.key);
   };
   const phaseNow = () => (O.on ? O.phase : '');
-  try { window.__campOpening = { start, reset, state, arrive, stage, tick, onConfirm, blockPreview, cfg, look, skip, gameshow, beam, phaseNow, talk, talkOn, tk: () => O.tk }; } catch (_) {}
+  try { window.__campOpening = { start, reset, state, arrive, stage, tick, onConfirm, blockPreview, cfg, look, skip, gameshow, beam, phaseNow, talk, talkOn, tk: () => O.tk, it: () => O.it }; } catch (_) {}
 })();
 
 const CAMP_PROLOGUE = {

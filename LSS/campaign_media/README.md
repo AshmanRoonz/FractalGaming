@@ -96,6 +96,11 @@ narrator's `hg_onto` with Gerald. 18 + 32 = 50 clips, 2,921 credits.
 **The hangar pictures.** `hangar_perspective1-3.png` are the owner's originals; the game loads their `.webp` twins (same
 pixels, ~0.3 MB each instead of ~2.5). Replacing a picture means re-fitting its camera (`cfg.talk.pics` in the game).
 
+**The intro's pictures (2026-10-13).** `fractalgaming_logo.webp` and `lss_title.webp` are the WebP twins of the owner's
+`../FractalGaming.png` and `../LSS_title.png` (232 KB / 293 KB instead of 1.6 / 2.2 MB): the logo card and the title card
+that open a brand-new campaign, before the hangar talk (`cfg.intro` in the game). A replaced PNG needs its twin re-made
+(Pillow: `quality=92` for the logo, `90` for the title, `method=6`).
+
 Every clip is **levelled to -17 LUFS** on the way in (`tools/campaign_voice_level.py`, run inside
 Blender): the voices come out of ElevenLabs at very different levels (the narrator 10-15 dB
 quieter than the rest). The raw takes are kept in `assets_base/campaign_voice_raw/` (local only),
