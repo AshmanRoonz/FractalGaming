@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.81";
+const LSS_BUILD = "53.93";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -4721,7 +4721,7 @@ function _campInitState() {
   game.campaign = {
     sceneIndex: 0, waveIndex: 0, bossActive: false, phase: 'travel',
     unlockedLoadouts: _campLoadUnlocks(), bodyKey: 'VORTEX_BODY',   
-    unlockedLegs: (function () { try { const s = _campLoadLegs(); s.unshift('camp_approach'); return s.filter((k, i) => s.indexOf(k) === i); } catch (_) { return ['camp_approach']; } })(),   
+    unlockedLegs: (function () { try { return _campCarouselLegs(); } catch (_) { return ['camp_approach']; } })(),   
     nemesis: { seen: false, escapes: 0, alive: false, monId: -1, unlocked8: false },
     waveCount: 3, _ended: false, _needFirstWave: false,
     av: _campLoadAV(),   // (v49.49) Xorzo's antivirus, %
@@ -5056,7 +5056,7 @@ function _campPickerSetup(selMap) {
   game.campaign = {
     sceneIndex: 0, waveIndex: 0, bossActive: false, phase: 'travel',
     unlockedLoadouts: _campLoadUnlocks(), bodyKey: 'VORTEX_BODY',
-    unlockedLegs: (function () { const s = _campLoadLegs(); s.unshift('camp_approach'); return s.filter((k, i) => s.indexOf(k) === i); })(),
+    unlockedLegs: _campCarouselLegs(),
     nemesis: { seen: false, escapes: 0, alive: false, monId: -1, unlocked8: false },
     waveCount: 3, _ended: false, _needFirstWave: false,
     difficulty: _getStoredDifficulty(), swarmCap: _campSwarmCapFor(_getStoredDifficulty()),
@@ -7461,6 +7461,14 @@ function _campSaveLegs(legs) {
     const arr = Array.isArray(legs) ? legs.filter((k) => typeof k === 'string' && k.indexOf('camp_') === 0) : [];
     localStorage.setItem('lss_campaign_legs', JSON.stringify(arr));
   } catch (_) {}
+}
+function _campTempUnlockAll() { return true; }
+function _campCarouselLegs() {
+  const s = _campLoadLegs(); s.unshift('camp_approach');
+  if (_campTempUnlockAll()) {
+    try { for (const L of CAMPAIGN_LEGS) if (L && L.key && MAP_DATA[L.key]) s.push(L.key); } catch (_) {}
+  }
+  return s.filter((k, i) => s.indexOf(k) === i);
 }
 
 function _campSaveLast(key) {
@@ -17634,8 +17642,9 @@ function _skyDomeEnsure() {
 function _skyDomeRefresh() {
   const dome = _skyDomeEnsure();
   const _T = (game && game.sandwichTerrain);
-  const atmosphereOn = !!(_T && _T.ON);
-  const brokenSim = !!(_T && (_T.biome === 'brokensim' || _T.biome === 'mossy'));
+  const atmosphereOn = !!(_T && _T.ON) || !!(game && game.caveGraph && game.caveGraph.ON);
+  const brokenSim = !!(_T && (_T.biome === 'brokensim' || _T.biome === 'mossy'))
+    || !!(game && game.caveGraph && game.caveGraph.ON && game.caveGraph.biome === 'brokensim');   // (v53.86) the glitch's ceiling holes, as in the cavern
   const tex = _equirectSky.texture;
   dome.material.map = tex || null;
   dome.material.needsUpdate = true;
@@ -27809,6 +27818,7 @@ function _swCavernWaterLevel(T) {
 }
 function _swApplyAtmosphere() {
   const T = game.sandwichTerrain;
+  if ((!T || !T.ON) && game.caveGraph && game.caveGraph.ON) { _cgApplyAtmosphere(); return; }
   if (!T || !T.ON) {
     if (game._swSavedFog !== undefined) { scene.fog = game._swSavedFog; game._swSavedFog = undefined; }
     if (game._swSavedBg !== undefined) { scene.background = game._swSavedBg; game._swSavedBg = undefined; }
@@ -48431,6 +48441,581 @@ function _arenaMakeMaterial() {
   _arenaMat = m;
   return m;
 }
+const _CG_DEF = {
+  seed: 7, keep: 170,
+  peaks: 0.5, peakSize: 260, sharp: 2.3, octaves: 4, vertical: 0.7,
+  peaksTunnel: 0.5, sharpTunnel: 1.7, verticalTunnel: 0, hollow: 0, hollowTunnel: 0.08, hollowSize: 430, narrowLift: 1,
+  crevice: 0.035, creviceWidth: 0.06, creviceSize: 640,
+  poolChance: 0.5, poolLevel: 0.30, basin: 0.08,
+  bandBase: 0.185, bandGain: 0.8, bandStart: 0.4,
+  seamScale: 1, seamTaps: 5,
+};
+const _CG_BIO = {
+  grassy:      { liquid: 0x16465c, liqEm: 0.0, liqAlpha: 0.78 },
+  rocky:       { liquid: 0x2b4a4a, liqEm: 0.0, liqAlpha: 0.85 },
+  snow:        { liquid: 0xa8c9d8, liqEm: 0.0, liqAlpha: 1.0 },
+  volcanic:    { liquid: 0xb32708, liqEm: 1.6, liqAlpha: 1.0 },
+  goldmine:    { liquid: 0xb98a1c, liqEm: 0.9, liqAlpha: 1.0 },
+  brokensim:   { liquid: 0x6a1e6a, liqEm: 0.8, liqAlpha: 1.0 },
+  crystalcave: { liquid: 0x2e2a76, liqEm: 0.35, liqAlpha: 0.82 },
+  mossy:       { liquid: 0x16465c, liqEm: 0.0, liqAlpha: 0.78, fog: 0x10241f },
+};
+const _cgMesh = { key: null, group: null, wallMat: null, waterMat: null, tex: null, tris: 0, pools: 0, U: null, ms: 0, tune: null };
+
+function _cgHash3(ix, iy, iz) {
+  let h = (Math.imul(ix + 65536, 374761393) + Math.imul(iy + 65536, 668265263) + Math.imul(iz + 65536, 1274126177)) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1103515245);
+  h = h ^ (h >>> 16);
+  return (h >>> 0) / 4294967296;
+}
+function _cgNoise(x, y, z) {
+  const fx = Math.floor(x), fy = Math.floor(y), fz = Math.floor(z);
+  const tx = x - fx, ty = y - fy, tz = z - fz;
+  const ux = tx * tx * (3 - 2 * tx), uy = ty * ty * (3 - 2 * ty), uz = tz * tz * (3 - 2 * tz);
+  const n000 = _cgHash3(fx, fy, fz), n100 = _cgHash3(fx + 1, fy, fz), n010 = _cgHash3(fx, fy + 1, fz), n110 = _cgHash3(fx + 1, fy + 1, fz);
+  const n001 = _cgHash3(fx, fy, fz + 1), n101 = _cgHash3(fx + 1, fy, fz + 1), n011 = _cgHash3(fx, fy + 1, fz + 1), n111 = _cgHash3(fx + 1, fy + 1, fz + 1);
+  const x00 = n000 + (n100 - n000) * ux, x10 = n010 + (n110 - n010) * ux, x01 = n001 + (n101 - n001) * ux, x11 = n011 + (n111 - n011) * ux;
+  const y0 = x00 + (x10 - x00) * uy, y1 = x01 + (x11 - x01) * uy;
+  return y0 + (y1 - y0) * uz;
+}
+function _cgSs(e0, e1, x) { let t = (x - e0) / (e1 - e0); t = t < 0 ? 0 : (t > 1 ? 1 : t); return t * t * (3 - 2 * t); }
+function _cgRidged(x, y, z, C, sharp) {
+  let sum = 0, amp = 1, prev = 1, norm = 0, f = 1;
+  for (let o = 0; o < C.oct; o++) {
+    const n = _cgNoise(x * f, y * f, z * f) * 2 - 1;
+    let r = 1 - Math.abs(n); r *= r;
+    sum += r * prev * amp; prev = r; norm += amp; f *= 2.07; amp *= 0.5;
+  }
+  const v = sum / Math.max(norm, 1e-4);
+  return Math.pow(v < 0 ? 0 : (v > 1 ? 1 : v), sharp);
+}
+function _cgHollow(x, y, z) {
+  return _cgSs(0.42, 0.72, 0.65 * _cgNoise(x, y, z) + 0.35 * _cgNoise(x * 2.03, y * 2.03, z * 2.03));
+}
+function _cgCrevice(x, y, z, C) {
+  const s = _cgNoise(x, y, z) * 2 - 1;
+  const m = _cgSs(0.48, 0.66, _cgNoise(x * 0.37 + 17.3, y * 0.37 + 5.1, z * 0.37 + 9.7));
+  return (1 - _cgSs(0, C.crevW, Math.abs(s))) * m;
+}
+function _cgDisp(pr, bx, by, bz, iny, C) {
+  let d = 0;
+  if (pr.peak > 0) {
+    d += pr.peak * _cgRidged(bx * C.pf + C.sx, by * C.pf + C.sy, bz * C.pf + C.sz, C, pr.sharp) * (1 + (_cgSs(0.15, 0.85, Math.abs(iny)) - 1) * pr.vb);
+  }
+  if (pr.crev > 0) d -= pr.crev * _cgCrevice(bx * C.cf + C.sz * 1.37, by * C.cf + C.sx * 1.37, bz * C.cf + C.sy * 1.37, C);
+  if (pr.pool > 0) {
+    const fl = _cgSs(0.4, 0.95, iny);
+    if (fl > 0) d -= pr.basinD * fl * (0.5 + 0.5 * _cgNoise(bx * C.bf + C.sy * 0.71, by * C.bf + C.sz * 0.71, bz * C.bf + C.sx * 0.71));
+  }
+  if (pr.hol > 0) d -= pr.hol * _cgHollow(bx * C.hf + C.sy * 0.53, by * C.hf + C.sx * 0.53, bz * C.hf + C.sz * 0.53);
+  return d;
+}
+function _cgPrimOpen(pr, px, py, pz, C) {
+  let t = 0;
+  if (pr.L2 > 0) { t = ((px - pr.ax) * pr.abx + (py - pr.ay) * pr.aby + (pz - pr.az) * pr.abz) / pr.L2; t = t < 0 ? 0 : (t > 1 ? 1 : t); }
+  const cx = pr.ax + pr.abx * t, cy = pr.ay + pr.aby * t, cz = pr.az + pr.abz * t;
+  const qx = px - cx, qy = py - cy, qz = pz - cz, dist = Math.sqrt(qx * qx + qy * qy + qz * qz);
+  if (dist >= pr.R + C.maxOut) return pr.R - dist;
+  const inv = 1 / Math.max(dist, 1e-3), rx = qx * inv, ry = qy * inv, rz = qz * inv;
+  return (pr.R - _cgDisp(pr, cx + rx * pr.R, cy + ry * pr.R, cz + rz * pr.R, -ry, C)) - dist;
+}
+function _cgOpenDepth(px, py, pz) {
+  const C = game.caveGraph;
+  if (!C) return -1e9;
+  const P = C.prims;
+  let best = -1e9;
+  for (let i = 0; i < P.length; i++) {
+    const pr = P[i], dx = px - pr.mx, dy = py - pr.my, dz = pz - pr.mz;
+    if (dx * dx + dy * dy + dz * dz > pr.bound2) continue;
+    const v = _cgPrimOpen(pr, px, py, pz, C);
+    if (v > best) { best = v; if (best >= 300) break; }
+  }
+  return best;
+}
+
+function _cgBuildField(level) {
+  const P = Object.assign({}, _CG_DEF, level.caveGraph || {}, _cgMesh.tune || {});   // tune = the local live knob
+  const rnd = mulberry32((((P.seed | 0) * 7919) + 13) >>> 0);
+  const prims = [], rooms = [];
+  for (const r of (level.rooms || [])) {
+    const pr = { type: 0, id: r.id, ax: r.x, ay: r.y, az: r.z, bx: r.x, by: r.y, bz: r.z, R: r.r, poolRoll: rnd() };
+    prims.push(pr); rooms.push(pr);
+  }
+  for (const t of (level.tunnels || [])) {
+    const R = t.r || SU * 1.2;
+    for (let k = 0; k + 1 < t.path.length; k++) {
+      const a = t.path[k], b = t.path[k + 1];
+      if (Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z) <= 10) continue;   // buildRoomGraphLevel's cylSegs rule
+      prims.push({ type: 1, ax: a.x, ay: a.y, az: a.z, bx: b.x, by: b.y, bz: b.z, R: R });
+    }
+  }
+  for (const pr of prims) {
+    pr.abx = pr.bx - pr.ax; pr.aby = pr.by - pr.ay; pr.abz = pr.bz - pr.az;
+    pr.L2 = pr.abx * pr.abx + pr.aby * pr.aby + pr.abz * pr.abz;
+    if (pr.type === 1) { const want = P.peaksTunnel * pr.R, cap0 = pr.R - P.keep; if (want > cap0) pr.R += (want - cap0) * P.narrowLift; }
+    const cap = Math.max(0, pr.R - P.keep);
+    pr.peak = Math.min((pr.type === 0 ? P.peaks : P.peaksTunnel) * pr.R, cap);
+    pr.crev = P.crevice * pr.R * (pr.type === 0 ? 1 : 0.6);
+    pr.pool = 0; pr.basinD = 0; pr.level = -1e9;
+    pr.sharp = pr.type === 0 ? P.sharp : P.sharpTunnel;
+    pr.vb = pr.type === 0 ? P.vertical : P.verticalTunnel;
+    pr.hol = (pr.type === 0 ? P.hollow : P.hollowTunnel) * pr.R;
+  }
+  let poolN = 0;
+  for (const pr of rooms) {
+    if (pr.poolRoll >= P.poolChance) continue;
+    const bottom = pr.ay - pr.R;
+    let lv = bottom + P.poolLevel * pr.R;
+    for (const o of prims) {
+      if (o === pr) continue;
+      if (o.type === 0) {
+        if (Math.hypot(o.ax - pr.ax, o.ay - pr.ay, o.az - pr.az) < pr.R + o.R) lv = Math.min(lv, (o.ay - o.R) - 30);
+      } else {
+        const L = Math.sqrt(o.L2) || 1, horiz = Math.sqrt(Math.max(0, 1 - (o.aby / L) * (o.aby / L)));
+        const reach = o.R * horiz + o.hol + o.crev;
+        for (let k = 0; k <= 24; k++) {
+          const qx = o.ax + o.abx * k / 24, qy = o.ay + o.aby * k / 24, qz = o.az + o.abz * k / 24;
+          if (Math.hypot(qx - pr.ax, qy - pr.ay, qz - pr.az) < pr.R + o.R * 0.5) lv = Math.min(lv, qy - reach - 30);
+        }
+      }
+    }
+    if (lv > bottom + 40) { pr.pool = 1; pr.basinD = P.basin * pr.R; pr.level = lv; poolN++; }
+  }
+  let maxOut = 5, tipSum = 0, crevSum = 0, nr = 0;
+  for (const pr of prims) maxOut = Math.max(maxOut, pr.crev + pr.basinD + pr.hol + 5);
+  for (const pr of prims) {
+    pr.mx = (pr.ax + pr.bx) * 0.5; pr.my = (pr.ay + pr.by) * 0.5; pr.mz = (pr.az + pr.bz) * 0.5;
+    pr.bound2 = Math.pow(Math.sqrt(pr.L2) * 0.5 + pr.R + maxOut + 260, 2);
+    if (pr.type === 0) { tipSum += pr.peak; crevSum += pr.crev; nr++; }
+  }
+  const C = {
+    ON: true, P: P, prims: prims, rooms: rooms, poolN: poolN, maxOut: maxOut,
+    oct: Math.max(1, P.octaves | 0), sharp: P.sharp, vert: P.vertical, crevW: P.creviceWidth,
+    pf: 1 / P.peakSize, cf: 1 / P.creviceSize, bf: 1 / (P.peakSize * 0.8), hf: 1 / P.hollowSize,
+    sx: (P.seed * 13.17) % 97, sy: (P.seed * 7.31) % 89, sz: (P.seed * 3.77) % 83,
+    tipRef: Math.max(20, (tipSum / Math.max(1, nr)) * 0.75), crevRef: Math.max(10, (crevSum / Math.max(1, nr)) * 0.8),
+    biome: 'rocky',
+  };
+  C.key = (level.name || '?') + '|' + JSON.stringify(P) + '|' + prims.length;
+  return C;
+}
+
+const _CG_GLSL = [
+  'uniform highp sampler2D uCgPrim;',
+  'uniform int uCgPrimCount;',
+  'uniform int uCgOct;',
+  'uniform float uCgPeakFreq;',
+  'uniform float uCgCrevFreq;',
+  'uniform float uCgCrevWidth;',
+  'uniform float uCgBasinFreq;',
+  'uniform float uCgHolFreq;',
+  'uniform float uCgMaxOut;',
+  'uniform float uCgSeamEps;',
+  'uniform int uCgSeamTaps;',
+  'uniform vec3 uCgSeed;',
+  'float cgHash3(ivec3 i) {',
+  '  uvec3 q = uvec3(i + ivec3(65536));',
+  '  uint h = q.x * 374761393u + q.y * 668265263u + q.z * 1274126177u;',
+  '  h = (h ^ (h >> 13u)) * 1103515245u;',
+  '  h = h ^ (h >> 16u);',
+  '  return float(h) * (1.0 / 4294967296.0);',
+  '}',
+  'float cgNoise(vec3 p) {',
+  '  vec3 fl = floor(p);',
+  '  ivec3 i = ivec3(fl);',
+  '  vec3 f = p - fl;',
+  '  vec3 u = f * f * (3.0 - 2.0 * f);',
+  '  float n000 = cgHash3(i);',
+  '  float n100 = cgHash3(i + ivec3(1, 0, 0));',
+  '  float n010 = cgHash3(i + ivec3(0, 1, 0));',
+  '  float n110 = cgHash3(i + ivec3(1, 1, 0));',
+  '  float n001 = cgHash3(i + ivec3(0, 0, 1));',
+  '  float n101 = cgHash3(i + ivec3(1, 0, 1));',
+  '  float n011 = cgHash3(i + ivec3(0, 1, 1));',
+  '  float n111 = cgHash3(i + ivec3(1, 1, 1));',
+  '  float x00 = n000 + (n100 - n000) * u.x;',
+  '  float x10 = n010 + (n110 - n010) * u.x;',
+  '  float x01 = n001 + (n101 - n001) * u.x;',
+  '  float x11 = n011 + (n111 - n011) * u.x;',
+  '  float y0 = x00 + (x10 - x00) * u.y;',
+  '  float y1 = x01 + (x11 - x01) * u.y;',
+  '  return y0 + (y1 - y0) * u.z;',
+  '}',
+  'float cgRidged(vec3 p, float sharp) {',
+  '  float sum = 0.0;',
+  '  float amp = 1.0;',
+  '  float prev = 1.0;',
+  '  float norm = 0.0;',
+  '  float f = 1.0;',
+  '  for (int o = 0; o < uCgOct; o++) {',
+  '    float n = cgNoise(p * f) * 2.0 - 1.0;',
+  '    float r = 1.0 - abs(n);',
+  '    r *= r;',
+  '    sum += r * prev * amp;',
+  '    prev = r;',
+  '    norm += amp;',
+  '    f *= 2.07;',
+  '    amp *= 0.5;',
+  '  }',
+  '  return pow(clamp(sum / max(norm, 1e-4), 0.0, 1.0), sharp);',
+  '}',
+  'float cgHollow(vec3 p) {',
+  '  return smoothstep(0.42, 0.72, 0.65 * cgNoise(p) + 0.35 * cgNoise(p * 2.03));',
+  '}',
+  'float cgCrevice(vec3 p) {',
+  '  float s = cgNoise(p) * 2.0 - 1.0;',
+  '  float m = smoothstep(0.48, 0.66, cgNoise(p * 0.37 + vec3(17.3, 5.1, 9.7)));',
+  '  return (1.0 - smoothstep(0.0, uCgCrevWidth, abs(s))) * m;',
+  '}',
+  'float cgDispParts(int prim, vec3 base, vec3 inward, out float holD) {',
+  '  vec4 t2 = texelFetch(uCgPrim, ivec2(2, prim), 0);',
+  '  vec4 t3 = texelFetch(uCgPrim, ivec2(3, prim), 0);',
+  '  float pk = cgRidged(base * uCgPeakFreq + uCgSeed, t3.w) * mix(1.0, smoothstep(0.15, 0.85, abs(inward.y)), t3.z);',
+  '  float cr = cgCrevice(base * uCgCrevFreq + uCgSeed.zxy * 1.37);',
+  '  float fl = smoothstep(0.4, 0.95, inward.y);',
+  '  float bs = t2.z * fl * (0.5 + 0.5 * cgNoise(base * uCgBasinFreq + uCgSeed.yzx * 0.71));',
+  '  holD = t3.y > 0.0 ? t3.y * cgHollow(base * uCgHolFreq + uCgSeed.yxz * 0.53) : 0.0;',
+  '  return t2.x * pk - t2.y * cr - t2.w * bs;',
+  '}',
+  'float cgDisp(int prim, vec3 base, vec3 inward) {',
+  '  float h;',
+  '  float d = cgDispParts(prim, base, inward, h);',
+  '  return d - h;',
+  '}',
+  'float cgReliefLow(int prim, vec3 base, vec3 inward) {',
+  '  vec4 t2 = texelFetch(uCgPrim, ivec2(2, prim), 0);',
+  '  vec4 t3 = texelFetch(uCgPrim, ivec2(3, prim), 0);',
+  '  float r = 1.0 - abs(cgNoise(base * uCgPeakFreq + uCgSeed) * 2.0 - 1.0);',
+  '  return t2.x * pow(r * r, t3.w) * mix(1.0, smoothstep(0.15, 0.85, abs(inward.y)), t3.z);',
+  '}',
+  'float cgOpen(int j, vec3 p) {',
+  '  vec4 t0 = texelFetch(uCgPrim, ivec2(0, j), 0);',
+  '  vec4 t1 = texelFetch(uCgPrim, ivec2(1, j), 0);',
+  '  vec3 a = t0.yzw;',
+  '  vec3 ab = t1.xyz - a;',
+  '  float R = t1.w;',
+  '  float L2 = dot(ab, ab);',
+  '  float t = 0.0;',
+  '  if (L2 > 0.0) t = clamp(dot(p - a, ab) / L2, 0.0, 1.0);',
+  '  vec3 ax = a + ab * t;',
+  '  vec3 q = p - ax;',
+  '  float dist = length(q);',
+  '  float open = -1.0;',
+  '  if (dist < R + uCgMaxOut) {',
+  '    vec3 rad = q / max(dist, 1e-3);',
+  '    open = (R - cgDisp(j, ax + rad * R, -rad)) - dist;',
+  '  }',
+  '  return open;',
+  '}',
+  '',
+].join('\n');
+const _CG_LOOK_GLSL = [
+  'uniform float uCgLiqAlpha;',
+  '',
+].join('\n');
+function _cgUniforms() {
+  if (_cgMesh.U) return _cgMesh.U;
+  _cgMesh.U = {
+    uCgPrim: { value: null }, uCgPrimCount: { value: 0 }, uCgOct: { value: 4 },
+    uCgPeakFreq: { value: 1 / 260 }, uCgCrevFreq: { value: 1 / 640 }, uCgCrevWidth: { value: 0.06 },
+    uCgBasinFreq: { value: 1 / 208 }, uCgHolFreq: { value: 1 / 430 }, uCgMaxOut: { value: 5 }, uCgSeamEps: { value: 8 }, uCgSeamTaps: { value: 5 },
+    uCgSeed: { value: new THREE.Vector3() },
+    uCgTipRef: { value: 120 }, uCgCrevRef: { value: 40 }, uCgHolRef: { value: 80 },
+    uCgCHi: { value: new THREE.Color() }, uCgCLo: { value: new THREE.Color() }, uCgBand: { value: new THREE.Vector3(0.185, 0.8, 0.4) },
+    uCgLiqAlpha: { value: 1 },
+  };
+  return _cgMesh.U;
+}
+function _cgWallMaterial() {
+  if (_cgMesh.wallMat) return _cgMesh.wallMat;
+  const m = _swPatchTerrainMat(new THREE.MeshStandardMaterial({
+    flatShading: true, roughness: 1.0, metalness: 0.0, side: THREE.BackSide, dithering: true,
+  }), false);
+  m.envMapIntensity = 0.12;   // as _swTerrainMatShared
+  const terrainCompile = m.onBeforeCompile;
+  m.onBeforeCompile = (sh, rr) => {
+    terrainCompile(sh, rr);
+    Object.assign(sh.uniforms, _cgUniforms());
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', '#include <common>\n' + _CG_GLSL +
+        'attribute vec3 aIn;\nattribute float aPrim;\nvarying vec3 vCgW;\nvarying vec3 vCgIn;\nvarying float vCgPrim;\nvarying float vCgCeilT;\n' +
+        'uniform float uYMid;\nuniform float uAMP;\nuniform float uCgTipRef;\nuniform float uCgCrevRef;\nuniform float uCgHolRef;\nuniform vec3 uCgBand;\n')
+      .replace('#include <begin_vertex>',
+        'vec3 transformed = vec3(position);\n' +
+        'float _cgWY;\n' +
+        '{ float _hd; float _cd = cgDispParts(int(aPrim + 0.5), position, aIn, _hd);\n' +
+        '  transformed += aIn * (_cd - _hd); vCgW = transformed; vCgIn = aIn; vCgPrim = aPrim;\n' +
+        '  float _up = smoothstep(-0.1, 0.5, aIn.y);\n' +
+        '  float _pk = clamp(cgReliefLow(int(aPrim + 0.5), position, aIn) / uCgTipRef, 0.0, 1.3), _cv = clamp(-_cd / uCgCrevRef, 0.0, 1.0), _ho = clamp(_hd / uCgHolRef, 0.0, 1.0);\n' +
+        '  float _f = clamp(uCgBand.x + uCgBand.y * max(0.0, _pk - uCgBand.z) * _up - uCgBand.x * _cv, 0.0, 1.0);\n' +
+        '  _cgWY = uYMid - uAMP * 0.5 + uAMP * 1.15 * _f;\n' +
+        '  vCgCeilT = clamp(0.55 - 0.55 * clamp(_cd / uCgTipRef, -1.0, 1.0) + 0.3 * _ho, 0.0, 1.0); }')
+      .replace('vWY=mix(position.y, aFlatY, uBendFlat); vWPos=position;', 'vWY=_cgWY; vWPos=transformed;');
+    sh.fragmentShader = sh.fragmentShader
+      .replace('uSlopeRock,uCeil,uRocky', 'uSlopeRock,uRocky')
+      .replace('float _lssSunVis=1.0;', 'float _lssSunVis=1.0;\nfloat uCeil=0.0;\nvec3 _cgDx, _cgDy;')
+      .split('dFdx(vWPos)').join('_cgDx').split('dFdy(vWPos)').join('_cgDy')
+      .replace('#include <common>', '#include <common>\n' + _CG_GLSL + 'uniform vec3 uCgCHi;\nuniform vec3 uCgCLo;\nvarying vec3 vCgW;\nvarying vec3 vCgIn;\nvarying float vCgPrim;\nvarying float vCgCeilT;\n')
+      .replace('void main() {', 'void main() {\n _cgDx = dFdx(vWPos); _cgDy = dFdy(vWPos);\n' +
+        ' { vec3 _cgN = normalize(cross(_cgDx, _cgDy)); uCeil = step(_cgN.y + 0.22 * _tvn(vWPos.xz * 0.011 + vec2(vWPos.y * 0.007, 3.1)), -0.3); }')
+      .replace('#include <clipping_planes_fragment>',
+        '#include <clipping_planes_fragment>\n' +
+        '{ int _self = int(vCgPrim + 0.5);\n' +
+        '  vec3 _sn = normalize(vCgIn);\n' +
+        '  vec3 _st1 = normalize(cross(_sn, abs(_sn.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));\n' +
+        '  vec3 _st2 = cross(_sn, _st1);\n' +
+        '  float _ss = uCgSeamEps * 1.6;\n' +
+        '  for (int j = 0; j < uCgPrimCount; j++) {\n' +
+        '    if (j == _self) continue;\n' +
+        '    for (int k = 0; k < uCgSeamTaps; k++) {\n' +
+        '      vec3 _q = vCgW;\n' +
+        '      if (k == 1) _q += _st1 * _ss; else if (k == 2) _q -= _st1 * _ss; else if (k == 3) _q += _st2 * _ss; else if (k == 4) _q -= _st2 * _ss;\n' +
+        '      float _o = cgOpen(j, _q);\n' +
+        '      if (k == 0) { if (_o <= 0.0) break; if (_o > uCgSeamEps) discard; }\n' +
+        '      else if (_o <= 0.0) break;\n' +
+        '      if (k == uCgSeamTaps - 1) discard;\n' +
+        '    }\n' +
+        '  } }')
+      .replace('#include <color_fragment>', '#include <color_fragment>\n diffuseColor.rgb = mix(uCgCHi, uCgCLo, vCgCeilT);');
+  };
+  m.customProgramCacheKey = () => 'lssCaveGraphTerrain1';
+  _cgMesh.wallMat = m;
+  return m;
+}
+function _cgWaterMaterial() {
+  if (_cgMesh.waterMat) return _cgMesh.waterMat;
+  const m = new THREE.MeshStandardMaterial({ color: 0x16465c, roughness: 0.16, metalness: 0.0, side: THREE.DoubleSide, transparent: true, emissive: 0x000000 });
+  m.onBeforeCompile = (sh) => {
+    Object.assign(sh.uniforms, _cgUniforms());
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', '#include <common>\nattribute float aPrim;\nvarying vec3 vCgW;\nvarying float vCgPrim;\n')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvCgW = position;\nvCgPrim = aPrim;');
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', '#include <common>\n' + _CG_GLSL + _CG_LOOK_GLSL + 'varying vec3 vCgW;\nvarying float vCgPrim;\n')
+      .replace('#include <clipping_planes_fragment>',
+        '#include <clipping_planes_fragment>\n' +
+        'if (cgOpen(int(vCgPrim + 0.5), vCgW) <= 0.0) discard;')
+      .replace('#include <color_fragment>',
+        '#include <color_fragment>\n' +
+        '{ float _fr = pow(1.0 - abs(normalize(cameraPosition - vCgW).y), 4.0);\n' +
+        '  diffuseColor.a = mix(uCgLiqAlpha, 1.0, _fr); }');
+  };
+  m.customProgramCacheKey = () => 'lssCaveGraphWater2';
+  _cgMesh.waterMat = m;
+  return m;
+}
+function _cgSetBiome(name) {
+  const bio = _SW_BIOMES[name] ? name : 'rocky', B = _CG_BIO[bio] || _CG_BIO.rocky, U = _cgUniforms();
+  const T0 = game.sandwichTerrain;
+  if (!T0) {
+    game.sandwichTerrain = { ON: false, biome: bio, YMID: 0, AMP: 1000, snowLine: 0.68, _caveGraph: true };
+    try { _swSyncFX(); } catch (e) { console.warn('[cave-graph] biome sync failed:', e); }
+    finally { game.sandwichTerrain = T0; }
+  }
+  U.uCgCHi.value.copy(_swLin(_SW_BIOMES[bio].cHi)); U.uCgCLo.value.copy(_swLin(_SW_BIOMES[bio].cLo));
+  U.uCgLiqAlpha.value = B.liqAlpha;
+  const w = _cgWaterMaterial();
+  w.color.set(B.liquid); w.emissive.set(B.liquid); w.emissiveIntensity = B.liqEm;
+}
+function _cgDetail() {
+  const mob = (typeof isStandaloneQuest === 'function' && isStandaloneQuest()) || (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE);
+  return mob ? 0.6 : 1.0;   // 24 u grid spacing on desktop, 40 u on phones / Quest (~0.36x the triangles)
+}
+function _cgDisposeMesh() {
+  if (_cgMesh.group) {
+    try { if (_cgMesh.group.parent) scene.remove(_cgMesh.group); } catch (_) {}
+    _cgMesh.group.traverse((n) => { if (n.isMesh && n.geometry) { try { n.geometry.dispose(); } catch (_) {} } });
+  }
+  if (_cgMesh.tex) { try { _cgMesh.tex.dispose(); } catch (_) {} }
+  _cgMesh.group = null; _cgMesh.key = null; _cgMesh.tex = null; _cgMesh.tris = 0; _cgMesh.pools = 0;
+}
+function _cgSeamEps() { return 0.9 * 24 / _cgDetail(); }
+function _cgUploadField(C) {
+  const U = _cgUniforms(), n = C.prims.length;
+  let tex = _cgMesh.tex;
+  if (!tex || tex.image.height !== n) {
+    if (tex) { try { tex.dispose(); } catch (_) {} }
+    tex = new THREE.DataTexture(new Float32Array(16 * n), 4, n, THREE.RGBAFormat, THREE.FloatType);
+    tex.minFilter = tex.magFilter = THREE.NearestFilter;
+    _cgMesh.tex = tex;
+  }
+  const data = tex.image.data;
+  C.prims.forEach((pr, i) => {
+    data.set([pr.type, pr.ax, pr.ay, pr.az, pr.bx, pr.by, pr.bz, pr.R, pr.peak, pr.crev, pr.pool, pr.basinD, pr.level, pr.hol, pr.vb, pr.sharp], i * 16);
+  });
+  tex.needsUpdate = true;
+  U.uCgPrim.value = tex; U.uCgPrimCount.value = n; U.uCgOct.value = C.oct;
+  U.uCgPeakFreq.value = C.pf; U.uCgCrevFreq.value = C.cf; U.uCgBasinFreq.value = C.bf; U.uCgCrevWidth.value = C.crevW;
+  U.uCgHolFreq.value = C.hf; U.uCgMaxOut.value = C.maxOut; U.uCgSeed.value.set(C.sx, C.sy, C.sz);
+  U.uCgSeamEps.value = _cgSeamEps() * C.P.seamScale; U.uCgSeamTaps.value = C.P.seamTaps;
+  U.uCgTipRef.value = C.tipRef; U.uCgCrevRef.value = C.crevRef;
+  let holMax = 0; for (const pr of C.prims) holMax = Math.max(holMax, pr.hol);
+  U.uCgHolRef.value = Math.max(20, holMax * 0.8);
+  U.uCgBand.value.set(C.P.bandBase, C.P.bandGain, C.P.bandStart);
+  _cgSetBiome(C.biome);
+}
+const _CG_FACES = [
+  [[1, 0, 0], [0, 1, 0], [0, 0, 1]], [[-1, 0, 0], [0, 0, 1], [0, 1, 0]],
+  [[0, 1, 0], [0, 0, 1], [1, 0, 0]], [[0, -1, 0], [1, 0, 0], [0, 0, 1]],
+  [[0, 0, 1], [1, 0, 0], [0, 1, 0]], [[0, 0, -1], [0, 1, 0], [1, 0, 0]],
+];
+function _cgEnsureMesh(level) {
+  const C = game.caveGraph;
+  if (!C) return;
+  const det = _cgDetail(), key = C.key + '|d' + det;
+  if (_cgMesh.key === key && _cgMesh.group) {
+    if (!_cgMesh.group.parent) scene.add(_cgMesh.group);
+    _cgSetBiome(C.biome);
+    return;
+  }
+  _cgDisposeMesh();
+  const t0 = performance.now();
+  _cgUploadField(C);
+  const n = C.prims.length;
+  const spacing = 24 / det, pos = [], inn = [], pid = [], idx = [];
+  let v0 = 0;
+  C.prims.forEach((pr, pi) => {
+    if (pr.type === 0) {
+      const N = Math.max(10, Math.min(120, Math.round((Math.PI / 2) * pr.R / spacing)));
+      for (const F of _CG_FACES) {
+        const base = v0, fn = F[0], fu = F[1], fv = F[2];
+        for (let j = 0; j <= N; j++) for (let i = 0; i <= N; i++) {
+          const s = i / N * 2 - 1, t = j / N * 2 - 1;
+          let x = fn[0] + s * fu[0] + t * fv[0], y = fn[1] + s * fu[1] + t * fv[1], z = fn[2] + s * fu[2] + t * fv[2];
+          const L = Math.sqrt(x * x + y * y + z * z); x /= L; y /= L; z /= L;
+          pos.push(pr.ax + x * pr.R, pr.ay + y * pr.R, pr.az + z * pr.R); inn.push(-x, -y, -z); pid.push(pi); v0++;
+        }
+        for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+          const a = base + j * (N + 1) + i, b = a + 1, c = a + (N + 1), d = c + 1;
+          idx.push(a, b, d, a, d, c);
+        }
+      }
+    } else {
+      const Lt = Math.sqrt(pr.L2) || 1, w0 = pr.abx / Lt, w1 = pr.aby / Lt, w2 = pr.abz / Lt;
+      const h0 = Math.abs(w1) < 0.9 ? 0 : 1, h1 = Math.abs(w1) < 0.9 ? 1 : 0;   // helper axis: up, or x for a vertical tunnel
+      let u0 = h1 * w2, u1 = -h0 * w2, u2 = h0 * w1 - h1 * w0;                    // helper x w
+      const ul = Math.sqrt(u0 * u0 + u1 * u1 + u2 * u2) || 1; u0 /= ul; u1 /= ul; u2 /= ul;
+      const v0x = w1 * u2 - w2 * u1, v0y = w2 * u0 - w0 * u2, v0z = w0 * u1 - w1 * u0;   // w x u, so u x v = w
+      const M = Math.max(12, Math.min(160, Math.round(2 * Math.PI * pr.R / spacing)));
+      const K = Math.max(2, Math.round(Lt / spacing));
+      const base = v0;
+      for (let k = 0; k <= K; k++) for (let m = 0; m <= M; m++) {
+        const t = k / K, th = (m % M) / M * Math.PI * 2, c = Math.cos(th), s = Math.sin(th);
+        const dx = c * u0 + s * v0x, dy = c * u1 + s * v0y, dz = c * u2 + s * v0z;
+        pos.push(pr.ax + pr.abx * t + dx * pr.R, pr.ay + pr.aby * t + dy * pr.R, pr.az + pr.abz * t + dz * pr.R);
+        inn.push(-dx, -dy, -dz); pid.push(pi); v0++;
+      }
+      for (let k = 0; k < K; k++) for (let m = 0; m < M; m++) {
+        const a = base + k * (M + 1) + m, b = a + (M + 1), c = a + 1, d = b + 1;
+        idx.push(a, c, b, b, c, d);
+      }
+      const Q = Math.max(3, Math.round((Math.PI / 2) * pr.R / (spacing * 1.5)));
+      for (let end = 0; end < 2; end++) {
+        const ring0 = base + (end ? K : 0) * (M + 1), sg = end ? 1 : -1, cb = v0;
+        const ex = end ? pr.bx : pr.ax, ey = end ? pr.by : pr.ay, ez = end ? pr.bz : pr.az;
+        for (let q = 1; q <= Q; q++) {
+          const ph = q / Q * Math.PI / 2, cp = Math.cos(ph), sp = Math.sin(ph) * sg;
+          for (let m = 0; m <= M; m++) {
+            const th = (m % M) / M * Math.PI * 2, c = Math.cos(th), s = Math.sin(th);
+            const dx = (c * u0 + s * v0x) * cp + w0 * sp, dy = (c * u1 + s * v0y) * cp + w1 * sp, dz = (c * u2 + s * v0z) * cp + w2 * sp;
+            pos.push(ex + dx * pr.R, ey + dy * pr.R, ez + dz * pr.R); inn.push(-dx, -dy, -dz); pid.push(pi); v0++;
+          }
+        }
+        for (let q = 0; q < Q; q++) for (let m = 0; m < M; m++) {
+          const a = (q === 0 ? ring0 : cb + (q - 1) * (M + 1)) + m, b = cb + q * (M + 1) + m, c = a + 1, d = b + 1;
+          if (end) idx.push(a, c, b, b, c, d); else idx.push(a, b, c, b, d, c);
+        }
+      }
+    }
+  });
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('aIn', new THREE.Float32BufferAttribute(inn, 3));
+  g.setAttribute('aPrim', new THREE.Float32BufferAttribute(pid, 1));
+  g.setIndex(idx);
+  const walls = new THREE.Mesh(g, _cgWallMaterial());
+  walls.frustumCulled = false; walls.castShadow = false; walls.receiveShadow = false;
+  walls.userData.isCaveGraph = true;
+  walls.onBeforeRender = () => {
+    if (game.sandwichTerrain) return;
+    _swU.uTime.value = performance.now() * 0.001;
+    if (typeof camera !== 'undefined' && camera) _swU.uCam.value.copy(camera.position);
+  };
+  const group = new THREE.Group();
+  group.name = 'caveGraph';
+  group.add(walls);
+  const wp = [], wpid = [], widx = [];
+  let w0 = 0;
+  C.rooms.forEach((rm) => {
+    if (!rm.pool) return;
+    const pi = C.prims.indexOf(rm), h = rm.level - (rm.ay - rm.R);
+    const rr = Math.sqrt(Math.max(0, rm.R * rm.R - (rm.R - h) * (rm.R - h))) + rm.basinD + 60;
+    const RINGS = 16, SEG = 72, base = w0;
+    wp.push(rm.ax, rm.level, rm.az); wpid.push(pi); w0++;
+    for (let r = 1; r <= RINGS; r++) for (let sg = 0; sg < SEG; sg++) {
+      const a = sg / SEG * Math.PI * 2, rad = rr * r / RINGS;
+      wp.push(rm.ax + Math.cos(a) * rad, rm.level, rm.az + Math.sin(a) * rad); wpid.push(pi); w0++;
+    }
+    for (let sg = 0; sg < SEG; sg++) widx.push(base, base + 1 + sg, base + 1 + (sg + 1) % SEG);
+    for (let r = 1; r < RINGS; r++) for (let sg = 0; sg < SEG; sg++) {
+      const a = base + 1 + (r - 1) * SEG + sg, b = base + 1 + (r - 1) * SEG + (sg + 1) % SEG;
+      widx.push(a, a + SEG, b, b, a + SEG, b + SEG);
+    }
+  });
+  if (widx.length) {
+    const wg = new THREE.BufferGeometry();
+    wg.setAttribute('position', new THREE.Float32BufferAttribute(wp, 3));
+    wg.setAttribute('aPrim', new THREE.Float32BufferAttribute(wpid, 1));
+    wg.setIndex(widx);
+    const water = new THREE.Mesh(wg, _cgWaterMaterial());
+    water.frustumCulled = false; water.renderOrder = 2; water.castShadow = false; water.receiveShadow = false;
+    group.add(water);
+  }
+  scene.add(group);
+  _cgMesh.group = group; _cgMesh.key = key; _cgMesh.tris = idx.length / 3; _cgMesh.pools = C.poolN;
+  _cgMesh.ms = Math.round(performance.now() - t0);
+  try { console.log('[cave-graph] ' + (level && level.name) + ': ' + n + ' shapes, ' + Math.round(_cgMesh.tris / 1000) + 'k tris, ' + C.poolN + ' pools, ' + C.biome + ', built in ' + _cgMesh.ms + ' ms'); } catch (_) {}
+}
+function _cgApplyAtmosphere() {
+  const biome = (game.caveGraph && game.caveGraph.biome) || 'rocky';
+  const P = _SW_BIOMES[biome] || _SW_BIOMES.rocky, B = _CG_BIO[biome] || _CG_BIO.rocky;
+  const look = (typeof _SW_BIOME_LOOK !== 'undefined' && _SW_BIOME_LOOK[biome]) || null;
+  try { _setArenaGridVisible(false); } catch (_) {}
+  if (game._swSavedFog === undefined) game._swSavedFog = (scene.fog !== undefined ? scene.fog : null);
+  if (game._swSavedBg === undefined) game._swSavedBg = (scene.background !== undefined ? scene.background : null);
+  const sky = new THREE.Color(B.fog != null ? B.fog : P.sky);
+  scene.fog = new THREE.FogExp2(sky.getHex(), (game.sandwichFog || 0.3) * 1e-4 * ((look && look.fogMul) || 1));
+  scene.background = new THREE.Color(P.cLo).multiplyScalar(0.3);   // the caverns' own dark ceiling tone
+  try { _cgSetBiome(biome); } catch (_) {}
+  try { _clearBrokenSimForcefield(); } catch (_) {}
+  try { _swDisposeHubWater(); } catch (_) {}
+  try { _lssApplyHubLighting(false); } catch (_) {}
+  try { _lssRestoreArenaMood(); if (look && look.mood) _lssApplyArenaMood(look.mood); } catch (_) {}
+  try { _skyDomeRefresh(); } catch (_) {}
+}
+if (typeof window !== 'undefined') {
+  window.__caveGraph = () => {
+    const C = game.caveGraph;
+    return C ? { on: true, biome: C.biome, shapes: C.prims.length, rooms: C.rooms.length, pools: C.poolN, maxOut: C.maxOut,
+      tris: _cgMesh.tris, buildMs: _cgMesh.ms, cached: !!_cgMesh.group, P: C.P } : { on: false, cachedTris: _cgMesh.tris };
+  };
+  window.__caveGraphAt = (x, y, z) => _cgOpenDepth(x, y, z);
+  window.__caveGraphTune = (p) => {
+    if (p === 'reset') _cgMesh.tune = null;
+    else if (p && typeof p === 'object') _cgMesh.tune = Object.assign(_cgMesh.tune || {}, p);
+    const C0 = game.caveGraph, lvl = game.currentLevel;
+    if (!C0 || !C0.ON || !lvl || !lvl.caveGraph) return p ? 'stored for the next cave graph map (not on one now)' : null;
+    if (!p) return Object.assign({}, C0.P);
+    const C = _cgBuildField(lvl);
+    C.biome = C0.biome;
+    game.caveGraph = C;
+    const geoSig = (c) => c.rooms.map((r) => r.pool ? Math.round(r.level) + ':' + Math.round(r.basinD) : '-').join(',') + '|' + c.prims.map((p) => Math.round(p.R)).join(',');
+    if (geoSig(C) !== geoSig(C0) || !_cgMesh.group) { _cgDisposeMesh(); _cgEnsureMesh(lvl); }
+    else { _cgUploadField(C); _cgMesh.key = C.key + '|d' + _cgDetail(); _cgMesh.pools = C.poolN; }
+    return Object.assign({}, C.P);
+  };
+}
+
 let _arenaShroomMats = null;
 const _AR_CLOUD_WAKE_R = 520;      // how close a ship has to be to disturb
 const _AR_CLOUD_WAKE_STR = 14;     // see the note at the applyWake call site
@@ -49500,6 +50085,11 @@ function worldSDF(px,py,pz) {
   if (_af && _af.ON) {
     const _fa = _ARENA_FIELD.eval(px, py, pz, _af.G);
     return _fa > 0 ? Math.min(_fa, 90) : Math.max(_fa, -300);
+  }
+  const _cgw = game.caveGraph;
+  if (_cgw && _cgw.ON) {
+    const _fc = -_cgOpenDepth(px, py, pz);
+    return _fc > 0 ? Math.min(_fc, 90) : Math.max(_fc, -300);
   }
   const _stT = game.sandwichTerrain;
   if (_stT && _stT.ON) {
@@ -65104,7 +65694,8 @@ function _spawnBasinClouds() {
   if (!game.levelSpheres || !game.levelSpheres.length) return;
   if (typeof billboardCloudSystem === 'undefined' || !billboardCloudSystem) return;
   if (typeof GasCloud !== 'function') return;
-  const _basinCloudAlpha = (typeof game !== 'undefined' && game.sandwichTerrain && game.sandwichTerrain.biome === 'volcanic') ? 0.30 : 0.6;
+  const _basinVolc = (typeof game !== 'undefined') && ((game.sandwichTerrain && game.sandwichTerrain.biome === 'volcanic') || (game.caveGraph && game.caveGraph.ON && game.caveGraph.biome === 'volcanic'));
+  const _basinCloudAlpha = _basinVolc ? 0.30 : 0.6;
   if (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) return;
   if (typeof QUALITY !== 'undefined' && !QUALITY.basinClouds()) return;
   if (!game.detachedGasPockets) game.detachedGasPockets = [];
@@ -76998,7 +77589,7 @@ function commitLoadout(key) {
   LSS.MODE = 'campaign';   // (v43.19) NOT room-deferred: internal setup, not a lobby mode button
       try { document.body.classList.remove('lss-freeflight'); } catch (_) {}   // (v38.68) the view is _applyStartView's call now, not a forced cockpit
       game.testMode = true; game.raceNoTimer = true; game.currentRound = 1;
-      if (!game.campaign) game.campaign = { sceneIndex: 0, waveIndex: 0, bossActive: false, phase: 'travel', unlockedLoadouts: _campLoadUnlocks(), bodyKey: 'VORTEX_BODY', unlockedLegs: (function () { const s = _campLoadLegs(); s.unshift('camp_approach'); return s.filter((k, i) => s.indexOf(k) === i); })(), nemesis: { seen: false, escapes: 0, alive: false, monId: -1, unlocked8: false }, waveCount: 3, _ended: false, _needFirstWave: false, difficulty: _getStoredDifficulty(), swarmCap: _campSwarmCapFor(_getStoredDifficulty()) };
+      if (!game.campaign) game.campaign = { sceneIndex: 0, waveIndex: 0, bossActive: false, phase: 'travel', unlockedLoadouts: _campLoadUnlocks(), bodyKey: 'VORTEX_BODY', unlockedLegs: _campCarouselLegs(), nemesis: { seen: false, escapes: 0, alive: false, monId: -1, unlocked8: false }, waveCount: 3, _ended: false, _needFirstWave: false, difficulty: _getStoredDifficulty(), swarmCap: _campSwarmCapFor(_getStoredDifficulty()) };
       try { if (typeof CAMPAIGN_LEGS !== 'undefined') { const _li = CAMPAIGN_LEGS.findIndex(l => l && l.key === _selLvl); if (_li >= 0) game.campaign.sceneIndex = _li; } } catch (_) {}
       try { _campSaveLast(_selLvl); } catch (_) {}   // (v37.12) picker choice = the new resume point
       game._campJourney = true; game._campRiftArmed = true; game._campFinale = false;
@@ -102952,6 +103543,130 @@ const MAP_DATA = {
     ]
   },
 
+  cave_v8: {
+    name: "Colossal Arena",   // (v53.92) was "V8 Engine" (v20's v8engine2) - owner: "v8engine to Colossal Arena"
+    thumb: 'map_thumbs/leg2.webp',   // (v53.92) owner: "use leg2 thumb for colossal arena" - the Molten Core art; shared with that leg
+    description: "Two banks of stacked chambers on one block, linked across by narrow bars. Spawns at either end; the champion room hangs beneath the banks.",
+    defaultTheme: "Volcanic",
+    noMonsters: true,
+    caveGraph: { seed: 7 },
+    palette: [0x4477ff, 0xff4488, 0x44ff77, 0xffaa44, 0xaa44ff, 0x44ffff, 0xff44aa, 0xffff44],
+    rooms: [
+      { id: "room_1", team: null, x: -980, y: 448, z: 780, r: 540 },
+      { id: "room_2", team: null, x: 1020, y: 448, z: 780, r: 540 },
+      { id: "room_3", team: null, x: -980, y: 448, z: 30, r: 540 },
+      { id: "room_4", team: null, x: 1020, y: 448, z: 30, r: 540 },
+      { id: "room_5", team: null, x: 996, y: 1026, z: 60, r: 540 },
+      { id: "room_6", team: null, x: 996, y: 1026, z: 810, r: 540 },
+      { id: "room_7", team: null, x: -1004, y: 1026, z: 60, r: 540 },
+      { id: "room_8", team: null, x: -1004, y: 1026, z: 810, r: 540 },
+      { id: "room_9", team: null, x: -924, y: 464, z: -716, r: 540 },
+      { id: "room_10", team: null, x: 1076, y: 464, z: -716, r: 540 },
+      { id: "room_11", team: null, x: -924, y: 464, z: -1466, r: 540 },
+      { id: "room_12", team: null, x: 1076, y: 464, z: -1466, r: 540 },
+      { id: "room_13", team: null, x: 1052, y: 1042, z: -1436, r: 540 },
+      { id: "room_14", team: null, x: 1052, y: 1042, z: -686, r: 540 },
+      { id: "room_15", team: null, x: -948, y: 1042, z: -1436, r: 540 },
+      { id: "room_16", team: null, x: -948, y: 1042, z: -686, r: 540 },
+      { id: "room_20", team: "A", x: 22, y: 0, z: -3678, r: 600 },
+      { id: "room_21", team: "B", x: -10, y: 0, z: 3602, r: 600 },
+      { id: "room_22", team: null, champion: true, x: 2, y: -1138, z: -334, r: 600 },
+    ],
+    tunnels: [
+      { path: [{x: -980, y: 448, z: 780}, {x: 1020, y: 448, z: 780}], r: 200 },
+      { path: [{x: -980, y: 448, z: 30}, {x: 1020, y: 448, z: 30}], r: 200 },
+      { path: [{x: -1004, y: 1026, z: 810}, {x: 996, y: 1026, z: 810}], r: 200 },
+      { path: [{x: -1004, y: 1026, z: 60}, {x: 996, y: 1026, z: 60}], r: 200 },
+      { path: [{x: -924, y: 464, z: -716}, {x: 1076, y: 464, z: -716}], r: 200 },
+      { path: [{x: -924, y: 464, z: -1466}, {x: 1076, y: 464, z: -1466}], r: 200 },
+      { path: [{x: -948, y: 1042, z: -686}, {x: 1052, y: 1042, z: -686}], r: 200 },
+      { path: [{x: -948, y: 1042, z: -1436}, {x: 1052, y: 1042, z: -1436}], r: 200 },
+      { path: [{x: -1004, y: 1026, z: 810}, {x: -1004, y: 1026, z: 60}], r: 360 },
+      { path: [{x: -1004, y: 1026, z: 60}, {x: -948, y: 1042, z: -686}], r: 360 },
+      { path: [{x: -948, y: 1042, z: -1436}, {x: -948, y: 1042, z: -686}], r: 360 },
+      { path: [{x: -924, y: 464, z: -1466}, {x: -924, y: 464, z: -716}], r: 360 },
+      { path: [{x: -924, y: 464, z: -716}, {x: -980, y: 448, z: 30}], r: 360 },
+      { path: [{x: -980, y: 448, z: 30}, {x: -980, y: 448, z: 780}], r: 360 },
+      { path: [{x: -924, y: 464, z: -1466}, {x: -948, y: 1042, z: -1436}], r: 360 },
+      { path: [{x: -924, y: 464, z: -716}, {x: -948, y: 1042, z: -686}], r: 360 },
+      { path: [{x: -980, y: 448, z: 30}, {x: -1004, y: 1026, z: 60}], r: 360 },
+      { path: [{x: -980, y: 448, z: 780}, {x: -1004, y: 1026, z: 810}], r: 360 },
+      { path: [{x: 996, y: 1026, z: 810}, {x: 1020, y: 448, z: 780}], r: 360 },
+      { path: [{x: 996, y: 1026, z: 60}, {x: 1020, y: 448, z: 30}], r: 360 },
+      { path: [{x: 1052, y: 1042, z: -686}, {x: 1076, y: 464, z: -716}], r: 360 },
+      { path: [{x: 1052, y: 1042, z: -1436}, {x: 1076, y: 464, z: -1466}], r: 360 },
+      { path: [{x: 1052, y: 1042, z: -1436}, {x: 1052, y: 1042, z: -686}], r: 360 },
+      { path: [{x: 1052, y: 1042, z: -686}, {x: 996, y: 1026, z: 60}], r: 360 },
+      { path: [{x: 996, y: 1026, z: 60}, {x: 996, y: 1026, z: 810}], r: 360 },
+      { path: [{x: 1020, y: 448, z: 780}, {x: 1020, y: 448, z: 30}], r: 360 },
+      { path: [{x: 1020, y: 448, z: 30}, {x: 1076, y: 464, z: -716}], r: 360 },
+      { path: [{x: 1076, y: 464, z: -716}, {x: 1076, y: 464, z: -1466}], r: 360 },
+      { path: [{x: 22, y: 0, z: -3678}, {x: -948, y: 1042, z: -1436}], r: 360 },
+      { path: [{x: 22, y: 0, z: -3678}, {x: 1052, y: 1042, z: -1436}], r: 360 },
+      { path: [{x: -10, y: 0, z: 3602}, {x: -1004, y: 1026, z: 810}], r: 360 },
+      { path: [{x: -10, y: 0, z: 3602}, {x: 996, y: 1026, z: 810}], r: 360 },
+      { path: [{x: 22, y: 0, z: -3678}, {x: 1076, y: 464, z: -1466}], r: 360 },
+      { path: [{x: 22, y: 0, z: -3678}, {x: -924, y: 464, z: -1466}], r: 360 },
+      { path: [{x: -10, y: 0, z: 3602}, {x: -980, y: 448, z: 780}], r: 360 },
+      { path: [{x: -10, y: 0, z: 3602}, {x: 1020, y: 448, z: 780}], r: 360 },
+      { path: [{x: -924, y: 464, z: -716}, {x: 2, y: -1138, z: -334}], r: 360 },
+      { path: [{x: -980, y: 448, z: 30}, {x: 2, y: -1138, z: -334}], r: 360 },
+      { path: [{x: 1020, y: 448, z: 30}, {x: 2, y: -1138, z: -334}], r: 360 },
+      { path: [{x: 1076, y: 464, z: -716}, {x: 2, y: -1138, z: -334}], r: 360 },
+      { path: [{x: 22, y: 0, z: -3678}, {x: 2, y: -1138, z: -334}], r: 360 },
+      { path: [{x: 2, y: -1138, z: -334}, {x: -10, y: 0, z: 3602}], r: 360 },
+    ]
+  },
+  cave_center_cube: {
+    name: "Hidden Arena",   // (v53.92) was "Center Cube" (v20's Center Cube 2) - owner: "rename center cube to Hidden Arena"
+    thumb: 'map_thumbs/leg3.webp',   // (v53.92) owner: "leg3 thumb for hidden arena" - The Golden Deep's art; shared with that leg
+    description: "A cube of chambers on two floors at the centre, satellite caves around it, spawns at opposite corners.",
+    defaultTheme: "Gold Mine",
+    noMonsters: true,
+    caveGraph: { seed: 7 },
+    palette: [0x4477ff, 0xff4488, 0x44ff77, 0xffaa44, 0xaa44ff, 0x44ffff, 0xff44aa, 0xffff44],
+    rooms: [
+      { id: "room_3", team: "B", x: 2932, y: 500, z: -3376, r: 540 },
+      { id: "room_6", team: null, x: -506, y: 4, z: 502, r: 360 },
+      { id: "room_7", team: null, x: -530, y: 2, z: -524, r: 360 },
+      { id: "room_8", team: null, x: 502, y: 8, z: -488, r: 360 },
+      { id: "room_9", team: null, x: 524, y: 0, z: 506, r: 360 },
+      { id: "room_10", team: null, x: -496, y: 840, z: 512, r: 360 },
+      { id: "room_11", team: null, x: -498, y: 840, z: -520, r: 360 },
+      { id: "room_12", team: null, champion: true, x: 530, y: 840, z: 518, r: 360 },
+      { id: "room_13", team: null, x: 544, y: 840, z: -490, r: 360 },
+      { id: "room_16", team: null, x: -906, y: 506, z: 998, r: 540 },
+      { id: "room_17", team: null, x: 1014, y: 506, z: -960, r: 540 },
+      { id: "room_18", team: "A", x: -3120, y: 500, z: 3266, r: 540 },
+      { id: "room_19", team: null, x: 2024, y: 506, z: 924, r: 540 },
+      { id: "room_20", team: null, x: -1556, y: 500, z: -1126, r: 540 },
+    ],
+    tunnels: [
+      { path: [{x: 544, y: 840, z: -490}, {x: 530, y: 840, z: 518}], r: 360 },
+      { path: [{x: 530, y: 840, z: 518}, {x: -496, y: 840, z: 512}], r: 360 },
+      { path: [{x: -496, y: 840, z: 512}, {x: -498, y: 840, z: -520}], r: 360 },
+      { path: [{x: -498, y: 840, z: -520}, {x: 544, y: 840, z: -490}], r: 360 },
+      { path: [{x: 544, y: 840, z: -490}, {x: 502, y: 8, z: -488}], r: 360 },
+      { path: [{x: 502, y: 8, z: -488}, {x: -530, y: 2, z: -524}], r: 360 },
+      { path: [{x: -530, y: 2, z: -524}, {x: -498, y: 840, z: -520}], r: 360 },
+      { path: [{x: -530, y: 2, z: -524}, {x: -506, y: 4, z: 502}], r: 360 },
+      { path: [{x: -506, y: 4, z: 502}, {x: 524, y: 0, z: 506}], r: 360 },
+      { path: [{x: 530, y: 840, z: 518}, {x: 524, y: 0, z: 506}], r: 360 },
+      { path: [{x: -496, y: 840, z: 512}, {x: -506, y: 4, z: 502}], r: 300 },
+      { path: [{x: 524, y: 0, z: 506}, {x: 502, y: 8, z: -488}], r: 360 },
+      { path: [{x: 544, y: 840, z: -490}, {x: 1014, y: 506, z: -960}], r: 300 },
+      { path: [{x: 502, y: 8, z: -488}, {x: 1014, y: 506, z: -960}], r: 300 },
+      { path: [{x: -496, y: 840, z: 512}, {x: -906, y: 506, z: 998}], r: 300 },
+      { path: [{x: -506, y: 4, z: 502}, {x: -906, y: 506, z: 998}], r: 300 },
+      { path: [{x: -906, y: 506, z: 998}, {x: -1556, y: 500, z: -1126}], r: 200 },
+      { path: [{x: 2024, y: 506, z: 924}, {x: 1014, y: 506, z: -960}], r: 200 },
+      { path: [{x: 2932, y: 500, z: -3376}, {x: -1556, y: 500, z: -1126}], r: 360 },
+      { path: [{x: -3120, y: 500, z: 3266}, {x: 2024, y: 506, z: 924}], r: 360 },
+      { path: [{x: -3120, y: 500, z: 3266}, {x: -906, y: 506, z: 998}], r: 360 },
+      { path: [{x: 2932, y: 500, z: -3376}, {x: 1014, y: 506, z: -960}], r: 360 },
+    ]
+  },
+
   assault_shifting: {
     name: 'The Shifting Causeway',
     thumb: 'map_thumbs/shifting_deep.webp',   // (v43.76) mode prefix dropped from the label - the picker already says which mode you are in
@@ -103794,6 +104509,12 @@ MAP_DATA.camp_brokensim.lift = { ambMul: 1.8, sunMul: 1.2, hemiMul: 1.8, hSky: 0
 MAP_DATA.camp_crystalcave.legHalfZ = 37000;
 MAP_DATA.camp_crystalcave.rooms = _campLegRooms(MAP_DATA.camp_crystalcave.legHalfZ);
 Object.assign(MAP_DATA.camp_approach, { thumb: 'map_thumbs/the_approach.webp' });
+Object.assign(MAP_DATA.camp_grassy,      { thumb: 'map_thumbs/leg1.webp' });   // green valley + lake
+Object.assign(MAP_DATA.camp_volcanic,    { thumb: 'map_thumbs/leg2.webp' });   // lava falls
+Object.assign(MAP_DATA.camp_goldmine,    { thumb: 'map_thumbs/leg3.webp' });   // golden canyon
+Object.assign(MAP_DATA.camp_crystalcave, { thumb: 'map_thumbs/leg4.webp' });   // blue / violet crystals
+Object.assign(MAP_DATA.camp_snow,        { thumb: 'map_thumbs/leg5.webp' });   // ice field
+Object.assign(MAP_DATA.camp_brokensim,   { thumb: 'map_thumbs/leg6.webp' });   // glitched floating rock
 const CAMPAIGN_LEGS = [
   { key: 'camp_approach', name: 'The Approach' },
   { key: 'camp_grassy', name: 'Verdant Pass' },
@@ -104987,6 +105708,8 @@ function buildRoomGraphLevel(level) {
   try { game._rrBuildParts.reset = Math.round(performance.now() - _bpT0); } catch (_) {}   // (v39.49c)
   if (!_keepTerrain) game.sandwichTerrain = null;
   game.arenaField = null;
+  game.caveGraph = null;
+  if (!(level && level.caveGraph)) { try { _cgDisposeMesh(); } catch (_) {} }
   if (!(level && level.arena)) { try { _arenaDisposeMesh(); } catch (_) {} }
   if (!(level && level.arena)) { try { _arenaLatDispose(); } catch (_) {} }
   try { if (typeof _bendReset === 'function') _bendReset(); } catch (_) {}
@@ -105247,6 +105970,11 @@ function buildRoomGraphLevel(level) {
     game.arenaField = { ON: true, G: _arenaBuildParams(level.arena, level.rooms) };
     game.sandwichTerrain = null;
   }
+  else if (level && level.caveGraph) {
+    game.caveGraph = _cgBuildField(level);
+    game.caveGraph.biome = (level && level._biomeOverride) || game.sandwichBiome || 'rocky';
+    game.sandwichTerrain = null;
+  }
   else if (game.sandwichTerrainEnabled) {
     const yMid = (bMinY + bMaxY) * 0.5;
     const SPACING = 670;
@@ -105340,6 +106068,11 @@ function buildRoomGraphLevel(level) {
     try { _arenaEnsureLattice(level); }
     catch (e) { console.warn('[spire] nav lattice failed (router + local planner only):', e); }
     if (mapGenHud && !_arenaMesh.building) mapGenHud.style.display = 'none';
+  }
+  else if (game.caveGraph) {
+    try { _cgEnsureMesh(level); } catch (e) { console.warn('[cave-graph] mesh build failed (collision-only world):', e); }
+    try { _swApplyAtmosphere(); } catch (e) { console.warn('[cave-graph] atmosphere failed:', e); }
+    if (mapGenHud) mapGenHud.style.display = 'none';
   }
   else if (game.sandwichTerrain && game.sandwichTerrain.ON) {
     if (mapGenHud) mapGenHud.style.display = 'none';

@@ -1,0 +1,890 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LSS cave graph lab</title>
+<style>
+  html,body{margin:0;height:100%;background:#05070b;overflow:hidden;font:12px/1.45 ui-monospace,Consolas,monospace;color:#cfe}
+  #c{position:fixed;inset:0;width:100%;height:100%;display:block}
+  #hud{position:fixed;left:10px;bottom:10px;max-width:620px;background:rgba(8,12,18,.74);border:1px solid #1d2b3a;border-radius:8px;padding:8px 10px;white-space:pre-wrap;pointer-events:none}
+  #msg{position:fixed;left:50%;top:42%;transform:translate(-50%,-50%);font-size:14px;color:#9fd;background:rgba(5,8,12,.78);padding:12px 18px;border-radius:8px;border:1px solid #1d3a3a;pointer-events:none;text-align:center}
+</style>
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.min.js" } }
+</script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">loading...</div>
+<div id="msg">click to fly<br>WASD + mouse, Space / C up-down, Shift boost, pad works too<br>1 / 2 / 3 = spawn A / spawn B / champion, J = next tunnel mouth, P = probe, H = panel</div>
+<script type="module">
+import * as THREE from 'three';
+import GUI from 'https://cdn.jsdelivr.net/npm/lil-gui@0.19.2/+esm';
+
+// =============================================================================
+// LSS CAVE GRAPH LAB (2026-10-12)
+//
+// The v20 room-graph maps (spheres + tunnels, LSS/maps/*.json) dressed like
+// today's caverns. Owner: "our caverns are two planes with noise... you can
+// create noise on the inside of a cylinder or sphere the same way as a plane."
+// So every wall is a HEIGHTFIELD ON ITS OWN SURFACE - a tunnel is the sandwich
+// terrain rolled into a tube, a room the same thing wrapped on a sphere - pushed
+// along its inward normal by ONE shared 3D noise field:
+//   + peaks     ridged noise (the cavern-peak recipe) pushes rock INTO the air
+//   - crevices  reverse noise along thin lines pushes INTO the rock
+//   - pools     reverse noise on floors digs basins, liquid fills them
+// Reverse noise only ever widens the flyable space; only peaks need a budget.
+//
+// HARD ROCK SEAMS (owner: "try the hard rock first"): each wall discards the
+// pixels that fall inside ANOTHER shape's displaced open space, so a tunnel cuts
+// its own mouth in a room and both walls end exactly at their intersection.
+// Both sides evaluate the same displaced radius, so the seam is watertight up to
+// tessellation.
+//
+// CLEARANCE: peaks are capped per shape at (radius - keep), so a clear core of
+// `keep` u runs down every tunnel axis and round every room centre. Tunnels run
+// centre to centre, so spawn-to-spawn stays open BY CONSTRUCTION. The probe
+// measures it anyway.
+//
+// GPU and CPU noise are twins built on an INTEGER hash (uint in GLSL, Math.imul
+// in JS) so collision and the probe see the walls that are drawn.
+// =============================================================================
+
+const SPIRE = 6.4e9;   // the Spire's measured comfortable flight space, u^3 at >= 170 u clearance
+
+const MAPS = {
+  'v8engine2': 'v8engine2.json', 'MiddleBars': 'map_middlebars.json', 'Center Cube 2': 'map_center_cube_v2.json',
+  'Center Cube': 'map_cubecenter.json', 'Pyramid': 'map_pyramid.json', 'Octahedron': 'map_octahedron.json',
+  'Pentagon': 'map_pentagon.json', 'Nexus': 'map_hourglass.json', 'Spine': 'map_spine.json',
+  'Infinity': 'map_infinity.json', 'Cross': 'map_cross.json',
+};
+
+// The game's own palettes (_SW_BIOMES tRock/gHi/cLo/tSnow/tMoss/sky, _SW_BIOME_LOOK strata + hemi,
+// _HZ_WATER for the liquids). 'mossy' takes the Spire's mystical storey (deep teal moss, aqua glow)
+// because the overworld's open-sky blue makes no sense underground.
+const BIOMES = ['crystalcave', 'volcanic', 'snow', 'goldmine', 'mossy', 'rocky', 'brokensim'];
+const BIO = {
+  crystalcave: { rock: 0x303a64, tip: 0x6a7ac0, ceil: 0x121530, cover: 0xc8d4ff, coverAmt: 0.45, fog: 0x141838, hSky: 0x2a3060, hGnd: 0x141030,
+                 liquid: 0x2e2a76, liqEm: 0.35, liqAlpha: 0.82, crevEm: 0x60c8ff, crevEmK: 0.35, fleck: 0x9a5cff, strata: 0.26 },
+  volcanic:    { rock: 0x5a4a40, tip: 0x8e7462, ceil: 0x46382e, cover: 0x483630, coverAmt: 0.35, fog: 0x5a2418, hSky: 0x9a4f2e, hGnd: 0x4a2418,
+                 liquid: 0xb32708, liqEm: 1.6, liqAlpha: 1.0, crevEm: 0xff5a1a, crevEmK: 1.4, fleck: 0x000000, strata: 0.34 },
+  snow:        { rock: 0x6f7a86, tip: 0xd8e6f2, ceil: 0x8fa6bd, cover: 0xffffff, coverAmt: 0.95, fog: 0xa9bccc, hSky: 0xb8c8d8, hGnd: 0x5a6878,
+                 liquid: 0xa8c9d8, liqEm: 0.0, liqAlpha: 1.0, crevEm: 0x000000, crevEmK: 0.0, fleck: 0x000000, strata: 0.16 },
+  goldmine:    { rock: 0x584828, tip: 0xcea44e, ceil: 0x241a10, cover: 0x9c7c3c, coverAmt: 0.5, fog: 0x3a2c1a, hSky: 0x4a3820, hGnd: 0x241a10,
+                 liquid: 0xb98a1c, liqEm: 0.9, liqAlpha: 1.0, crevEm: 0x000000, crevEmK: 0.0, fleck: 0xffc030, strata: 0.40 },
+  mossy:       { rock: 0x3d5a50, tip: 0x6e8a5a, ceil: 0x1e3430, cover: 0x294e18, coverAmt: 0.8, fog: 0x10241f, hSky: 0x2f5f58, hGnd: 0x0c1a14,
+                 liquid: 0x16465c, liqEm: 0.0, liqAlpha: 0.78, crevEm: 0x5fd8c2, crevEmK: 0.5, fleck: 0x000000, strata: 0.14 },
+  rocky:       { rock: 0x44484f, tip: 0x97a2b0, ceil: 0x3c4150, cover: 0x55606b, coverAmt: 0.3, fog: 0x3a4250, hSky: 0x8a9aae, hGnd: 0x2c313c,
+                 liquid: 0x2b4a4a, liqEm: 0.0, liqAlpha: 0.85, crevEm: 0x000000, crevEmK: 0.0, fleck: 0x000000, strata: 0.30 },
+  brokensim:   { rock: 0x3a3a42, tip: 0x70707e, ceil: 0x14141c, cover: 0xc8c8d6, coverAmt: 0.3, fog: 0x1a1428, hSky: 0x3a2a58, hGnd: 0x14141c,
+                 liquid: 0x6a1e6a, liqEm: 0.8, liqAlpha: 1.0, crevEm: 0xd040ff, crevEmK: 0.9, fleck: 0x000000, strata: 0.22 },
+};
+const NB = BIOMES.length;
+
+const P = {
+  map: 'v8engine2', scale: 2.0, biome: 'mixed', seed: 7, detail: 1.0,
+  // peaks (into the air): fraction of the shape's radius, capped at radius - keep
+  // (first look: 0.32 / 0.26 / size 380 / sharp 1.75 read as lumps, not peaks - these read as cavern peaks)
+  peaks: 0.5, peaksTunnel: 0.34, keep: 170, peakSize: 260, sharp: 2.3, octaves: 4, vertical: 0.7,
+  // reverse noise (into the rock)
+  crevice: 0.10, creviceWidth: 0.07, creviceSize: 520,
+  poolChance: 0.5, poolLevel: 0.30, basin: 0.12,
+  // look
+  headlight: 2.2, ambient: 0.55, fog: 1.0, exposure: 1.05,
+  // ship
+  shipR: 55, speed: 900,
+};
+
+// ---------------------------------------------------------------------------- noise, CPU twin
+function hash3(ix, iy, iz) {
+  let h = (Math.imul(ix + 65536, 374761393) + Math.imul(iy + 65536, 668265263) + Math.imul(iz + 65536, 1274126177)) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1103515245);
+  h = h ^ (h >>> 16);
+  return (h >>> 0) / 4294967296;
+}
+function vnoise(x, y, z) {
+  const fx = Math.floor(x), fy = Math.floor(y), fz = Math.floor(z);
+  const tx = x - fx, ty = y - fy, tz = z - fz;
+  const ux = tx * tx * (3 - 2 * tx), uy = ty * ty * (3 - 2 * ty), uz = tz * tz * (3 - 2 * tz);
+  const n000 = hash3(fx, fy, fz), n100 = hash3(fx + 1, fy, fz), n010 = hash3(fx, fy + 1, fz), n110 = hash3(fx + 1, fy + 1, fz);
+  const n001 = hash3(fx, fy, fz + 1), n101 = hash3(fx + 1, fy, fz + 1), n011 = hash3(fx, fy + 1, fz + 1), n111 = hash3(fx + 1, fy + 1, fz + 1);
+  const x00 = n000 + (n100 - n000) * ux, x10 = n010 + (n110 - n010) * ux, x01 = n001 + (n101 - n001) * ux, x11 = n011 + (n111 - n011) * ux;
+  const y0 = x00 + (x10 - x00) * uy, y1 = x01 + (x11 - x01) * uy;
+  return y0 + (y1 - y0) * uz;
+}
+const sstep = (e0, e1, x) => { let t = (x - e0) / (e1 - e0); t = t < 0 ? 0 : (t > 1 ? 1 : t); return t * t * (3 - 2 * t); };
+const F = { peakFreq: 0, crevFreq: 0, basinFreq: 0, sx: 0, sy: 0, sz: 0, maxOut: 0 };   // mirrors the shader uniforms
+function ridged(x, y, z) {
+  let sum = 0, amp = 1, prev = 1, norm = 0, f = 1;
+  for (let o = 0; o < P.octaves; o++) {
+    const n = vnoise(x * f, y * f, z * f) * 2 - 1;
+    let r = 1 - Math.abs(n); r *= r;
+    sum += r * prev * amp; prev = r; norm += amp; f *= 2.07; amp *= 0.5;
+  }
+  const v = Math.min(1, Math.max(0, sum / Math.max(norm, 1e-4)));
+  return Math.pow(v, P.sharp);
+}
+function crevice(x, y, z) {
+  let s = 0, a = 0.6, f = 1;
+  for (let o = 0; o < 2; o++) { s += a * (vnoise(x * f, y * f, z * f) * 2 - 1); f *= 2.11; a *= 0.45; }
+  return 1 - sstep(0, P.creviceWidth, Math.abs(s));
+}
+// + = rock pushed into the air (peaks), - = pushed into the rock (crevices, basins)
+function dispAt(pr, bx, by, bz, inx, iny, inz) {
+  const vert = Math.abs(iny);
+  const pk = ridged(bx * F.peakFreq + F.sx, by * F.peakFreq + F.sy, bz * F.peakFreq + F.sz) * (1 + (sstep(0.15, 0.85, vert) - 1) * P.vertical);
+  const cr = crevice(bx * F.crevFreq + F.sz * 1.37, by * F.crevFreq + F.sx * 1.37, bz * F.crevFreq + F.sy * 1.37);
+  const fl = sstep(0.4, 0.95, iny);
+  const bs = pr.pool * fl * (0.5 + 0.5 * vnoise(bx * F.basinFreq + F.sy * 0.71, by * F.basinFreq + F.sz * 0.71, bz * F.basinFreq + F.sx * 0.71));
+  return pr.peak * pk - pr.crev * cr - pr.basinD * bs;
+}
+// > 0 inside this shape's displaced open space (value ~ distance to its wall along the radial)
+function primOpen(pr, px, py, pz) {
+  const abx = pr.bx - pr.ax, aby = pr.by - pr.ay, abz = pr.bz - pr.az, L2 = abx * abx + aby * aby + abz * abz;
+  let t = 0;
+  if (L2 > 0) { t = ((px - pr.ax) * abx + (py - pr.ay) * aby + (pz - pr.az) * abz) / L2; t = t < 0 ? 0 : (t > 1 ? 1 : t); }
+  const cx = pr.ax + abx * t, cy = pr.ay + aby * t, cz = pr.az + abz * t;
+  const qx = px - cx, qy = py - cy, qz = pz - cz, dist = Math.sqrt(qx * qx + qy * qy + qz * qz);
+  if (dist >= pr.R + F.maxOut) return -1;
+  const inv = 1 / Math.max(dist, 1e-3), rx = qx * inv, ry = qy * inv, rz = qz * inv;
+  return (pr.R - dispAt(pr, cx + rx * pr.R, cy + ry * pr.R, cz + rz * pr.R, -rx, -ry, -rz)) - dist;
+}
+const _od = { v: -1e9, i: -1 };
+function openDepth(px, py, pz) {
+  let best = -1e9, bi = -1;
+  for (let i = 0; i < prims.length; i++) {
+    const pr = prims[i];
+    // cheap reject on the shape's bounding sphere before any noise
+    const dx = px - pr.mx, dy = py - pr.my, dz = pz - pr.mz;
+    if (dx * dx + dy * dy + dz * dz > pr.bound2) continue;
+    const v = primOpen(pr, px, py, pz);
+    if (v > best) { best = v; bi = i; }
+  }
+  _od.v = best; _od.i = bi; return _od;
+}
+
+// ---------------------------------------------------------------------------- shaders
+const NOISE_GLSL = /* glsl */`
+uniform highp sampler2D uPrim;
+uniform int uPrimCount;
+uniform int uOct;
+uniform int uCrevOct;
+uniform float uPeakFreq;
+uniform float uSharp;
+uniform float uCrevFreq;
+uniform float uCrevWidth;
+uniform float uBasinFreq;
+uniform float uVertBias;
+uniform float uMaxOut;
+uniform vec3 uSeed;
+
+float hash3(ivec3 i) {
+  uvec3 q = uvec3(i + ivec3(65536));
+  uint h = q.x * 374761393u + q.y * 668265263u + q.z * 1274126177u;
+  h = (h ^ (h >> 13u)) * 1103515245u;
+  h = h ^ (h >> 16u);
+  return float(h) * (1.0 / 4294967296.0);
+}
+float vnoise(vec3 p) {
+  vec3 fl = floor(p);
+  ivec3 i = ivec3(fl);
+  vec3 f = p - fl;
+  vec3 u = f * f * (3.0 - 2.0 * f);
+  float n000 = hash3(i);
+  float n100 = hash3(i + ivec3(1, 0, 0));
+  float n010 = hash3(i + ivec3(0, 1, 0));
+  float n110 = hash3(i + ivec3(1, 1, 0));
+  float n001 = hash3(i + ivec3(0, 0, 1));
+  float n101 = hash3(i + ivec3(1, 0, 1));
+  float n011 = hash3(i + ivec3(0, 1, 1));
+  float n111 = hash3(i + ivec3(1, 1, 1));
+  float x00 = n000 + (n100 - n000) * u.x;
+  float x10 = n010 + (n110 - n010) * u.x;
+  float x01 = n001 + (n101 - n001) * u.x;
+  float x11 = n011 + (n111 - n011) * u.x;
+  float y0 = x00 + (x10 - x00) * u.y;
+  float y1 = x01 + (x11 - x01) * u.y;
+  return y0 + (y1 - y0) * u.z;
+}
+// loop bounds are UNIFORMS on purpose: ANGLE's fxc unrolls constant loops and inlines every
+// call, which is what turned one lab shader into a 16 s compile (eml_blocks, 2026-10-06)
+float ridged(vec3 p) {
+  float sum = 0.0;
+  float amp = 1.0;
+  float prev = 1.0;
+  float norm = 0.0;
+  float f = 1.0;
+  for (int o = 0; o < uOct; o++) {
+    float n = vnoise(p * f) * 2.0 - 1.0;
+    float r = 1.0 - abs(n);
+    r *= r;
+    sum += r * prev * amp;
+    prev = r;
+    norm += amp;
+    f *= 2.07;
+    amp *= 0.5;
+  }
+  return pow(clamp(sum / max(norm, 1e-4), 0.0, 1.0), uSharp);
+}
+float crevice(vec3 p) {
+  float s = 0.0;
+  float a = 0.6;
+  float f = 1.0;
+  for (int o = 0; o < uCrevOct; o++) {
+    s += a * (vnoise(p * f) * 2.0 - 1.0);
+    f *= 2.11;
+    a *= 0.45;
+  }
+  return 1.0 - smoothstep(0.0, uCrevWidth, abs(s));
+}
+// row layout of uPrim (one row per shape):
+//   0: type, ax, ay, az    1: bx, by, bz, R    2: peak, crevice, poolFlag, basinDepth    3: bioA, bioB, poolLevel, 0
+float dispAt(int prim, vec3 base, vec3 inward) {
+  vec4 t2 = texelFetch(uPrim, ivec2(2, prim), 0);
+  float vert = abs(inward.y);
+  float pk = ridged(base * uPeakFreq + uSeed) * mix(1.0, smoothstep(0.15, 0.85, vert), uVertBias);
+  float cr = crevice(base * uCrevFreq + uSeed.zxy * 1.37);
+  float fl = smoothstep(0.4, 0.95, inward.y);
+  float bs = t2.z * fl * (0.5 + 0.5 * vnoise(base * uBasinFreq + uSeed.yzx * 0.71));
+  return t2.x * pk - t2.y * cr - t2.w * bs;
+}
+float primOpen(int j, vec3 p) {
+  vec4 t0 = texelFetch(uPrim, ivec2(0, j), 0);
+  vec4 t1 = texelFetch(uPrim, ivec2(1, j), 0);
+  vec3 a = t0.yzw;
+  vec3 ab = t1.xyz - a;
+  float R = t1.w;
+  float L2 = dot(ab, ab);
+  float t = 0.0;
+  if (L2 > 0.0) t = clamp(dot(p - a, ab) / L2, 0.0, 1.0);
+  vec3 ax = a + ab * t;
+  vec3 q = p - ax;
+  float dist = length(q);
+  float open = -1.0;
+  if (dist < R + uMaxOut) {
+    vec3 rad = q / max(dist, 1e-3);
+    open = (R - dispAt(j, ax + rad * R, -rad)) - dist;
+  }
+  return open;
+}
+`;
+
+const WALL_VS = NOISE_GLSL + /* glsl */`
+attribute vec3 aIn;
+attribute float aPrim;
+attribute vec3 aBio;
+varying vec3 vW;
+varying float vDisp;
+varying vec3 vBio;
+varying float vPrim;
+void main() {
+  int prim = int(aPrim + 0.5);
+  float d = dispAt(prim, position, aIn);
+  vec3 w = position + aIn * d;
+  vW = w;
+  vDisp = d;
+  vBio = aBio;
+  vPrim = aPrim;
+  gl_Position = projectionMatrix * viewMatrix * vec4(w, 1.0);
+}
+`;
+
+const LOOK_GLSL = /* glsl */`
+#define NB ${NB}
+uniform vec3 uRock[NB];
+uniform vec3 uTip[NB];
+uniform vec3 uCeil[NB];
+uniform vec3 uCover[NB];
+uniform float uCoverAmt[NB];
+uniform vec3 uHSky[NB];
+uniform vec3 uHGnd[NB];
+uniform vec3 uCrevEm[NB];
+uniform float uCrevEmK[NB];
+uniform vec3 uFleck[NB];
+uniform float uStrata[NB];
+uniform vec3 uLiquid[NB];
+uniform float uLiqEm[NB];
+uniform float uLiqAlpha[NB];
+uniform vec3 uCam;
+uniform vec3 uCamFwd;
+uniform float uHead;
+uniform float uAmb;
+uniform float uFogD;
+uniform vec3 uFogCol;
+uniform float uUnder;
+uniform vec3 uUnderCol;
+uniform float uTipRef;
+uniform float uCrevRef;
+`;
+
+const WALL_FS = NOISE_GLSL + LOOK_GLSL + /* glsl */`
+varying vec3 vW;
+varying float vDisp;
+varying vec3 vBio;
+varying float vPrim;
+float fleckAt(vec3 p) {
+  ivec3 c = ivec3(floor(p / 6.0));
+  float h = hash3(c + ivec3(311, 97, 53));
+  return smoothstep(0.9965, 0.9998, h);
+}
+void main() {
+  int self = int(vPrim + 0.5);
+  // HARD ROCK SEAMS: this wall is hidden wherever it lies inside another shape's open space
+  for (int j = 0; j < uPrimCount; j++) {
+    if (j == self) continue;
+    if (primOpen(j, vW) > 0.0) discard;
+  }
+  vec3 n = normalize(cross(dFdx(vW), dFdy(vW)));
+  vec3 toCam = uCam - vW;
+  float dist = length(toCam);
+  vec3 V = toCam / max(dist, 1e-3);
+  if (dot(n, V) < 0.0) n = -n;
+  int bA = int(vBio.x + 0.5);
+  int bB = int(vBio.y + 0.5);
+  float bt = smoothstep(0.3, 0.7, vBio.z);
+  vec3 rock = mix(uRock[bA], uRock[bB], bt);
+  vec3 tipC = mix(uTip[bA], uTip[bB], bt);
+  vec3 ceilC = mix(uCeil[bA], uCeil[bB], bt);
+  vec3 coverC = mix(uCover[bA], uCover[bB], bt);
+  float coverK = mix(uCoverAmt[bA], uCoverAmt[bB], bt);
+  vec3 skyC = mix(uHSky[bA], uHSky[bB], bt);
+  vec3 gndC = mix(uHGnd[bA], uHGnd[bB], bt);
+  vec3 emC = mix(uCrevEm[bA] * uCrevEmK[bA], uCrevEm[bB] * uCrevEmK[bB], bt);
+  vec3 flC = mix(uFleck[bA], uFleck[bB], bt);
+  float strata = mix(uStrata[bA], uStrata[bB], bt);
+
+  float tip = clamp(vDisp / uTipRef, 0.0, 1.0);
+  float crev = clamp(-vDisp / uCrevRef, 0.0, 1.0);
+  vec3 alb = mix(rock, tipC, tip * tip * 0.85);
+  float st = sin(vW.y * 0.035 + sin(vW.x * 0.0021) * 2.0 + sin(vW.z * 0.0017) * 2.0);
+  alb *= 1.0 - strata * 0.45 * (0.5 + 0.5 * st);
+  alb = mix(alb, coverC, smoothstep(0.55, 0.88, n.y) * coverK);
+  alb = mix(alb, ceilC, smoothstep(0.35, 0.9, -n.y) * 0.45);
+  alb *= 1.0 - 0.65 * crev;
+
+  vec3 hemi = mix(gndC, skyC, 0.5 + 0.5 * n.y) * uAmb;
+  float cone = smoothstep(0.78, 0.97, dot(-V, uCamFwd));
+  float fall = 1.0 / (1.0 + dist * dist / (2600.0 * 2600.0));
+  float lamp = uHead * max(dot(n, V), 0.0) * (0.18 + 0.82 * cone) * fall;
+  vec3 col = alb * (hemi + vec3(1.0, 0.95, 0.88) * lamp);
+  col += emC * smoothstep(0.15, 0.9, crev);
+  col += flC * fleckAt(vW) * 2.5;
+  float fog = 1.0 - exp(-pow(dist * uFogD, 2.0));
+  col = mix(col, mix(uFogCol, uUnderCol, uUnder), clamp(fog + uUnder * 0.3, 0.0, 1.0));
+  gl_FragColor = vec4(col, 1.0);
+  #include <tonemapping_fragment>
+  #include <colorspace_fragment>
+}
+`;
+
+const WATER_VS = /* glsl */`
+attribute float aPrim;
+attribute vec3 aBio;
+varying vec3 vW;
+varying float vPrim;
+varying vec3 vBio;
+void main() {
+  vW = position;
+  vPrim = aPrim;
+  vBio = aBio;
+  gl_Position = projectionMatrix * viewMatrix * vec4(position, 1.0);
+}
+`;
+const WATER_FS = NOISE_GLSL + LOOK_GLSL + /* glsl */`
+varying vec3 vW;
+varying float vPrim;
+varying vec3 vBio;
+void main() {
+  int room = int(vPrim + 0.5);
+  // the liquid only exists inside its own (bumpy) room: the basin walls clip it
+  if (primOpen(room, vW) <= 0.0) discard;
+  int b = int(vBio.x + 0.5);
+  vec3 toCam = uCam - vW;
+  float dist = length(toCam);
+  vec3 V = toCam / max(dist, 1e-3);
+  float fres = pow(1.0 - abs(V.y), 4.0);
+  vec3 base = uLiquid[b];
+  float em = uLiqEm[b];
+  float fall = 1.0 / (1.0 + dist * dist / (2600.0 * 2600.0));
+  vec3 col = base * (uAmb * 0.7 + uHead * 0.35 * abs(V.y) * fall) + base * em;
+  col += vec3(0.55, 0.65, 0.75) * fres * 0.3 * (1.0 - min(em, 1.0));
+  float a = mix(uLiqAlpha[b], 1.0, fres);
+  float fog = 1.0 - exp(-pow(dist * uFogD, 2.0));
+  col = mix(col, uFogCol, fog);
+  gl_FragColor = vec4(col, a);
+  #include <tonemapping_fragment>
+  #include <colorspace_fragment>
+}
+`;
+
+// ---------------------------------------------------------------------------- renderer
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = P.exposure;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 2, 60000);
+
+const lin = (hex) => new THREE.Color(hex);   // sRGB hex -> linear working space
+const arr = (key) => BIOMES.map(b => lin(BIO[b][key]));
+const num = (key) => BIOMES.map(b => BIO[b][key]);
+const U = {
+  uPrim: { value: null }, uPrimCount: { value: 0 }, uOct: { value: P.octaves }, uCrevOct: { value: 2 },
+  uPeakFreq: { value: 0 }, uSharp: { value: P.sharp }, uCrevFreq: { value: 0 }, uCrevWidth: { value: P.creviceWidth },
+  uBasinFreq: { value: 0 }, uVertBias: { value: P.vertical }, uMaxOut: { value: 0 }, uSeed: { value: new THREE.Vector3() },
+  uRock: { value: arr('rock') }, uTip: { value: arr('tip') }, uCeil: { value: arr('ceil') }, uCover: { value: arr('cover') },
+  uCoverAmt: { value: num('coverAmt') }, uHSky: { value: arr('hSky') }, uHGnd: { value: arr('hGnd') },
+  uCrevEm: { value: arr('crevEm') }, uCrevEmK: { value: num('crevEmK') }, uFleck: { value: arr('fleck') }, uStrata: { value: num('strata') },
+  uLiquid: { value: arr('liquid') }, uLiqEm: { value: num('liqEm') }, uLiqAlpha: { value: num('liqAlpha') },
+  uCam: { value: new THREE.Vector3() }, uCamFwd: { value: new THREE.Vector3(0, 0, -1) },
+  uHead: { value: P.headlight }, uAmb: { value: P.ambient }, uFogD: { value: 1 / 9000 }, uFogCol: { value: new THREE.Color() },
+  uUnder: { value: 0 }, uUnderCol: { value: new THREE.Color() }, uTipRef: { value: 120 }, uCrevRef: { value: 40 },
+};
+const wallMat = new THREE.ShaderMaterial({ uniforms: U, vertexShader: WALL_VS, fragmentShader: WALL_FS, side: THREE.BackSide });
+const waterMat = new THREE.ShaderMaterial({ uniforms: U, vertexShader: WATER_VS, fragmentShader: WATER_FS, side: THREE.DoubleSide, transparent: true });
+let wallMesh = null, waterMesh = null, markers = [];
+
+// ---------------------------------------------------------------------------- shapes
+let mapData = null, prims = [], rooms = [], spawnA = null, spawnB = null, champ = null, poolCount = 0, triCount = 0, mouths = [];
+function mulberry32(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+function buildPrims() {
+  const s = P.scale, rnd = mulberry32(P.seed * 7919 + 13);
+  prims = []; rooms = [];
+  for (const r of mapData.rooms) {
+    const bio = P.biome === 'mixed' ? Math.floor(rnd() * NB) : Math.max(0, BIOMES.indexOf(P.biome));
+    const pr = { type: 0, id: r.id, team: r.team || null, champion: !!r.champion, ax: r.x * s, ay: r.y * s, az: r.z * s, R: r.r * s, bioA: bio, bioB: bio, poolRoll: rnd() };
+    pr.bx = pr.ax; pr.by = pr.ay; pr.bz = pr.az;
+    prims.push(pr); rooms.push(pr);
+  }
+  for (const t of mapData.tunnels) {
+    const R = (t.r || 180) * s;
+    for (let k = 0; k + 1 < t.path.length; k++) {
+      const a = t.path[k], b = t.path[k + 1];
+      const pr = { type: 1, ax: a.x * s, ay: a.y * s, az: a.z * s, bx: b.x * s, by: b.y * s, bz: b.z * s, R };
+      // a tunnel takes the biome of the room at each end and blends between them along its length
+      const endRoom = (x, y, z) => { let best = null, bd = Infinity; for (const rm of rooms) { const d = Math.hypot(x - rm.ax, y - rm.ay, z - rm.az); if (d < rm.R + 5 && d < bd) { bd = d; best = rm; } } return best; };
+      const ra = endRoom(pr.ax, pr.ay, pr.az), rb = endRoom(pr.bx, pr.by, pr.bz);
+      pr.bioA = ra ? ra.bioA : (rb ? rb.bioA : 0); pr.bioB = rb ? rb.bioA : pr.bioA;
+      prims.push(pr);
+    }
+  }
+  spawnA = rooms.find(r => r.team === 'A') || rooms[0];
+  spawnB = rooms.find(r => r.team === 'B') || rooms[rooms.length - 1];
+  champ = rooms.find(r => r.champion) || null;
+  applyAmplitudes();
+}
+
+// Per-shape amplitudes + pools (no geometry rebuild needed for these)
+function applyAmplitudes() {
+  poolCount = 0;
+  for (const pr of prims) {
+    const cap = Math.max(0, pr.R - P.keep);
+    if (pr.type === 0) {
+      pr.peak = Math.min(P.peaks * pr.R, cap);
+      pr.crev = P.crevice * pr.R;
+      pr.pool = 0; pr.basinD = 0; pr.level = -1e9;
+      if (pr.poolRoll < P.poolChance) {
+        const bottom = pr.ay - pr.R;
+        let level = bottom + P.poolLevel * pr.R;
+        // keep the liquid below every other shape that reaches into this room, or it would end in mid-air
+        for (const o of prims) {
+          if (o === pr) continue;
+          if (o.type === 0) {
+            if (Math.hypot(o.ax - pr.ax, o.ay - pr.ay, o.az - pr.az) < pr.R + o.R) level = Math.min(level, (o.ay - o.R) - 30);
+          } else {
+            const ax = o.bx - o.ax, ay = o.by - o.ay, az = o.bz - o.az, L = Math.hypot(ax, ay, az) || 1, horiz = Math.sqrt(Math.max(0, 1 - (ay / L) * (ay / L)));
+            for (let k = 0; k <= 24; k++) {
+              const qx = o.ax + ax * k / 24, qy = o.ay + ay * k / 24, qz = o.az + az * k / 24;
+              if (Math.hypot(qx - pr.ax, qy - pr.ay, qz - pr.az) < pr.R + o.R * 0.5) level = Math.min(level, qy - o.R * horiz - 30);
+            }
+          }
+        }
+        if (level > bottom + 40) { pr.pool = 1; pr.basinD = P.basin * pr.R; pr.level = level; poolCount++; }
+      }
+    } else {
+      pr.peak = Math.min(P.peaksTunnel * pr.R, cap);
+      pr.crev = P.crevice * pr.R * 0.6;
+      pr.pool = 0; pr.basinD = 0; pr.level = -1e9;
+    }
+  }
+  F.maxOut = 5; let tipSum = 0, crevSum = 0, nr = 0;
+  for (const pr of prims) {
+    F.maxOut = Math.max(F.maxOut, pr.crev + pr.basinD + 5);
+    // bounding sphere for the CPU reject (axis midpoint, half length + radius + outward reach)
+    pr.mx = (pr.ax + pr.bx) / 2; pr.my = (pr.ay + pr.by) / 2; pr.mz = (pr.az + pr.bz) / 2;
+    const hl = Math.hypot(pr.bx - pr.ax, pr.by - pr.ay, pr.bz - pr.az) / 2;
+    pr.bound2 = Math.pow(hl + pr.R + pr.crev + pr.basinD + 10, 2);
+    if (pr.type === 0) { tipSum += pr.peak; crevSum += pr.crev; nr++; }
+  }
+  U.uTipRef.value = Math.max(20, (tipSum / Math.max(1, nr)) * 0.75);
+  U.uCrevRef.value = Math.max(10, (crevSum / Math.max(1, nr)) * 0.8);
+  U.uMaxOut.value = F.maxOut;
+  writePrimTexture();
+}
+
+function writePrimTexture() {
+  const n = prims.length, data = new Float32Array(4 * 4 * n);
+  prims.forEach((pr, i) => {
+    const o = i * 16;
+    data.set([pr.type, pr.ax, pr.ay, pr.az, pr.bx, pr.by, pr.bz, pr.R, pr.peak, pr.crev, pr.pool, pr.basinD, pr.bioA, pr.bioB, pr.level, 0], o);
+  });
+  if (U.uPrim.value) U.uPrim.value.dispose();
+  const tex = new THREE.DataTexture(data, 4, n, THREE.RGBAFormat, THREE.FloatType);
+  tex.minFilter = tex.magFilter = THREE.NearestFilter; tex.needsUpdate = true;
+  U.uPrim.value = tex; U.uPrimCount.value = n;
+}
+
+function syncUniforms() {
+  F.peakFreq = 1 / P.peakSize; F.crevFreq = 1 / P.creviceSize; F.basinFreq = 1 / (P.peakSize * 0.8);
+  F.sx = (P.seed * 13.17) % 97; F.sy = (P.seed * 7.31) % 89; F.sz = (P.seed * 3.77) % 83;
+  U.uPeakFreq.value = F.peakFreq; U.uCrevFreq.value = F.crevFreq; U.uBasinFreq.value = F.basinFreq;
+  U.uSeed.value.set(F.sx, F.sy, F.sz);
+  U.uOct.value = P.octaves | 0; U.uSharp.value = P.sharp; U.uCrevWidth.value = P.creviceWidth; U.uVertBias.value = P.vertical;
+  U.uHead.value = P.headlight; U.uAmb.value = P.ambient; U.uFogD.value = P.fog / 9000;
+  renderer.toneMappingExposure = P.exposure;
+}
+
+// cube-sphere faces with cross(u, v) = n, so (a, b, d), (a, d, c) wind OUTWARD (into the rock)
+const FACES = [
+  { n: [1, 0, 0], u: [0, 1, 0], v: [0, 0, 1] }, { n: [-1, 0, 0], u: [0, 0, 1], v: [0, 1, 0] },
+  { n: [0, 1, 0], u: [0, 0, 1], v: [1, 0, 0] }, { n: [0, -1, 0], u: [1, 0, 0], v: [0, 0, 1] },
+  { n: [0, 0, 1], u: [1, 0, 0], v: [0, 1, 0] }, { n: [0, 0, -1], u: [0, 1, 0], v: [1, 0, 0] },
+];
+function buildGeometry() {
+  if (wallMesh) { scene.remove(wallMesh); wallMesh.geometry.dispose(); }
+  if (waterMesh) { scene.remove(waterMesh); waterMesh.geometry.dispose(); waterMesh = null; }
+  const pos = [], inn = [], pid = [], bio = [], idx = [];
+  let v0 = 0;
+  const spacing = 24 / P.detail;
+  prims.forEach((pr, pi) => {
+    if (pr.type === 0) {
+      const n = Math.max(10, Math.min(120, Math.round((Math.PI / 2) * pr.R / spacing)));
+      for (const Fc of FACES) {
+        const base = v0;
+        for (let j = 0; j <= n; j++) for (let i = 0; i <= n; i++) {
+          const s = i / n * 2 - 1, t = j / n * 2 - 1;
+          let x = Fc.n[0] + s * Fc.u[0] + t * Fc.v[0], y = Fc.n[1] + s * Fc.u[1] + t * Fc.v[1], z = Fc.n[2] + s * Fc.u[2] + t * Fc.v[2];
+          const L = Math.hypot(x, y, z); x /= L; y /= L; z /= L;
+          pos.push(pr.ax + x * pr.R, pr.ay + y * pr.R, pr.az + z * pr.R); inn.push(-x, -y, -z); pid.push(pi); bio.push(pr.bioA, pr.bioB, 0);
+          v0++;
+        }
+        for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+          const a = base + j * (n + 1) + i, b = a + 1, c = a + (n + 1), d = c + 1;
+          idx.push(a, b, d, a, d, c);
+        }
+      }
+    } else {
+      const abx = pr.bx - pr.ax, aby = pr.by - pr.ay, abz = pr.bz - pr.az, Lt = Math.hypot(abx, aby, abz) || 1;
+      const w = [abx / Lt, aby / Lt, abz / Lt];
+      const hlp = Math.abs(w[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
+      let u = [hlp[1] * w[2] - hlp[2] * w[1], hlp[2] * w[0] - hlp[0] * w[2], hlp[0] * w[1] - hlp[1] * w[0]];
+      const ul = Math.hypot(u[0], u[1], u[2]); u = [u[0] / ul, u[1] / ul, u[2] / ul];
+      const v = [w[1] * u[2] - w[2] * u[1], w[2] * u[0] - w[0] * u[2], w[0] * u[1] - w[1] * u[0]];   // w x u, so u x v = w
+      const M = Math.max(12, Math.min(160, Math.round(2 * Math.PI * pr.R / spacing)));
+      const K = Math.max(2, Math.round(Lt / spacing));
+      const base = v0;
+      for (let k = 0; k <= K; k++) for (let m = 0; m <= M; m++) {
+        const t = k / K, th = (m % M) / M * Math.PI * 2, c = Math.cos(th), s = Math.sin(th);
+        const dx = c * u[0] + s * v[0], dy = c * u[1] + s * v[1], dz = c * u[2] + s * v[2];
+        pos.push(pr.ax + abx * t + dx * pr.R, pr.ay + aby * t + dy * pr.R, pr.az + abz * t + dz * pr.R);
+        inn.push(-dx, -dy, -dz); pid.push(pi); bio.push(pr.bioA, pr.bioB, t);
+        v0++;
+      }
+      for (let k = 0; k < K; k++) for (let m = 0; m < M; m++) {
+        const a = base + k * (M + 1) + m, b = a + (M + 1), c = a + 1, d = b + 1;
+        idx.push(a, c, b, b, c, d);
+      }
+    }
+  });
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('aIn', new THREE.Float32BufferAttribute(inn, 3));
+  g.setAttribute('aPrim', new THREE.Float32BufferAttribute(pid, 1));
+  g.setAttribute('aBio', new THREE.Float32BufferAttribute(bio, 3));
+  g.setIndex(idx);
+  wallMesh = new THREE.Mesh(g, wallMat); wallMesh.frustumCulled = false; scene.add(wallMesh);
+  triCount = idx.length / 3;
+  buildWater();
+  // markers: spawn A teal, spawn B coral, champion amber
+  for (const m of markers) { scene.remove(m); m.geometry.dispose(); }
+  markers = [];
+  const mk = (rm, col) => { if (!rm) return; const m = new THREE.Mesh(new THREE.SphereGeometry(Math.min(90, rm.R * 0.15), 16, 10), new THREE.MeshBasicMaterial({ color: col, wireframe: true, transparent: true, opacity: 0.45 })); m.position.set(rm.ax, rm.ay, rm.az); scene.add(m); markers.push(m); };
+  mk(spawnA, 0x2fd6b0); mk(spawnB, 0xff7a5a); mk(champ, 0xffc040);
+  // tunnel mouths for J (a point just inside the room, looking down the tunnel)
+  mouths = [];
+  for (const pr of prims) if (pr.type === 1) {
+    for (const [ex, ey, ez, ox, oy, oz] of [[pr.ax, pr.ay, pr.az, pr.bx, pr.by, pr.bz], [pr.bx, pr.by, pr.bz, pr.ax, pr.ay, pr.az]]) {
+      const rm = rooms.find(r => Math.hypot(ex - r.ax, ey - r.ay, ez - r.az) < r.R * 0.5);
+      if (!rm) continue;
+      const dx = ox - ex, dy = oy - ey, dz = oz - ez, L = Math.hypot(dx, dy, dz) || 1;
+      mouths.push({ from: [ex - dx / L * rm.R * 0.25, ey - dy / L * rm.R * 0.25 + 40, ez - dz / L * rm.R * 0.25], to: [ex + dx / L * rm.R, ey + dy / L * rm.R, ez + dz / L * rm.R] });
+    }
+  }
+}
+
+function buildWater() {
+  const pos = [], pid = [], bio = [], idx = [];
+  let v0 = 0;
+  rooms.forEach((rm) => {
+    if (!rm.pool) return;
+    const pi = prims.indexOf(rm);
+    const h = rm.level - (rm.ay - rm.R);
+    const rr = Math.sqrt(Math.max(0, rm.R * rm.R - (rm.R - h) * (rm.R - h))) + rm.basinD + 60;
+    const RINGS = 20, SEG = 96, base = v0;
+    pos.push(rm.ax, rm.level, rm.az); pid.push(pi); bio.push(rm.bioA, rm.bioA, 0); v0++;
+    for (let r = 1; r <= RINGS; r++) for (let sg = 0; sg < SEG; sg++) {
+      const a = sg / SEG * Math.PI * 2, rad = rr * r / RINGS;
+      pos.push(rm.ax + Math.cos(a) * rad, rm.level, rm.az + Math.sin(a) * rad); pid.push(pi); bio.push(rm.bioA, rm.bioA, 0); v0++;
+    }
+    for (let sg = 0; sg < SEG; sg++) idx.push(base, base + 1 + sg, base + 1 + (sg + 1) % SEG);
+    for (let r = 1; r < RINGS; r++) for (let sg = 0; sg < SEG; sg++) {
+      const a = base + 1 + (r - 1) * SEG + sg, b = base + 1 + (r - 1) * SEG + (sg + 1) % SEG, c = a + SEG, d = b + SEG;
+      idx.push(a, c, b, b, c, d);
+    }
+  });
+  if (!idx.length) return;
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('aPrim', new THREE.Float32BufferAttribute(pid, 1));
+  g.setAttribute('aBio', new THREE.Float32BufferAttribute(bio, 3));
+  g.setIndex(idx);
+  waterMesh = new THREE.Mesh(g, waterMat); waterMesh.frustumCulled = false; waterMesh.renderOrder = 2; scene.add(waterMesh);
+}
+
+// ---------------------------------------------------------------------------- flight
+const ship = { pos: new THREE.Vector3(), vel: new THREE.Vector3(), yaw: 0, pitch: 0 };
+const keys = Object.create(null);
+let locked = false, dirty = true, paused = false, mouseDX = 0, mouseDY = 0;
+function placeAt(rm, lookAt) {
+  if (!rm) return;
+  ship.pos.set(rm.ax, rm.ay, rm.az); ship.vel.set(0, 0, 0);
+  const t = lookAt || (champ && champ !== rm ? champ : (rm === spawnA ? spawnB : spawnA));
+  if (t) { const dx = t.ax - rm.ax, dy = t.ay - rm.ay, dz = t.az - rm.az; ship.yaw = Math.atan2(-dx, -dz); ship.pitch = Math.atan2(dy, Math.hypot(dx, dz)); }
+  dirty = true;
+}
+let mouthIx = -1;
+function nextMouth() {
+  if (!mouths.length) return;
+  mouthIx = (mouthIx + 1) % mouths.length;
+  const m = mouths[mouthIx];
+  ship.pos.set(m.from[0], m.from[1], m.from[2]); ship.vel.set(0, 0, 0);
+  const dx = m.to[0] - m.from[0], dy = m.to[1] - m.from[1], dz = m.to[2] - m.from[2];
+  ship.yaw = Math.atan2(-dx, -dz); ship.pitch = Math.atan2(dy, Math.hypot(dx, dz)); dirty = true;
+}
+canvas.addEventListener('click', () => { if (!locked) canvas.requestPointerLock(); });
+document.addEventListener('pointerlockchange', () => { locked = document.pointerLockElement === canvas; document.getElementById('msg').style.display = locked ? 'none' : ''; });
+document.addEventListener('mousemove', (e) => { if (locked) { mouseDX += e.movementX; mouseDY += e.movementY; } });
+addEventListener('keydown', (e) => {
+  const tag = (e.target && e.target.tagName) || '';
+  if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+  keys[e.code] = true;
+  if (e.code === 'Digit1') placeAt(spawnA);
+  if (e.code === 'Digit2') placeAt(spawnB);
+  if (e.code === 'Digit3') placeAt(champ || spawnA);
+  if (e.code === 'KeyJ') nextMouth();
+  if (e.code === 'KeyP') runProbe();
+  if (e.code === 'KeyH') { gui._hidden ? gui.show() : gui.hide(); }
+  dirty = true;
+});
+addEventListener('keyup', (e) => { keys[e.code] = false; });
+addEventListener('resize', () => { renderer.setSize(window.innerWidth, window.innerHeight); camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); dirty = true; });
+document.addEventListener('visibilitychange', () => { dirty = true; });
+
+const _f = new THREE.Vector3(), _r = new THREE.Vector3(), _u = new THREE.Vector3(), _w = new THREE.Vector3(), _e = new THREE.Euler();
+const dz = (v) => Math.abs(v) < 0.15 ? 0 : v;
+function updateFlight(dt) {
+  let pad = null;
+  try { const gps = navigator.getGamepads ? navigator.getGamepads() : []; for (const g of gps) if (g && g.connected) { pad = g; break; } } catch (_) {}
+  let lookX = mouseDX * 0.0022, lookY = mouseDY * 0.0022; mouseDX = 0; mouseDY = 0;
+  let mx = 0, mz = 0, my = 0, boost = keys.ShiftLeft || keys.ShiftRight;
+  if (keys.KeyW) mz += 1; if (keys.KeyS) mz -= 1; if (keys.KeyD) mx += 1; if (keys.KeyA) mx -= 1;
+  if (keys.Space) my += 1; if (keys.KeyC || keys.ControlLeft) my -= 1;
+  if (pad) {
+    mx += dz(pad.axes[0] || 0); mz -= dz(pad.axes[1] || 0);
+    lookX += dz(pad.axes[2] || 0) * 2.4 * dt; lookY += dz(pad.axes[3] || 0) * 2.0 * dt;
+    my += ((pad.buttons[7] && pad.buttons[7].value) || 0) - ((pad.buttons[6] && pad.buttons[6].value) || 0);
+    if (pad.buttons[0] && pad.buttons[0].pressed) boost = true;
+    if (pad.buttons[3] && pad.buttons[3].pressed && !updateFlight._y) placeAt(spawnA);
+    updateFlight._y = !!(pad.buttons[3] && pad.buttons[3].pressed);
+  }
+  ship.yaw -= lookX; ship.pitch = Math.max(-1.55, Math.min(1.55, ship.pitch - lookY));
+  _f.set(-Math.sin(ship.yaw) * Math.cos(ship.pitch), Math.sin(ship.pitch), -Math.cos(ship.yaw) * Math.cos(ship.pitch)).normalize();
+  _r.set(Math.cos(ship.yaw), 0, -Math.sin(ship.yaw)).normalize();
+  _w.set(0, 0, 0).addScaledVector(_f, mz).addScaledVector(_r, mx); _w.y += my;
+  const spd = P.speed * (boost ? 2.6 : 1);
+  if (_w.lengthSq() > 0) { _w.normalize().multiplyScalar(spd * dt * 5); ship.vel.add(_w); }
+  ship.vel.multiplyScalar(Math.max(0, 1 - 4.0 * dt));
+  if (ship.vel.length() > spd) ship.vel.setLength(spd);
+  ship.pos.addScaledVector(ship.vel, dt);
+  collide();
+  camera.position.copy(ship.pos);
+  _e.set(ship.pitch, ship.yaw, 0, 'YXZ'); camera.quaternion.setFromEuler(_e);
+  return lookX !== 0 || lookY !== 0 || ship.vel.lengthSq() > 1 || _w.lengthSq() > 0;
+}
+// sphere-vs-field: push out along the open-depth gradient, kill the inbound velocity
+function collide() {
+  const r = P.shipR, p = ship.pos;
+  const o = openDepth(p.x, p.y, p.z).v;
+  if (o >= r) return;
+  const e = 6;
+  const gx = openDepth(p.x + e, p.y, p.z).v - openDepth(p.x - e, p.y, p.z).v;
+  const gy = openDepth(p.x, p.y + e, p.z).v - openDepth(p.x, p.y - e, p.z).v;
+  const gz = openDepth(p.x, p.y, p.z + e).v - openDepth(p.x, p.y, p.z - e).v;
+  _u.set(gx, gy, gz); if (_u.lengthSq() < 1e-9) return; _u.normalize();
+  p.addScaledVector(_u, Math.min(200, r - o));
+  const vn = ship.vel.dot(_u); if (vn < 0) ship.vel.addScaledVector(_u, -vn);
+}
+
+// ---------------------------------------------------------------------------- probe
+let probeText = 'P = probe (connected flight space from spawn A, which hulls reach spawn B)';
+function runProbe() {
+  probeText = 'probing...'; hud(); dirty = true;
+  setTimeout(() => {
+    const t0 = performance.now();
+    let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
+    for (const pr of prims) {
+      x0 = Math.min(x0, pr.ax - pr.R, pr.bx - pr.R); x1 = Math.max(x1, pr.ax + pr.R, pr.bx + pr.R);
+      y0 = Math.min(y0, pr.ay - pr.R, pr.by - pr.R); y1 = Math.max(y1, pr.ay + pr.R, pr.by + pr.R);
+      z0 = Math.min(z0, pr.az - pr.R, pr.bz - pr.R); z1 = Math.max(z1, pr.az + pr.R, pr.bz + pr.R);
+    }
+    const ext = Math.max(x1 - x0, y1 - y0, z1 - z0), cell = Math.max(30, ext / 110);
+    const nx = Math.ceil((x1 - x0) / cell), ny = Math.ceil((y1 - y0) / cell), nz = Math.ceil((z1 - z0) / cell);
+    const C = new Float32Array(nx * ny * nz), id = (i, j, k) => (i * ny + j) * nz + k;
+    for (let i = 0; i < nx; i++) for (let j = 0; j < ny; j++) for (let k = 0; k < nz; k++) C[id(i, j, k)] = openDepth(x0 + (i + 0.5) * cell, y0 + (j + 0.5) * cell, z0 + (k + 0.5) * cell).v;
+    const cellOf = (rm) => id(Math.min(nx - 1, Math.max(0, Math.floor((rm.ax - x0) / cell))), Math.min(ny - 1, Math.max(0, Math.floor((rm.ay - y0) / cell))), Math.min(nz - 1, Math.max(0, Math.floor((rm.az - z0) / cell))));
+    const res = [];
+    for (const [TH, who] of [[170, 'every hull'], [139, 'Dreadnought'], [93, 'Corvette'], [68, 'Frigate']]) {
+      const seen = new Uint8Array(C.length), st = []; let reach = 0, gotB = false; const s0 = cellOf(spawnA), goal = cellOf(spawnB);
+      if (C[s0] >= TH) { st.push(s0); seen[s0] = 1; }
+      while (st.length) {
+        const q = st.pop(); reach++; if (q === goal) gotB = true;
+        const k = q % nz, j = ((q - k) / nz) % ny, i = (q - k - j * nz) / (ny * nz);
+        if (i > 0 && !seen[q - ny * nz] && C[q - ny * nz] >= TH) { seen[q - ny * nz] = 1; st.push(q - ny * nz); }
+        if (i < nx - 1 && !seen[q + ny * nz] && C[q + ny * nz] >= TH) { seen[q + ny * nz] = 1; st.push(q + ny * nz); }
+        if (j > 0 && !seen[q - nz] && C[q - nz] >= TH) { seen[q - nz] = 1; st.push(q - nz); }
+        if (j < ny - 1 && !seen[q + nz] && C[q + nz] >= TH) { seen[q + nz] = 1; st.push(q + nz); }
+        if (k > 0 && !seen[q - 1] && C[q - 1] >= TH) { seen[q - 1] = 1; st.push(q - 1); }
+        if (k < nz - 1 && !seen[q + 1] && C[q + 1] >= TH) { seen[q + 1] = 1; st.push(q + 1); }
+      }
+      res.push({ TH, who, gotB, vol: reach * cell ** 3 / SPIRE });
+    }
+    window.__cglProbe = { res, cell, ms: Math.round(performance.now() - t0) };
+    probeText = 'probe (cell ' + cell.toFixed(0) + ' u, ' + window.__cglProbe.ms + ' ms): ' +
+      res.map(r => r.TH + ' u ' + (r.gotB ? 'A->B' : 'NO') + ' ' + r.vol.toFixed(2) + ' Sp').join(' | ') +
+      '\n  (170 u = every hull comfortable; 139 / 93 / 68 = Dreadnought / Corvette / Frigate headway; Sp = Spires of flight space)';
+    dirty = true; hud();
+  }, 30);
+}
+
+// ---------------------------------------------------------------------------- hud + loop
+const hudEl = document.getElementById('hud');
+let fps = 0, fpsAcc = 0, fpsN = 0, fpsT = performance.now(), here = '';
+function hud() {
+  hudEl.textContent =
+    P.map + '  x' + P.scale + '  ' + (triCount / 1000).toFixed(0) + 'k tris  ' + rooms.length + ' rooms + ' + (prims.length - rooms.length) + ' tunnels  ' + poolCount + ' pools\n' +
+    'fps ' + fps.toFixed(0) + '  (renders only while something moves)' + here + '\n' + probeText;
+}
+const _fogTarget = new THREE.Color(), _fogNow = new THREE.Color(0x141838);
+function frameUniforms() {
+  U.uCam.value.copy(camera.position); camera.getWorldDirection(U.uCamFwd.value);
+  const o = openDepth(ship.pos.x, ship.pos.y, ship.pos.z);
+  const pr = o.i >= 0 ? prims[o.i] : null;
+  let under = 0;
+  if (pr) {
+    const b = BIOMES[pr.type === 0 ? pr.bioA : (pr.bioB)];
+    _fogTarget.set(BIO[b].fog);
+    // underwater: inside a pool room, below its liquid line
+    for (const rm of rooms) if (rm.pool && primOpen(rm, ship.pos.x, ship.pos.y, ship.pos.z) > 0 && ship.pos.y < rm.level) { under = 1; U.uUnderCol.value.set(BIO[BIOMES[rm.bioA]].liquid); break; }
+    here = '\nhere: ' + (pr.type === 0 ? (pr.id || 'room') : 'tunnel') + '  ' + b + '  clearance ' + o.v.toFixed(0) + ' u' + (under ? '  (in the liquid)' : '');
+  }
+  _fogNow.lerp(_fogTarget, 0.06); U.uFogCol.value.copy(_fogNow); U.uUnder.value = under;
+  // a marker the camera is sitting in is just lines across the screen
+  for (const m of markers) m.visible = m.position.distanceTo(camera.position) > 500;
+  renderer.setClearColor(_fogNow);
+}
+let lastT = performance.now();
+function frame(now) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (now - lastT) / 1000); lastT = now;
+  if (paused || document.hidden || !wallMesh) return;
+  const moving = updateFlight(dt);
+  if (!moving && !dirty) return;
+  frameUniforms();
+  renderer.render(scene, camera);
+  fpsAcc += dt; fpsN++;
+  if (now - fpsT > 500) { fps = fpsN / Math.max(1e-3, fpsAcc); fpsAcc = 0; fpsN = 0; fpsT = now; hud(); }
+  dirty = moving || Math.abs(_fogNow.r - _fogTarget.r) + Math.abs(_fogNow.g - _fogTarget.g) + Math.abs(_fogNow.b - _fogTarget.b) > 0.004;
+}
+
+// ---------------------------------------------------------------------------- load + gui
+async function loadMap(name) {
+  P.map = name;
+  const res = await fetch('maps/' + MAPS[name]);
+  mapData = await res.json();
+  rebuild(true);
+  placeAt(spawnA);
+}
+function rebuild(geometry) {
+  syncUniforms();
+  if (geometry) { buildPrims(); buildGeometry(); }
+  else { applyAmplitudes(); buildWater(); }
+  probeText = 'P = probe (connected flight space from spawn A, which hulls reach spawn B)';
+  dirty = true; hud();
+}
+const gui = new GUI({ title: 'cave graph lab' });
+const gMap = gui.addFolder('map');
+gMap.add(P, 'map', Object.keys(MAPS)).onChange(v => loadMap(v));
+gMap.add(P, 'scale', 1, 3, 0.1).onFinishChange(() => { rebuild(true); placeAt(spawnA); });
+gMap.add(P, 'biome', ['mixed'].concat(BIOMES)).onChange(() => rebuild(true));
+gMap.add(P, 'seed', 1, 99, 1).onFinishChange(() => rebuild(true));
+gMap.add(P, 'detail', 0.4, 2, 0.1).onFinishChange(() => rebuild(true));
+const gPk = gui.addFolder('peaks (into the air)');
+gPk.add(P, 'peaks', 0, 0.6, 0.01).name('room peaks').onChange(() => rebuild(false));
+gPk.add(P, 'peaksTunnel', 0, 0.6, 0.01).name('tunnel peaks').onChange(() => rebuild(false));
+gPk.add(P, 'keep', 60, 400, 5).name('clear core u').onChange(() => rebuild(false));
+gPk.add(P, 'peakSize', 120, 1200, 10).name('peak size u').onChange(() => { syncUniforms(); dirty = true; });
+gPk.add(P, 'sharp', 0.6, 3.5, 0.05).name('sharpness').onChange(() => { syncUniforms(); dirty = true; });
+gPk.add(P, 'octaves', 1, 6, 1).onChange(() => { syncUniforms(); dirty = true; });
+gPk.add(P, 'vertical', 0, 1, 0.05).name('floor/ceiling bias').onChange(() => { syncUniforms(); dirty = true; });
+const gRv = gui.addFolder('reverse noise (into the rock)');
+gRv.add(P, 'crevice', 0, 0.35, 0.01).name('crevice depth').onChange(() => rebuild(false));
+gRv.add(P, 'creviceWidth', 0.01, 0.25, 0.005).name('crevice width').onChange(() => { syncUniforms(); dirty = true; });
+gRv.add(P, 'creviceSize', 120, 1500, 10).name('crevice size u').onChange(() => { syncUniforms(); dirty = true; });
+gRv.add(P, 'poolChance', 0, 1, 0.05).name('pool chance').onChange(() => rebuild(false));
+gRv.add(P, 'poolLevel', 0.05, 0.8, 0.01).name('pool level').onChange(() => rebuild(false));
+gRv.add(P, 'basin', 0, 0.4, 0.01).name('basin depth').onChange(() => rebuild(false));
+const gLk = gui.addFolder('look');
+gLk.add(P, 'headlight', 0, 6, 0.05).onChange(() => { syncUniforms(); dirty = true; });
+gLk.add(P, 'ambient', 0, 2, 0.01).onChange(() => { syncUniforms(); dirty = true; });
+gLk.add(P, 'fog', 0, 4, 0.05).onChange(() => { syncUniforms(); dirty = true; });
+gLk.add(P, 'exposure', 0.3, 2.5, 0.01).onChange(() => { syncUniforms(); dirty = true; });
+const gSh = gui.addFolder('ship');
+gSh.add(P, 'shipR', 20, 120, 1).name('collision radius');
+gSh.add(P, 'speed', 200, 3000, 10);
+gui.add({ probe: runProbe }, 'probe').name('probe flight space (P)');
+gui.add({ a: () => placeAt(spawnA) }, 'a').name('spawn A (1)');
+gui.add({ b: () => placeAt(spawnB) }, 'b').name('spawn B (2)');
+gui.add({ c: () => placeAt(champ || spawnA) }, 'c').name('champion (3)');
+gui.add({ j: nextMouth }, 'j').name('next tunnel mouth (J)');
+gui.add({ p: () => { paused = !paused; dirty = true; } }, 'p').name('pause rendering');
+
+// test hooks for the console / harness
+window.CGL = {
+  P, prims: () => prims, rooms: () => rooms, openDepth: (x, y, z) => ({ ...openDepth(x, y, z) }), probe: runProbe,
+  spawn: (w) => placeAt(w === 'B' ? spawnB : (w === 'C' ? (champ || spawnA) : spawnA)), mouth: nextMouth,
+  set: (k, v) => { P[k] = v; const geo = ['scale', 'biome', 'seed', 'detail'].includes(k); if (k === 'map') return loadMap(v); rebuild(geo); },
+  look: (x, y, z, tx, ty, tz) => { ship.pos.set(x, y, z); ship.vel.set(0, 0, 0); const dx = tx - x, dy = ty - y, dzz = tz - z; ship.yaw = Math.atan2(-dx, -dzz); ship.pitch = Math.atan2(dy, Math.hypot(dx, dzz)); dirty = true; },
+  stats: () => ({ map: P.map, tris: triCount, prims: prims.length, rooms: rooms.length, pools: poolCount, fps, pos: ship.pos.toArray().map(v => Math.round(v)) }),
+  render: () => { frameUniforms(); renderer.render(scene, camera); },
+  renderer,
+};
+
+loadMap(P.map).catch(e => { hudEl.textContent = 'map load failed: ' + e; console.error(e); });
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
