@@ -3749,7 +3749,14 @@ body.vr-active #camp-video { display: none !important; }
   object-fit: contain;
   filter: drop-shadow(0 0 24px rgba(120, 200, 255, 0.35));
 }
+/* (v54.19) THE HEADLINE IS HIDDEN, every mode, every raise. Owner: "during load screens it says 'preparing arena' under the
+   loading screen image, we don't need that yellow/orange text there, that's what the png is for / for all modes, and any time
+   that loading screen is up". Only ever a generic label (PREPARING ARENA / ENTERING THE OVERWORLD / the markup's WAITING FOR
+   PEERS...); showLoadingOverlay still writes it (the curtain log and the VR cover read ov._lssMain), it just never shows. The
+   grey progress line under it (#lss-loading-sub) stays. The headset's cover (_xrCoverPaint) keeps its own headline: there
+   is no picture in VR, so that text is the whole panel. Delete `display: none` to bring it back. */
 #lss-loading-text {
+  display: none;
   font-size: 28px;
   font-weight: bold;
   letter-spacing: 6px;
@@ -8688,7 +8695,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "54.12";
+const LSS_BUILD = "54.22";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -19304,7 +19311,9 @@ function _campSaveLegs(legs) {
 // the bare _campLoadLegs(), so a brand-new player still gets the hub journey first. A function, not a top-level const:
 // the 15631 builder runs above this line, and CAMPAIGN_LEGS (declared far below) is read inside a try - the v39.02 TDZ trap.
 // TO RE-LOCK: return false.
-function _campTempUnlockAll() { return true; }
+// (v54.22) RE-LOCKED. Owner, 2026-10-13, asked whether the legs were still unlocked: "lock em up". The carousel is back to
+// the player's own progress (The Approach + whatever lss_campaign_legs holds); true unlocks them all again.
+function _campTempUnlockAll() { return false; }
 function _campCarouselLegs() {
   const s = _campLoadLegs(); s.unshift('camp_approach');
   if (_campTempUnlockAll()) {
@@ -43971,6 +43980,10 @@ function _swGrassMapInit() {
 function _swGrassMapTick(force) {
   const G = _swGrassMapInit();
   if (typeof renderer === 'undefined' || !renderer) return;
+  // (v54.15) not while a launch drains its links (game._linkHold, _commitWarmRun): the streamer builds tufts in that window
+  // and this render was its material's first use, waiting behind the whole queue - MEASURED 9.7 s in one gameLoop task
+  // (cold). The map draws a few frames after the hold lifts (it re-renders on a moved cell or every 8th call), under the cover.
+  if (typeof game !== 'undefined' && game && game._linkHold) return;
   try { if (renderer.xr && renderer.xr.isPresenting && G.n > 0) return; } catch (_) {}
   const ts = (2 * G.R) / G.N, c = _swU.uCam.value;
   const cx = Math.floor(c.x / ts) * ts, cz = Math.floor(c.z / ts) * ts;
@@ -46334,8 +46347,17 @@ function _swDrapeStrand(acc, lx, lz, hLip, fx, fz, len, rad, snowy, T) {
   const n = S.length / 7, SEG = _SW_DRAPE_SEG, lxA = -fz, lzA = fx;
   const C0 = snowy ? _swDrapeC0I : _swDrapeC0V, C1 = snowy ? _swDrapeC1I : _swDrapeC1V, CT = _swDrapeCT;
   const base = acc.v;
+  // (v54.19) THE LEAF SHADER'S COORDINATES (vines only - see _swDrapeVineMatGet), four floats a vertex: how far down the
+  // strand (world units from the tongue's far end, so a leaf is the same size on every strand), how far across it (this
+  // vertex's lateral + binormal offset, ca + sa below - ONE value per vertex, so the four sides close with no seam), sPar
+  // (the tip thins on it) and one random per strand (from where it starts, not the chunk's rnd: an extra draw there would
+  // move every strand after it on a rebake).
+  const vin = acc.vin;
+  const seed = vin ? (((Math.sin(lx * 12.9898 + lz * 78.233) * 43758.5453) % 1) + 1) % 1 : 0;
+  let sAcc = 0;
   for (let k = 0; k < n; k++) {
     const o = k * 7, oA = Math.max(0, k - 1) * 7, oB = Math.min(n - 1, k + 1) * 7;
+    if (vin && k) sAcc += Math.hypot(S[o] - S[o - 7], S[o + 1] - S[o - 6], S[o + 2] - S[o - 5]);
     let tx = S[oB] - S[oA], ty = S[oB + 1] - S[oA + 1], tz = S[oB + 2] - S[oA + 2];
     const tl = Math.hypot(tx, ty, tz) || 1; tx /= tl; ty /= tl; tz /= tl;
     let bx = ty * lzA, by = tz * lxA - tx * lzA, bz = -ty * lxA;
@@ -46346,6 +46368,7 @@ function _swDrapeStrand(acc, lx, lz, hLip, fx, fz, len, rad, snowy, T) {
       const th = (q / SEG) * 6.283185 + 0.7854, ca = Math.cos(th) * r * ex, sa = Math.sin(th) * r * ey;
       acc.pos.push(S[o] + lxA * ca + bx * sa, S[o + 1] + by * sa, S[o + 2] + lzA * ca + bz * sa);
       acc.col.push(CT.r, CT.g, CT.b);
+      if (vin) vin.push(sAcc, ca + sa, sPar, seed);
     }
   }
   for (let k = 0; k < n - 1; k++) for (let q = 0; q < SEG; q++) {
@@ -46362,7 +46385,124 @@ let _swIceMat = null, _swVineMat = null;
 // only carries the lighting floor. `vertexColors` is a program define - both drape materials set it,
 // and neither shares a program with anything else.
 function _swIceMatGet(){ if(!_swIceMat) _swIceMat = new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x8fb4cc, vertexColors: true, side: THREE.DoubleSide }); return _swIceMat; }
-function _swDrapeVineMatGet(){ if(!_swVineMat) _swVineMat = new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x141f0d, vertexColors: true, side: THREE.DoubleSide }); return _swVineMat; }
+// ⭐⭐ (v54.19) THE VINES GROW LEAVES. Owner: "the vines in the overworld, the ones that are similar to the icicles, those
+// vines need shaders, since they look too plain bright green". Up to here a vine was its tube and its two-colour ramp under a
+// plain Lambert: a smooth lime blade on the rock, the only flat-shaded thing on a cliff whose rock and grass are all texture.
+// Now the fragment shader paints IVY over the same tube - no texture, no new draw, the geometry's shape unchanged:
+//   - LEAVES: hanging pointed leaves splatted on a jittered grid in the strand's own coordinates (aVine, see
+//     _swDrapeStrand: down the strand x across it, world units). Each cell holds one leaf - jittered, splayed +-0.4 rad,
+//     0.8-1.3x in size - and a pixel shows the TOP leaf of those covering it (a hash orders them), so they overlap like
+//     shingles. Two such layers, the second offset half a cell and shaded as the one underneath; where neither covers, a gap.
+//   - GAPS ARE CUT (discard), so the rock shows between leaves and the outline turns lacy; leaves also thin out toward the
+//     tip (sPar) and where the tube is seen edge-on, so a strand ends in loose leaves instead of a spike's point.
+//   - COLOUR: the geometry's ramp (ground at the root -> vine, owner v46.57) stays the base; each leaf multiplies it by its
+//     own tone and tint, deep blue-green to yellow-green with the odd brown one, a rib down its middle, darker edges - and
+//     the whole is pulled darker and a little desaturated: that was the "bright green".
+//   - LIGHT: each leaf's normal is tipped by a WORLD-space random (through viewMatrix: a view-space one would change which
+//     leaves catch the sun every time the camera turned), so the sun picks out single leaves. The emissive floor follows
+//     the leaf's shade, so a gap does not glow.
+//   - DISTANCE: once a leaf is under ~2.5 px (fwidth of the leaf grid) the pattern fades to its own average and the cut
+//     stops - a speckle that small only shimmers in flight.
+// ⚠ COST: 18 cells a fragment (2 layers x 3 x 3), only where a vine covers the screen; one program; draw calls unchanged.
+//   No override-material pass draws the whole scene (the silhouette passes draw hull clones only), so the cut is safe.
+// ⚠ The leaf grid is only valid because each leaf stays inside its 3 x 3 neighbourhood: cells are 1 x 1 leaf units, a leaf
+//   is at most 1.5 long x 0.65 wide, splayed 0.4 rad, based 0.2-0.8 into its cell. Lengthen, widen or splay them past that
+//   and leaves get cut along straight cell lines - widen the loops with them.
+// window.__vineLeaf = { size, tilt, cut, tip, gap, back, desat } live (uniforms; next frame).
+function _swDrapeVineMatGet(){
+  if (_swVineMat) return _swVineMat;
+  const m = new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x141f0d, vertexColors: true, side: THREE.DoubleSide });
+  // a = leaf size (world units), normal tilt, cut (1 = discard the gaps), tip thinning starts (sPar)
+  // b = gap shade, the under-layer's shade, desaturation
+  const U = { a: { value: new THREE.Vector4(5.0, 0.35, 1.0, 0.55) }, b: { value: new THREE.Vector4(0.10, 0.55, 0.20, 0.0) } };
+  const PARS = `
+uniform vec4 uVineA;
+uniform vec4 uVineB;
+varying vec4 vVine;
+vec3 lssVH32( vec2 p ) {
+  vec3 p3 = fract( vec3( p.xyx ) * vec3( 0.1031, 0.1030, 0.0973 ) );
+  p3 += dot( p3, p3.yxz + 33.33 );
+  return fract( ( p3.xxy + p3.yzz ) * p3.zyx );
+}
+// one layer: the top leaf covering P. x = across it (-1..1), y = along it (0 stem .. 1 tip), w = 1 if any leaf covers P
+vec4 lssVineLayer( vec2 P, float thin, out vec3 hOut ) {
+  vec2 ic = floor( P ), fc = P - ic;
+  float best = -1.0; vec4 r = vec4( 0.0 ); hOut = vec3( 0.0 );
+  for ( int j = -2; j <= 0; j ++ ) for ( int i = -1; i <= 1; i ++ ) {
+    vec2 o = vec2( float( i ), float( j ) );
+    vec3 h = lssVH32( ic + o );
+    if ( h.z < thin ) continue;
+    vec2 d = fc - ( o + 0.2 + 0.6 * h.xy );
+    float a = ( fract( h.x * 5.3 + h.y * 2.1 ) - 0.5 ) * 0.8, ca = cos( a ), sa = sin( a );
+    vec2 l = vec2( ca * d.x - sa * d.y, sa * d.x + ca * d.y );
+    float sz = 0.8 + 0.5 * fract( h.z * 3.7 + h.y );
+    float len = 1.15 * sz, wid = 0.5 * sz;
+    float t = l.y / len;
+    if ( t <= 0.0 || t >= 1.0 ) continue;
+    float hw = wid * pow( sin( t * 3.14159 ), 0.6 ) * ( 1.0 - 0.25 * t ) + 1e-4;
+    float ax = l.x / hw;
+    if ( abs( ax ) >= 1.0 ) continue;
+    float z = fract( h.z * 7.13 + h.x * 3.7 );
+    if ( z > best ) { best = z; r = vec4( ax, t, h.z, 1.0 ); hOut = h; }
+  }
+  return r;
+}
+`;
+  const COL = `
+  vec2 vP = vec2( vVine.y, vVine.x ) / uVineA.x + vVine.w * vec2( 113.0, 271.0 );
+  vP += 0.3 * vec2( sin( vP.y * 0.83 + vVine.w * 6.0 ), sin( vP.x * 1.31 + vP.y * 0.47 ) );
+  float vPx = max( length( dFdx( vP ) ), length( dFdy( vP ) ) );
+  float vLod = smoothstep( 0.25, 0.6, vPx );
+  float vRim = 1.0 - abs( dot( normalize( vNormal ), normalize( vViewPosition ) ) );
+  float vThin = max( 0.9 * smoothstep( uVineA.w, 1.05, vVine.z ), 0.7 * smoothstep( 0.6, 0.95, vRim ) );
+  vec3 vH1, vH2;
+  vec4 vA = lssVineLayer( vP, vThin, vH1 );
+  vec4 vB = lssVineLayer( vP + vec2( 0.5, 0.37 ) + 57.0, vThin, vH2 );
+  bool vFront = vA.w > 0.5;
+  vec4 vL = vFront ? vA : vB; vec3 vH = vFront ? vH1 : vH2;
+  float vCov = max( vA.w, vB.w );
+  if ( vCov < 0.5 && uVineA.z > 0.5 && vLod < 0.5 ) discard;
+  float vTone = ( 0.55 + 0.5 * vH.x ) * ( vFront ? 1.0 : uVineB.y );
+  vec3 vTint = mix( vec3( 0.72, 0.95, 0.80 ), vec3( 1.10, 1.05, 0.62 ), vH.y * vH.y );
+  if ( vH.z > 0.965 ) vTint = vec3( 1.25, 0.75, 0.45 );
+  float vAc = abs( vL.x );
+  float vLeaf = ( 1.0 - 0.38 * vAc * vAc ) * ( 0.82 + 0.3 * vL.y ) + 0.10 * ( 1.0 - smoothstep( 0.0, 0.12, vAc ) );
+  vec3 vNear = vCov > 0.5 ? vTint * vTone * vLeaf : vec3( uVineB.x );
+  vec3 vShade = mix( vNear, vec3( 0.62 ), vLod );
+  diffuseColor.rgb *= vShade;
+  diffuseColor.rgb = mix( diffuseColor.rgb, vec3( dot( diffuseColor.rgb, vec3( 0.299, 0.587, 0.114 ) ) ), uVineB.z );
+  float vEm = dot( vShade, vec3( 0.333 ) );
+`;
+  const NRM = `
+  if ( vCov > 0.5 ) normal = normalize( normal + uVineA.y * ( 1.0 - vLod ) * ( mat3( viewMatrix ) * ( vH * 2.0 - 1.0 ) ) );
+  totalEmissiveRadiance *= vEm;
+`;
+  m.onBeforeCompile = (sh) => {
+    sh.uniforms.uVineA = U.a; sh.uniforms.uVineB = U.b;
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', '#include <common>\nattribute vec4 aVine;\nvarying vec4 vVine;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\n\tvVine = aVine;');
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', '#include <common>\n' + PARS)
+      .replace('#include <color_fragment>', '#include <color_fragment>\n' + COL)
+      .replace('#include <normal_fragment_maps>', '#include <normal_fragment_maps>\n' + NRM);
+  };
+  m.customProgramCacheKey = () => 'lssVineLeaf1';
+  try {
+    const a = U.a.value, b = U.b.value;
+    window.__vineLeaf = {
+      get size() { return a.x; }, set size(v) { a.x = Math.max(0.5, +v || 5); },
+      get tilt() { return a.y; }, set tilt(v) { a.y = +v || 0; },
+      get cut() { return a.z; }, set cut(v) { a.z = v ? 1 : 0; },
+      get tip() { return a.w; }, set tip(v) { a.w = +v; },
+      get gap() { return b.x; }, set gap(v) { b.x = +v; },
+      get back() { return b.y; }, set back(v) { b.y = +v; },
+      get desat() { return b.z; }, set desat(v) { b.z = +v; },
+    };
+  } catch (_) {}
+  _swVineMat = m;
+  return m;
+}
 // ⭐⭐⭐ (v46.69) THE SURFACE THE STRAND HAS TO FIT IS THE ONE L0 DRAWS, NOT THE FUNCTION.
 // Owner: "they don't fit properly, some are floating, some are shoved in". Every height the placer
 // used came from the analytic field (`_stGroundYGrid`, `_stGroundYCarved`), and the hub's ground is
@@ -46409,7 +46549,7 @@ function _swBuildDrapes(x0, z0, T) {
   let _a = (Math.imul(Math.round(x0 / 16) + 12345, 2654435761) ^ Math.imul(Math.round(z0 / 16) + 6789, 40503)) | 0;
   const rnd = () => { _a = (_a + 0x6D2B79F5) | 0; let t = Math.imul(_a ^ (_a >>> 15), 1 | _a);
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
-  const accIce = { pos: [], col: [], idx: [], v: 0, n: 0 }, accVine = { pos: [], col: [], idx: [], v: 0, n: 0 };   // (v46.71) merged per chunk
+  const accIce = { pos: [], col: [], idx: [], v: 0, n: 0 }, accVine = { pos: [], col: [], idx: [], vin: [], v: 0, n: 0 };   // (v46.71) merged per chunk; (v54.19) vin = the leaf shader's aVine
   const snowLine = (T.snowLine != null) ? T.snowLine : 0.7;
   const _hot = (K.hot != null) ? !!K.hot : (T.biome === 'volcanic' || T.biome === 'goldmine');
   const _snowK = (K.snow != null) ? +K.snow : 0;   // shifts the ice/vine split up or down the band
@@ -46514,6 +46654,7 @@ function _swBuildDrapes(x0, z0, T) {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(Float32Array.from(acc.pos), 3));
     g.setAttribute('color', new THREE.BufferAttribute(Float32Array.from(acc.col), 3));
+    if (acc.vin) g.setAttribute('aVine', new THREE.BufferAttribute(Float32Array.from(acc.vin), 4));   // (v54.19)
     g.setIndex(acc.idx);
     g.computeVertexNormals(); g.computeBoundingSphere();
     const m = new THREE.Mesh(g, mat);
@@ -49344,6 +49485,18 @@ function _swRippleInit() {
     const err = gpu.init();
     if (err) { try { console.warn('[water] GPGPU init failed, analytic fallback:', err); } catch (_) {} return; }
     _swRipple.gpu = gpu; _swRipple.heightVar = v; _swRipple.acc = 0; _swRipple.pending.length = 0;
+    // ⭐ (v54.13) ITS PROGRAM QUEUED NOW, linked by the launch's drain: renderer.compile only QUEUES the build (a parallel
+    // link), _drainProgramLinks waits for it without blocking and primes it, and _swRippleTick waits for isReady() before
+    // its first step - which used to be the program's first use (5.3 s in one tick, cold). Bound to the sim's own target
+    // for the call: the target's output colour space is a term of the program key (the canvas would build another).
+    _swRipple._linked = false;
+    try {
+      const _cm = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), v.material), _cs = new THREE.Scene(); _cs.add(_cm);
+      const _pRT = renderer.getRenderTarget();
+      renderer.setRenderTarget(v.renderTargets[0]);
+      try { renderer.compile(_cs, new THREE.Camera()); } finally { renderer.setRenderTarget(_pRT); }
+      _cm.geometry.dispose();
+    } catch (_) {}
     _swRipple.center.set((player && player.position) ? player.position.x : 0, (player && player.position) ? player.position.z : 0);
     _swRipple.scale = 64;   
     _swRippleBakeMask();    
@@ -53735,6 +53888,16 @@ function _swRippleTick(dt) {
   // compute, its readback and the crest scan were pure heat. Drop pending
   // seeds (visual only) and skip; the surface picks up where it was.
   if (typeof document !== 'undefined' && document.hidden && !((typeof isXRPresenting === 'function') && isXRPresenting())) { R.pending.length = 0; return; }
+  // (v54.13) not while the launch drains its links, and not before the sim's own program has linked (_swRippleInit
+  // queues it): its first compute() was that program's first use - MEASURED 5.3 s in one tick on a cold cache, waiting
+  // behind the launch's whole compile queue. Seeds are visual only; the surface starts a few frames later instead.
+  if (game._linkHold) { R.pending.length = 0; return; }
+  if (!R._linked) {
+    let ok = true;
+    try { const pp = renderer.properties.get(R.heightVar.material), pr = pp && pp.currentProgram; if (pr && typeof pr.isReady === 'function') ok = !!pr.isReady(); } catch (_) {}
+    if (!ok) { R.pending.length = 0; return; }
+    R._linked = true;
+  }
   // (v38.15) live A/B for the two that decide how far a ripple carries. The shipped feel is
   // waveC2 0.16 / visc 0.9885 ; window.__water = { waveC2: 0.05, visc: 0.972 } is the old water
   // exactly, so the change can be judged against it without a rebuild.
@@ -81382,6 +81545,10 @@ function _lssSeatEnsure(ship, hull, who) {
     // (_warmDrawRoot: ANGLE builds a vertex executable per input layout at the first draw, v39.52), then show.
     const go = () => {
       if (rec.shown || ud.lssSeat !== rec) return;
+      // (v54.14) NOT WHILE A LAUNCH DRAINS ITS LINKS (game._linkHold, see _commitWarmQ). The 1.5 s fallback below fired
+      // with his compile still queued behind the launch's, and the warm draw joined it: MEASURED 11.9 s in one task (cold).
+      // He shows (and warms) when the hold lifts - still under the loading cover.
+      if (typeof game !== 'undefined' && game && game._linkHold) { setTimeout(go, 250); return; }
       rec.shown = true;
       scene.add(body);
       _lssSeatPlace(rec);
@@ -109831,16 +109998,79 @@ function _ghostPinWarmAsync() {
   } catch (_) {}
 }
 
-function _ghostPinWarm() {
+// ⭐⭐ (v54.13) THE LAUNCH COMMIT'S WARM DRAWS WAIT FOR THE LINKS. Owner (2026-10-13): "during the screen load before the
+// second scene, the browser asks to quit or wait... is there a way to tell the browser we are on a loading screen so it
+// doesn't do that?" There is not: Chrome's "Page unresponsive" comes from the main thread not answering input for that
+// long, cover or no cover. And the pane never showed it - its GPU program cache was warm from a day of runs; the owner's
+// Chrome compiles from scratch. MEASURED with a cold cache forced (a unique comment in THREE.ShaderChunk.common, so no
+// program source matches the cache), hangar talk -> city: ONE 20.6 s task in the deferred commit (+ 5.3 s, + 1.1 s after),
+// the profiler's stacks: _finishCommit -> _ghostPinWarm -> _warmDrawRoot 76 %, three's link wait 77 % self. The commit's
+// renderer.compile() passes only QUEUE their programs (parallel links); the warm DRAWS are each program's first use,
+// which waits for its link - behind the whole launch's queue, since the GPU process works through it in order.
+// So during the deferred commit (_commitWarmQ is an array) the draws are queued, not drawn: _ghostPinWarm compiles as
+// before and leaves its draws; _pinPostFXPrograms (draws only) waits whole. _commitWarmRun (the first link of the
+// launch chain, before warmupCombatShaders) drains the links WITHOUT blocking (_drainProgramLinks: polls + yields) and
+// then runs them - same draws, same state, now on linked programs. `game._linkHold` holds the two gameLoop warmers that
+// would join a link in that window (the cloak's fin, the ripple sim's first step); the loop's own render is already
+// out of the canvas for the whole launch window (v40.35). The between-rounds swap (midMatch) is untouched.
+let _commitWarmQ = null;
+const _ghostDrawJob = () => _ghostPinWarm({ now: true, drawOnly: true });
+// (v54.14) ...AND THE PIN'S COMPILE BURST LEAVES THE COMMIT TOO. A first use waits behind EVERYTHING queued before it (the
+// parallel-link pool works through it in order), and the pin (_pinCombatEffectPrograms: whole-scene compiles, ~170
+// programs x their variants) ran from _wxInit, inside the world build - ahead of the build's own first uses, every
+// GPUComputationRenderer.init() (fish, birds, ripples: each renders its first texture with a pass-through program of its
+// own grid size). MEASURED, 54.13 cold: the commit still 12.1 s, 8.3 s of it `_fishSchoolInit` waiting. So in the commit
+// the pin only queues itself (`_pinJob`, flagged as a COMPILE job) and _commitWarmRun goes in three steps: the compile
+// jobs (their own warm draws are caught in a fresh queue), the drain, the draw jobs.
+const _pinJob = () => _pinCombatEffectPrograms({ now: true });
+_pinJob._lssCompiles = true;
+function _commitWarmTake() {
+  const q = _commitWarmQ; _commitWarmQ = null;
+  return q ? _commitWarmRun(q) : null;
+}
+async function _commitWarmRun(q) {
+  const t0 = performance.now();
+  let n = 0;
+  try {
+    await _warmupYield();   // out of the commit's task first
+    const comp = q.filter((f) => f && f._lssCompiles), draw = q.filter((f) => f && !f._lssCompiles);
+    if (comp.length) {
+      _commitWarmQ = [];    // a compile job's own warm draws (the pin calls _ghostPinWarm) queue here, not draw now
+      for (const f of comp) {
+        try { f(); n++; } catch (e) { try { console.warn('[launch] deferred compile failed:', e && e.message); } catch (_) {} }
+        await _warmupYield();
+      }
+      const extra = _commitWarmQ || []; _commitWarmQ = null;
+      for (const f of extra) if (f && draw.indexOf(f) < 0) draw.push(f);
+    }
+    await _drainProgramLinks((typeof window !== 'undefined' && +window.__commitLinkCap) || 45000, null, 'commitDefer');
+    for (const f of draw) {
+      try { f(); n++; } catch (e) { try { console.warn('[launch] deferred warm failed:', e && e.message); } catch (_) {} }
+      await _warmupYield();
+    }
+  } catch (_) { _commitWarmQ = null; }
+  finally { try { game._linkHold = false; } catch (_) {} }
+  try { window.__commitWarm = { ms: Math.round(performance.now() - t0), jobs: n, drain: window.__linkDrain || null }; } catch (_) {}
+}
+// opts.drawOnly = only the draws (the deferred half: the compiles already ran in the commit); opts.now = never defer
+function _ghostPinWarm(opts) {
   // (v39.05) skipped on small devices with the other pin passes - three more synchronous
   // full-scene compiles in the warmup window. See _pinCombatEffectPrograms.
   try {
     if (typeof _fxSmallDevice === 'function' && _fxSmallDevice() &&
         !(typeof window !== 'undefined' && window.__pinShaders)) { _ghostPinWarmAsync(); return; }
   } catch (_) {}
+  const _drawOnly = !!(opts && opts.drawOnly);
+  // (v54.13) in the launch commit: draws later. In a try: a `let` read before its line has run throws through `typeof`
+  // and everything else (the v39.02 TDZ trap) - and this can be reached from code above it.
+  let _defer = false;
+  try { _defer = !_drawOnly && !!_commitWarmQ && !(opts && opts.now); } catch (_) {}
   try {
     if (typeof _ghostHullApply !== 'function') return;
     if (typeof player === 'undefined' || !player || !player.mesh) return;
+    // (v54.13) the deferred half can land after the commit has taken the hull back out of the scene: in for the draws
+    const _adopt = _drawOnly && !player.mesh.parent;
+    if (_adopt) { try { scene.add(player.mesh); } catch (_) {} }
     const _was = !!(player.mesh.userData && player.mesh.userData._ghostOn);
     if (!_was) _ghostHullApply(player.mesh);
     // (v39.82) SHOW THE WHOLE SHIP FOR THE WARM. The pin ran with the hull in its THIRD-PERSON
@@ -109854,11 +110084,13 @@ function _ghostPinWarm() {
     // the duration of the warm and put back exactly as it was; the draw is 8x8 and off-screen.
     const _hid = [];
     try { player.mesh.traverse((o) => { if (o.visible === false) { o.visible = true; _hid.push(o); } }); } catch (_) {}
-    const _tm = renderer.toneMapping;
-    const _no = (typeof THREE !== 'undefined' && THREE.NoToneMapping !== undefined) ? THREE.NoToneMapping : 0;
-    try { renderer.toneMapping = _no; renderer.compile(scene, camera); } catch (_) {}
-    try { renderer.toneMapping = _tm; } catch (_) {}
-    try { renderer.compile(scene, camera); } catch (_) {}
+    if (!_drawOnly) {   // (v54.13) the deferred half: these already ran in the commit
+      const _tm = renderer.toneMapping;
+      const _no = (typeof THREE !== 'undefined' && THREE.NoToneMapping !== undefined) ? THREE.NoToneMapping : 0;
+      try { renderer.toneMapping = _no; renderer.compile(scene, camera); } catch (_) {}
+      try { renderer.toneMapping = _tm; } catch (_) {}
+      try { renderer.compile(scene, camera); } catch (_) {}
+    }
     // ...and for the target the game actually draws into. The OUTPUT COLOUR SPACE is a term of
     // the program cache key: a compile against the canvas builds the `srgb` variant, and the
     // gameplay frame renders into postFX.rtScene, which is `srgb-linear`. That one character was
@@ -109866,21 +110098,23 @@ function _ghostPinWarm() {
     try {
       if (typeof postFX !== 'undefined' && postFX && postFX.rtScene) {
         renderer.setRenderTarget(postFX.rtScene);
-        renderer.compile(scene, camera);
-        // (v39.49b) the seat shell's ghost materials are transparent + DoubleSide, so three draws
-        // them in two single-sided passes with two programs; compile both (see _warmCloakForRoot).
-        try {
-          const _gm = [];
-          player.mesh.traverse((o) => { const g = o.userData && o.userData._ghostMats; if (!g) return; for (const m of (Array.isArray(g) ? g : [g])) if (m && m.side === THREE.DoubleSide && m.transparent) _gm.push(m); });
-          if (_gm.length) {
-            for (const m of _gm) { m.side = THREE.BackSide; m.needsUpdate = true; }
-            renderer.compile(scene, camera);
-            for (const m of _gm) { m.side = THREE.FrontSide; m.needsUpdate = true; }
-            renderer.compile(scene, camera);
-            for (const m of _gm) { m.side = THREE.DoubleSide; m.needsUpdate = true; }
-          }
-        } catch (_) {}
-        try { if (typeof _warmDrawRoot === 'function') _warmDrawRoot(player.mesh, postFX.rtScene, true); } catch (_) {}   // (v39.52; v39.84 with the shadow pass - the seat shell is transparent, a different depth key)
+        if (!_drawOnly) {
+          renderer.compile(scene, camera);
+          // (v39.49b) the seat shell's ghost materials are transparent + DoubleSide, so three draws
+          // them in two single-sided passes with two programs; compile both (see _warmCloakForRoot).
+          try {
+            const _gm = [];
+            player.mesh.traverse((o) => { const g = o.userData && o.userData._ghostMats; if (!g) return; for (const m of (Array.isArray(g) ? g : [g])) if (m && m.side === THREE.DoubleSide && m.transparent) _gm.push(m); });
+            if (_gm.length) {
+              for (const m of _gm) { m.side = THREE.BackSide; m.needsUpdate = true; }
+              renderer.compile(scene, camera);
+              for (const m of _gm) { m.side = THREE.FrontSide; m.needsUpdate = true; }
+              renderer.compile(scene, camera);
+              for (const m of _gm) { m.side = THREE.DoubleSide; m.needsUpdate = true; }
+            }
+          } catch (_) {}
+        }
+        if (!_defer) { try { if (typeof _warmDrawRoot === 'function') _warmDrawRoot(player.mesh, postFX.rtScene, true); } catch (_) {} }   // (v39.52; v39.84 with the shadow pass - the seat shell is transparent, a different depth key)
         renderer.setRenderTarget(null);
       }
     } catch (_) { try { renderer.setRenderTarget(null); } catch (__) {} }
@@ -109895,16 +110129,23 @@ function _ghostPinWarm() {
     // One more warm draw AFTER the restore, with the interior still shown, covers it.
     if (!_was) _ghostHullRestore(player.mesh);
     try {
-      if (typeof _warmDrawRoot === 'function' && typeof postFX !== 'undefined' && postFX && postFX.rtScene) {
+      if (!_defer && typeof _warmDrawRoot === 'function' && typeof postFX !== 'undefined' && postFX && postFX.rtScene) {
         const _pRT2 = renderer.getRenderTarget();
         try { renderer.setRenderTarget(postFX.rtScene); _warmDrawRoot(player.mesh, postFX.rtScene, true); }
         finally { try { renderer.setRenderTarget(_pRT2); } catch (_) {} }
       }
     } catch (_) {}
     for (let i = 0; i < _hid.length; i++) { try { _hid[i].visible = false; } catch (_) {} }   // (v39.82) exactly as they were
+    if (_adopt) { try { scene.remove(player.mesh); } catch (_) {} }
+    // (v54.13) the draws, after the launch's links drain (once: the commit warms the hull twice, one draw job covers it)
+    if (_defer && _commitWarmQ && _commitWarmQ.indexOf(_ghostDrawJob) < 0) _commitWarmQ.push(_ghostDrawJob);
   } catch (_) {}
 }
-function _pinCombatEffectPrograms() {
+function _pinCombatEffectPrograms(opts) {
+  // (v54.14) in the launch commit it only queues itself (a compile job: see _pinJob / _commitWarmRun) - its burst ran ahead
+  // of the world build's own first uses and they waited behind it. opts.now = the deferred run itself. In a try: the TDZ trap.
+  { let _cq = null; try { _cq = _commitWarmQ; } catch (_) {}
+    if (_cq && !(opts && opts.now)) { if (_cq.indexOf(_pinJob) < 0) _cq.push(_pinJob); return; } }
   // (v39.05) THE PHONE CRASH. This runs at EVERY round warmup (both round-start paths) and does
   // FIVE synchronous full-scene renderer.compile() passes - two tone-mapping variants plus the
   // rtScene colourspace - over ~170 programs. _ghostPinWarm adds three more. On a phone that is a
@@ -110224,6 +110465,11 @@ async function _pinCombatEffectProgramsStaged() {
 let _postFXPinned = false;
 function _pinPostFXPrograms() {
   if (_postFXPinned) return;
+  // (v54.13) in the launch commit it runs after the links drain (_commitWarmRun): its three draws are the three programs'
+  // first use, and inside the commit they joined the back of the whole launch's compile queue. The loop's render stays out
+  // of the canvas until the launch window ends (v40.35), so nothing draws the chain before it.
+  { let _cq = null; try { _cq = _commitWarmQ; } catch (_) {}   // (in a try: the TDZ trap, as in _ghostPinWarm)
+    if (_cq) { if (_cq.indexOf(_pinPostFXPrograms) < 0) _cq.push(_pinPostFXPrograms); return; } }
   if (typeof renderer === 'undefined' || !renderer) return;
   if (typeof postFX === 'undefined' || !postFX) return;
   if (!postFX.passScene || !postFX.quadCamera || !postFX.compositeMat ||
@@ -110898,6 +111144,9 @@ function _pbSub(txt) {
   // Sub-line only: the main line stays PREPARING ARENA so this reads as progress
   // inside the existing screen rather than a second loading screen. showLoadingOverlay
   // is the v36.24 audio-hold engage point and is idempotent, so calling it here is safe.
+  // (v54.17) ...except from the launch's link hold (_commitWarmRun's drain): it only ever UPDATES the line. If anything has
+  // dropped the cover meanwhile (a forced handoff), a drain still polling must not raise it again over the world.
+  try { if (game._linkHold) { const o = document.getElementById('lss-loading-overlay'); if (!o || !o.classList.contains('active')) return; } } catch (_) {}
   try { showLoadingOverlay(null, txt); } catch (_) {}
 }
 // ═══ (v40.24) A WARM IS NOT FINISHED UNTIL ITS DRAWS HAVE EXECUTED ═══════════════════════════════
@@ -119979,7 +120228,10 @@ function commitLoadout(key) {
       // The prebake is capped at _PREBAKE_MAX_MS so it cannot hold this off
       // indefinitely, but a 12 s cold hub build would otherwise look identical to
       // a wedged launch to a 12 s stall detector.
-      const _warming = !!(typeof _shaderWarmup !== 'undefined' && _shaderWarmup && _shaderWarmup.promise) || !!game._worldPrebaking;
+      // (v54.17) + the launch's link hold (_commitWarmRun): it is the first link of this chain, BEFORE the shader warmup and
+      // the prebake set their flags, and a cold drain runs 20-30 s. Without it this forced the handoff mid-drain (the city
+      // opened at 51 s with the drain still polling - and the drain's progress line then raised the cover over it).
+      const _warming = !!(typeof _shaderWarmup !== 'undefined' && _shaderWarmup && _shaderWarmup.promise) || !!game._worldPrebaking || !!game._linkHold;
       if (_warming) { _settled = 0; return; }
       if (++_settled < 12) return;
       _clearLaunchStall();
@@ -120002,7 +120254,10 @@ function commitLoadout(key) {
   try { game._warmupDone = false; } catch (_) {}   // (v42.25) cleared by both promise arms below
   let _warmupPromise;
   try {
-    _warmupPromise = warmupCombatShaders();
+    // ⭐ (v54.13) THE COMMIT'S DEFERRED WARM DRAWS FIRST: its drain links everything the build just queued, without
+    // blocking, and then they draw (see _commitWarmQ). Null outside the deferred commit (midMatch): as before.
+    const _cw = _commitWarmTake();
+    _warmupPromise = _cw ? _cw.then(() => warmupCombatShaders()) : warmupCombatShaders();
   } catch (_) {
     _warmupPromise = Promise.resolve();
   }
@@ -120132,6 +120387,11 @@ function commitLoadout(key) {
   // live, clickable picker and then freeze with nothing over it.
   try { showLoadingOverlay('PREPARING ARENA', 'compiling shaders'); } catch (_) {}
   _commitDeferOneFrame(() => {
+    // (v54.13) the warm draws of this commit wait for its links (see _commitWarmQ above _ghostPinWarm); the hold keeps the
+    // gameLoop's two link-joining warmers out of the window. _finishCommit takes the queue at its warmup line; a commit
+    // that throws before it still gets its queued draws run and the hold released (the finally below).
+    // A/B: window.__noCommitDefer = true restores the synchronous commit exactly (no queue, no hold)
+    if (!(typeof window !== 'undefined' && window.__noCommitDefer)) { _commitWarmQ = []; try { game._linkHold = true; } catch (_) {} }
     try { _finishCommit(); }
     catch (e) {
       // (v36.21) A failed build is the one case where landing back on the picker
@@ -120147,7 +120407,12 @@ function commitLoadout(key) {
       try { game.state = 'select'; } catch (_) {}
       try { if (window.Overlays && Overlays.banner) Overlays.banner('LAUNCH FAILED', (e && e.message) ? String(e.message).slice(0, 60) : 'pick a ship again'); } catch (_) {}
     }
-    finally { _commitPending = false; }
+    finally {
+      _commitPending = false;
+      // (v54.13) not taken (it threw before its warmup line): run the queued draws and release the hold anyway. Taken:
+      // _commitWarmRun releases the hold itself.
+      if (_commitWarmQ) { try { _commitWarmTake(); } catch (_) { try { game._linkHold = false; } catch (__) {} } }
+    }
   });
 }
 
@@ -121970,6 +122235,9 @@ let _cloakPendingFin = null;
 function _cloakPendingTick() {
   const P = _cloakPendingFin;
   if (!P) return;
+  // (v54.13) not while the launch drains its links (game._linkHold, _commitWarmRun): its programs sit in that queue, and
+  // the 6 s cap below would run out on a cold cache and draw - joining the queue's back. Its clock starts after the hold.
+  if (typeof game !== 'undefined' && game && game._linkHold) { P.t0 = performance.now(); return; }
   let ready = true;
   try {
     const gl = renderer.getContext();
@@ -163338,16 +163606,29 @@ const CAMP_SEQS = {
         frostfang: { at: [0, 5.2], h: 1.95, ship: 'SYPHON' },
       },
       // the ships: [x, underside over the floor, z] in metres, heading in degrees (0 = nose toward the main camera, 90 = +x).
-      // Their three in a V behind them, noses out; the other four further back, a second row - nose-on, because at their
-      // game size (12-19 m) the main screen's broadside rows were a wall of hull across the frame (the first cut).
+      // Their three in a V behind them, noses out (nose-on, because at their game size (11-19 m) the main screen's broadside
+      // rows were a wall of hull across the frame - the first cut).
+      // ⭐⭐ (v54.19) RIGHT BEHIND THEIR PILOTS, FROM EVERY CAMERA. Owner, at the beam-in cut: "when the pilots teleport to
+      // their ships, it looks like the ships somehow all got higher in that scene", then "in every shot, the characters and
+      // the ships should be the same relative to each other".
+      // It was one world all along - every camera drew the same metres - but the three eye-level pictures FLATTEN DEPTH: a
+      // 14 m hull 26-31 m from the lens reads as a smaller one just behind the pilots, bellies at their heads. The high
+      // picture (the 'seat' cut) shows the floor, and there the V sat 15-20 m behind them at the back of the hangar, and the
+      // four parked hulls - 36-44 m deep - landed ON the painted back wall up by the ceiling lights (their floor spots
+      // projected to rows 232-262 of hangar_perspective3, its wall's foot is ~300): "all got higher".
+      // So the V moved forward as a block, 6.5 m, every offset between the three and every height kept: noses now 2-7 m
+      // behind the pilots, over the back of the lit platform (their shadow blobs land on it), which is where the eye-level
+      // shots had always made them look. The look from those three cameras barely changes; the high one now agrees.
+      // ⚠ THE FOUR PARKED HULLS ARE OUT of this scene (they were BLASTER [-13, 3.2, -36] yaw 8, PYRO [13, 3.2, -36] yaw -8,
+      //   TRACKER [-5.5, 4.4, -44] yaw 4, PUNCTURE [5.5, 4.4, -44] yaw -4). The pictures' back walls stand only 7-11 m
+      //   behind the platform (measured through the fitted cameras: main z -15, high -17..-21, right -17..-23, left -19..-32),
+      //   so there is no row behind the V that is in front of the wall from every camera - and in the high picture a hull
+      //   behind the wall is a hull on the wall. Back = add them here again (the build reads this list) at spots that pass
+      //   that test from all four cameras.
       ships: {
-        VORTEX:   { at: [-8.0, 1.6, -10], yaw: 12 },
-        SLAYER:   { at: [7.5, 1.4, -9.5], yaw: -12 },
-        SYPHON:   { at: [0.0, 2.2, -15], yaw: 0 },
-        BLASTER:  { at: [-13, 3.2, -36], yaw: 8 },
-        PYRO:     { at: [13, 3.2, -36], yaw: -8 },
-        TRACKER:  { at: [-5.5, 4.4, -44], yaw: 4 },
-        PUNCTURE: { at: [5.5, 4.4, -44], yaw: -4 },
+        VORTEX:   { at: [-8.0, 1.6, -3.5], yaw: 12 },
+        SLAYER:   { at: [7.5, 1.4, -3.0], yaw: -12 },
+        SYPHON:   { at: [0.0, 2.2, -8.5], yaw: 0 },
       },
       k: 0.0836,          // build: metres per game unit (Ashman's seat fit in the Slayer: 1.82 m standing = seated)
       bob: 0.12, bobT: 6.2, sway: 0.8,   // the hulls float: metres, period (s), roll / pitch (deg)
@@ -163392,7 +163673,9 @@ const CAMP_SEQS = {
       beamHold: 1.6,      // seated, before the engines come up
       spool: 0.9,         // the engines coming up, a lift of `lift` metres
       lift: 0.8,
-      fly: 1.7,           // seconds from leaving to passing the camera
+      // (v54.19) 1.7 -> 1.4: the V now leaves 6.5 m nearer the lens (see `ships`), so the same seconds made them ~20% slower
+      // past it - and the drive-by's doppler (v54.12) softer with them. This keeps the speed they had.
+      fly: 1.4,           // seconds from leaving to passing the camera
       pass: { VORTEX: [-2.4, 0.5], SLAYER: [2.6, 0.1], SYPHON: [0.2, 2.6] },   // where each goes past the camera: right, up (m)
       lag: { VORTEX: 0.12, SLAYER: 0.0, SYPHON: 0.26 },                       // seconds after the first one leaves
       blackAt: 0.82,      // share of the flight at which the screen starts going black
@@ -172535,7 +172818,10 @@ function _gameLoopBody(timestamp) {
     try {
       const _cov = document.getElementById('lss-loading-overlay');
       const _launching = !!(_cov && _cov.classList.contains('active') && _selEl && _selEl.classList.contains('lss-launching'));
-      _rfPrebake = (!!(_PREBAKE && _PREBAKE.on) || _launching) && !_xrActive && !window.__noOccludedThrottle;
+      // (v54.15) ...and the launch's LINK HOLD (game._linkHold, _commitWarmRun): a launch that does not come from the picker
+      // (the campaign prologue's city) is never .lss-launching, so the loop drew the world in the drain window - first uses,
+      // each waiting behind the queue: MEASURED a 4.8 s frame (the water mirror, cold). The cover is up for the whole hold.
+      _rfPrebake = (!!(_PREBAKE && _PREBAKE.on) || _launching || !!game._linkHold) && !_xrActive && !window.__noOccludedThrottle;
     } catch (_) { _rfPrebake = false; }
     if (_rfPrebake) _rfCovered = true;
   } catch (_) { _rfCovered = false; }

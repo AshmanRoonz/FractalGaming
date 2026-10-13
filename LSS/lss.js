@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "54.12";
+const LSS_BUILD = "54.22";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -7463,7 +7463,7 @@ function _campSaveLegs(legs) {
     localStorage.setItem('lss_campaign_legs', JSON.stringify(arr));
   } catch (_) {}
 }
-function _campTempUnlockAll() { return true; }
+function _campTempUnlockAll() { return false; }
 function _campCarouselLegs() {
   const s = _campLoadLegs(); s.unshift('camp_approach');
   if (_campTempUnlockAll()) {
@@ -24793,6 +24793,7 @@ function _swGrassMapInit() {
 function _swGrassMapTick(force) {
   const G = _swGrassMapInit();
   if (typeof renderer === 'undefined' || !renderer) return;
+  if (typeof game !== 'undefined' && game && game._linkHold) return;
   try { if (renderer.xr && renderer.xr.isPresenting && G.n > 0) return; } catch (_) {}
   const ts = (2 * G.R) / G.N, c = _swU.uCam.value;
   const cx = Math.floor(c.x / ts) * ts, cz = Math.floor(c.z / ts) * ts;
@@ -26551,8 +26552,12 @@ function _swDrapeStrand(acc, lx, lz, hLip, fx, fz, len, rad, snowy, T) {
   const n = S.length / 7, SEG = _SW_DRAPE_SEG, lxA = -fz, lzA = fx;
   const C0 = snowy ? _swDrapeC0I : _swDrapeC0V, C1 = snowy ? _swDrapeC1I : _swDrapeC1V, CT = _swDrapeCT;
   const base = acc.v;
+  const vin = acc.vin;
+  const seed = vin ? (((Math.sin(lx * 12.9898 + lz * 78.233) * 43758.5453) % 1) + 1) % 1 : 0;
+  let sAcc = 0;
   for (let k = 0; k < n; k++) {
     const o = k * 7, oA = Math.max(0, k - 1) * 7, oB = Math.min(n - 1, k + 1) * 7;
+    if (vin && k) sAcc += Math.hypot(S[o] - S[o - 7], S[o + 1] - S[o - 6], S[o + 2] - S[o - 5]);
     let tx = S[oB] - S[oA], ty = S[oB + 1] - S[oA + 1], tz = S[oB + 2] - S[oA + 2];
     const tl = Math.hypot(tx, ty, tz) || 1; tx /= tl; ty /= tl; tz /= tl;
     let bx = ty * lzA, by = tz * lxA - tx * lzA, bz = -ty * lxA;
@@ -26563,6 +26568,7 @@ function _swDrapeStrand(acc, lx, lz, hLip, fx, fz, len, rad, snowy, T) {
       const th = (q / SEG) * 6.283185 + 0.7854, ca = Math.cos(th) * r * ex, sa = Math.sin(th) * r * ey;
       acc.pos.push(S[o] + lxA * ca + bx * sa, S[o + 1] + by * sa, S[o + 2] + lzA * ca + bz * sa);
       acc.col.push(CT.r, CT.g, CT.b);
+      if (vin) vin.push(sAcc, ca + sa, sPar, seed);
     }
   }
   for (let k = 0; k < n - 1; k++) for (let q = 0; q < SEG; q++) {
@@ -26573,7 +26579,98 @@ function _swDrapeStrand(acc, lx, lz, hLip, fx, fz, len, rad, snowy, T) {
 }
 let _swIceMat = null, _swVineMat = null;
 function _swIceMatGet(){ if(!_swIceMat) _swIceMat = new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x8fb4cc, vertexColors: true, side: THREE.DoubleSide }); return _swIceMat; }
-function _swDrapeVineMatGet(){ if(!_swVineMat) _swVineMat = new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x141f0d, vertexColors: true, side: THREE.DoubleSide }); return _swVineMat; }
+function _swDrapeVineMatGet(){
+  if (_swVineMat) return _swVineMat;
+  const m = new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x141f0d, vertexColors: true, side: THREE.DoubleSide });
+  const U = { a: { value: new THREE.Vector4(5.0, 0.35, 1.0, 0.55) }, b: { value: new THREE.Vector4(0.10, 0.55, 0.20, 0.0) } };
+  const PARS = `
+uniform vec4 uVineA;
+uniform vec4 uVineB;
+varying vec4 vVine;
+vec3 lssVH32( vec2 p ) {
+  vec3 p3 = fract( vec3( p.xyx ) * vec3( 0.1031, 0.1030, 0.0973 ) );
+  p3 += dot( p3, p3.yxz + 33.33 );
+  return fract( ( p3.xxy + p3.yzz ) * p3.zyx );
+}
+// one layer: the top leaf covering P. x = across it (-1..1), y = along it (0 stem .. 1 tip), w = 1 if any leaf covers P
+vec4 lssVineLayer( vec2 P, float thin, out vec3 hOut ) {
+  vec2 ic = floor( P ), fc = P - ic;
+  float best = -1.0; vec4 r = vec4( 0.0 ); hOut = vec3( 0.0 );
+  for ( int j = -2; j <= 0; j ++ ) for ( int i = -1; i <= 1; i ++ ) {
+    vec2 o = vec2( float( i ), float( j ) );
+    vec3 h = lssVH32( ic + o );
+    if ( h.z < thin ) continue;
+    vec2 d = fc - ( o + 0.2 + 0.6 * h.xy );
+    float a = ( fract( h.x * 5.3 + h.y * 2.1 ) - 0.5 ) * 0.8, ca = cos( a ), sa = sin( a );
+    vec2 l = vec2( ca * d.x - sa * d.y, sa * d.x + ca * d.y );
+    float sz = 0.8 + 0.5 * fract( h.z * 3.7 + h.y );
+    float len = 1.15 * sz, wid = 0.5 * sz;
+    float t = l.y / len;
+    if ( t <= 0.0 || t >= 1.0 ) continue;
+    float hw = wid * pow( sin( t * 3.14159 ), 0.6 ) * ( 1.0 - 0.25 * t ) + 1e-4;
+    float ax = l.x / hw;
+    if ( abs( ax ) >= 1.0 ) continue;
+    float z = fract( h.z * 7.13 + h.x * 3.7 );
+    if ( z > best ) { best = z; r = vec4( ax, t, h.z, 1.0 ); hOut = h; }
+  }
+  return r;
+}
+`;
+  const COL = `
+  vec2 vP = vec2( vVine.y, vVine.x ) / uVineA.x + vVine.w * vec2( 113.0, 271.0 );
+  vP += 0.3 * vec2( sin( vP.y * 0.83 + vVine.w * 6.0 ), sin( vP.x * 1.31 + vP.y * 0.47 ) );
+  float vPx = max( length( dFdx( vP ) ), length( dFdy( vP ) ) );
+  float vLod = smoothstep( 0.25, 0.6, vPx );
+  float vRim = 1.0 - abs( dot( normalize( vNormal ), normalize( vViewPosition ) ) );
+  float vThin = max( 0.9 * smoothstep( uVineA.w, 1.05, vVine.z ), 0.7 * smoothstep( 0.6, 0.95, vRim ) );
+  vec3 vH1, vH2;
+  vec4 vA = lssVineLayer( vP, vThin, vH1 );
+  vec4 vB = lssVineLayer( vP + vec2( 0.5, 0.37 ) + 57.0, vThin, vH2 );
+  bool vFront = vA.w > 0.5;
+  vec4 vL = vFront ? vA : vB; vec3 vH = vFront ? vH1 : vH2;
+  float vCov = max( vA.w, vB.w );
+  if ( vCov < 0.5 && uVineA.z > 0.5 && vLod < 0.5 ) discard;
+  float vTone = ( 0.55 + 0.5 * vH.x ) * ( vFront ? 1.0 : uVineB.y );
+  vec3 vTint = mix( vec3( 0.72, 0.95, 0.80 ), vec3( 1.10, 1.05, 0.62 ), vH.y * vH.y );
+  if ( vH.z > 0.965 ) vTint = vec3( 1.25, 0.75, 0.45 );
+  float vAc = abs( vL.x );
+  float vLeaf = ( 1.0 - 0.38 * vAc * vAc ) * ( 0.82 + 0.3 * vL.y ) + 0.10 * ( 1.0 - smoothstep( 0.0, 0.12, vAc ) );
+  vec3 vNear = vCov > 0.5 ? vTint * vTone * vLeaf : vec3( uVineB.x );
+  vec3 vShade = mix( vNear, vec3( 0.62 ), vLod );
+  diffuseColor.rgb *= vShade;
+  diffuseColor.rgb = mix( diffuseColor.rgb, vec3( dot( diffuseColor.rgb, vec3( 0.299, 0.587, 0.114 ) ) ), uVineB.z );
+  float vEm = dot( vShade, vec3( 0.333 ) );
+`;
+  const NRM = `
+  if ( vCov > 0.5 ) normal = normalize( normal + uVineA.y * ( 1.0 - vLod ) * ( mat3( viewMatrix ) * ( vH * 2.0 - 1.0 ) ) );
+  totalEmissiveRadiance *= vEm;
+`;
+  m.onBeforeCompile = (sh) => {
+    sh.uniforms.uVineA = U.a; sh.uniforms.uVineB = U.b;
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', '#include <common>\nattribute vec4 aVine;\nvarying vec4 vVine;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\n\tvVine = aVine;');
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', '#include <common>\n' + PARS)
+      .replace('#include <color_fragment>', '#include <color_fragment>\n' + COL)
+      .replace('#include <normal_fragment_maps>', '#include <normal_fragment_maps>\n' + NRM);
+  };
+  m.customProgramCacheKey = () => 'lssVineLeaf1';
+  try {
+    const a = U.a.value, b = U.b.value;
+    window.__vineLeaf = {
+      get size() { return a.x; }, set size(v) { a.x = Math.max(0.5, +v || 5); },
+      get tilt() { return a.y; }, set tilt(v) { a.y = +v || 0; },
+      get cut() { return a.z; }, set cut(v) { a.z = v ? 1 : 0; },
+      get tip() { return a.w; }, set tip(v) { a.w = +v; },
+      get gap() { return b.x; }, set gap(v) { b.x = +v; },
+      get back() { return b.y; }, set back(v) { b.y = +v; },
+      get desat() { return b.z; }, set desat(v) { b.z = +v; },
+    };
+  } catch (_) {}
+  _swVineMat = m;
+  return m;
+}
 function _swDrapeY(x, z, T) {
   if (T && T.HUB && _HB.ready && _HB.on && _HB.mean && _HB.sp === 32 && _CLIP_M0 === 32 && _HB.minLevel <= 0) {
     const sp = _HB.sp, dim = _HB.dim[0], D = _HB.mean[0];
@@ -26603,7 +26700,7 @@ function _swBuildDrapes(x0, z0, T) {
   let _a = (Math.imul(Math.round(x0 / 16) + 12345, 2654435761) ^ Math.imul(Math.round(z0 / 16) + 6789, 40503)) | 0;
   const rnd = () => { _a = (_a + 0x6D2B79F5) | 0; let t = Math.imul(_a ^ (_a >>> 15), 1 | _a);
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
-  const accIce = { pos: [], col: [], idx: [], v: 0, n: 0 }, accVine = { pos: [], col: [], idx: [], v: 0, n: 0 };   // (v46.71) merged per chunk
+  const accIce = { pos: [], col: [], idx: [], v: 0, n: 0 }, accVine = { pos: [], col: [], idx: [], vin: [], v: 0, n: 0 };   // (v46.71) merged per chunk; (v54.19) vin = the leaf shader's aVine
   const snowLine = (T.snowLine != null) ? T.snowLine : 0.7;
   const _hot = (K.hot != null) ? !!K.hot : (T.biome === 'volcanic' || T.biome === 'goldmine');
   const _snowK = (K.snow != null) ? +K.snow : 0;   // shifts the ice/vine split up or down the band
@@ -26664,6 +26761,7 @@ function _swBuildDrapes(x0, z0, T) {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(Float32Array.from(acc.pos), 3));
     g.setAttribute('color', new THREE.BufferAttribute(Float32Array.from(acc.col), 3));
+    if (acc.vin) g.setAttribute('aVine', new THREE.BufferAttribute(Float32Array.from(acc.vin), 4));   // (v54.19)
     g.setIndex(acc.idx);
     g.computeVertexNormals(); g.computeBoundingSphere();
     const m = new THREE.Mesh(g, mat);
@@ -28407,6 +28505,14 @@ function _swRippleInit() {
     const err = gpu.init();
     if (err) { try { console.warn('[water] GPGPU init failed, analytic fallback:', err); } catch (_) {} return; }
     _swRipple.gpu = gpu; _swRipple.heightVar = v; _swRipple.acc = 0; _swRipple.pending.length = 0;
+    _swRipple._linked = false;
+    try {
+      const _cm = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), v.material), _cs = new THREE.Scene(); _cs.add(_cm);
+      const _pRT = renderer.getRenderTarget();
+      renderer.setRenderTarget(v.renderTargets[0]);
+      try { renderer.compile(_cs, new THREE.Camera()); } finally { renderer.setRenderTarget(_pRT); }
+      _cm.geometry.dispose();
+    } catch (_) {}
     _swRipple.center.set((player && player.position) ? player.position.x : 0, (player && player.position) ? player.position.z : 0);
     _swRipple.scale = 64;   
     _swRippleBakeMask();    
@@ -31164,6 +31270,13 @@ function _swRippleTick(dt) {
   const R = _swRipple; if (!R.gpu) return;
   if (game._xrBlurred) return;
   if (typeof document !== 'undefined' && document.hidden && !((typeof isXRPresenting === 'function') && isXRPresenting())) { R.pending.length = 0; return; }
+  if (game._linkHold) { R.pending.length = 0; return; }
+  if (!R._linked) {
+    let ok = true;
+    try { const pp = renderer.properties.get(R.heightVar.material), pr = pp && pp.currentProgram; if (pr && typeof pr.isReady === 'function') ok = !!pr.isReady(); } catch (_) {}
+    if (!ok) { R.pending.length = 0; return; }
+    R._linked = true;
+  }
   try {
     const _W3 = window.__water || {};   // (v46.77) the object is created lazily; the hull-driven wave speed below must not wait for it
     if (_W3 && R.heightVar && R.heightVar.material && R.heightVar.material.uniforms) {
@@ -50822,6 +50935,7 @@ function _lssSeatEnsure(ship, hull, who) {
     Object.assign(rec, { body, mixer, idle, g, seatM: new THREE.Matrix4(), fitSig: '' });
     const go = () => {
       if (rec.shown || ud.lssSeat !== rec) return;
+      if (typeof game !== 'undefined' && game && game._linkHold) { setTimeout(go, 250); return; }
       rec.shown = true;
       scene.add(body);
       _lssSeatPlace(rec);
@@ -71606,54 +71720,99 @@ function _ghostPinWarmAsync() {
   } catch (_) {}
 }
 
-function _ghostPinWarm() {
+let _commitWarmQ = null;
+const _ghostDrawJob = () => _ghostPinWarm({ now: true, drawOnly: true });
+const _pinJob = () => _pinCombatEffectPrograms({ now: true });
+_pinJob._lssCompiles = true;
+function _commitWarmTake() {
+  const q = _commitWarmQ; _commitWarmQ = null;
+  return q ? _commitWarmRun(q) : null;
+}
+async function _commitWarmRun(q) {
+  const t0 = performance.now();
+  let n = 0;
+  try {
+    await _warmupYield();   // out of the commit's task first
+    const comp = q.filter((f) => f && f._lssCompiles), draw = q.filter((f) => f && !f._lssCompiles);
+    if (comp.length) {
+      _commitWarmQ = [];    // a compile job's own warm draws (the pin calls _ghostPinWarm) queue here, not draw now
+      for (const f of comp) {
+        try { f(); n++; } catch (e) { try { console.warn('[launch] deferred compile failed:', e && e.message); } catch (_) {} }
+        await _warmupYield();
+      }
+      const extra = _commitWarmQ || []; _commitWarmQ = null;
+      for (const f of extra) if (f && draw.indexOf(f) < 0) draw.push(f);
+    }
+    await _drainProgramLinks((typeof window !== 'undefined' && +window.__commitLinkCap) || 45000, null, 'commitDefer');
+    for (const f of draw) {
+      try { f(); n++; } catch (e) { try { console.warn('[launch] deferred warm failed:', e && e.message); } catch (_) {} }
+      await _warmupYield();
+    }
+  } catch (_) { _commitWarmQ = null; }
+  finally { try { game._linkHold = false; } catch (_) {} }
+  try { window.__commitWarm = { ms: Math.round(performance.now() - t0), jobs: n, drain: window.__linkDrain || null }; } catch (_) {}
+}
+function _ghostPinWarm(opts) {
   try {
     if (typeof _fxSmallDevice === 'function' && _fxSmallDevice() &&
         !(typeof window !== 'undefined' && window.__pinShaders)) { _ghostPinWarmAsync(); return; }
   } catch (_) {}
+  const _drawOnly = !!(opts && opts.drawOnly);
+  let _defer = false;
+  try { _defer = !_drawOnly && !!_commitWarmQ && !(opts && opts.now); } catch (_) {}
   try {
     if (typeof _ghostHullApply !== 'function') return;
     if (typeof player === 'undefined' || !player || !player.mesh) return;
+    const _adopt = _drawOnly && !player.mesh.parent;
+    if (_adopt) { try { scene.add(player.mesh); } catch (_) {} }
     const _was = !!(player.mesh.userData && player.mesh.userData._ghostOn);
     if (!_was) _ghostHullApply(player.mesh);
     const _hid = [];
     try { player.mesh.traverse((o) => { if (o.visible === false) { o.visible = true; _hid.push(o); } }); } catch (_) {}
-    const _tm = renderer.toneMapping;
-    const _no = (typeof THREE !== 'undefined' && THREE.NoToneMapping !== undefined) ? THREE.NoToneMapping : 0;
-    try { renderer.toneMapping = _no; renderer.compile(scene, camera); } catch (_) {}
-    try { renderer.toneMapping = _tm; } catch (_) {}
-    try { renderer.compile(scene, camera); } catch (_) {}
+    if (!_drawOnly) {   // (v54.13) the deferred half: these already ran in the commit
+      const _tm = renderer.toneMapping;
+      const _no = (typeof THREE !== 'undefined' && THREE.NoToneMapping !== undefined) ? THREE.NoToneMapping : 0;
+      try { renderer.toneMapping = _no; renderer.compile(scene, camera); } catch (_) {}
+      try { renderer.toneMapping = _tm; } catch (_) {}
+      try { renderer.compile(scene, camera); } catch (_) {}
+    }
     try {
       if (typeof postFX !== 'undefined' && postFX && postFX.rtScene) {
         renderer.setRenderTarget(postFX.rtScene);
-        renderer.compile(scene, camera);
-        try {
-          const _gm = [];
-          player.mesh.traverse((o) => { const g = o.userData && o.userData._ghostMats; if (!g) return; for (const m of (Array.isArray(g) ? g : [g])) if (m && m.side === THREE.DoubleSide && m.transparent) _gm.push(m); });
-          if (_gm.length) {
-            for (const m of _gm) { m.side = THREE.BackSide; m.needsUpdate = true; }
-            renderer.compile(scene, camera);
-            for (const m of _gm) { m.side = THREE.FrontSide; m.needsUpdate = true; }
-            renderer.compile(scene, camera);
-            for (const m of _gm) { m.side = THREE.DoubleSide; m.needsUpdate = true; }
-          }
-        } catch (_) {}
-        try { if (typeof _warmDrawRoot === 'function') _warmDrawRoot(player.mesh, postFX.rtScene, true); } catch (_) {}   // (v39.52; v39.84 with the shadow pass - the seat shell is transparent, a different depth key)
+        if (!_drawOnly) {
+          renderer.compile(scene, camera);
+          try {
+            const _gm = [];
+            player.mesh.traverse((o) => { const g = o.userData && o.userData._ghostMats; if (!g) return; for (const m of (Array.isArray(g) ? g : [g])) if (m && m.side === THREE.DoubleSide && m.transparent) _gm.push(m); });
+            if (_gm.length) {
+              for (const m of _gm) { m.side = THREE.BackSide; m.needsUpdate = true; }
+              renderer.compile(scene, camera);
+              for (const m of _gm) { m.side = THREE.FrontSide; m.needsUpdate = true; }
+              renderer.compile(scene, camera);
+              for (const m of _gm) { m.side = THREE.DoubleSide; m.needsUpdate = true; }
+            }
+          } catch (_) {}
+        }
+        if (!_defer) { try { if (typeof _warmDrawRoot === 'function') _warmDrawRoot(player.mesh, postFX.rtScene, true); } catch (_) {} }   // (v39.52; v39.84 with the shadow pass - the seat shell is transparent, a different depth key)
         renderer.setRenderTarget(null);
       }
     } catch (_) { try { renderer.setRenderTarget(null); } catch (__) {} }
     if (!_was) _ghostHullRestore(player.mesh);
     try {
-      if (typeof _warmDrawRoot === 'function' && typeof postFX !== 'undefined' && postFX && postFX.rtScene) {
+      if (!_defer && typeof _warmDrawRoot === 'function' && typeof postFX !== 'undefined' && postFX && postFX.rtScene) {
         const _pRT2 = renderer.getRenderTarget();
         try { renderer.setRenderTarget(postFX.rtScene); _warmDrawRoot(player.mesh, postFX.rtScene, true); }
         finally { try { renderer.setRenderTarget(_pRT2); } catch (_) {} }
       }
     } catch (_) {}
     for (let i = 0; i < _hid.length; i++) { try { _hid[i].visible = false; } catch (_) {} }   // (v39.82) exactly as they were
+    if (_adopt) { try { scene.remove(player.mesh); } catch (_) {} }
+    if (_defer && _commitWarmQ && _commitWarmQ.indexOf(_ghostDrawJob) < 0) _commitWarmQ.push(_ghostDrawJob);
   } catch (_) {}
 }
-function _pinCombatEffectPrograms() {
+function _pinCombatEffectPrograms(opts) {
+  { let _cq = null; try { _cq = _commitWarmQ; } catch (_) {}
+    if (_cq && !(opts && opts.now)) { if (_cq.indexOf(_pinJob) < 0) _cq.push(_pinJob); return; } }
   try {
     if (typeof _fxSmallDevice === 'function' && _fxSmallDevice() &&
         !(typeof window !== 'undefined' && window.__pinShaders)) return;
@@ -71835,6 +71994,8 @@ async function _pinCombatEffectProgramsStaged() {
 let _postFXPinned = false;
 function _pinPostFXPrograms() {
   if (_postFXPinned) return;
+  { let _cq = null; try { _cq = _commitWarmQ; } catch (_) {}   // (in a try: the TDZ trap, as in _ghostPinWarm)
+    if (_cq) { if (_cq.indexOf(_pinPostFXPrograms) < 0) _cq.push(_pinPostFXPrograms); return; } }
   if (typeof renderer === 'undefined' || !renderer) return;
   if (typeof postFX === 'undefined' || !postFX) return;
   if (!postFX.passScene || !postFX.quadCamera || !postFX.compositeMat ||
@@ -72132,6 +72293,7 @@ const _PREBAKE_MAX_CALLS  = 64;      // inner streamer calls per pass
 const _PREBAKE_MAX_PASSES = 900;     // belt: pass ceiling on top of the ms ceiling
 function _pbNow() { return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now(); }
 function _pbSub(txt) {
+  try { if (game._linkHold) { const o = document.getElementById('lss-loading-overlay'); if (!o || !o.classList.contains('active')) return; } } catch (_) {}
   try { showLoadingOverlay(null, txt); } catch (_) {}
 }
 async function _compileSliced(root, cam, scn, budgetMs) {
@@ -78060,7 +78222,7 @@ function commitLoadout(key) {
       if (net.active || _countdownActive || game.state === 'playing' || game.state === 'select') { _clearLaunchStall(); return; }
       if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) { _settled = 0; return; }
       if (game.state !== 'warmup' || !player.loadoutKey) { _settled = 0; return; }
-      const _warming = !!(typeof _shaderWarmup !== 'undefined' && _shaderWarmup && _shaderWarmup.promise) || !!game._worldPrebaking;
+      const _warming = !!(typeof _shaderWarmup !== 'undefined' && _shaderWarmup && _shaderWarmup.promise) || !!game._worldPrebaking || !!game._linkHold;
       if (_warming) { _settled = 0; return; }
       if (++_settled < 12) return;
       _clearLaunchStall();
@@ -78077,7 +78239,8 @@ function commitLoadout(key) {
   try { game._warmupDone = false; } catch (_) {}   // (v42.25) cleared by both promise arms below
   let _warmupPromise;
   try {
-    _warmupPromise = warmupCombatShaders();
+    const _cw = _commitWarmTake();
+    _warmupPromise = _cw ? _cw.then(() => warmupCombatShaders()) : warmupCombatShaders();
   } catch (_) {
     _warmupPromise = Promise.resolve();
   }
@@ -78132,6 +78295,7 @@ function commitLoadout(key) {
   try { if (net.active) { net.mapCommitLocked = true; _syncMapButtonsDisabled(); } } catch (_) {}
   try { showLoadingOverlay('PREPARING ARENA', 'compiling shaders'); } catch (_) {}
   _commitDeferOneFrame(() => {
+    if (!(typeof window !== 'undefined' && window.__noCommitDefer)) { _commitWarmQ = []; try { game._linkHold = true; } catch (_) {} }
     try { _finishCommit(); }
     catch (e) {
       console.error('[commitLoadout] deferred world build FAILED — returning to ship-select:', e);
@@ -78140,7 +78304,10 @@ function commitLoadout(key) {
       try { game.state = 'select'; } catch (_) {}
       try { if (window.Overlays && Overlays.banner) Overlays.banner('LAUNCH FAILED', (e && e.message) ? String(e.message).slice(0, 60) : 'pick a ship again'); } catch (_) {}
     }
-    finally { _commitPending = false; }
+    finally {
+      _commitPending = false;
+      if (_commitWarmQ) { try { _commitWarmTake(); } catch (_) { try { game._linkHold = false; } catch (__) {} } }
+    }
   });
 }
 
@@ -79152,6 +79319,7 @@ let _cloakPendingFin = null;
 function _cloakPendingTick() {
   const P = _cloakPendingFin;
   if (!P) return;
+  if (typeof game !== 'undefined' && game && game._linkHold) { P.t0 = performance.now(); return; }
   let ready = true;
   try {
     const gl = renderer.getContext();
@@ -108240,13 +108408,9 @@ const CAMP_SEQS = {
         frostfang: { at: [0, 5.2], h: 1.95, ship: 'SYPHON' },
       },
       ships: {
-        VORTEX:   { at: [-8.0, 1.6, -10], yaw: 12 },
-        SLAYER:   { at: [7.5, 1.4, -9.5], yaw: -12 },
-        SYPHON:   { at: [0.0, 2.2, -15], yaw: 0 },
-        BLASTER:  { at: [-13, 3.2, -36], yaw: 8 },
-        PYRO:     { at: [13, 3.2, -36], yaw: -8 },
-        TRACKER:  { at: [-5.5, 4.4, -44], yaw: 4 },
-        PUNCTURE: { at: [5.5, 4.4, -44], yaw: -4 },
+        VORTEX:   { at: [-8.0, 1.6, -3.5], yaw: 12 },
+        SLAYER:   { at: [7.5, 1.4, -3.0], yaw: -12 },
+        SYPHON:   { at: [0.0, 2.2, -8.5], yaw: 0 },
       },
       k: 0.0836,          // build: metres per game unit (Ashman's seat fit in the Slayer: 1.82 m standing = seated)
       bob: 0.12, bobT: 6.2, sway: 0.8,   // the hulls float: metres, period (s), roll / pitch (deg)
@@ -108286,7 +108450,7 @@ const CAMP_SEQS = {
       beamHold: 1.6,      // seated, before the engines come up
       spool: 0.9,         // the engines coming up, a lift of `lift` metres
       lift: 0.8,
-      fly: 1.7,           // seconds from leaving to passing the camera
+      fly: 1.4,           // seconds from leaving to passing the camera
       pass: { VORTEX: [-2.4, 0.5], SLAYER: [2.6, 0.1], SYPHON: [0.2, 2.6] },   // where each goes past the camera: right, up (m)
       lag: { VORTEX: 0.12, SLAYER: 0.0, SYPHON: 0.26 },                       // seconds after the first one leaves
       blackAt: 0.82,      // share of the flight at which the screen starts going black
@@ -115263,7 +115427,7 @@ function _gameLoopBody(timestamp) {
     try {
       const _cov = document.getElementById('lss-loading-overlay');
       const _launching = !!(_cov && _cov.classList.contains('active') && _selEl && _selEl.classList.contains('lss-launching'));
-      _rfPrebake = (!!(_PREBAKE && _PREBAKE.on) || _launching) && !_xrActive && !window.__noOccludedThrottle;
+      _rfPrebake = (!!(_PREBAKE && _PREBAKE.on) || _launching || !!game._linkHold) && !_xrActive && !window.__noOccludedThrottle;
     } catch (_) { _rfPrebake = false; }
     if (_rfPrebake) _rfCovered = true;
   } catch (_) { _rfCovered = false; }
