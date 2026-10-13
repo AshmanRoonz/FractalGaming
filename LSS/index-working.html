@@ -8695,7 +8695,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "54.22";
+const LSS_BUILD = "54.23";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -162525,19 +162525,42 @@ try { window.__stormDuck = STORM_DUCK; } catch (_) {}
   function _campPlayVoice(n, volume) {
     return _campManifest().then((m) => (m.voices.has(n) ? _campPlayVoiceUrl(_campMediaBase() + 'voice' + n + '.mp3', volume) : 0));
   }
+  // ⭐ (v54.23) A CLIP CAN BE FETCHED AHEAD (CampDialogue asks for the next lines' clips as they queue - see _prefetch there).
+  // Owner: "at the end of the game show scene, summoners ask 'are you ready' and then azure and captain both take a second to
+  // say yeah and then the rest of their line gets cut off... same thing with azure [in the caverns], she's supposed to say
+  // 'yeah ok there buddy' but she ends up just saying 'yeah'". Every clip was fetched and decoded the moment its line began, so
+  // a take the browser had never heard (Tammy's and Erik's were new; Ashman's were long cached) started late - and those two
+  // lines play while the next stage builds / the launch finishes, a busy main thread: a second or more. One loader now, shared
+  // by the play and the prefetch (`_voiceLoading` = in flight, so the two never fetch the same clip twice).
+  const _voiceLoading = new Map();
+  function _campLoadVoice(url, ctx) {
+    const ready = _voiceBuf.get(url);
+    if (ready) return Promise.resolve(ready);
+    let p = _voiceLoading.get(url);
+    if (!p) {
+      p = fetch(url, { cache: 'force-cache' })
+        .then((r) => (r.ok ? r.arrayBuffer().then((a) => ctx.decodeAudioData(a)) : null))
+        .then((buf) => { if (buf) _voiceBuf.set(url, buf); return buf; });
+      const done = () => { if (_voiceLoading.get(url) === p) _voiceLoading.delete(url); };
+      p.then(done, done);
+      _voiceLoading.set(url, p);
+    }
+    return p;   // null = no such file; rejects when it could not be read or decoded (the player falls back to <audio>)
+  }
+  // fetch + decode now, play later. Never CREATES the audio context (that waits for the player's first gesture).
+  function _campPreloadVoice(url) {
+    try {
+      const ctx = (typeof audio !== 'undefined' && audio && audio.ctx) ? audio.ctx : null;
+      if (ctx && url) _campLoadVoice(url, ctx).catch(() => {});
+    } catch (_) {}
+  }
   async function _campPlayVoiceUrl(url, volume) {
     try {
       const ctx = _campVoiceCtx();
       if (ctx) {
         try { if (ctx.state === 'suspended' && ctx.resume) await ctx.resume(); } catch (_) {}
-        let buf = _voiceBuf.get(url);
-        if (!buf) {
-          const resp = await fetch(url, { cache: 'force-cache' });
-          if (!resp.ok) return 0;
-          const arr = await resp.arrayBuffer();
-          buf = await ctx.decodeAudioData(arr.slice(0));
-          _voiceBuf.set(url, buf);
-        }
+        const buf = await _campLoadVoice(url, ctx);
+        if (!buf) return 0;
         _campStopVoice();
         const src = ctx.createBufferSource();
         const gain = ctx.createGain();
@@ -162599,7 +162622,8 @@ try { window.__stormDuck = STORM_DUCK; } catch (_) {}
 
   try {
     window.CampMedia = { base: _campMediaBase, playVideo: _campPlayVideo, stopVideo: _campStopVideo, playVoice: _campPlayVoice, playVoiceUrl: _campPlayVoiceUrl, stopVoice: _campStopVoice, videoActive: function () { return _campVidPlaying; }, manifest: _campManifest, voiceUrl: _campVoiceUrl,
-                         voiceLevel: _campVoiceLevel };   // (v54.04)
+                         voiceLevel: _campVoiceLevel,   // (v54.04)
+                         preloadVoice: _campPreloadVoice };   // (v54.23)
   } catch (_) {}
 })();
 
@@ -162966,9 +162990,10 @@ const CAMP_SEQS = {
   // (v52.10) whisperCps = the typing-speed factor for a `whisper: true` line.
   // (v52.66) voiceHold / voiceTail: how long a VOICED line stays - see `want` in _start.
   // (v52.70) aiGap / aiWaitMax: a line waits for the ship AI to finish - see _schedule.
+  // (v54.23) prefetch = how many queued lines' clips are fetched ahead - see _prefetch (0 = off).
   const cfg = { cps: 42, holdMin: 1.6, readCps: 15, gap: 0.35, fadeIn: 0.18, fadeOut: 0.32,
                 beatDelay: { leg: 1.5, boss: 0.5 }, voiceVol: 0.95, flickHack: 0.55, flickIdle: 0.07, whisperCps: 0.6,
-                voiceHold: 'clip', voiceTail: 0.5, aiGap: 0.3, aiWaitMax: 4 };
+                voiceHold: 'clip', voiceTail: 0.5, aiGap: 0.3, aiWaitMax: 4, prefetch: 3 };
   // (v52.70) idleAt = when the queue last drained (CampDialogue.idleFor, for the tips); aiT0 / aiHeld = _schedule's wait
   const D = { q: [], busy: false, cur: null, tok: 0, raf: 0, flick: 0, ft: 0, inHack: false, idle: [], idleAt: 0, aiT0: 0, aiHeld: false };
   // (v49.47) waiters for "the queue has drained" (CampOpening sequences its beats on it)
@@ -163024,6 +163049,20 @@ const CAMP_SEQS = {
       if (v && set.has(line.id + '.' + v)) return line.id + '.' + v;
     }
     return set.has(line.id) ? line.id : null;
+  }
+  // (v54.23) a clip's URL, and THE NEXT LINES FETCHED AHEAD: the first cfg.prefetch queued lines' clips (the chosen pilot's
+  // take for a pilot line) are fetched + decoded into CampMedia's cache as they queue and again as each line starts, so a
+  // line's voice starts with its text instead of a second later (see `want` in _start for why that mattered). A pilot swapped
+  // in between only costs the old fetch: the line still loads the take it needs when it plays.
+  const _clipUrl = (vid) => (window.CampMedia.voiceUrl ? window.CampMedia.voiceUrl(vid) : (window.CampMedia.base() + 'voice/' + vid + '.mp3'));
+  function _prefetch() {
+    const M = window.CampMedia;
+    if (!M || !M.preloadVoice || !(cfg.prefetch > 0)) return;
+    const ahead = D.q.slice(0, cfg.prefetch).filter((x) => x && x.id);
+    if (!ahead.length) return;
+    _voices().then((set) => {
+      for (const it of ahead) { const vid = _voiceId(it, set); if (vid) M.preloadVoice(_clipUrl(vid)); }
+    }).catch(() => {});
   }
 
   // Opacity is the fade (WAAPI), `.on` is visibility + the running loops. The inline opacity is set to
@@ -163164,13 +163203,15 @@ const CAMP_SEQS = {
     if (line.who === 'xorzo' && (line.hack || segs.some((s) => s.hack))) _startFlicker(tok, !!line.hack);
     else _stopFlicker();
     const t0 = performance.now();
-    let voiceLen = 0;
+    _prefetch();   // (v54.23) the lines after this one, fetched while it plays
+    // (v54.23) voiceAt = seconds from the line's start to its clip's - see `want`
+    let voiceLen = 0, voiceAt = 0;
     const voiceP = (line.id ? _voices() : Promise.resolve(null)).then((set) => {
       const vid = _voiceId(line, set);   // (v53.64) the chosen pilot's take of a pilot line
       if (tok !== D.tok || !vid || !window.CampMedia || !window.CampMedia.playVoiceUrl) return 0;
       // (v52.96) the versioned URL (CampMedia.voiceUrl): a re-made clip must not come back out of the browser's cache
-      return window.CampMedia.playVoiceUrl(window.CampMedia.voiceUrl ? window.CampMedia.voiceUrl(vid) : (window.CampMedia.base() + 'voice/' + vid + '.mp3'), cfg.voiceVol);
-    }).then((len) => { voiceLen = +len || 0; }).catch(() => {});
+      return window.CampMedia.playVoiceUrl(_clipUrl(vid), cfg.voiceVol);
+    }).then((len) => { voiceLen = +len || 0; voiceAt = (performance.now() - t0) / 1000; }).catch(() => {});
     const typeDur = total / cps;
     let typed = false;
     const finishTyping = () => {
@@ -163189,9 +163230,15 @@ const CAMP_SEQS = {
         // (typing + holdMin + chars / readCps) outlasts speech: pr_home's clip is 4.5 s, its box held 7.4 s - 2-3 s of
         // silence after every voiced line. Never shorter than the typing (+0.3 s), so the words finish appearing.
         // cfg.voiceHold = 'max' brings the old rule back (`__dlg.cfg`). An unvoiced line is unchanged.
+        // ⭐ (v54.23) ...counted from when the CLIP started, not the line. Owner: "azure and captain both take a second to say
+        // yeah and then the rest of their line gets cut off" (gs_money, then op_hear: "she ends up just saying 'yeah'"). A clip
+        // starts once it is fetched + decoded; the hold ran from the line's start, so a clip that came in late outlived its
+        // line by the delay less voiceTail, and the next line's clip (gs_people / op_train) stopped it mid-sentence. Fetched
+        // ahead now (_prefetch), so it is rarely late at all - and when it is, its line waits for it.
         const readHold = typeDur + cfg.holdMin + total / cfg.readCps;
+        const voiceEnd = voiceAt + voiceLen + cfg.voiceTail;
         const want = voiceLen > 0
-          ? (cfg.voiceHold === 'max' ? Math.max(readHold, voiceLen + cfg.voiceTail) : Math.max(typeDur + 0.3, voiceLen + cfg.voiceTail))
+          ? (cfg.voiceHold === 'max' ? Math.max(readHold, voiceEnd) : Math.max(typeDur + 0.3, voiceEnd))
           : readHold;
         setTimeout(() => _finish(tok), Math.max(0, want - spent) * 1000);
       });
@@ -163231,6 +163278,7 @@ const CAMP_SEQS = {
   function enqueue(list, extra) {
     if (list.some((x) => !(x && x.tip))) _yieldTip();   // (v52.70) a story line never waits behind a tip
     for (const x of list) { const it = _item(x); if (it) { if (extra) Object.assign(it, extra); D.q.push(it); } }
+    _prefetch();   // (v54.23)
     _kick();
   }
   // (v52.70) A TIP GIVES WAY. Queued tips are dropped, and the one on screen is cut: bumping D.tok kills its typing /
@@ -163276,6 +163324,7 @@ const CAMP_SEQS = {
     if (!items.length) return;
     _yieldTip();   // (v52.70)
     D.q.unshift(...items);
+    _prefetch();   // (v54.23)
     _kick();
   }
   function clear() {

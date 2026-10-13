@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "54.22";
+const LSS_BUILD = "54.23";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -107622,19 +107622,34 @@ try { window.__stormDuck = STORM_DUCK; } catch (_) {}
   function _campPlayVoice(n, volume) {
     return _campManifest().then((m) => (m.voices.has(n) ? _campPlayVoiceUrl(_campMediaBase() + 'voice' + n + '.mp3', volume) : 0));
   }
+  const _voiceLoading = new Map();
+  function _campLoadVoice(url, ctx) {
+    const ready = _voiceBuf.get(url);
+    if (ready) return Promise.resolve(ready);
+    let p = _voiceLoading.get(url);
+    if (!p) {
+      p = fetch(url, { cache: 'force-cache' })
+        .then((r) => (r.ok ? r.arrayBuffer().then((a) => ctx.decodeAudioData(a)) : null))
+        .then((buf) => { if (buf) _voiceBuf.set(url, buf); return buf; });
+      const done = () => { if (_voiceLoading.get(url) === p) _voiceLoading.delete(url); };
+      p.then(done, done);
+      _voiceLoading.set(url, p);
+    }
+    return p;   // null = no such file; rejects when it could not be read or decoded (the player falls back to <audio>)
+  }
+  function _campPreloadVoice(url) {
+    try {
+      const ctx = (typeof audio !== 'undefined' && audio && audio.ctx) ? audio.ctx : null;
+      if (ctx && url) _campLoadVoice(url, ctx).catch(() => {});
+    } catch (_) {}
+  }
   async function _campPlayVoiceUrl(url, volume) {
     try {
       const ctx = _campVoiceCtx();
       if (ctx) {
         try { if (ctx.state === 'suspended' && ctx.resume) await ctx.resume(); } catch (_) {}
-        let buf = _voiceBuf.get(url);
-        if (!buf) {
-          const resp = await fetch(url, { cache: 'force-cache' });
-          if (!resp.ok) return 0;
-          const arr = await resp.arrayBuffer();
-          buf = await ctx.decodeAudioData(arr.slice(0));
-          _voiceBuf.set(url, buf);
-        }
+        const buf = await _campLoadVoice(url, ctx);
+        if (!buf) return 0;
         _campStopVoice();
         const src = ctx.createBufferSource();
         const gain = ctx.createGain();
@@ -107692,7 +107707,8 @@ try { window.__stormDuck = STORM_DUCK; } catch (_) {}
 
   try {
     window.CampMedia = { base: _campMediaBase, playVideo: _campPlayVideo, stopVideo: _campStopVideo, playVoice: _campPlayVoice, playVoiceUrl: _campPlayVoiceUrl, stopVoice: _campStopVoice, videoActive: function () { return _campVidPlaying; }, manifest: _campManifest, voiceUrl: _campVoiceUrl,
-                         voiceLevel: _campVoiceLevel };   // (v54.04)
+                         voiceLevel: _campVoiceLevel,   // (v54.04)
+                         preloadVoice: _campPreloadVoice };   // (v54.23)
   } catch (_) {}
 })();
 
@@ -107921,7 +107937,7 @@ const CAMP_SEQS = {
                   ashman: 'ASHMAN ROONZ', azure: 'AZURE VANGUARD', frostfang: 'CAPTAIN FROSTFANG' };
   const cfg = { cps: 42, holdMin: 1.6, readCps: 15, gap: 0.35, fadeIn: 0.18, fadeOut: 0.32,
                 beatDelay: { leg: 1.5, boss: 0.5 }, voiceVol: 0.95, flickHack: 0.55, flickIdle: 0.07, whisperCps: 0.6,
-                voiceHold: 'clip', voiceTail: 0.5, aiGap: 0.3, aiWaitMax: 4 };
+                voiceHold: 'clip', voiceTail: 0.5, aiGap: 0.3, aiWaitMax: 4, prefetch: 3 };
   const D = { q: [], busy: false, cur: null, tok: 0, raf: 0, flick: 0, ft: 0, inHack: false, idle: [], idleAt: 0, aiT0: 0, aiHeld: false };
   const _idleNow = () => { const w = D.idle.splice(0); for (const f of w) { try { f(); } catch (_) {} } };
   const $root = () => document.getElementById('camp-dialogue');
@@ -107962,6 +107978,16 @@ const CAMP_SEQS = {
       if (v && set.has(line.id + '.' + v)) return line.id + '.' + v;
     }
     return set.has(line.id) ? line.id : null;
+  }
+  const _clipUrl = (vid) => (window.CampMedia.voiceUrl ? window.CampMedia.voiceUrl(vid) : (window.CampMedia.base() + 'voice/' + vid + '.mp3'));
+  function _prefetch() {
+    const M = window.CampMedia;
+    if (!M || !M.preloadVoice || !(cfg.prefetch > 0)) return;
+    const ahead = D.q.slice(0, cfg.prefetch).filter((x) => x && x.id);
+    if (!ahead.length) return;
+    _voices().then((set) => {
+      for (const it of ahead) { const vid = _voiceId(it, set); if (vid) M.preloadVoice(_clipUrl(vid)); }
+    }).catch(() => {});
   }
 
   function _fade(on) {
@@ -108081,12 +108107,13 @@ const CAMP_SEQS = {
     if (line.who === 'xorzo' && (line.hack || segs.some((s) => s.hack))) _startFlicker(tok, !!line.hack);
     else _stopFlicker();
     const t0 = performance.now();
-    let voiceLen = 0;
+    _prefetch();   // (v54.23) the lines after this one, fetched while it plays
+    let voiceLen = 0, voiceAt = 0;
     const voiceP = (line.id ? _voices() : Promise.resolve(null)).then((set) => {
       const vid = _voiceId(line, set);   // (v53.64) the chosen pilot's take of a pilot line
       if (tok !== D.tok || !vid || !window.CampMedia || !window.CampMedia.playVoiceUrl) return 0;
-      return window.CampMedia.playVoiceUrl(window.CampMedia.voiceUrl ? window.CampMedia.voiceUrl(vid) : (window.CampMedia.base() + 'voice/' + vid + '.mp3'), cfg.voiceVol);
-    }).then((len) => { voiceLen = +len || 0; }).catch(() => {});
+      return window.CampMedia.playVoiceUrl(_clipUrl(vid), cfg.voiceVol);
+    }).then((len) => { voiceLen = +len || 0; voiceAt = (performance.now() - t0) / 1000; }).catch(() => {});
     const typeDur = total / cps;
     let typed = false;
     const finishTyping = () => {
@@ -108101,8 +108128,9 @@ const CAMP_SEQS = {
         if (tok !== D.tok) return;
         const spent = (performance.now() - t0) / 1000;
         const readHold = typeDur + cfg.holdMin + total / cfg.readCps;
+        const voiceEnd = voiceAt + voiceLen + cfg.voiceTail;
         const want = voiceLen > 0
-          ? (cfg.voiceHold === 'max' ? Math.max(readHold, voiceLen + cfg.voiceTail) : Math.max(typeDur + 0.3, voiceLen + cfg.voiceTail))
+          ? (cfg.voiceHold === 'max' ? Math.max(readHold, voiceEnd) : Math.max(typeDur + 0.3, voiceEnd))
           : readHold;
         setTimeout(() => _finish(tok), Math.max(0, want - spent) * 1000);
       });
@@ -108139,6 +108167,7 @@ const CAMP_SEQS = {
   function enqueue(list, extra) {
     if (list.some((x) => !(x && x.tip))) _yieldTip();   // (v52.70) a story line never waits behind a tip
     for (const x of list) { const it = _item(x); if (it) { if (extra) Object.assign(it, extra); D.q.push(it); } }
+    _prefetch();   // (v54.23)
     _kick();
   }
   function _yieldTip() {
@@ -108173,6 +108202,7 @@ const CAMP_SEQS = {
     if (!items.length) return;
     _yieldTip();   // (v52.70)
     D.q.unshift(...items);
+    _prefetch();   // (v54.23)
     _kick();
   }
   function clear() {
