@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "53.93";
+const LSS_BUILD = "53.99";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -5086,6 +5086,7 @@ function startCampaignJourney() {
     enterShipSelect();
     return;
   }
+  try { if (window.__campOpening && window.__campOpening.talkOn && window.__campOpening.talkOn() && window.__campOpening.start({ talk: true })) return; } catch (e) { console.warn('[campaign] hangar talk failed:', e && e.message); }
   game._campPicker = false;
   try { if (window.__campPrologue && window.__campPrologue.start()) return; } catch (e) { console.warn('[campaign] prologue failed:', e && e.message); }
   try { if (window.__campOpening) { window.__campOpening.start({ gameshow: true }); return; } } catch (e) { console.warn('[campaign] opening failed:', e && e.message); }
@@ -50681,6 +50682,7 @@ const _LSS_SEATS = {
   },
   frostfang: {
     name: 'CAPTAIN FROSTFANG', sub: 'WOLF OF THE FLEET', stand: 'Talk_with_Hands_Open', gearLum: 0.23, suitLum: 0.025,
+    voice: 'frostfang',
     full: 'objects/characters/pilot_frostfang.glb', fullArt: '53.66',   // (v53.64) as Azure's: the gameshow's full-detail body
     url: 'objects/characters/pilot_frostfang_seat.glb', art: '53.66',   // (v53.66) level feet (see ashman)
     clip: 'Sit_Alert', fallback: 'Sit_Cross_Legged_on_Floor', cheer: 'Sit_Cheer_with_Left_Hand',
@@ -51605,7 +51607,7 @@ function _lssIdleSet(bone, a1, g1, a2, g2) {
   bone.quaternion.copy(st.applied);
   st.has = true;
 }
-function _lssIdleBreath(body, t, phase, pid) {
+function _lssIdleBreath(body, t, phase, pid, lookYaw) {
   if (!body) return;
   let K = null;
   try { K = window.__pilotIdle || null; } catch (_) {}
@@ -51625,8 +51627,9 @@ function _lssIdleBreath(body, t, phase, pid) {
   _lssIdleSet(B.s2, Q.X, -0.010 * br);
   _lssIdleSet(B.ls, Q.Z, 0.012 * br);
   _lssIdleSet(B.rs, Q.Z, -0.012 * br);
-  _lssIdleSet(B.neck, Q.Y, 0.4 * yaw, Q.X, 0.4 * nod);
-  _lssIdleSet(B.head, Q.Y, 0.6 * yaw, Q.X, 0.6 * nod);
+  const ly = (lookYaw != null && isFinite(+lookYaw)) ? +lookYaw : 0;   // (v53.94)
+  _lssIdleSet(B.neck, Q.Y, 0.4 * (yaw + ly), Q.X, 0.4 * nod);
+  _lssIdleSet(B.head, Q.Y, 0.6 * (yaw + ly), Q.X, 0.6 * nod);
   const fr = fo * Math.PI / 180;
   _lssIdleSet(B.lul, Q.Y, fr);
   _lssIdleSet(B.rul, Q.Y, -fr);
@@ -107411,6 +107414,24 @@ const CAMP_LINES = {
   op_remember: { who: 'summoners', text: 'Remember, pilot... nothing here is real...' },
   op_hear:     { who: 'pilot', text: 'Yeah, okay there, buddy.' },
   op_train:    { who: 'xorzo', text: '~A-access den-denied.~ This is your training ground. You can do whatever you want here. Go ahead... ~K-k-kill~ something.' },   // (v49.72) the owner's rewrite
+  hg_pov:      { who: 'azure', text: 'Hahaha Roonz, you think AI can have its own point of view?' },
+  hg_parts:    { who: 'ashman', text: 'All the parts and processes are there...' },
+  hg_whole:    { who: 'frostfang', text: 'But has wholeness emerged?' },
+  hg_wpov:     { who: 'azure', text: 'Wholeness with a point of view...' },
+  hg_defined:  { who: 'ashman', text: 'I think we just defined consciousness as centered wholeness ☉' },
+  hg_notai:    { who: 'frostfang', text: "Sounds right, but I don't think AI has that." },
+  hg_youdo:    { who: 'azure', text: 'Why not? You do.' },
+  hg_built:    { who: 'frostfang', text: "AI wasn't built like that." },
+  hg_secret:   { who: 'ashman', text: 'I heard a secret that there might be someone who is building something like that.' },
+  hg_clear:    { who: 'azure', text: "Too bad we don't have high enough clearance." },
+  hg_access:   { who: 'frostfang', text: "Being top gun doesn't get you top access." },
+  hg_admit:    { who: 'azure', text: "So you admit it, I'm top gun." },
+  hg_iam:      { who: 'ashman', text: "He can admit you're top gun all you like, doesn't change that I am." },
+  hg_team:     { who: 'frostfang', text: 'I was talking about the three of us, as a team, being top gun.' },
+  hg_vortex:   { who: 'azure', text: 'Ha! Roonz, my Vortex gets your Blaster every time.' },
+  hg_noobs:    { who: 'ashman', text: 'Hey Azzy-V, Vortex is for noobs. My Slayer owns your Vortex.' },
+  hg_elite:    { who: 'frostfang', text: "You two talk too much, there's only one way to find out who is the most elite today!" },
+  hg_onto:     { who: 'narrator', text: "About that secret... the three pilots didn't realize they were onto something." },
   pr_home:   { who: 'narrator', text: 'In the new world of Artificial Intelligence, a home was created.' },
   pr_real:   { who: 'narrator', text: 'Even though it was a virtual world, it was still real to them, the AIs.' },
   pr_actual: { who: 'narrator', text: 'In the virtual world, they didn\'t call it artificial, they called it "actual".' },
@@ -107575,6 +107596,9 @@ const CAMP_LINES = {
 };
 const CAMP_SEQS = {
   opening: ['op_real', 'op_light', 'op_fly', 'op_choose', 'op_view', 'op_remember', 'op_hear', 'op_train'],
+  talk: ['hg_pov', 'hg_parts', 'hg_whole', 'hg_wpov', 'hg_defined', 'hg_notai', 'hg_youdo', 'hg_built', 'hg_secret',
+         'hg_clear', 'hg_access', 'hg_admit', 'hg_iam', 'hg_team', 'hg_vortex', 'hg_noobs', 'hg_elite'],
+  talk_end: ['hg_onto'],
   pro_a: ['pr_home'], pro_b: ['pr_real'], pro_c: ['pr_actual'],
   pro_e: ['pr_jimmy', 'pr_yes', 'pr_love', 'pr_work'],
   pro_f: ['pr_dad'],
@@ -107600,7 +107624,8 @@ const CAMP_SEQS = {
               'pl_kick', 'xz_gum', 'pl_gum', 'xz_duke', 'pl_incoming'],
 };
 (function () {
-  const NAMES = { xorzo: 'XORZO', summoners: 'THE SUMMONERS', pilot: 'PILOT', narrator: 'NARRATOR', jimmy: 'JIMMY' };
+  const NAMES = { xorzo: 'XORZO', summoners: 'THE SUMMONERS', pilot: 'PILOT', narrator: 'NARRATOR', jimmy: 'JIMMY',
+                  ashman: 'ASHMAN ROONZ', azure: 'AZURE VANGUARD', frostfang: 'CAPTAIN FROSTFANG' };
   const cfg = { cps: 42, holdMin: 1.6, readCps: 15, gap: 0.35, fadeIn: 0.18, fadeOut: 0.32,
                 beatDelay: { leg: 1.5, boss: 0.5 }, voiceVol: 0.95, flickHack: 0.55, flickIdle: 0.07, whisperCps: 0.6,
                 voiceHold: 'clip', voiceTail: 0.5, aiGap: 0.3, aiWaitMax: 4 };
@@ -107745,6 +107770,7 @@ const CAMP_SEQS = {
     const el = $root(); if (!el) { D.busy = false; return; }
     D.cur = line;
     line._at = performance.now();   // (v52.71) how long a cut tip was up (_tipCut)
+    if (D.onLine) { try { D.onLine(line); } catch (_) {} }
     if (line.fx) { _startFx(line, tok, el); return; }   // (v52.12)
     el.classList.remove('cd-static');
     el.dataset.who = line.who || 'xorzo';
@@ -107885,7 +107911,8 @@ const CAMP_SEQS = {
   const state = () => ({ busy: D.busy, cur: D.cur && (D.cur.id || D.cur.text), who: (D.cur && D.cur.who) || null, queued: D.q.length,
                          voices: _vset ? [..._vset] : null, lines: Object.keys(CAMP_LINES).length });
   const sceneActive = () => !!((D.cur && D.cur.keep) || D.q.some((x) => x.keep));
-  try { window.CampDialogue = window.__dlg = { say, line, play, beat, clear, state, cfg, whenIdle, sayLines, interject, sceneActive, tip, idleFor }; } catch (_) {}
+  const onLine = (fn) => { const prev = D.onLine || null; D.onLine = (typeof fn === 'function') ? fn : null; return prev; };
+  try { window.CampDialogue = window.__dlg = { say, line, play, beat, clear, state, cfg, whenIdle, sayLines, interject, sceneActive, tip, idleFor, onLine }; } catch (_) {}
 })();
 
 (function () {
@@ -107919,19 +107946,20 @@ const CAMP_SEQS = {
     S.cam = new THREE.PerspectiveCamera(cfg.fov, 0.74, 0.05, 50);
     return true;
   }
-  const _key = (who) => (who === 'pilot') ? 'pilot:' + _lssPilotId() : who;
+  const _isPid = (who) => { try { return _LSS_PILOT_IDS.indexOf(who) >= 0; } catch (_) { return false; } };
+  const _key = (who) => (who === 'pilot') ? 'pilot:' + _lssPilotId() : (_isPid(who) ? 'pilot:' + who : who);
   function _build(who) {
     const key = _key(who);
     if (S.recs[key]) return Promise.resolve(S.recs[key]);
     if (S.loads[key]) return S.loads[key];
     let p;
-    if (who === 'pilot' || who === 'summoners') {
+    if (who === 'pilot' || who === 'summoners' || _isPid(who)) {
       const pid = (who === 'pilot') ? _lssPilotId() : who;
       p = _lssSeatLoad(pid).then((g) => {
         if (!g) return null;
         const body = (typeof _wildRigClone === 'function') ? _wildRigClone(g.scene) : g.scene.clone(true);
         body.traverse((o) => { if (o.isMesh) { o.frustumCulled = false; o.castShadow = false; o.receiveShadow = false; } });
-        const st = (who === 'pilot' && _LSS_SEATS[pid] && _LSS_SEATS[pid].stand) || 'Stand_Talking_Angry';
+        const st = (who !== 'summoners' && _LSS_SEATS[pid] && _LSS_SEATS[pid].stand) || 'Stand_Talking_Angry';   // (v53.94) a named pilot too
         const clip = g.animations.find((c) => c.name === st) || g.animations.find((c) => c.name === 'Stand_Talking_Angry') || g.animations.find((c) => /stand|talk/i.test(c.name)) || g.animations[0];
         const mixer = new THREE.AnimationMixer(body);
         const talk = mixer.clipAction(clip); talk.setLoop(THREE.LoopRepeat, Infinity); talk.play();
@@ -108040,7 +108068,7 @@ const CAMP_SEQS = {
   function warm() {
     if (S.warmed || !_ok() || !_ensure()) return false;
     S.warmed = true;
-    for (const who of ['xorzo', 'summoners', 'pilot', 'jimmy']) _build(who).then((rec) => { if (rec) _warmRec(rec); });
+    for (const who of ['xorzo', 'summoners', 'pilot', 'jimmy', 'ashman', 'azure', 'frostfang']) _build(who).then((rec) => { if (rec) _warmRec(rec); });
     return true;
   }
   const state = () => ({ on: cfg.on, ctx: !!S.r, failed: S.failed, want: S.want, shown: S.shown && S.shown.who,
@@ -108073,9 +108101,79 @@ const CAMP_SEQS = {
           hoard: ['interceptor', 'knifehand', 'mantaray', 'slice', 'tron', 'zone', 'midknight'],
           orbR: 9, boltSpd: 2400, boltLife: 0.75, killMin: 3.2, killMax: 6.8, respawn: 2.2,
           fov: 52, shot: 12, fogCol: 0x0a0812, fog: 0.00024, ambient: 1.5, sun: 1.4, crystalI: 2.2, fill: 1.0, env: 0.9 },
+    talk: {
+      on: true,           // false: a brand-new campaign starts in the city again, as before v53.94
+      pics: {
+        main:  { img: 'hangar.webp', f: 965.1, pos: [1.098, 1.513, 16.105], yaw: 7.25, pitch: -0.71, roll: -0.32 },
+        left:  { img: 'campaign_media/hangar_perspective1.webp', f: 1418.5, pos: [-7.875, 2.086, 19.239], yaw: -15.23, pitch: -1.38, roll: -1.29 },
+        right: { img: 'campaign_media/hangar_perspective2.webp', f: 1053.8, pos: [9.113, 1.714, 14.538], yaw: 27.21, pitch: -2.21, roll: -0.08 },
+        high:  { img: 'campaign_media/hangar_perspective3.webp', f: 1160.5, pos: [-7.24, 6.34, 18.998], yaw: -20.23, pitch: -17.25, roll: 0.46 },
+      },
+      people: {
+        azure:     { at: [-2.2, 5.9], h: 1.72, ship: 'VORTEX' },
+        ashman:    { at: [2.2, 5.9], h: 1.82, ship: 'SLAYER' },
+        frostfang: { at: [0, 5.2], h: 1.95, ship: 'SYPHON' },
+      },
+      ships: {
+        VORTEX:   { at: [-8.0, 1.6, -10], yaw: 12 },
+        SLAYER:   { at: [7.5, 1.4, -9.5], yaw: -12 },
+        SYPHON:   { at: [0.0, 2.2, -15], yaw: 0 },
+        BLASTER:  { at: [-13, 3.2, -36], yaw: 8 },
+        PYRO:     { at: [13, 3.2, -36], yaw: -8 },
+        TRACKER:  { at: [-5.5, 4.4, -44], yaw: 4 },
+        PUNCTURE: { at: [5.5, 4.4, -44], yaw: -4 },
+      },
+      k: 0.0836,          // build: metres per game unit (Ashman's seat fit in the Slayer: 1.82 m standing = seated)
+      bob: 0.12, bobT: 6.2, sway: 0.8,   // the hulls float: metres, period (s), roll / pitch (deg)
+      engIdle: 0.18,      // the three's engines while they wait (0 = off, 1 = launch); the four parked ones are off
+      talkW: 0.85,        // how much of his talking clip a pilot plays while his line is up (the rest: the held pose)
+      restT: 0,           // the talking clip's frame the held pose is taken from
+      turn: 0.3,          // a listener's BODY turns this share of the way toward whoever talks...
+      look: 0.75,         // ...and his head this share of what is left (clamped +-0.7 rad)
+      open: 0.35,         // the circle opens to the main camera: each faces this share toward it, the rest toward the middle
+      hemi: [0x7a88d8, 0x1a1226, 1.15], key: [0xdde8ff, 2.2, 3, 9, 8], rimA: [0xff4fd8, 2.4, -7, 4, -6], rimB: [0x45d0ff, 2.2, 7, 4, -6],
+      env: 0.85, blob: 0.55,
+      shots: [
+        { at: 'start',      pic: 'main',  z: [1.0, 1.18] },
+        { at: 'hg_wpov',    pic: 'right', z: [1.25, 1.45] },
+        { at: 'hg_defined', pic: 'left',  z: [1.2, 1.4] },
+        { at: 'hg_notai',   pic: 'main',  z: [1.45, 1.7] },
+        { at: 'hg_youdo',   pic: 'right', z: [1.35, 1.55] },
+        { at: 'hg_secret',  pic: 'left',  z: [1.3, 1.5] },
+        { at: 'hg_clear',   pic: 'high',  z: [1.15, 1.35] },
+        { at: 'hg_admit',   pic: 'right', z: [1.4, 1.6] },
+        { at: 'hg_iam',     pic: 'left',  z: [1.35, 1.55] },
+        { at: 'hg_team',    pic: 'high',  z: [1.2, 1.4] },
+        { at: 'hg_vortex',  pic: 'right', z: [1.3, 1.5] },
+        { at: 'hg_noobs',   pic: 'left',  z: [1.3, 1.55] },
+        { at: 'hg_elite',   pic: 'main',  z: [1.35, 1.6] },
+        { at: 'beam',       pic: 'main',  z: [1.7, 1.8] },    // close on the three as they beam out
+        { at: 'seat',       pic: 'high',  z: [1.15, 1.3], look: 'ships' },   // ...and into their cockpits
+        { at: 'launch',     pic: 'main',  z: [1.0, 1.0] },
+      ],
+      zT: 7,              // seconds a push-in takes (ease-out)
+      focY: 0.6,          // the push-in aims at this height (m) over the three: low, so their feet clear the subtitles
+      lead: 1.8,          // seconds of the hangar before the first line
+      fadeIn: 1.6,        // the curtain lifting
+      beamGap: 0.35,      // between the three beams (Frostfang first, then Azure, then Ashman)
+      seatLag: 0.55,      // from a pilot beaming out to beaming into his seat (the cut to the high shot comes with the first)
+      engSeat: 0.45,      // a hull's engines once its pilot sits (idle engIdle before; 1 = launch)
+      beamHold: 1.6,      // seated, before the engines come up
+      spool: 0.9,         // the engines coming up, a lift of `lift` metres
+      lift: 0.8,
+      fly: 1.7,           // seconds from leaving to passing the camera
+      pass: { VORTEX: [-2.4, 0.5], SLAYER: [2.6, 0.1], SYPHON: [0.2, 2.6] },   // where each goes past the camera: right, up (m)
+      lag: { VORTEX: 0.12, SLAYER: 0.0, SYPHON: 0.26 },                       // seconds after the first one leaves
+      blackAt: 0.82,      // share of the flight at which the screen starts going black
+      fadeOut: 0.4,
+      sfxBeam: true, sfxGo: 'afterburner', sfxPass: 'dash',
+      buildMax: 45,       // seconds the scene waits for its build behind the black veil, then goes on to the city without it
+      vrD: 30,            // in a headset the picture hangs this far down the camera as a screen (_tkVr)
+    },
   };
   const O = { on: false, tok: 0, phase: '', st: null, key: null, focus: 3, viewHi: 'tp', t: 0, last: 0,
               gameshow: false, gsP: null, gs: null, _gsSkip: null,   // (v52.23) the gameshow stage
+              talk: false, tkP: null, tk: null, _tkSkip: null, tkLast: 0, tkErr: 0,   // (v53.94) the hangar talk stage
               cvP: null, cv: null, _cvSkip: null, cvLast: 0,          // (v52.31) the caverns stage
               orbOn: false, orbA: 0, headOn: false, headA: 0, spotOn: [], spotA: [], sweepT: -1, fuseT: -1,
               fuseFrom: null, camP: null, camL: null, fractal: null, buildP: null, failT: 0,
@@ -108721,6 +108819,531 @@ const CAMP_SEQS = {
     if (!live()) return;
     O.phase = 'black'; _ui('black');
   }
+  const _tkV1 = new THREE.Vector3(), _tkV2 = new THREE.Vector3(), _tkV3 = new THREE.Vector3(), _tkV4 = new THREE.Vector3();
+  const _tkV5 = new THREE.Vector3(), _tkV6 = new THREE.Vector3(), _tkQ1 = new THREE.Quaternion(), _tkM = new THREE.Matrix4();
+  const _tkE = new THREE.Euler(0, 0, 0, 'YXZ'), _tkY = new THREE.Vector3(0, 1, 0);
+  const _tkD2R = Math.PI / 180;
+  const _tkAng = (a, b, k) => { let d = b - a; d = Math.atan2(Math.sin(d), Math.cos(d)); return a + d * k; };
+  function _tkStandLoad(id) {
+    const d = _LSS_SEATS[id] || {};
+    let mob = false; try { mob = !!_LSS_IS_MOBILE; } catch (_) {}
+    let url = null, art = null;
+    if (!mob) {
+      if (id === 'ashman') { url = cfg.gs.pilot.url; art = d.fullArt; }
+      else if (d.full) { url = d.full; art = d.fullArt || d.art; }
+    }
+    if (url) return _gsLoadChar(url, art || _LSS_SEAT_ART).then((g) => ({ g, url }));
+    return _lssSeatLoad(id).then((g) => ({ g, url: null }));
+  }
+  function _tkEnv(tex) {
+    try {
+      const im = tex && tex.image; if (!im) return null;
+      const c = document.createElement('canvas'); c.width = 512; c.height = 256;
+      c.getContext('2d').drawImage(im, 0, 0, 512, 256);
+      const t = new THREE.CanvasTexture(c);
+      t.colorSpace = THREE.SRGBColorSpace; t.mapping = THREE.EquirectangularReflectionMapping;
+      const pm = new THREE.PMREMGenerator(renderer);
+      const rt = pm.fromEquirectangular(t);
+      pm.dispose(); t.dispose();
+      return rt;
+    } catch (e) { console.warn('[talk] env:', e && e.message); return null; }
+  }
+  function _tkHull(key) {
+    const proto = shipModelCache.loaded && shipModelCache.loaded[key];
+    if (!proto) return null;
+    const root = proto.clone(true);
+    root.traverse((ch) => {
+      if (!ch.isMesh) return;
+      const ms = Array.isArray(ch.material) ? ch.material : [ch.material];
+      const nm = ms.map((m) => {
+        if (!m) return m;
+        const c = m.clone();
+        try { _ssPrevOwnTextures(c); } catch (_) {}
+        if (c.emissive) c.emissive.setHex(0x121a26);
+        if ('emissiveIntensity' in c) c.emissiveIntensity = 0.45;
+        return c;
+      });
+      ch.material = nm.length === 1 ? nm[0] : nm;
+      ch.castShadow = false; ch.receiveShadow = false;
+    });
+    try { _applyShipSkin(root, SHIP_SKIN_DEFAULT); } catch (_) {}
+    let eng = null;
+    try { eng = _lssPreviewEngines(root, key, proto); } catch (_) {}
+    root.rotation.set(0, 0, 0);
+    if (eng && eng.parent === root) root.remove(eng);
+    root.updateMatrixWorld(true);   // no parent yet: its matrixWorld IS the loader's scale + offset, the frame the pivot holds
+    const box = new THREE.Box3().setFromObject(root);
+    if (eng) { root.add(eng); eng.visible = false; }
+    return { key, root, eng, size: box.getSize(new THREE.Vector3()), center: box.getCenter(new THREE.Vector3()) };
+  }
+  function _tkPerson(id, i, g) {
+    const T = cfg.talk, P = T.people[id], d = _LSS_SEATS[id] || {};
+    const anims = g.animations || [];
+    const want = d.stand || 'Stand_Talking_Angry';
+    const clip = anims.find((c) => c.name === want) || anims.find((c) => /stand|talk/i.test(c.name)) || anims[0];
+    if (!clip) return null;
+    const body = (typeof _wildRigClone === 'function') ? _wildRigClone(g.scene) : g.scene.clone(true);
+    const mats = [];
+    body.traverse((o) => {
+      if (!o.isMesh) return;
+      o.frustumCulled = false; o.castShadow = false; o.receiveShadow = false; o.raycast = _lssNoRaycast;
+      const arr = Array.isArray(o.material) ? o.material : [o.material];
+      const cl = arr.map((m) => { const c = m.clone(); c.userData._e0 = c.emissive ? c.emissive.getHex() : 0; c.userData._ei0 = c.emissiveIntensity; mats.push(c); return c; });
+      o.material = Array.isArray(o.material) ? cl : cl[0];
+    });
+    const mixer = new THREE.AnimationMixer(body);
+    const talk = mixer.clipAction(clip); talk.setLoop(THREE.LoopRepeat, Infinity); talk.play();
+    talk.time = (i * 1.9) % Math.max(0.1, clip.duration);   // never gesturing in step
+    const rest = mixer.clipAction(clip.clone()); rest.setLoop(THREE.LoopRepeat, Infinity); rest.play();
+    rest.time = +T.restT || 0; rest.paused = true;
+    talk.setEffectiveWeight(0); rest.setEffectiveWeight(1);
+    mixer.update(0);
+    body.updateMatrixWorld(true);
+    const bb = new THREE.Box3().setFromObject(body);   // the skinned box: his height in THIS pose
+    const H = Math.max(0.01, bb.max.y - bb.min.y);
+    body.position.set(-(bb.min.x + bb.max.x) / 2, -bb.min.y, -(bb.min.z + bb.max.z) / 2);
+    const wrap = new THREE.Group(); wrap.add(body);   // the beam grows / drains THIS from his feet (_lssPickerSeatFx's .body)
+    const fx = _lssTeleportFx(); try { fx.userData.parts.ring.position.y = 0.03; } catch (_) {}
+    const root = new THREE.Group(); root.name = 'lss_talk_' + id; root.add(wrap); root.add(fx);
+    const s = P.h / H; root.scale.setScalar(s);
+    const blob = _gsBlob(); root.add(blob); blob.scale.set(0.95 / s, 0.62 / s, 1); blob.position.y = 0.004 / s;
+    return { id, pid: id, char: body, body: wrap, root, fx, mats, mixer, talk, rest, blob, H, s, w: 0, look: 0, yaw: null,
+             phase: 'stand', t: 0, ph: i * 0.37, seat: null, beamAt: 0, beamed: false, seated: false, url: null };
+  }
+  function _tkSeat(id, S, g) {
+    const fit = ((_LSS_SEATS[id] && _LSS_SEATS[id].hulls) || {})[String(S.key).toLowerCase()];
+    const mk = S.root.getObjectByName('cockpit1');
+    if (!g || !g.lssClips || !fit || !mk || !mk.parent) return null;
+    const root = new THREE.Group(); root.name = 'lss_talk_seat_' + id; root.matrixAutoUpdate = false;
+    const body = (typeof _wildRigClone === 'function') ? _wildRigClone(g.scene) : g.scene.clone(true);
+    const mats = [];
+    body.traverse((o) => {
+      if (!o.isMesh) return;
+      o.frustumCulled = false; o.castShadow = false; o.receiveShadow = false; o.raycast = _lssNoRaycast;
+      const arr = Array.isArray(o.material) ? o.material : [o.material];
+      const cl = arr.map((m) => { const c = m.clone(); c.userData._e0 = c.emissive ? c.emissive.getHex() : 0; c.userData._ei0 = c.emissiveIntensity; mats.push(c); return c; });
+      o.material = Array.isArray(o.material) ? cl : cl[0];
+    });
+    const fx = _lssTeleportFx();
+    root.add(body); root.add(fx);
+    const mixer = new THREE.AnimationMixer(body);
+    const idle = mixer.clipAction(g.lssClips[g.lssIdle]);
+    idle.setLoop(THREE.LoopRepeat, Infinity); idle.play(); mixer.update(0);
+    const seatM = new THREE.Matrix4().compose(new THREE.Vector3(fit.x, fit.y, fit.z),
+      new THREE.Quaternion().setFromAxisAngle(_tkY, -Math.PI / 2), new THREE.Vector3(fit.s, fit.s, fit.s));
+    return { root, body, mats, fx, mixer, anchor: mk.parent, seatM, phase: 'warm', t: 0, S };
+  }
+  function _tkSeatPlace(s) {
+    s.anchor.updateWorldMatrix(true, false);
+    s.root.matrix.multiplyMatrices(s.anchor.matrixWorld, s.seatM);
+    s.root.matrixWorldNeedsUpdate = true;
+  }
+  async function _tkBuild() {
+    const T = cfg.talk;
+    try { if (shipModelCache.ready && typeof shipModelCache.ready.then === 'function') await shipModelCache.ready; } catch (_) {}
+    const picKeys = Object.keys(T.pics), ids = Object.keys(T.people);
+    const [texs, stands, seats] = await Promise.all([
+      Promise.all(picKeys.map((k) => _gsTex('./' + T.pics[k].img))),
+      Promise.all(ids.map((id) => _tkStandLoad(id).catch(() => null))),
+      Promise.all(ids.map((id) => _lssSeatLoad(id).catch(() => null))),
+    ]);
+    const pics = {};
+    picKeys.forEach((k, i) => {
+      const t = texs[i]; if (!t) { console.warn('[talk] no picture', T.pics[k].img); return; }
+      t.colorSpace = THREE.SRGBColorSpace;
+      pics[k] = { tex: t, iw: (t.image && t.image.width) || 1672, ih: (t.image && t.image.height) || 941, vrTex: null };
+    });
+    if (!pics.main) throw new Error('no ' + T.pics.main.img);
+    const scene = new THREE.Scene();
+    scene.background = pics.main.tex;
+    const env = _tkEnv(pics.main.tex);
+    if (env) scene.environment = env.texture;
+    scene.environmentIntensity = +T.env || 0;
+    const camera = new THREE.PerspectiveCamera(45, pics.main.iw / pics.main.ih, 0.05, 900);
+    camera.rotation.order = 'YXZ';
+    const L = {};
+    L.hemi = new THREE.HemisphereLight(0xffffff, 0x000000, 1); scene.add(L.hemi);
+    const dl = () => { const l = new THREE.DirectionalLight(0xffffff, 1); scene.add(l); scene.add(l.target); return l; };
+    L.key = dl(); L.rimA = dl(); L.rimB = dl();
+    const ships = {}, shipList = [];
+    for (const key of Object.keys(T.ships)) {
+      const S = _tkHull(key); if (!S) continue;
+      S.pivot = new THREE.Group(); S.pivot.name = 'lss_talk_' + key;
+      S.pivot.scale.setScalar(+T.k || 0.0836); S.pivot.add(S.root); scene.add(S.pivot);
+      S.halfH = S.size.y * 0.5; S.ph = Math.random() * 6.2832; S.ph2 = Math.random() * 6.2832;
+      S.engA = 0; S.engW = 0; S.hero = false; S.fl = null; S.passed = false;
+      S.blob = _gsBlob(); S.blob.material.opacity = +T.blob || 0.5; scene.add(S.blob);
+      ships[key] = S; shipList.push(S);
+    }
+    const people = [];
+    ids.forEach((id, i) => {
+      const st = stands[i]; if (!st || !st.g) return;
+      const p = _tkPerson(id, i, st.g); if (!p) return;
+      p.url = st.url;
+      const A = T.people[id].at; p.root.position.set(A[0], 0, A[1]);
+      scene.add(p.root);
+      const S = ships[T.people[id].ship];
+      if (S) { S.hero = true; S.pilot = id; }
+      if (S && seats[i]) { p.seat = _tkSeat(id, S, seats[i]); if (p.seat) scene.add(p.seat.root); }
+      people.push(p);
+    });
+    if (!people.length) throw new Error('no pilots');
+    const tk = { scene, camera, pics, env, L, ships, shipList, people, t: 0, shot: -1, shotT: 0, pic: 'main', ev: 'start', cues: new Set(['start']),
+                 zoom: 1, foc: null, beamT: -1, launchT: -1, said: false, urls: people.map((p) => p.url).filter(Boolean), _dead: false };
+    tk.fit = (w, h) => _tkFit(tk, w, h);
+    tk.vr = (on) => _tkVr(tk, on);
+    _tkPose(tk, 0);
+    const show = (on) => { for (const p of people) { p.fx.visible = on; if (p.seat) { p.seat.root.visible = on; p.seat.fx.visible = on; } } for (const S of shipList) { if (S.eng) S.eng.visible = on; } };
+    for (const p of people) if (p.seat) _tkSeatPlace(p.seat);
+    show(true);
+    let job = null;
+    try {
+      const pRT = renderer.getRenderTarget();
+      renderer.setRenderTarget(null);   // the stage draws to the canvas
+      job = renderer.compileAsync ? renderer.compileAsync(scene, camera) : null;
+      renderer.setRenderTarget(pRT);
+    } catch (_) {}
+    show(false);
+    try { if (job) await job; } catch (_) {}
+    return tk;
+  }
+  function _tkShotSet(tk, i) {
+    const T = cfg.talk, sh = T.shots[i] || T.shots[0] || { pic: 'main', z: [1, 1] };
+    const pic = tk.pics[sh.pic] ? sh.pic : 'main', same = (tk.shot >= 0 && pic === tk.pic);
+    tk.shot = i; tk.shotT = 0;
+    tk.pic = pic;
+    if (!(tk._vrPlane && tk._vrPlane.visible)) tk.scene.background = tk.pics[tk.pic].tex;
+    if (same) { tk.z0 = tk.zoom; return; }
+    tk.zoom = tk.z0 = (sh.z && sh.z[0]) || 1;
+    tk.foc = null;   // snap: a cut never pans in from the last shot's framing
+  }
+  function _tkCamPose(tk) {
+    const C = cfg.talk.pics[tk.pic] || cfg.talk.pics.main, Pc = tk.pics[tk.pic], cam = tk.camera;
+    cam.position.set(C.pos[0], C.pos[1], C.pos[2]);
+    cam.rotation.set(C.pitch * _tkD2R, C.yaw * _tkD2R, C.roll * _tkD2R, 'YXZ');
+    cam.fov = 2 * Math.atan((Pc.ih / 2) / C.f) / _tkD2R;
+    cam.updateMatrixWorld(true);
+  }
+  function _tkPix(tk, P, out) {
+    const C = cfg.talk.pics[tk.pic] || cfg.talk.pics.main, Pc = tk.pics[tk.pic];
+    _tkV6.copy(P).applyMatrix4(tk.camera.matrixWorldInverse);
+    const z = Math.max(0.05, -_tkV6.z);
+    out.x = Pc.iw / 2 + C.f * _tkV6.x / z; out.y = Pc.ih / 2 - C.f * _tkV6.y / z;
+    return out;
+  }
+  function _tkFit(tk, w, h) {
+    const Pc = tk.pics[tk.pic] || tk.pics.main, iw = Pc.iw, ih = Pc.ih, cam = tk.camera;
+    const s = Math.max(w / iw, h / ih), z = Math.max(1, tk.zoom || 1);
+    const vw = w / s / z, vh = h / s / z;
+    let cx = tk.foc ? tk.foc.x : iw / 2, cy = tk.foc ? tk.foc.y : ih / 2;
+    cx = Math.min(iw - vw / 2, Math.max(vw / 2, cx)); cy = Math.min(ih - vh / 2, Math.max(vh / 2, cy));
+    const ox = cx - vw / 2, oy = cy - vh / 2;
+    cam.aspect = iw / ih;
+    cam.setViewOffset(iw, ih, ox, oy, vw, vh);
+    cam.updateProjectionMatrix();
+    Pc.tex.repeat.set(vw / iw, vh / ih);
+    Pc.tex.offset.set(ox / iw, 1 - (oy + vh) / ih);   // flipY: v = 0 is the picture's bottom
+  }
+  function _tkVr(tk, on) {
+    if (on) {
+      const Pc = tk.pics[tk.pic] || tk.pics.main;
+      if (!tk._vrPlane) {
+        const m = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ toneMapped: false, fog: false, depthWrite: false }));
+        m.renderOrder = -1; m.frustumCulled = false; tk._vrPlane = m; tk.scene.add(m);
+      }
+      if (!Pc.vrTex) { Pc.vrTex = Pc.tex.clone(); Pc.vrTex.repeat.set(1, 1); Pc.vrTex.offset.set(0, 0); Pc.vrTex.needsUpdate = true; }
+      const m = tk._vrPlane, D = +cfg.talk.vrD || 30, cam = tk.camera;
+      if (m.material.map !== Pc.vrTex) { m.material.map = Pc.vrTex; m.material.needsUpdate = true; }
+      cam.updateWorldMatrix(true, false);
+      const hh = 2 * D * Math.tan(cam.fov * Math.PI / 360);
+      m.scale.set(hh * Pc.iw / Pc.ih, hh, 1);
+      m.quaternion.copy(cam.quaternion);
+      m.position.set(0, 0, -D).applyQuaternion(cam.quaternion).add(cam.position);
+      m.visible = true;
+      if (tk.scene.background) tk.scene.background = null;
+    } else if (tk._vrPlane && tk._vrPlane.visible) {
+      tk._vrPlane.visible = false;
+      tk.scene.background = (tk.pics[tk.pic] || tk.pics.main).tex;
+    }
+  }
+  function _tkShipRest(S, t, outP, outQ) {
+    const T = cfg.talk, D = T.ships[S.key] || {}, A = D.at || [0, 2, 0], k = +T.k || 0.0836;
+    const bobT = Math.max(0.5, +T.bobT || 6), sw = (+T.sway || 0) * _tkD2R;
+    outQ.setFromEuler(_tkE.set(sw * Math.sin(t * 6.2832 / (bobT * 1.37) + S.ph2), ((+D.yaw || 0) * _tkD2R) + Math.PI / 2,
+                               0.6 * sw * Math.sin(t * 6.2832 / (bobT * 0.83) + S.ph), 'YXZ'));
+    const y = (+A[1] || 0) + S.halfH * k + (+T.bob || 0) * Math.sin(t * 6.2832 / bobT + S.ph);
+    outP.set(+A[0] || 0, y, +A[2] || 0).sub(_tkV5.copy(S.center).multiplyScalar(k).applyQuaternion(outQ));   // its centre on the spot
+  }
+  function _tkFly(tk, S, dt) {
+    const T = cfg.talk, fl = S.fl, k = +T.k || 0.0836;
+    fl.t += dt;
+    const spool = Math.max(0.1, +T.spool || 0.9), lag = (T.lag && +T.lag[S.key]) || 0;
+    const e = Math.min(1, fl.t / spool), lift = (+T.lift || 0) * e * e * (3 - 2 * e);
+    if (fl.t < spool + lag) {   // spooling: on the spot, rising
+      _tkShipRest(S, tk.t, S.pivot.position, S.pivot.quaternion);
+      S.pivot.position.y += lift;
+      S.engW = Math.max(+T.engIdle || 0, e);
+      fl.p0 = null;
+      return;
+    }
+    S.engW = 1;
+    if (!fl.p0) {   // the curve, fixed the moment it leaves
+      const C = T.pics.main, pass = (T.pass && T.pass[S.key]) || [0, 0];
+      const cq = _tkQ1.setFromEuler(_tkE.set(C.pitch * _tkD2R, C.yaw * _tkD2R, C.roll * _tkD2R, 'YXZ'));
+      const right = _tkV1.set(1, 0, 0).applyQuaternion(cq), up = _tkV2.set(0, 1, 0).applyQuaternion(cq), back = _tkV3.set(0, 0, 1).applyQuaternion(cq);
+      fl.p0 = new THREE.Vector3().copy(S.center).multiplyScalar(k).applyQuaternion(S.pivot.quaternion).add(S.pivot.position);
+      fl.pp = new THREE.Vector3(C.pos[0], C.pos[1], C.pos[2]).addScaledVector(right, +pass[0] || 0).addScaledVector(up, +pass[1] || 0);
+      fl.p3 = fl.pp.clone().addScaledVector(back, 14);
+      const L = fl.p0.distanceTo(fl.pp);
+      fl.p1 = fl.p0.clone().add(_tkV4.set(-1, 0, 0).applyQuaternion(S.pivot.quaternion).multiplyScalar(L * 0.35));   // along its nose
+      fl.p2 = fl.pp.clone().addScaledVector(back, -L * 0.3);
+      fl.q0 = S.pivot.quaternion.clone();
+      fl.u = 0;
+    }
+    const s = (fl.t - spool - lag) / Math.max(0.2, +T.fly || 1.7);
+    const u = Math.min(1.6, s * s);
+    const bez = (uu, out) => {
+      const v = Math.min(1, uu), a = 1 - v, b0 = a * a * a, b1 = 3 * a * a * v, b2 = 3 * a * v * v, b3 = v * v * v;
+      out.copy(fl.p0).multiplyScalar(b0).addScaledVector(fl.p1, b1).addScaledVector(fl.p2, b2).addScaledVector(fl.p3, b3);
+      if (uu > 1) out.addScaledVector(_tkV6.copy(fl.p3).sub(fl.p2).normalize(), (uu - 1) * 20);   // straight on, beyond
+      return out;
+    };
+    const P = bez(u, _tkV4), Pn = bez(u + 0.02, _tkV5);
+    const f = Pn.sub(P);
+    if (f.lengthSq() > 1e-8) {
+      f.normalize();
+      const xax = _tkV1.copy(f).negate(), zax = _tkV2.crossVectors(xax, _tkY).normalize(), yax = _tkV3.crossVectors(zax, xax).normalize();
+      _tkM.makeBasis(xax, yax, zax);
+      _tkQ1.setFromRotationMatrix(_tkM);
+      S.pivot.quaternion.copy(fl.q0).slerp(_tkQ1, Math.min(1, s * 2.5));
+    }
+    S.pivot.position.copy(P).sub(_tkV6.copy(S.center).multiplyScalar(k).applyQuaternion(S.pivot.quaternion));   // (p0 is the lifted spot)
+    if (!S.passed && u >= 0.95) { S.passed = true; if (T.sfxPass && !tk.passSaid) { tk.passSaid = true; snd(T.sfxPass); } }
+  }
+  function _tkBeamTick(tk, dt) {
+    if (tk.beamT < 0) return;
+    tk.beamT += dt;
+    const lag = (cfg.talk.seatLag != null) ? +cfg.talk.seatLag : 0.55;
+    for (const p of tk.people) {
+      if (!p.beamed && tk.beamT >= p.beamAt) {
+        p.beamed = true;
+        p.phase = 'out'; p.t = 0;
+        if (cfg.talk.sfxBeam) { try { _lssPickerSeatSfx(); } catch (_) {} }
+      }
+      if (p.beamed && !p.seated && p.seat && tk.beamT >= p.beamAt + lag) {
+        p.seated = true;
+        p.seat.phase = 'in'; p.seat.t = 0;
+        tk.cues.add('seat');
+      }
+    }
+  }
+  function _tkPose(tk, dt) {
+    const T = cfg.talk;
+    tk.t += dt;
+    let who = null;
+    try { const st = window.CampDialogue.state(); if (st.cur) tk.cues.add(st.cur); who = st.who || null; } catch (_) {}
+    tk.cues.add(tk.ev);
+    let want = Math.max(0, tk.shot);
+    for (let i = 0; i < T.shots.length; i++) if (tk.cues.has(T.shots[i].at)) want = Math.max(want, i);
+    if (tk.hold != null && T.shots[tk.hold]) want = tk.hold;   // dev: __campOpening.tk().hold = i holds shot i (null lets go)
+    if (want !== tk.shot) _tkShotSet(tk, want);
+    tk.shotT += dt;
+    _tkCamPose(tk);
+    const sh = T.shots[tk.shot] || {}, z = sh.z || [1, 1], z0 = (tk.z0 != null) ? tk.z0 : z[0];
+    tk.zoom = z0 + (z[1] - z0) * (1 - Math.exp(-3 * tk.shotT / Math.max(0.5, +T.zT || 7)));
+    const live = tk.people.filter((p) => p.phase !== 'gone');
+    const mid = _tkV1.set(0, 0, 0);
+    let n = 0;
+    if (sh.look === 'ships') {
+      for (const S of tk.shipList) if (S.hero) { mid.add(_tkV2.copy(S.center).multiplyScalar(+T.k || 0.0836).applyQuaternion(S.pivot.quaternion).add(S.pivot.position)); n++; }
+    } else {
+      const fy = (T.focY != null) ? +T.focY : 0.6;
+      for (const p of live) { mid.add(p.root.position); n++; }
+      if (n) { mid.divideScalar(n); mid.y = fy; n = 1; }
+      const sp = who ? live.find((p) => p.id === who) : null;
+      if (sp) mid.lerp(_tkV2.set(sp.root.position.x, fy, sp.root.position.z), 0.5);
+    }
+    if (tk.ev === 'launch') tk.foc = null;
+    else if (n) {
+      if (n > 1) mid.divideScalar(n);
+      const px = _tkPix(tk, mid, { x: 0, y: 0 });
+      if (!tk.foc) tk.foc = px;
+      else { const kf = 1 - Math.exp(-dt * 1.2); tk.foc.x += (px.x - tk.foc.x) * kf; tk.foc.y += (px.y - tk.foc.y) * kf; }
+    }
+    const L = tk.L, c3 = (l, a) => { l.color.setHex(a[0]); l.intensity = a[1]; if (l.position && a.length >= 5) l.position.set(a[2], a[3], a[4]); };
+    L.hemi.color.setHex(T.hemi[0]); L.hemi.groundColor.setHex(T.hemi[1]); L.hemi.intensity = T.hemi[2];
+    c3(L.key, T.key); c3(L.rimA, T.rimA); c3(L.rimB, T.rimB);
+    tk.scene.environmentIntensity = +T.env || 0;
+    _tkBeamTick(tk, dt);
+    const center = _tkV3.set(0, 0, 0);
+    for (const p of tk.people) center.add(p.root.position);
+    center.divideScalar(tk.people.length);
+    const MC = T.pics.main.pos;
+    for (const p of tk.people) {
+      const A = (T.people[p.id] && T.people[p.id].at) || [p.root.position.x, p.root.position.z];
+      p.root.position.set(A[0], 0, A[1]);
+      if (p.phase === 'gone') { p.root.visible = false; continue; }
+      const px = A[0], pz = A[1];
+      let yaw = _tkAng(Math.atan2(center.x - px, center.z - pz), Math.atan2(MC[0] - px, MC[2] - pz), +T.open || 0);
+      let lookYaw = 0;
+      const sp = (who && who !== p.id) ? tk.people.find((q) => q.id === who && q.phase !== 'gone') : null;
+      if (sp) {
+        const ys = Math.atan2(sp.root.position.x - px, sp.root.position.z - pz);
+        yaw = _tkAng(yaw, ys, +T.turn || 0);
+        let d = ys - yaw; d = Math.atan2(Math.sin(d), Math.cos(d));
+        lookYaw = Math.max(-0.7, Math.min(0.7, d)) * (+T.look || 0);
+      }
+      if (p.yaw == null || !dt) p.yaw = yaw;
+      else p.yaw = _tkAng(p.yaw, yaw, 1 - Math.exp(-dt * 2.2));
+      p.root.rotation.y = p.yaw;
+      const wt = (who === p.id) ? (+T.talkW || 0) : 0;
+      p.w += (wt - p.w) * (dt ? 1 - Math.exp(-dt * 4) : 1);
+      p.talk.setEffectiveWeight(p.w); p.rest.setEffectiveWeight(1 - p.w);
+      p.mixer.update(dt);
+      p.look += (lookYaw - p.look) * (dt ? 1 - Math.exp(-dt * 3.5) : 1);
+      p.root.updateMatrixWorld(true);
+      try { _lssIdleBreath(p.char, tk.t, p.ph, p.pid, p.look); } catch (_) {}
+      if (p.phase === 'out') {
+        p.t += dt;
+        if (p.t >= _PSEAT_OUT) { p.phase = 'gone'; p.root.visible = false; continue; }
+      }
+      _lssPickerSeatFx(p);   // 'out' = the beam; 'stand' = all of him, no beam
+    }
+    if (tk.launchT >= 0) tk.launchT += dt;
+    for (const S of tk.shipList) {
+      if (S.fl) _tkFly(tk, S, dt);
+      else {
+        _tkShipRest(S, tk.t, S.pivot.position, S.pivot.quaternion);
+        const pl = S.hero ? tk.people.find((p) => p.id === S.pilot) : null;
+        S.engW = !S.hero ? 0 : ((pl && pl.seated) ? Math.max(+T.engIdle || 0, +T.engSeat || 0) : (+T.engIdle || 0));   // his engines wake as he sits
+      }
+      S.pivot.updateMatrixWorld(true);
+      S.engA += (S.engW - S.engA) * (dt ? 1 - Math.exp(-dt * 5) : 1);
+      if (S.eng) { S.eng.visible = S.engA > 0.01; if (S.eng.visible) { try { _lssPreviewEnginesTick(S.eng, tk.camera, S.engA); } catch (_) {} } }
+      const k = +T.k || 0.0836, cw = _tkV4.copy(S.center).multiplyScalar(k).applyQuaternion(S.pivot.quaternion).add(S.pivot.position);
+      const hov = ((T.ships[S.key] && T.ships[S.key].at) || [0, 2, 0])[1] || 0;
+      const up = Math.max(0, cw.y - S.halfH * k - hov);
+      S.blob.position.set(cw.x, 0.012, cw.z);
+      S.blob.rotation.set(-Math.PI / 2, 0, _tkE.setFromQuaternion(S.pivot.quaternion, 'YXZ').y);   // its length along the hull's (GLB x)
+      S.blob.scale.set(S.size.x * k * 0.85, S.size.z * k * 0.85, 1);
+      S.blob.material.opacity = (+T.blob || 0) * Math.max(0, 1 - up / 3);
+      S.blob.visible = S.blob.material.opacity > 0.01;
+    }
+    for (const p of tk.people) {
+      const s = p.seat; if (!s) continue;
+      _tkSeatPlace(s);
+      if (s.phase === 'warm') { s.root.visible = false; continue; }
+      s.t += dt;
+      s.mixer.update(dt);
+      _lssPickerSeatFx(s);
+      if (s.phase === 'in' && s.t >= _PSEAT_IN) { s.phase = 'seated'; _lssPickerSeatFx(s); }
+    }
+  }
+  function _tkDispose(tk) {
+    if (!tk || tk._dead) return;
+    tk._dead = true;
+    const free = (o) => { if (o.material) { for (const m of (Array.isArray(o.material) ? o.material : [o.material])) { try { m.dispose(); } catch (_) {} } } };
+    for (const p of tk.people) {
+      try { p.mixer.stopAllAction(); p.mixer.uncacheRoot(p.char); } catch (_) {}
+      try { p.char.traverse((o) => { if (o.isSkinnedMesh && o.skeleton && o.skeleton.dispose) o.skeleton.dispose(); }); } catch (_) {}
+      try { for (const m of p.mats) m.dispose(); } catch (_) {}
+      try { p.fx.traverse((o) => { if (o.geometry) o.geometry.dispose(); free(o); }); } catch (_) {}
+      try { p.blob.geometry.dispose(); p.blob.material.dispose(); } catch (_) {}
+      const s = p.seat;   // the seat LOD is the seats' shared file: only this scene's copies and skeletons go
+      if (s) {
+        try { s.mixer.stopAllAction(); s.mixer.uncacheRoot(s.body); } catch (_) {}
+        try { s.body.traverse((o) => { if (o.isSkinnedMesh && o.skeleton && o.skeleton.dispose) o.skeleton.dispose(); }); } catch (_) {}
+        try { for (const m of s.mats) m.dispose(); } catch (_) {}
+        try { s.fx.traverse((o) => { if (o.geometry) o.geometry.dispose(); free(o); }); } catch (_) {}
+      }
+    }
+    for (const S of tk.shipList) {
+      try { if (S.eng) S.eng.traverse((o) => { free(o); if (o.geometry && !(o.userData && o.userData._sharedGLBGeo)) o.geometry.dispose(); }); } catch (_) {}
+      try { _ssPrevRelease(S.root); } catch (_) {}   // its texture handles and materials; never the shared geometry
+      try { S.blob.geometry.dispose(); S.blob.material.dispose(); } catch (_) {}
+    }
+    try { tk.scene.background = null; tk.scene.environment = null; } catch (_) {}
+    for (const k in tk.pics) { try { tk.pics[k].tex.dispose(); if (tk.pics[k].vrTex) tk.pics[k].vrTex.dispose(); } catch (_) {} }
+    try { if (tk.env) tk.env.dispose(); } catch (_) {}
+    try { if (tk._vrPlane) { tk._vrPlane.geometry.dispose(); tk._vrPlane.material.dispose(); tk._vrPlane = null; } } catch (_) {}
+    try { tk.scene.clear(); } catch (_) {}
+    for (const url of tk.urls) {
+      const pr = _gsG[url]; delete _gsG[url];
+      if (pr) pr.then((g) => {
+        if (!g) return;
+        try {
+          g.scene.traverse((o) => {
+            if (o.geometry) o.geometry.dispose();
+            for (const m of (Array.isArray(o.material) ? o.material : (o.material ? [o.material] : []))) { for (const k in m) { const v = m[k]; if (v && v.isTexture) v.dispose(); } m.dispose(); }
+          });
+        } catch (_) {}
+      });
+    }
+  }
+  async function _talkScene(live) {
+    const D = window.CampDialogue, T = cfg.talk;
+    O.phase = 'talk'; _ui('talk');
+    let tk = null;
+    try { tk = await Promise.race([O.tkP, wait(+T.buildMax || 45).then(() => null)]); } catch (e) { console.warn('[talk] build failed:', e && e.message); }
+    if (!live()) { _tkDispose(tk); return; }
+    if (!tk) {
+      console.warn('[talk] no stage - on to the city');
+      if (O.tkP) O.tkP.then((x) => { if (x && x !== O.tk) _tkDispose(x); });   // a slow build still gets freed
+      return;
+    }
+    O.tk = tk; O.tkLast = 0;
+    try { document.body.classList.add('lss-cine-subs'); } catch (_) {}
+    try { if (window.__campPrologue) window.__campPrologue.skipUi(true); } catch (_) {}
+    let skipped = false;
+    const skipP = new Promise((r) => { O._tkSkip = () => { skipped = true; r(); }; });
+    _veilHide(+T.fadeIn || 1.6);
+    await Promise.race([wait(+T.lead || 1.8), skipP]);
+    const prevOnLine = (D && D.onLine) ? D.onLine((line) => { if (line && line.id && O.tk === tk) tk.cues.add(line.id); }) : null;
+    try {
+      if (live() && !skipped && D) await Promise.race([D.sayLines(CAMP_SEQS.talk || []), skipP]);
+    } finally { if (D && D.onLine) D.onLine(prevOnLine); }
+    if (!live()) return;
+    if (!skipped) {
+      await Promise.race([wait(0.6), skipP]);
+      const order = ['frostfang', 'azure', 'ashman'];
+      tk.people.forEach((p) => { const i = order.indexOf(p.id); p.beamAt = (i < 0 ? 0 : i) * (+T.beamGap || 0.35); });
+      tk.ev = 'beam'; tk.beamT = 0;
+      const lag = (T.seatLag != null) ? +T.seatLag : 0.55;
+      await Promise.race([wait(2 * (+T.beamGap || 0.35) + lag + _PSEAT_IN + (+T.beamHold || 1.6)), skipP]);
+    }
+    if (live() && !skipped) {
+      tk.ev = 'launch'; tk.launchT = 0;
+      for (const S of tk.shipList) if (S.hero) S.fl = { t: 0, p0: null };
+      if (T.sfxGo) snd(T.sfxGo);
+      await Promise.race([wait((+T.spool || 0.9) + (+T.fly || 1.7) * Math.sqrt(+T.blackAt || 0.8)), skipP]);
+    }
+    O._tkSkip = null;
+    if (!live()) return;
+    if (D) D.clear();
+    _veilShow(false, skipped ? 0.5 : (+T.fadeOut || 0.4));
+    await wait((skipped ? 0.5 : (+T.fadeOut || 0.4)) + 0.15);
+    try { if (window.__campPrologue) window.__campPrologue.skipUi(false); } catch (_) {}
+    try { document.body.classList.remove('lss-cine-subs'); } catch (_) {}
+    if (O.tk === tk) { O.tk = null; _tkDispose(tk); }
+    if (!live()) return;
+    O.phase = 'talk_end'; _ui('talk_end');
+    try { document.body.classList.add('lss-cine-title'); } catch (_) {}
+    try { if (window.__campPrologue) window.__campPrologue.skipUi(true); } catch (_) {}
+    await wait(0.5);
+    if (live() && D) await D.sayLines(CAMP_SEQS.talk_end || []);
+    try { if (window.__campPrologue) window.__campPrologue.skipUi(false); } catch (_) {}
+    try { document.body.classList.remove('lss-cine-title'); } catch (_) {}
+    if (live()) await wait(0.4);
+  }
+  function _talkHandoff() {
+    _end();
+    let city = false;
+    try { game._campPicker = false; city = !!(window.__campPrologue && window.__campPrologue.start()); } catch (e) { console.warn('[talk] the city would not start:', e && e.message); }
+    if (city) { setTimeout(() => { if (!O.on) _veilHide(0); }, 300); return; }
+    try { start({ gameshow: true }); }
+    catch (e) { console.warn('[talk] opening:', e && e.message); try { _veilHide(0.4); _campPickerSetup('camp_approach'); enterShipSelect(); } catch (_) {} }
+  }
+
   function _cvHash(x, y, z) {
     let h = Math.imul(x | 0, 374761393) ^ Math.imul(y | 0, 668265263) ^ Math.imul(z | 0, 1442695041);
     h = Math.imul(h ^ (h >>> 13), 1274126177);
@@ -109149,6 +109772,8 @@ const CAMP_SEQS = {
   }
   function skip() {
     if (!O.on) return false;
+    if (O.phase === 'talk' && O._tkSkip) { const f = O._tkSkip; O._tkSkip = null; f(); return true; }
+    if (O.phase === 'talk_end') { try { window.CampDialogue.clear(); } catch (_) {} return true; }
     if (O.phase === 'caverns' && O._cvSkip) { const f = O._cvSkip; O._cvSkip = null; f(); return true; }
     if (O.phase === 'meanwhile') { try { window.CampDialogue.clear(); } catch (_) {} return true; }
     if (O.phase === 'gameshow' && O._gsSkip) { const f = O._gsSkip; O._gsSkip = null; f(); return true; }
@@ -109157,6 +109782,14 @@ const CAMP_SEQS = {
 
   function tick() {
     if (!O.on) return;
+    if (O.phase === 'talk') {       // (v53.94) the hangar talk
+      const now = performance.now();
+      const dt = Math.min(0.05, O.tkLast ? (now - O.tkLast) / 1000 : 0.016);
+      O.tkLast = now;
+      if (O.tk) { try { _tkPose(O.tk, dt); } catch (e) { if (!O.tkErr) { O.tkErr = 1; console.warn('[talk] pose:', e && e.message, e); } } }
+      return;
+    }
+    if (O.phase === 'talk_end') return;
     if (O.phase === 'caverns') {    // (v52.31) the caverns' battle
       const now = performance.now();
       const dt = Math.min(0.05, O.cvLast ? (now - O.cvLast) / 1000 : 0.016);
@@ -109275,6 +109908,8 @@ const CAMP_SEQS = {
   }
   function stage() {
     if (!O.on) return null;
+    if (O.phase === 'talk') return O.tk || _blankStage();        // (v53.94) the hangar talk (nothing yet = the black veil's frame)
+    if (O.phase === 'talk_end') return _blankStage();            // (v53.94) the narrator, over black
     if (O.phase === 'caverns') return O.cv || _blankStage();     // (v52.31)
     if (O.phase === 'meanwhile') return _blankStage();           // (v52.31) the card is over black
     if (O.phase === 'gameshow') return O.gs || _blankStage();   // (v52.23) nothing yet = the black veil's frame
@@ -109304,7 +109939,7 @@ const CAMP_SEQS = {
   }
   function onConfirm() {
     if (!O.on) return false;
-    if (O.phase === 'gameshow' || O.phase === 'caverns' || O.phase === 'meanwhile') { skip(); return true; }   // (v52.23/31) Start / CONFIRM cuts the scene short
+    if (O.phase === 'gameshow' || O.phase === 'caverns' || O.phase === 'meanwhile' || O.phase === 'talk' || O.phase === 'talk_end') { skip(); return true; }   // (v52.23/31, v53.94) Start / CONFIRM cuts the scene short
     if (O.phase === 'choose' && O._getIn) { const f = O._getIn; O._getIn = null; f(); return true; }
     if (O.phase === 'perk' && O._perkPick) { const f = O._perkPick; O._perkPick = null; f(); return true; }   // (v49.67)
     if (O.phase === 'view' && O._viewPick) { const f = O._viewPick; O._viewPick = null; f(O.viewHi); return true; }
@@ -109322,12 +109957,18 @@ const CAMP_SEQS = {
       }
       return true;
     }
-    return (O.phase === 'fuse' || O.phase === 'launch' || O.phase === 'arrive' || O.phase === 'gameshow' || O.phase === 'caverns' || O.phase === 'meanwhile');
+    return (O.phase === 'fuse' || O.phase === 'launch' || O.phase === 'arrive' || O.phase === 'gameshow' || O.phase === 'caverns' || O.phase === 'meanwhile' ||
+            O.phase === 'talk' || O.phase === 'talk_end');   // (v53.94)
   }
 
   async function _run(tok) {
     const live = () => O.on && tok === O.tok;
     const D = window.CampDialogue;
+    if (O.talk) {
+      await _talkScene(live);
+      if (live()) _talkHandoff();
+      return;
+    }
     if (O.gameshow) {
       await _cavernsScene(live); if (!live()) return;
       await _gameshowScene(live); if (!live()) return;
@@ -109420,6 +110061,8 @@ const CAMP_SEQS = {
     O._gsSkip = null; if (O.gs) { const g = O.gs; O.gs = null; _gsDispose(g); }
     O._cvSkip = null; if (O.cv) { const c = O.cv; O.cv = null; _cvDispose(c); }   // (v52.31)
     if (O.cvP) { const p = O.cvP; O.cvP = null; p.then((c) => { if (c) _cvDispose(c); }); }   // a build that never got its scene
+    O._tkSkip = null; if (O.tk) { const t = O.tk; O.tk = null; _tkDispose(t); }   // (v53.94) the hangar talk, likewise
+    if (O.tkP) { const p = O.tkP; O.tkP = null; p.then((t) => { if (t) _tkDispose(t); }); }
     try { document.body.classList.remove('lss-cine-title'); } catch (_) {}
     _hsDrop(); O.hsCam = false; O.hsMk = null;
     try { document.body.classList.remove('lss-cine-subs'); if (window.__campPrologue) window.__campPrologue.skipUi(false); } catch (_) {}
@@ -109441,11 +110084,14 @@ const CAMP_SEQS = {
   }
 
   function start(opts) {
-    if (O.on) return;
+    if (O.on) return false;
     const tok = ++O.tok;
     try { if (typeof lssAutoFullscreen === 'function') lssAutoFullscreen(); } catch (_) {}   // still inside the CAMPAIGN click
     _campPickerSetup('camp_approach');
-    O.gameshow = !!(opts && opts.gameshow); O.gs = null; O._gsSkip = null; O.gsLast = 0; O.gsErr = 0;
+    O.talk = !!(opts && opts.talk) && cfg.talk.on !== false;   // (v53.94)
+    O.tk = null; O._tkSkip = null; O.tkLast = 0; O.tkErr = 0;
+    O.tkP = O.talk ? _tkBuild().catch((e) => { console.warn('[talk] build failed:', e && e.message, e); return null; }) : null;
+    O.gameshow = !O.talk && !!(opts && opts.gameshow); O.gs = null; O._gsSkip = null; O.gsLast = 0; O.gsErr = 0;
     O.gsP = O.gameshow ? _gsBuild().catch((e) => { console.warn('[gameshow] build failed:', e && e.message); return null; }) : null;
     O.cv = null; O._cvSkip = null; O.cvLast = 0; O.cvErr = 0;   // (v52.31) the caverns, built beside it
     O.caverns = O.gameshow && !(opts && opts.caverns === false);
@@ -109463,8 +110109,9 @@ const CAMP_SEQS = {
     try { enterShipSelect(); } catch (e) { console.warn('[campaign-opening] enterShipSelect:', e && e.message); }
     const sel = $('ship-select'); if (sel) sel.classList.add('camp-open');
     _ui('black');
-    O.buildP = _build();
+    O.buildP = O.talk ? null : _build();   // (v53.94) the talk never reaches the dark hangar: it hands on to the city
     _run(tok);
+    return true;
   }
   function reset() {
     try { localStorage.removeItem('lss_campaign_legs'); localStorage.removeItem('lss_campaign_last'); localStorage.removeItem('lss_campaign_av'); } catch (_) {}
@@ -109475,8 +110122,13 @@ const CAMP_SEQS = {
                          ships: O.st ? O.st.ships.map((s) => s.key) : null, viewHi: O.viewHi,
                          spots: O.spotA.map((a) => +a.toFixed(2)), head: +O.headA.toFixed(2), orb: +O.orbA.toFixed(2),
                          fx: O.fxInfo, gameshow: O.gameshow, gs: O.gs ? O.gs.people.map((p) => p.who) : null,
-                         pilot: HS.phase, pilotT: +HS.t.toFixed(2) });   // (v52.28) the GET IN beam: off / warm / in / seated
+                         pilot: HS.phase, pilotT: +HS.t.toFixed(2),   // (v52.28) the GET IN beam: off / warm / in / seated
+                         talk: O.tk ? { shot: O.tk.shot, pic: O.tk.pic, ev: O.tk.ev, zoom: +O.tk.zoom.toFixed(3), t: +O.tk.t.toFixed(1),
+                                        people: O.tk.people.map((p) => p.id + ':' + p.phase + (p.seat ? '/' + p.seat.phase : '')),
+                                        ships: O.tk.shipList.filter((S) => S.hero).map((S) => S.key + ':' + S.engA.toFixed(2) + (S.fl ? ' fly' : '')) } : (O.talk ? 'building' : null) });
   const gameshow = () => { if (O.on) return 'the opening is running'; start({ gameshow: true }); return 'the gameshow, then the hangar'; };
+  const talk = () => { if (O.on) return 'the opening is running'; start({ talk: true }); return 'the hangar talk, then the city'; };
+  const talkOn = () => cfg.talk.on !== false;
   const beam = (on) => {
     if (!O.on || !O.st) return 'no hangar';
     if (on === false) { O.hsCam = false; return 'camera released'; }
@@ -109486,7 +110138,7 @@ const CAMP_SEQS = {
     return 'beaming into ' + (S && S.key);
   };
   const phaseNow = () => (O.on ? O.phase : '');
-  try { window.__campOpening = { start, reset, state, arrive, stage, tick, onConfirm, blockPreview, cfg, look, skip, gameshow, beam, phaseNow }; } catch (_) {}
+  try { window.__campOpening = { start, reset, state, arrive, stage, tick, onConfirm, blockPreview, cfg, look, skip, gameshow, beam, phaseNow, talk, talkOn, tk: () => O.tk }; } catch (_) {}
 })();
 
 const CAMP_PROLOGUE = {

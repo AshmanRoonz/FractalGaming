@@ -64,17 +64,33 @@ const CAST = {
   summoners: { name: 'Victor',      id: 'ttNi9wVM8M97tsxE7PFZ' },
   pilot:     { name: 'Grainger',    id: 'e6UxWrNGwfbzUCaklNVm' },
   jimmy:     { name: 'Joe',         id: 'I1ApPIaF2fI21XlrwfaW' },
+  // (2026-10-12, v53.94) THE HANGAR TALK: the three pilots in one scene, each speaking as HIMSELF whoever the player picked
+  // (CAMP_LINES hg_*, who = the pilot's id) - so each has a fixed voice: the pilot's own (Grainger), Azure's Verity and
+  // Frostfang's Erik (the owner: "frostfang who i have chosen the voice on elevenlabs as Erik").
+  ashman:    { name: 'Grainger',    id: 'e6UxWrNGwfbzUCaklNVm' },
+  azure:     { name: 'Tammy',       id: 'CyHwTRKhXEYuSd7CbMwI' },   // (2026-10-13) was Verity - see VARIANTS.azure
+  frostfang: { name: 'Erik',        id: 'Fz7HYdHHCP1EF1FLn46C' },
 };
 // (2026-10-11) A SPEAKER'S SECOND VOICE. The owner: "i just added a new voice on elevenlabs, 'verity' for the female_pilot
 // character... because we can choose between 3 characters for the campaign... let's copy all the pilot's lines for the
 // female pilot, in verity's voice / the animal pilot can use the same voice as the main pilot". A variant is every line
 // of `who` again in another voice: the clip <id>.<variant>.mp3 beside <id>.mp3, with its own raw / manifest / media.json
 // "lines" + "rev" entries under that id. The game plays it when the chosen pilot's `voice` names it (CampDialogue,
-// _campVoiceId) and falls back to the line's own clip when it is missing. Frostfang has none: Grainger's takes are his.
+// _campVoiceId) and falls back to the line's own clip when it is missing. (Frostfang used Grainger's takes until v53.94.)
 // Verity = the "Chatty Young Woman, Fast-Paced Storyteller" (young, British): the owner's workspace copy - the Verity that
 // creative_list_voices lists twice, and only once with voice_category 'professional' (the library) - not "Calm & Soft".
+// (2026-10-12, v53.94) FROSTFANG GETS HIS OWN: "we recently copied ashman's lines to azure, and we will need to do the same
+// for frostfang who i have chosen the voice on elevenlabs as Erik". Erik = "Erik - Natural Easygoing Millenial" (young,
+// Canadian, conversational; the library entry is "Erik - Realistic, conversational, Millennial") - listed twice by
+// creative_list_voices with the same id, like Verity: the owner's workspace copy. _LSS_SEATS.frostfang.voice = 'frostfang'.
+// (2026-10-13) AZURE IS TAMMY. Owner: "azure's voice sounds bad... i just added Tammy, so let's redo all her lines in Tammy".
+// Tammy = "Tammy - Fun, Dynamic and Quirky" (young, American, upbeat; the library entry is "Tammy - Fun, upbeat, and
+// conversational") - listed twice with the same id, the owner's workspace copy. The id is in every hash, so all 38 of her
+// clips went stale (her 32 pilot lines + her 6 in the hangar talk). Verity's takes, levelled + raw + the JSONs:
+// assets_base/campaign_voice_raw/verity_backup_2026-10-13/ (git-ignored).
 const VARIANTS = {
-  azure: { who: 'pilot', name: 'Verity', id: 'oW8bn5YtBB89X2nJ0DT9' },
+  azure: { who: 'pilot', name: 'Tammy', id: 'CyHwTRKhXEYuSd7CbMwI' },
+  frostfang: { who: 'pilot', name: 'Erik', id: 'Fz7HYdHHCP1EF1FLn46C' },
 };
 // eleven_v4: the auditions' model. Same price as eleven_multilingual_v2 (1 credit per character, checked with
 // estimate_only on the same line), and it performs [audio tags]. FORMAT asks the API for what the levelled files are.
@@ -115,7 +131,17 @@ const PRON_LINE = {
   // (2026-10-08, v53.02) pr_dad's text changed ("young AIs"), so it is a NEW take: sent with "AI's" from the start rather than
   // risking the misread and paying for a second take
   pr_dad:     { AIs: "AI's" },
+  // (2026-10-12, v53.94) Ashman's nickname for Azure: a lone capital V after a hyphen reads as the Roman numeral ("Azzy five")
+  'hg_noobs': { 'Azzy-V': 'Azzy-Vee' },
+  // (2026-10-13) Erik read the line-opening "AI wasn't built like that." as "Ah... I wasn't build like that" (owner). His
+  // other "AI"s sit mid-sentence ("I don't think AI has that", "an AI trafficker") and were not flagged; this one is spelled.
+  // ...and "A.I." misread too ("Uhh. I wasn't built for that"), so the line is now the OWNER'S OWN CLIP (state 'own': no
+  // manifest entry, never re-made unless --only hg_built --force). Every take: assets_base/campaign_voice_raw/hg_built_takes_2026-10-13/.
+  hg_built: { AI: 'A.I.' },
 };
+// (2026-10-12, v53.94) Glyphs the BOX shows and no voice should try to say: the circumpunct closing hg_defined ("...centered
+// wholeness ☉") - sent, a voice reads it as "sun" or a noise. Dropped from the spoken text only (and the space before it).
+const SILENT = /\s*[☉⊙]/g;
 
 const argv = process.argv.slice(2);
 const has = (k) => argv.includes(k);
@@ -139,6 +165,10 @@ function spoken(id, line, base, voiceKey) {
   base = base || id;
   if (SAY[base]) return SAY[base];
   let t = String(line.text).replace(/~/g, '');
+  // a dropped glyph that ended the line leaves it with no stop: give it one, or the voice trails off mid-thought (only those
+  // lines - any other line's text, and so its hash and its take, is untouched)
+  const t0 = t; t = t.replace(SILENT, '');
+  if (t !== t0 && !/[.!?…]$/.test(t)) t += '.';
   for (const [w, r] of Object.entries(PRON[voiceKey || line.who] || {})) t = t.replace(new RegExp('\\b' + w + '\\b', 'g'), r);
   for (const [w, r] of Object.entries(PRON_LINE[id] || {})) t = t.replace(new RegExp('\\b' + w + '\\b', 'g'), r);
   const tags = Object.keys(STYLE_TAGS).filter((k) => line[k]).map((k) => STYLE_TAGS[k]);

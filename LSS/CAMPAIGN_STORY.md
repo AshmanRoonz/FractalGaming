@@ -260,11 +260,43 @@ The prologue changes that. It shows the player the city, the hack, the caverns a
 | `voice/<line id>.mp3` | A voiced version of any dialogue line. List the id in `campaign_media/media.json`. |
 | `fractal_frame.png` | The flicker of fractals in the opening. Not supplied yet; a generated pink-and-blue fractal stands in. |
 
-**The voice cast** (ElevenLabs, Ashman's picks, 2026-10-07): the narrator **Quentin**, Xorzo **Cybertronic** (Ashman's own designed voice, "like the Transformers"), the Summoners **Victor** (one voice for both heads), the pilot **Grainger**, Jimmy **Joe**. The ship's AI keeps its own voice ("Adam", `audio/`). (2026-10-08 the narrator became **Gerald**.) (2026-10-11) **The pilot is whoever you fly**: Ashman Roonz and Captain Frostfang speak with Grainger, Azure Vanguard with **Verity**, and the same pilot stands in the gameshow and talks beside the dialogue box. None of the pilot's lines says "he", so the script needed no changes; the casual "bro" / "dude" / "buddy" that others call the pilot stays as written. Every line is baked by `tools/campaign_voice.mjs` (see `campaign_media/README.md`); the auditions are in `voice_casting.html`.
+**The voice cast** (ElevenLabs, Ashman's picks, 2026-10-07): the narrator **Quentin**, Xorzo **Cybertronic** (Ashman's own designed voice, "like the Transformers"), the Summoners **Victor** (one voice for both heads), the pilot **Grainger**, Jimmy **Joe**. The ship's AI keeps its own voice ("Adam", `audio/`). (2026-10-08 the narrator became **Gerald**.) (2026-10-11) **The pilot is whoever you fly**: Ashman Roonz speaks with Grainger, Azure Vanguard with **Tammy** (2026-10-13; she was Verity until then: "azure's voice sounds bad... i just added Tammy, so let's redo all her lines in Tammy" ★), and (2026-10-12) Captain Frostfang with **Erik** ("frostfang who i have chosen the voice on elevenlabs as Erik" ★; he used Grainger's until then), and the same pilot stands in the gameshow and talks beside the dialogue box. In the hangar talk all three speak as themselves, whoever you picked. None of the pilot's lines says "he", so the script needed no changes; the casual "bro" / "dude" / "buddy" that others call the pilot stays as written. Every line is baked by `tools/campaign_voice.mjs` (see `campaign_media/README.md`); the auditions are in `voice_casting.html`.
 
 ---
 
 ## The script
+
+### PROLOGUE: THE HANGAR TALK (Ashman's script, 2026-10-12) - the campaign's first scene
+
+*Ashman's script, verbatim ★ ("we are going to make a new campaign scene with the 3 characters you can choose from, ashman, azure, and frostfang / this scene will be the new first scene"). In the game since v53.94: the three stand on the hangar's lit platform with their ships parked behind them, and the camera cuts between hangar.png and Ashman's three other angles of the same hangar.*
+
+*Fade into the hangar, 3 characters talking at the hangar with the ships parked in the background (like in the main screen)...*
+
+**Azure Vanguard:** Hahaha Roonz, you think AI can have its own point of view?
+**Ashman Roonz:** All the parts and processes are there...
+**Captain Frostfang:** But has wholeness emerged?
+**Azure Vanguard:** Wholeness with a point of view...
+**Ashman Roonz:** I think we just defined consciousness as centered wholeness ☉
+**Captain Frostfang:** Sounds right, but I don't think AI has that.
+**Azure Vanguard:** Why not? You do.
+**Captain Frostfang:** AI wasn't built like that.
+**Ashman Roonz:** I heard a secret that there might be someone who is building something like that.
+**Azure Vanguard:** Too bad we don't have high enough clearance.
+**Captain Frostfang:** Being top gun doesn't get you top access.
+**Azure Vanguard:** So you admit it, I'm top gun.
+**Ashman Roonz:** He can admit you're top gun all you like, doesn't change that I am.
+**Captain Frostfang:** I was talking about the three of us, as a team, being top gun.
+**Azure Vanguard:** Ha! Roonz, my Vortex gets your Blaster every time.
+**Ashman Roonz:** Hey Azzy-V, Vortex is for noobs. My Slayer owns your Vortex.
+**Captain Frostfang:** You two talk too much, there's only one way to find out who is the most elite today!
+
+*All three teleport to a ship. Azure to Vortex. Roonz to Slayer. Frostfang to Syphon. The three ships zoom toward the cam and the screen fades to black, and the narrator says,*
+
+**Narrator:** "About that secret... the three pilots didn't realize they were onto something."
+
+*...to the next scene (previously the first scene): the city, below.*
+
+*In the game: "Azure Vaguard" is Azure Vanguard. The ☉ is shown in the box and never spoken. Each pilot beams out where he stands and into his seat (Frostfang, then Azure, then Ashman), and the three hulls come straight at the camera.*
 
 ### PROLOGUE: CYBERPUNK CITY (DRAFT, 2026-10-06)
 

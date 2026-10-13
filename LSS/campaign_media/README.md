@@ -80,6 +80,22 @@ line. The game plays the `.azure` take when Azure is the chosen pilot and falls 
 (Frostfang speaks with Grainger's). `VARIANTS` in the baker holds them; `--var azure` selects only those, `--var none`
 only the lines' own. 32 lines, 2,020 credits.
 
+**Azure is Tammy (2026-10-13).** The owner: "azure's voice sounds bad... i just added Tammy, so let's redo all her lines in
+Tammy". All 38 of her clips (`*.azure` + her six `hg_*`) were re-made in **Tammy** under the same names (media.json `rev`
+changed, so browsers fetch the new takes); Verity's are kept in `assets_base/campaign_voice_raw/verity_backup_2026-10-13/`.
+Erik's `hg_built` was re-taken the same day with "A.I." spelled (he had read "AI wasn't" as "Ah... I wasn't") and misread
+again ("Uhh. I wasn't"), so `voice/hg_built.mp3` is now **the owner's own clip** (levelled to -17 LUFS by hand, no
+manifest entry: the baker shows it `own` and never overwrites it). All its takes are in
+`assets_base/campaign_voice_raw/hg_built_takes_2026-10-13/`.
+
+**A third (2026-10-12).** Captain Frostfang has his own voice too, **Erik**: `voice/<id>.frostfang.mp3` (`--var frostfang`),
+32 lines. And **the hangar talk** (the campaign's first scene, `hg_*`) has the three pilots speaking as themselves, whoever
+you fly: those lines are baked under their own speakers (`ashman` Grainger, `azure` Verity, `frostfang` Erik), and the
+narrator's `hg_onto` with Gerald. 18 + 32 = 50 clips, 2,921 credits.
+
+**The hangar pictures.** `hangar_perspective1-3.png` are the owner's originals; the game loads their `.webp` twins (same
+pixels, ~0.3 MB each instead of ~2.5). Replacing a picture means re-fitting its camera (`cfg.talk.pics` in the game).
+
 Every clip is **levelled to -17 LUFS** on the way in (`tools/campaign_voice_level.py`, run inside
 Blender): the voices come out of ElevenLabs at very different levels (the narrator 10-15 dB
 quieter than the rest). The raw takes are kept in `assets_base/campaign_voice_raw/` (local only),
