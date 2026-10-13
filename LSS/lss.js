@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "54.23";
+const LSS_BUILD = "54.24";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -24517,6 +24517,10 @@ let _swBladeGeo=null, _swGrassMat=null;
 let _swTreeGeos=null, _swTreeMat=null, _swShroomMat=null;
 const _swGd = new THREE.Object3D();
 const _SW_GRID = _SW_CHUNK / _SW_CELLS;
+function _swShellY(x, z, T) {
+  if (T && T.HUB) { let h = null; try { h = _hbGroundAt(x, z); } catch (_) {} if (h != null) return h; }
+  return _stGroundYCarved(x, z, T);
+}
 function _stGroundYGrid(x, z, T) {
   const g = _SW_GRID, J = g * 0.40;
   const gi = Math.floor(x / g), gj = Math.floor(z / g);
@@ -24524,7 +24528,7 @@ function _stGroundYGrid(x, z, T) {
   const corner = (ci, cj) => {
     const jx = ci * g + (_stHash2(ci * 1.7, cj * 2.3) - 0.5) * J;
     const jz = cj * g + (_stHash2(ci * 3.1 + 5.0, cj * 1.1 + 9.0) - 0.5) * J;
-    return { x: jx, z: jz, h: _stGroundYCarved(jx, jz, T) };
+    return { x: jx, z: jz, h: _swShellY(jx, jz, T) };   // (v54.24) the shell's own height source
   };
   const c00 = corner(gi, gj), c10 = corner(gi + 1, gj), c01 = corner(gi, gj + 1), c11 = corner(gi + 1, gj + 1);
   let V0, V1, V2;
@@ -25701,7 +25705,7 @@ function _swBuildShorePlants(x0, z0, T) {
   const WL = T.WL;
   let near = false;
   for (let j = 0; j <= 4 && !near; j++) for (let i = 0; i <= 4; i++) {
-    const y = _stGroundYCarved(x0 + i * _SW_CHUNK / 4, z0 + j * _SW_CHUNK / 4, T);
+    const y = _swShellY(x0 + i * _SW_CHUNK / 4, z0 + j * _SW_CHUNK / 4, T);   // (v54.24) the baked table where it covers
     if (y > WL - 30 && y < WL + 90) { near = true; break; }
   }
   if (!near) return null;
@@ -25720,7 +25724,7 @@ function _swBuildShorePlants(x0, z0, T) {
   for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
     const x = x0 + (i + rnd()) * step, z = z0 + (j + rnd()) * step;
     const r1 = rnd(), r2 = rnd(), r3 = rnd();   // drawn up front: a rejection never shifts the stream
-    const y = _stGroundYCarved(x, z, T), dy = y - WL;
+    const y = _swShellY(x, z, T), dy = y - WL;
     if (dy < -3 || dy > 62) continue;
     const reedBand = dy < 12;
     if (r1 > (reedBand ? 0.40 : 0.26) * dens) continue;   // the cheap rejection first
@@ -25729,8 +25733,8 @@ function _swBuildShorePlants(x0, z0, T) {
     const zn = _hzZoneForFoliage(x, z);
     if (zn && (zn.key === 'snow' || zn.key === 'volcanic')) continue;
     if (zn && r2 > Math.max(0.15, 1 - 0.8 * zn.zs)) continue;
-    const yx = _stGroundYCarved(x + 6, z, T), yz = _stGroundYCarved(x, z + 6, T);   // gentle ground only
-    if (Math.sqrt((yx - y) * (yx - y) + (yz - y) * (yz - y)) / 6 > (reedBand ? 0.45 : 0.6)) continue;
+    const y0 = _stGroundYCarved(x, z, T), yx = _stGroundYCarved(x + 6, z, T), yz = _stGroundYCarved(x, z + 6, T);   // gentle ground only
+    if (Math.sqrt((yx - y0) * (yx - y0) + (yz - y0) * (yz - y0)) / 6 > (reedBand ? 0.45 : 0.6)) continue;
     if (typeof _volcHotAt === 'function' && _volcHotAt(x, z, 1.2) > 0.004) continue;
     buckets[reedBand ? 0 : (r3 < 0.62 ? 1 : 2)].push(x, y, z);
   }
@@ -26150,7 +26154,7 @@ function _swMoistAt(x, z, T) {
                       Math.max(0, 1 - Math.abs(r3) / 0.12));
   const river = ch * ch * (3 - 2 * ch);
   const WL = (T.WL != null) ? T.WL : T.YFLOOR;
-  const y = _stGroundYCarved(x, z, T);
+  const y = _swShellY(x, z, T);   // (v54.24) the baked table where it covers - see _swShellY
   const low = Math.max(0, Math.min(1, 1 - (y - WL) / 1100));
   return Math.max(0, Math.min(1, river * 0.75 + low * 0.55));
 }
@@ -26160,8 +26164,8 @@ function _swExposeAt(x, z, y, T) {
   let above = 0;
   for (let k = 0; k < 4; k++) {
     const a = k * Math.PI / 4;
-    const n = _stGroundYCarved(x + Math.cos(a) * d, z + Math.sin(a) * d, T);
-    const s = _stGroundYCarved(x - Math.cos(a) * d, z - Math.sin(a) * d, T);
+    const n = _swShellY(x + Math.cos(a) * d, z + Math.sin(a) * d, T);
+    const s = _swShellY(x - Math.cos(a) * d, z - Math.sin(a) * d, T);
     above += Math.max(0, y - n) + Math.max(0, y - s);
   }
   return Math.max(0, Math.min(1, (above / 8) / 160));
@@ -26672,15 +26676,7 @@ vec4 lssVineLayer( vec2 P, float thin, out vec3 hOut ) {
   return m;
 }
 function _swDrapeY(x, z, T) {
-  if (T && T.HUB && _HB.ready && _HB.on && _HB.mean && _HB.sp === 32 && _CLIP_M0 === 32 && _HB.minLevel <= 0) {
-    const sp = _HB.sp, dim = _HB.dim[0], D = _HB.mean[0];
-    const fx = (x - _HB.x0) / sp, fz = (z - _HB.z0) / sp, i0 = Math.floor(fx), j0 = Math.floor(fz);
-    if (i0 >= 0 && j0 >= 0 && i0 + 1 < dim && j0 + 1 < dim) {
-      const u = fx - i0, v = fz - j0, o = j0 * dim + i0;
-      const a = D[o], b = D[o + 1], c = D[o + dim], e = D[o + dim + 1];
-      return 0.125 * ((u + v <= 1) ? a + (b - a) * u + (c - a) * v : e + (c - e) * (1 - u) + (b - e) * (1 - v));
-    }
-  }
+  if (T && T.HUB && _HB.sp === 32 && _CLIP_M0 === 32) { const h = _hbGroundAt(x, z); if (h != null) return h; }
   return _stGroundYCarved(x, z, T);
 }
 let _swDrapeErr = 0;   // (v46.56d) one-shot guard for the build-threw warning at the stream site
@@ -26800,6 +26796,7 @@ function _swShellJobRows(J, budgetMs) {
   const n = J.n, step = _SW_CHUNK / n, T = J.T, isCeil = J.isCeil, verts = J.verts, cols = J.cols, x0 = J.x0, z0 = J.z0;
   const pair = J.pair, adopt = J.adopt, gY = J.gY, cY = J.cY, PR = _stPairScratch;
   const wantCol = isCeil || (typeof window !== 'undefined' && window.__swGroundCol === true);
+  const useHB = !isCeil && !adopt && !!(T && T.HUB);
   const t0 = performance.now();
   let p = J.p;
   while (J.j <= n) {
@@ -26812,7 +26809,10 @@ function _swShellJobRows(J, budgetMs) {
       const z = gz0 + (_stHash2(_gi * 3.1 + 5.0, _gj * 1.1 + 9.0) - 0.5) * _jit;
       let y;
       const _pinch = _swRimPinch(x, z, T);
-      if (pair) {
+      let _hb = null;
+      if (useHB) { try { _hb = _hbGroundAt(x, z); } catch (_) {} }
+      if (_hb != null) { y = _hb; J.hb = true; }
+      else if (pair) {
         const v = p / 3;
         let yo;
         if (adopt) { y = cY[v]; yo = gY[v]; }
@@ -26843,7 +26843,7 @@ function _swShellJobRows(J, budgetMs) {
   return J.j > n;
 }
 function _swShellJobFinish(J) {
-  if (!J.isCeil && J.gY) _swPairLast = J;
+  if (!J.isCeil && J.gY && !J.hb) _swPairLast = J;
   const n = J.n, isCeil = J.isCeil, verts = J.verts, cols = J.cols, nVert = (n + 1) * (n + 1);
   const idx = [];
   const row = n + 1;
@@ -26868,7 +26868,7 @@ function _swShellJobFinish(J) {
   const mat = _swTerrainMatShared(isCeil);
   const mesh = new THREE.Mesh(geo, mat);
   mesh.receiveShadow = !isCeil;
-  mesh.userData = { isSandwichTerrain: true };
+  mesh.userData = { isSandwichTerrain: true, hb: !!J.hb };   // (v54.24) hb: built from the baked table - see _hbOnReady
   mesh.renderOrder = -2;
   scene.add(_lssFreezeStatic(mesh));   // (v49.50) world-space shell, never moved
   return mesh;
@@ -47062,6 +47062,15 @@ function _hbMinAround(wx, wz, r) {
   for (let j = j0; j <= j1; j++) { const row = j * N; for (let i = i0; i <= i1; i++) { const v = H[row + i]; if (v < m) m = v; } }
   return m * 0.125;
 }
+function _hbGroundAt(x, z) {
+  if (!_HB.ready || !_HB.on || !_HB.mean || _HB.minLevel > 0) return null;
+  const sp = _HB.sp, dim = _HB.dim[0], D = _HB.mean[0];
+  const fx = (x - _HB.x0) / sp, fz = (z - _HB.z0) / sp, i0 = Math.floor(fx), j0 = Math.floor(fz);
+  if (!(i0 >= 0 && j0 >= 0 && i0 + 1 < dim && j0 + 1 < dim)) return null;
+  const u = fx - i0, v = fz - j0, o = j0 * dim + i0;
+  const a = D[o], b = D[o + 1], c = D[o + dim], e = D[o + dim + 1];
+  return 0.125 * ((u + v <= 1) ? a + (b - a) * u + (c - a) * v : e + (c - e) * (1 - u) + (b - e) * (1 - v));
+}
 const _HB_BOX = 53248;        // base half-extent: 45,056 (cities) + 8,192 (L0 half window at N=512, M0=32)
 const _HB_EYE = 45056;        // far tables assume the eye anywhere inside the content box
 const _HB_FAR_MAX = 327680;   // cap on a far table's half-extent (L5 at N=512 wants 307,200)
@@ -47234,31 +47243,122 @@ async function _hbBakeMain(T) {
   }
   _HB.mean = [base]; _HB.max = [base]; _HB.dim = [N]; _HB.far = null; _HB.workers = 0; _HB.evals = N * N;
 }
+const _HB_FILE_DIR = 'hub_bake/', _HB_PHONE_WAIT_MS = 15000;
+async function _hbFileFetch(url, bytes, onBytes) {
+  const r = await fetch(url, { cache: 'force-cache' });   // the URL carries the key: a file never changes under its name
+  if (!r.ok) return null;
+  if (!r.body || !r.body.getReader) { const b = await r.arrayBuffer(); return (b.byteLength === bytes) ? b : null; }
+  const out = new Uint8Array(bytes), rd = r.body.getReader();
+  let off = 0;
+  for (;;) {
+    const { done, value } = await rd.read();
+    if (done) break;
+    if (off + value.length > bytes) { try { rd.cancel(); } catch (_) {} return null; }
+    out.set(value, off); off += value.length;
+    if (onBytes) onBytes(off);
+  }
+  return (off === bytes) ? out.buffer : null;
+}
+function _hbFileParse(buf, kind, key, specs) {
+  const u8 = new Uint8Array(buf), MAG = 'LSSHB01\0';
+  if (u8.length < 16) return null;
+  for (let i = 0; i < 8; i++) if (u8[i] !== MAG.charCodeAt(i)) return null;   // (Pages answers a missing path with index.html)
+  const H = new DataView(buf).getUint32(8, true);
+  if (12 + H > u8.length) return null;
+  let h = null; try { h = JSON.parse(new TextDecoder().decode(u8.subarray(12, 12 + H))); } catch (_) { return null; }
+  if (!h || h.v !== 1 || h.kind !== kind || h.key !== key || !Array.isArray(h.levels) || h.levels.length !== specs.length) return null;
+  const off0 = 12 + H; if (off0 % 8) return null;
+  const out = [];
+  for (let i = 0; i < specs.length; i++) {
+    const L = h.levels[i], S = specs[i], n = S.N * S.N;
+    if (L.sp !== S.sp || L.N !== S.N || L.x0 !== S.x0 || L.z0 !== S.z0 || (L.off % 2) || off0 + L.off + n * 2 > u8.length) return null;
+    out.push(new Int16Array(buf, off0 + L.off, n));
+  }
+  return out;
+}
+async function _hbFileLoad(T, farSpec, key) {
+  try {
+    if (new Uint8Array(new Uint16Array([1]).buffer)[0] !== 1) return false;   // the files are little-endian
+    const mr = await fetch(_HB_FILE_DIR + 'manifest.json', { cache: 'no-cache' });
+    if (!mr.ok) return false;
+    let man = null; try { man = await mr.json(); } catch (_) { return false; }
+    const keyBase = farSpec.length ? _hbHash(T, [], _HB.sp, _HB.N) : key;
+    const eb = man && man.base && man.base[keyBase], ef = farSpec.length ? (man && man.far && man.far[key]) : null;
+    if (!eb || (farSpec.length && !ef)) {
+      try { console.log('[hbake] no shipped table for this world (base ' + keyBase + (farSpec.length ? ', far ' + key : '') + ') - baking'); } catch (_) {}
+      return false;
+    }
+    const total = eb.bytes + (ef ? ef.bytes : 0); let done = 0;
+    _HB.loadingFile = true;
+    const prog = (n) => { _HB.prog = Math.min(0.999, (done + n) / total); if (_HB.onProg) { try { _HB.onProg(_HB.prog); } catch (_) {} } };
+    const bb = await _hbFileFetch(_HB_FILE_DIR + eb.file, eb.bytes, prog);
+    const base = bb ? _hbFileParse(bb, 'base', keyBase, [{ sp: _HB.sp, N: _HB.N, x0: _HB.x0, z0: _HB.z0 }]) : null;
+    if (!base) { try { console.warn('[hbake] ' + eb.file + ' did not load / did not match - baking'); } catch (_) {} return false; }
+    done += eb.bytes;
+    let far = null;
+    if (ef) {
+      const fb = await _hbFileFetch(_HB_FILE_DIR + ef.file, ef.bytes, prog);
+      far = fb ? _hbFileParse(fb, 'far', key, farSpec) : null;
+      if (!far) { try { console.warn('[hbake] ' + ef.file + ' did not load / did not match - baking'); } catch (_) {} return false; }
+    }
+    _HB.mean = [base[0]]; _HB.max = [base[0]]; _HB.dim = [_HB.N];
+    for (let i = 0; i < farSpec.length; i++) farSpec[i].data = far[i];
+    _HB.far = farSpec.length ? farSpec : null;
+    _HB.file = eb.file + (ef ? ' + ' + ef.file : '');
+    return true;
+  } catch (e) { try { console.warn('[hbake] file load failed:', e); } catch (_) {} return false; }
+  finally { _HB.loadingFile = false; }
+}
+function _hbProgText(p) { return (_HB.loadingFile ? 'loading' : 'baking') + ' the overworld  ' + Math.round(p * 100) + '%'; }
+function _hbOnReady() {
+  try {
+    if (game._clipWantHub) return;
+    const T = game.sandwichTerrain, chunks = game.sandwichChunks;
+    if (!T || !T.HUB || !chunks || !chunks.size) return;
+    let n = 0;
+    for (const [key, c] of chunks) {
+      if (c.ground && c.ground.userData && c.ground.userData.hb) continue;   // built from the table already
+      if (!c.ground && !c.ceiling) { _swDisposeChunk(c); chunks.delete(key); n++; continue; }
+      if (c._reJob || c._reG || c._reC) _swDropRebake(c);
+      c._job = null; c._stale = true; n++;
+    }
+    if (n) { _swStreamIdle.idle = false; try { console.log('[hbake] the table landed under ' + n + ' chunks built on the function - re-streaming them from it'); } catch (_) {} }
+  } catch (e) { try { console.warn('[hbake] onReady failed:', e); } catch (_) {} }
+}
 function _hbPending() {
   try { return !!(_HB.on && !_HB.ready && !_HB.failed && game && game._clipWantHub && game.sandwichTerrain && game.sandwichTerrain.HUB); } catch (_) { return false; }
 }
 function _hbKick() {
   try {
     const T = game.sandwichTerrain;
-    if (!_HB.on || !T || !T.HUB || !game._clipWantHub || _HB.building) return;
-    const farSpec = _hbFarSpec(), sp = _HB.spWanted, N = Math.round(2 * _HB_BOX / sp);
+    if (!_HB.on || !T || !T.HUB || _HB.building) return;
+    const farSpec = game._clipWantHub ? _hbFarSpec() : [], sp = _HB.spWanted, N = Math.round(2 * _HB_BOX / sp);
     const key = _hbHash(T, farSpec, sp, N);
     if (_HB.ready && _HB.hash === key) return;
-    _HB.ready = false; _HB.failed = false; _HB.hash = key; _HB.sp = sp; _HB.N = N;
+    _HB.ready = false; _HB.failed = false; _HB.hash = key; _HB.sp = sp; _HB.N = N; _HB.waitUntil = 0;
     _HB.promise = _hbBuild(null, key, farSpec).catch((e) => { try { console.warn('[hbake] build threw:', e); } catch (_) {} _HB.failed = true; });
   } catch (e) { try { console.warn('[hbake] kick failed:', e); } catch (_) {} _HB.failed = true; }
 }
 async function _hbAwait(onProg) {
   if (onProg) _HB.onProg = onProg;
   if (!_HB.promise && _hbPending()) _hbKick();
-  if (_HB.promise) { try { await _HB.promise; } catch (_) {} }
+  if (_HB.promise) {
+    try {
+      if (game._clipWantHub || _HB.ready) await _HB.promise;
+      else {
+        if (!_HB.waitUntil) _HB.waitUntil = performance.now() + _HB_PHONE_WAIT_MS;
+        const left = _HB.waitUntil - performance.now();
+        if (left > 0) await Promise.race([_HB.promise, new Promise((r) => setTimeout(r, left))]);
+      }
+    } catch (_) {}
+  }
   _HB.onProg = null;
 }
 async function _hbBuild(onProg, key, farSpec) {
   if (onProg) _HB.onProg = onProg;
   const T = game.sandwichTerrain;
   if (!_HB.on || !T || !T.HUB) return;
-  if (!farSpec) farSpec = _hbFarSpec();
+  if (!farSpec) farSpec = game._clipWantHub ? _hbFarSpec() : [];   // (v54.24) a phone has no far tables
   if (!key) { _HB.sp = _HB.spWanted; _HB.N = Math.round(2 * _HB_BOX / _HB.sp); key = _hbHash(T, farSpec, _HB.sp, _HB.N); _HB.hash = key; _HB.ready = false; }
   _HB.building = true; _HB.cached = false; _HB.failed = false; _HB.prog = 0;
   const t0 = performance.now();
@@ -47266,23 +47366,30 @@ async function _hbBuild(onProg, key, farSpec) {
     const half = _hbHalf(); _HB.x0 = -half; _HB.z0 = -half;
     let hit = null; try { hit = await _hbCacheGet(key); } catch (e) { try { console.warn('[hbake] cache read failed:', e); } catch (_) {} }
     const fits = !!(hit && hit.base && hit.base.length === _HB.N * _HB.N && Array.isArray(hit.far) && hit.far.length === farSpec.length && hit.far.every((a, i) => a && a.length === farSpec[i].N * farSpec[i].N));
+    _HB.file = '';
     if (fits) {
       _HB.mean = [hit.base]; _HB.max = [hit.base]; _HB.dim = [_HB.N];
       for (let i = 0; i < farSpec.length; i++) farSpec[i].data = hit.far[i];
-      _HB.far = farSpec; _HB.cached = true; _HB.evals = 0; _HB.workers = 0;
+      _HB.far = farSpec.length ? farSpec : null; _HB.cached = true; _HB.evals = 0; _HB.workers = 0;
+    } else if (await _hbFileLoad(T, farSpec, key)) {
+      _HB.evals = 0; _HB.workers = 0;
+      _hbCachePut(key, { v: 1, base: _HB.mean[0], far: farSpec.map(f => f.data) });   // fire and forget
     } else {
       const g = _hbGameBits(), Tp = JSON.parse(JSON.stringify(T));
       let ok = false;
       try { ok = await _hbBakeWorkers(Tp, farSpec, g); } catch (e) { try { console.warn('[hbake] worker path threw:', e); } catch (_) {} }
+      if (!ok && !game._clipWantHub) throw new Error('no worker bake on this device - staying on the function');
       if (!ok) await _hbBakeMain(T);
       else _hbCachePut(key, { v: 1, base: _HB.mean[0], far: farSpec.map(f => f.data) });   // fire and forget
     }
     _HB.ms = Math.round(performance.now() - t0); _HB.prog = 1; _HB.ready = true;
     let bytes = _HB.mean[0].byteLength; if (_HB.far) for (const f of _HB.far) bytes += f.data.byteLength;
     try {
-      console.log('[hbake] ' + (_HB.cached ? 'cache hit' : ('baked on ' + _HB.workers + ' workers, ' + _HB.evals + ' evals')) + ': base ' + _HB.N + '^2 @' + _HB.sp + 'u' +
-        (_HB.far ? ' + far ' + _HB.far.map(f => f.N + '^2@' + f.sp).join(', ') : '') + ' in ' + _HB.ms + ' ms, ' + (bytes / 1048576).toFixed(1) + ' MB, key ' + key);
+      console.log('[hbake] ' + (_HB.cached ? 'cache hit' : (_HB.file ? ('shipped file ' + _HB.file) : ('baked on ' + _HB.workers + ' workers, ' + _HB.evals + ' evals'))) + ': base ' + _HB.N + '^2 @' + _HB.sp + 'u' +
+        (_HB.far ? ' + far ' + _HB.far.map(f => f.N + '^2@' + f.sp).join(', ') : '') + ' in ' + _HB.ms + ' ms, ' + (bytes / 1048576).toFixed(1) + ' MB, key ' + key +
+        (game._clipWantHub ? '' : ' (phone: base only)'));
     } catch (_) {}
+    try { _hbOnReady(); } catch (_) {}   // (v54.24) a phone's chunks built on the function meanwhile
     try {
       if (typeof _clipmap !== 'undefined' && _clipmap.on && _clipmap.levels) {
         for (const L of _clipmap.levels) { _clipBakeLevel(L); await new Promise(r => setTimeout(r, 0)); }
@@ -47294,6 +47401,26 @@ async function _hbBuild(onProg, key, farSpec) {
   } finally { _HB.building = false; _HB.onProg = null; }
 }
 try { window.__hbakeBuild = _hbBuild; } catch (_) {}
+try {
+  window.__hbakeSpec = function () {
+    const T = game.sandwichTerrain;
+    if (!T || !T.HUB) return { error: 'not in the overworld (the spec needs the hub\'s T)' };
+    if (!game._clipWantHub) return { error: 'export from DESKTOP: a phone has no far tables (and maybe another _CLIP_N)' };
+    const sp = _HB.spWanted, N = Math.round(2 * _HB_BOX / sp), half = N * sp * 0.5, farSpec = _hbFarSpec();
+    let sd = 12345; const rnd = () => { sd = (Math.imul(sd, 1664525) + 1013904223) >>> 0; return sd / 4294967296; };
+    const check = [], expect = [];
+    for (let i = 0; i < 48; i++) {
+      const R = (i < 32) ? _HB_BOX : _HB_FAR_MAX, x = (rnd() * 2 - 1) * R, z = (rnd() * 2 - 1) * R;
+      check.push(x, z); expect.push(_stGroundYCarved(x, z, T));
+    }
+    return { v: 1, build: (typeof LSS_BUILD !== 'undefined') ? LSS_BUILD : '?', made: new Date().toISOString(),
+             keyBase: _hbHash(T, [], sp, N), keyFar: _hbHash(T, farSpec, sp, N),
+             sp: sp, N: N, x0: -half, z0: -half, box: _HB_BOX, q: 8,
+             far: farSpec.map((f) => ({ sp: f.sp, N: f.N, x0: f.x0, z0: f.z0 })),
+             T: JSON.parse(JSON.stringify(T)), src: _hbWorkerSrc(_hbGameBits()),
+             fam: _hbFamily().map((f) => ({ name: f.name, src: f.toString() })), check: check, expect: expect };
+  };
+} catch (_) {}
 
 const _CLIP_PEAK = { on: 1, k: 2, w: 0.7, foot: 1.0, minLevel: 3 };
 try { window.__clipPeak = _CLIP_PEAK; } catch (_) {}
@@ -72776,7 +72903,7 @@ async function _prebakeWorldForLaunch() {
   };
   try {
     const _tA = _pbNow();
-    try { if (typeof _hbAwait === 'function') await _hbAwait((p) => { try { _pbSub('baking the overworld  ' + Math.round(p * 100) + '%'); } catch (_) {} }); } catch (_) {}
+    try { if (typeof _hbAwait === 'function') await _hbAwait((p) => { try { _pbSub(_hbProgText(p)); } catch (_) {} }); } catch (_) {}
     await _warmupYield();
     rep.ms.clip = Math.round(_pbNow() - _tA);
 
@@ -73742,7 +73869,7 @@ async function _rrStagedSwap(pending, ph) {
     await _warmupYield();
 
     t = _pbNow();
-    try { if (typeof _hbAwait === 'function') await _hbAwait((p) => { try { showLoadingOverlay(null, 'baking the overworld  ' + Math.round(p * 100) + '%'); } catch (_) {} }); } catch (_) {}
+    try { if (typeof _hbAwait === 'function') await _hbAwait((p) => { try { showLoadingOverlay(null, _hbProgText(p)); } catch (_) {} }); } catch (_) {}
     if (game._clipWantHub && !_clipmap.on && player && player.position) {
       try { rep.clipLevels = await _clipEnableSliced(player.position.x, player.position.z); }
       catch (e) { console.warn('[swap] clipmap enable failed:', e); }
@@ -78254,7 +78381,7 @@ function commitLoadout(key) {
     );
     _warmupPromise = _warmupPromise.then(() => {
       try { return _hbAwait((p) => { try { const _ls = document.getElementById('lss-loading-sub');
-        if (_ls) _ls.textContent = 'baking the overworld  ' + Math.round(p * 100) + '%'; } catch (_) {} }); }
+        if (_ls) _ls.textContent = _hbProgText(p); } catch (_) {} }); }
       catch (e) { try { console.warn('[hbake] build threw:', e); } catch (_) {} }
     });
   }

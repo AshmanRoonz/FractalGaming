@@ -63,6 +63,20 @@ def run(cmd, ok_codes=(0,)):
         sys.exit(f"FAILED ({r.returncode}): {' '.join(cmd)}")
     return r.returncode
 
+# (v54.24) THE OVERWORLD'S SHIPPED HEIGHT TABLES (LSS/hub_bake/, tools/hub_bake_file.mjs). They are generated, not
+# committed (34 MB a terrain change), so make sure the ones that ship describe the CURRENT field: --check passes when
+# the exported spec still matches lss.js and the files are there; if only the files are missing, bake them (~10 s); if
+# the terrain moved on since the spec was exported, say so and ship anyway - the game never loads a table whose key it
+# does not recognise, it just bakes in the browser as before (re-export window.__hbakeSpec() to fix that).
+if os.path.exists(os.path.join(REPO, "tools", "hub_bake_spec.json")):
+    _hb = subprocess.run(["node", os.path.join(REPO, "tools", "hub_bake_file.mjs"), "--check"], cwd=REPO)
+    if _hb.returncode != 0:
+        _hb2 = subprocess.run(["node", os.path.join(REPO, "tools", "hub_bake_file.mjs")], cwd=REPO)
+        if _hb2.returncode != 0:
+            print("WARNING: the overworld height tables are STALE (the terrain changed since tools/hub_bake_spec.json was "
+                  "exported). Deploying anyway - players will bake in the browser until the spec is re-exported "
+                  "(window.__hbakeSpec() in the game) and `node tools/hub_bake_file.mjs` is re-run.")
+
 # robocopy exit codes 0-7 are success variants.
 xd = []
 for d in EXCLUDE_DIRS:
