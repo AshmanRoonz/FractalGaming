@@ -25,11 +25,11 @@
   button:hover{background:#1d4a60}
   button.on{background:#2a6d5a;border-color:#4fb;color:#fff}
   .btns{display:flex;flex-wrap:wrap;gap:5px}
-  #hot{position:fixed;left:50%;bottom:12px;transform:translateX(-50%);display:flex;gap:4px;padding:5px;background:rgba(10,14,20,.7);border:1px solid #223;border-radius:8px}
-  .slot{width:34px;height:34px;border-radius:5px;border:2px solid #0000;position:relative;cursor:pointer;box-shadow:inset 0 -8px 12px #0006}
+  #hot{position:fixed;left:50%;bottom:12px;transform:translateX(-50%);display:flex;flex-wrap:wrap;justify-content:center;max-width:calc(100% - 24px);gap:4px;padding:5px;background:rgba(10,14,20,.7);border:1px solid #223;border-radius:8px}
+  .slot{width:28px;height:28px;border-radius:5px;border:2px solid #0000;position:relative;cursor:pointer;box-shadow:inset 0 -8px 12px #0006}
   .slot.sel{border-color:#fff;transform:translateY(-3px)}
   .slot b{position:absolute;left:2px;top:0;font-size:9px;color:#fffc;text-shadow:0 0 3px #000}
-  #mname{position:fixed;left:50%;bottom:62px;transform:translateX(-50%);color:#fff;text-shadow:0 0 4px #000;font-size:13px}
+  #mname{position:fixed;left:50%;bottom:92px;transform:translateX(-50%);color:#fff;text-shadow:0 0 4px #000;font-size:13px}
   #xh{position:fixed;left:50%;top:50%;width:14px;height:14px;margin:-7px 0 0 -7px;pointer-events:none}
   #xh:before,#xh:after{content:"";position:absolute;background:#fffb;box-shadow:0 0 2px #000}
   #xh:before{left:6px;top:0;width:2px;height:14px}#xh:after{top:6px;left:0;height:2px;width:14px}
@@ -77,6 +77,13 @@
     <div class="hint">Every tower is a neuron: it charges, fires, and sends packets down its light links; enough arrivals and the next one fires. A firing tower's facade gets busier and a ripple runs through the circuit ground. T pokes the tower you look at.</div>
   </div>
 
+  <div class="grp"><div class="t">frontage city · tile → frontage → divide → outline → prism</div>
+    <div class="btns"><button id="cityGo">build city</button><button id="cityRoll">reroll</button><button id="cityView">go: overview</button><button id="cityAve">go: avenue</button></div>
+    <div id="citySl"></div>
+    <div class="hint">circuit share 1 = the CIRCUIT CITY: every lot is hardware - racks, die towers, memory banks on fibre stilts, fibre groves - on a board floor, with skybridges and the 24 tallest wired as neurons. 0 = the brick / stone / glass city. N = day / dusk / night (night suits the circuits).</div>
+    <div class="hint" id="cityInfo">A street grid cuts the ground into blocks; each block edge facing a street is frontage; lots are cut across it (corner lots get two); each lot's outline is shaped, then extruded as a hollow shell in tiers. The facades are not drawn: the differentiation genes read the shells (thin wall = windows, shell corner = pier, lone pier = column, span = arch). G flips the views.</div>
+  </div>
+
   <div class="grp"><div class="t">world</div>
     <div class="row"><label>sun height</label><input id="sunEl" type="range" min="2" max="88" step="1" value="38"><span class="v" id="sunEl_v"></span></div>
     <div class="row"><label>sun turn</label><input id="sunAz" type="range" min="0" max="360" step="1" value="35"><span class="v" id="sunAz_v"></span></div>
@@ -90,7 +97,7 @@
 <div id="mname"></div>
 <div id="prevlbl">selected block, alone</div>
 <div id="fps"></div>
-<div id="help">click to fly · WASD · Space/Shift up/down · Ctrl fast<br>LMB break · RMB place · wheel / 1-9 0 - = pick block<br>M skin mode · R show roles · Tab panel · Esc free mouse<br>T poke a tower · G AI city / showcase · N day / dusk / night<br>pad: sticks fly/look · A/B up/down · RT place · LT break<br>LB/RB block · Y skin mode · X poke</div>
+<div id="help">click to fly · WASD · Space/Shift up/down · Ctrl fast<br>LMB break · RMB place · wheel / 1-9 0 - = pick block<br>M skin mode · R show roles · Tab panel · Esc free mouse<br>T poke a tower · G AI city / showcase (city: overview / avenue) · N day / dusk / night<br>pad: sticks fly/look · A/B up/down · RT place · LT break<br>LB/RB block · Y skin mode · X poke</div>
 
 <script>
 'use strict';
@@ -103,6 +110,11 @@ const cls2 = new Int8Array(W * H * D);
 const vox = new Uint32Array(W * H * D * 4);           // RGBA32UI: r = material, g = 26-bit "skin" neighbour mask, b/a = morphogens
 const idx = (x, y, z) => x + W * (y + H * z);
 const inb = (x, y, z) => x >= 0 && y >= 0 && z >= 0 && x < W && y < H && z < D;
+// which BUILDING a cell belongs to (0 = none: terrain, streets, the old world). A row's run stops where the building
+// does. The frontage city's party walls touch, and a run that carried on into the neighbour measured a different length
+// in every row of a storey - the window gene spaces windows by that length, so they came out sliced (2026-10-13).
+const bid = new Uint16Array(W * H * D);
+let curB = 0;                                          // set() stamps this
 let skinMode = 0;                                      // 0 fused, 1 per type, 2 isolated
 
 // eml DNA per material. A = k, gain, L, iso | B = fill, R(skin depth), noise scale, variation
@@ -127,6 +139,24 @@ const MATS = [
   { name: 'core',      k: 1.0, g: .02, L: .10, iso: .02, fill: 1, R: .20, sc: 1.0, vr: 0, kind: 0, c0: [.05,.05,.07], c1: [.03,.03,.04], em: 0, gloss: .85, pl: 0.25, fl: 0, ai: 3 },
   { name: 'fiber',     k: 1.0, g: .02, L: .15, iso: .02, fill: 1, R: .25, sc: 1.0, vr: 0, kind: 0, c0: [.16,.22,.27], c1: [.09,.13,.17], em: 0, gloss: .6,  pl: 1,   fl: 0, ai: 4 },
   { name: 'memory',    k: 2.0, g: .08, L: .12, iso: .02, fill: 1, R: .20, sc: 1.0, vr: 0, kind: 8, c0: [.10,.06,.14], c1: [.05,.03,.08], em: 0, gloss: .5,  pl: 0.4, fl: 0, ai: 5 },
+  // the FRONTAGE CITY (2026-10-13): road, pavement + concrete frames, curtain glass, white stone for civic fronts,
+  // copper for roofs and spires. First pass glass was cell-noise with glowing crevices: it read as LAVA, a honeycomb
+  // of light over every facade - glass is now smooth and dark, and the light comes from the ROOMS behind its windows.
+  // Copper and slate FLOW: a stepped hip roof of them is smoothed into one slope by the flow gene.
+  // ww / wp = the material's own window (half width, spacing; uF.zw): glass is a curtain wall - a window every block,
+  // floor to ceiling - and concrete has wide square modern ones. Everything else keeps the arched default.
+  { name: 'asphalt',   k: 1.4, g: .05, L: .14, iso: .03, fill: 1, R: .25, sc: 3.0, vr: 0, kind: 0, c0: [.14,.14,.15], c1: [.08,.08,.09], em: 0,   gloss: .05, pl: 0.2, fl: 0 },
+  { name: 'concrete',  k: 1.4, g: .04, L: .16, iso: .03, fill: 1, R: .28, sc: 1.4, vr: 0, kind: 0, c0: [.62,.61,.58], c1: [.52,.52,.50], em: 0,   gloss: .05, pl: 1,   fl: 0, ww: .55, wp: 2 },
+  { name: 'glass',     k: 1.0, g: .02, L: .12, iso: .02, fill: 1, R: .22, sc: 1.0, vr: 0, kind: 0, c0: [.16,.22,.28], c1: [.10,.14,.19], em: 0,   gloss: .95, pl: 1,   fl: 0, ww: .40, wp: 1 },
+  { name: 'marble',    k: 1.6, g: .05, L: .18, iso: .03, fill: 1, R: .30, sc: 1.3, vr: 0, kind: 1, c0: [.86,.84,.80], c1: [.72,.70,.66], em: 0,   gloss: .4,  pl: 1,   fl: 0, ww: .40, wp: -2 },
+  { name: 'copper',    k: 1.6, g: .10, L: .18, iso: .03, fill: 1, R: .28, sc: 2.0, vr: 0, kind: 0, c0: [.33,.60,.50], c1: [.30,.42,.33], em: 0,   gloss: .35, pl: 0.8, fl: 1 },
+  // a lit ROOM: the core one block in behind a facade - seen only through its windows, so it glows (no genes on it)
+  { name: 'room',      k: 1.0, g: .02, L: .12, iso: .02, fill: 1, R: .20, sc: 1.0, vr: 0, kind: 0, c0: [1.0,.80,.52], c1: [.92,.64,.38], em: .9,  gloss: 0,   pl: 0,   fl: 0 },
+  { name: 'slate',     k: 1.8, g: .08, L: .16, iso: .03, fill: 1, R: .28, sc: 1.6, vr: 0, kind: 6, c0: [.31,.34,.39], c1: [.19,.21,.25], em: 0,   gloss: .25, pl: 0.8, fl: 1 },
+  { name: 'sandstone', k: 1.6, g: .06, L: .18, iso: .03, fill: 1, R: .30, sc: 1.2, vr: 0, kind: 0, c0: [.80,.68,.50], c1: [.70,.58,.42], em: 0,   gloss: .05, pl: 1,   fl: 0, ww: .40, wp: -2 },
+  { name: 'yellow brick', k: 3.0, g: .18, L: .15, iso: .04, fill: 1, R: .30, sc: 1.0, vr: 0, kind: 4, c0: [.78,.66,.42], c1: [.62,.58,.52], em: 0, gloss: 0,  pl: 1,   fl: 0, ww: .40, wp: -2 },
+  // the city's brick: the world's brick (7, same per-brick tint) with the city's denser arched windows
+  { name: 'city brick', k: 3.0, g: .18, L: .15, iso: .04, fill: 1, R: .30, sc: 1.0, vr: 0, kind: 4, c0: [.64,.26,.18], c1: [.78,.75,.68], em: 0,   gloss: 0,   pl: 1,   fl: 0, ww: .40, wp: -2 },
 ];
 const DEFAULTS = JSON.parse(JSON.stringify(MATS));
 const NM = MATS.length - 1;
@@ -162,7 +192,8 @@ function morphAt(x, y, z) {
   const c = clsOf(x, y, z);
   let hDn = 0; while (hDn < 15 && clsOf(x, y - hDn - 1, z) === c) hDn++;        // place in its stack
   let hUp = 0; while (hUp < 15 && clsOf(x, y + hUp + 1, z) === c) hUp++;
-  const run = (dx, dz) => { let k = 0; while (k < 15 && solid(x + dx * (k + 1), y, z + dz * (k + 1))) k++; return k; };
+  const b0 = bid[idx(x, y, z)], same = (nx, nz) => solid(nx, y, nz) && bid[idx(nx, y, nz)] === b0;
+  const run = (dx, dz) => { let k = 0; while (k < 15 && same(x + dx * (k + 1), z + dz * (k + 1))) k++; return k; };
   const b = (hDn | hUp << 4 | run(-1, 0) << 8 | run(1, 0) << 12 | run(0, -1) << 16 | run(0, 1) << 20 | (c & 3) << 28) >>> 0;
   let a = 0;
   if (y > 0 && !solid(x, y - 1, z)) {                  // air beneath: an arch if the gap is held at both ends, else an overhang
@@ -192,7 +223,7 @@ function flowHeights(x, y, z) {
 }
 // LEVEL 2: the same plan rules at three times the scale. A run of 2-3 blocks is "thin" for a whole:
 // 1 = big column (2-3 wide both ways), 2/3 = thick wall along x / z, 0 = no level-2 role.
-function runLen(x, y, z, dx, dz) { let k = 0; while (k < 15 && solid(x + dx * (k + 1), y, z + dz * (k + 1))) k++; return k; }
+function runLen(x, y, z, dx, dz) { const b0 = bid[idx(x, y, z)]; let k = 0; while (k < 15 && solid(x + dx * (k + 1), y, z + dz * (k + 1)) && bid[idx(x + dx * (k + 1), y, z + dz * (k + 1))] === b0) k++; return k; }
 function calcCls2(x, y, z) {
   if (!mat[idx(x, y, z)]) return -1;
   const Lx = runLen(x, y, z, -1, 0) + runLen(x, y, z, 1, 0) + 1, Lz = runLen(x, y, z, 0, -1) + runLen(x, y, z, 0, 1) + 1;
@@ -210,9 +241,10 @@ function writeCell(x, y, z) {
   if (mat[i]) { const k2 = cls2[i];
     if (k2 > 0) { let d2 = 0; while (d2 < 15 && c2At(x, y - d2 - 1, z) === k2) d2++; let u2 = 0; while (u2 < 15 && c2At(x, y + u2 + 1, z) === k2) u2++;
       vox2[i] = (k2 | d2 << 2 | u2 << 6) >>> 0; }
-    // the stack of this material in this column (bottom y, top surface y): boards are fitted to it
-    let t1 = y; while (t1 + 1 < H && mat[idx(x, t1 + 1, z)] === mat[i]) t1++;
-    let b1 = y; while (b1 > 0 && mat[idx(x, b1 - 1, z)] === mat[i]) b1--;
+    // the stack of this material in this column (bottom y, top surface y): boards are fitted to it. It ends where the
+    // building id changes too - a circuit tower's tiers each carry their own, so each tier's boards fit that tier
+    let t1 = y; while (t1 + 1 < H && mat[idx(x, t1 + 1, z)] === mat[i] && bid[idx(x, t1 + 1, z)] === bid[i]) t1++;
+    let b1 = y; while (b1 > 0 && mat[idx(x, b1 - 1, z)] === mat[i] && bid[idx(x, b1 - 1, z)] === bid[i]) b1--;
     vox2[i] = (vox2[i] | ((t1 + 1) << 10) | (b1 << 16)) >>> 0; }
   if (!mat[i]) {
     // air — unless it is a GHOST: the room in a corner where a floor meets something standing on it.
@@ -256,9 +288,10 @@ function vn2(x, z) {
   return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
 }
 function fbm2(x, z) { let s = 0, a = .5, f = 1; for (let o = 0; o < 4; o++) { s += a * vn2(x * f, z * f); f *= 2; a *= .5; } return s / .9375; }
-function set(x, y, z, m) { if (inb(x, y, z)) mat[idx(x, y, z)] = m; }
+function set(x, y, z, m) { if (inb(x, y, z)) { const i = idx(x, y, z); mat[i] = m; bid[i] = curB; } }
 function genWorld() {
-  mat.fill(0);
+  worldKind = 'world';
+  mat.fill(0); bid.fill(0); curB = 0;
   const CX = 48, CZ = 40, flat = 15;
   for (let z = 0; z < D; z++) for (let x = 0; x < W; x++) {
     let h = Math.floor(9 + fbm2(x * .035, z * .035) * 16 + Math.pow(fbm2(x * .012 + 9, z * .012), 3) * 18);
@@ -385,6 +418,502 @@ function buildAIDistrict() {
   for (const k of srv) netLink(mind, k); for (const k of mems) netLink(mind, k);
 }
 
+// ---------------------------------------------------------------- THE FRONTAGE CITY
+// Owner (2026-10-13): "take a tile, find the frontage, divide it, then shape the outline. It then becomes a prism
+// extrusion, and the challenge is to make it interesting looking and varied enough."
+//   1 TILE      a street grid cuts the ground into blocks: five streets each way (4, 4, the AVENUE 6, 4, 4 wide: pavement,
+//               road, pavement), four blocks between them, widths jittered.
+//   2 FRONTAGE  every block edge faces a street; the avenue's edges are the prime frontage (taller, corners lead with it).
+//   3 DIVIDE    a perimeter block: a strip of lots `depth` deep along each frontage, cut ACROSS the frontage into lots
+//               lotMin..lotMax wide; the four corners are lots of their own with two frontages; the middle is a yard.
+//               Now and then (downtown more often) the whole block is one lot.
+//   4 OUTLINE   each lot's footprint in its own frame (u along the frontage, v away from it): chamfered / rounded /
+//               notched street corners, forecourt setbacks, L cuts, U and closed light courts, a ribbed front; a whole
+//               block becomes a court building or a podium.
+//   5 PRISM     the outline extruded as a SHELL - walls one block thick, hollow, a floor slab at the top of every storey -
+//               in tiers: a base (sometimes an ARCADE), the body (tall ones stand back from their podium and keep
+//               stepping back), the top storey with its cornice, then a crown (parapet, penthouse, spire).
+// Most of the variety is NOT drawn here. This lab's differentiation reads the shells: a one-thick run is a WALL and opens
+// windows by storey (every 3 blocks along, every 3.5 up - so a storey here is 4 cells: three of wall, then the slab), the
+// shell's corners are solid PIERS, the slabs are floor bands, a lone arcade pier is a turned COLUMN with base and capital,
+// the span over an opening is an ARCH. Honest massing rules, facades for free.
+// `stage` 1-5 stops the pipeline after that step, so each step can be seen on its own.
+// ROOMS (first look, same day): hollow shells read as RUINS - every window was a hole with sky behind it. A building
+// with room for it now has a core one block in behind its walls (the walls stay thin, so they keep their windows), and
+// each core cell is a lit room or a dark one, per storey - so at dusk the facades are windows, some lit, not holes.
+const MC = { asphalt: 18, concrete: 19, glass: 20, marble: 21, copper: 22, room: 23, slate: 24, sandstone: 25, ybrick: 26, brick: 27 };
+const CITY = { seed: 2077, stage: 5, lotMin: 4, lotMax: 9, depth: 7, maxH: 40, tower: .6, shape: .75, arcade: .45, setback: .6, lit: .5, fog: .003, ai: 1 };
+const CITY_G = 5;                                       // the street level (top ground cell)
+const CITY_STYLES = {
+  // walls (one picked per building) / base / trim (cornice, string course, parapet) / roof + floor slabs / hip = a pitched
+  // roof's material and how often / storey height in cells / height range in storeys
+  // (bases were rough stone 3 at first: at street level the arcades read as CAVES - the city's bases are dressed now)
+  brick:    { walls: [MC.brick, MC.brick, MC.brick, MC.ybrick], base: MC.sandstone, trim: MC.sandstone, roof: MC.concrete, hip: [MC.slate, .35], storey: 4, h: [2, 4] },
+  stone:    { walls: [MC.marble, MC.sandstone], base: MC.marble, trim: MC.marble, roof: MC.copper, hip: [MC.copper, .5], storey: 4, h: [3, 5] },
+  concrete: { walls: [MC.concrete], base: MC.concrete, trim: MC.marble, roof: MC.concrete, storey: 4, h: [3, 6] },   // (trim was rough stone 3: rubble rims)
+  glass:    { walls: [MC.glass], base: MC.concrete, trim: MC.marble, roof: MC.glass, storey: 5, h: [4, 6] },
+  ai:       { walls: [14], base: 15, trim: 15, roof: 15, storey: 4, h: [4, 7], ai: 1 },
+};
+const cityHash = (a, b, c) => { let h = (a * 374761393 + b * 668265263 + c * 1442695041) | 0; h = Math.imul(h ^ (h >>> 13), 1274126177); return ((h ^ (h >>> 16)) >>> 0) / 4294967296; };
+const CITY_VIEW = { x: -2, y: 54, z: -2, yaw: 0.785, pitch: -0.5 };
+const CITY_AVE = { x: 48, y: CITY_G + 2.2, z: 1, yaw: 0, pitch: 0.08 };   // under the avenue's trees; x set by genCity
+let worldKind = 'world', cityInfo = null;
+function cityRng(seed) { let s = (seed | 0) ^ 0x5bd1e995; return () => { s = (s + 0x6D2B79F5) | 0; let t = Math.imul(s ^ (s >>> 15), 1 | s); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+// mask helpers: a footprint is a wU x dV byte grid in the lot's own frame
+const mAt = (m, wU, dV, u, v) => u >= 0 && v >= 0 && u < wU && v < dV && m[u + v * wU] === 1;
+function mErode(m, wU, dV, n) {
+  let a = m;
+  for (let k = 0; k < n; k++) {
+    const b = new Uint8Array(wU * dV);
+    for (let v = 0; v < dV; v++) for (let u = 0; u < wU; u++)
+      if (mAt(a, wU, dV, u, v) && mAt(a, wU, dV, u - 1, v) && mAt(a, wU, dV, u + 1, v) && mAt(a, wU, dV, u, v - 1) && mAt(a, wU, dV, u, v + 1)) b[u + v * wU] = 1;
+    a = b;
+  }
+  return a.some((x) => x) ? a : null;
+}
+const mCount = (m) => { let n = 0; for (const x of m) n += x; return n; };
+function mCentre(m, wU, dV) {
+  let su = 0, sv = 0, n = 0;
+  for (let v = 0; v < dV; v++) for (let u = 0; u < wU; u++) if (m[u + v * wU]) { su += u; sv += v; n++; }
+  const cu = su / n, cv = sv / n; let best = null, bd = 1e9;
+  for (let v = 0; v < dV; v++) for (let u = 0; u < wU; u++) if (m[u + v * wU]) { const d = (u - cu) ** 2 + (v - cv) ** 2; if (d < bd) { bd = d; best = [u, v]; } }
+  return best;
+}
+function genCity() {
+  worldKind = 'city';
+  mat.fill(0); bid.fill(0); curB = 0; NET.nodes.length = 0; NET.links.length = 0;
+  const C = CITY, G = CITY_G, rnd = cityRng(C.seed), ri = (a, b) => a + Math.floor(rnd() * (b - a + 1));
+  const TOP = H - 3;                                    // the highest cell anything may use
+  const tally = { styles: {}, ops: {} }; const bump = (o, k) => { o[k] = (o[k] || 0) + 1; };
+  // ---- 1. TILES
+  const lay = (N) => {
+    const sw = [4, 4, 6, 4, 4], free = N - 2 - 22;
+    const ws = [0, 1, 2, 3].map(() => 14 + rnd() * 8), k = free / ws.reduce((a, b) => a + b, 0);
+    const wi = ws.map((w) => Math.max(12, Math.round(w * k))); wi[3] += free - wi.reduce((a, b) => a + b, 0);
+    const blocks = [], streets = []; let p = 1;
+    for (let i = 0; i < 5; i++) { streets.push({ a: p, b: p + sw[i] - 1, ave: i === 2 }); p += sw[i]; if (i < 4) { blocks.push([p, p + wi[i] - 1]); p += wi[i]; } }
+    return { blocks, streets };
+  };
+  const LX = lay(W), LZ = lay(D);
+  const aveX = (LX.streets[2].a + LX.streets[2].b) / 2, aveZ = (LZ.streets[2].a + LZ.streets[2].b) / 2;
+  CITY_AVE.x = aveX + .5;
+  for (let z = 0; z < D; z++) for (let x = 0; x < W; x++) for (let y = 0; y <= G; y++) set(x, y, z, y < G - 1 ? 3 : y < G ? 2 : MC.asphalt);
+  // pavement: a ring of concrete round every block
+  for (const [z0, z1] of LZ.blocks) for (const [x0, x1] of LX.blocks)
+    for (let z = z0 - 1; z <= z1 + 1; z++) for (let x = x0 - 1; x <= x1 + 1; x++) if (x < x0 || x > x1 || z < z0 || z > z1) set(x, G, z, MC.concrete);
+  // ---- 2. FRONTAGE (shown at stage 2: a line on every block edge - coral along the avenue, crystal on the streets)
+  // ---- 3. DIVIDE
+  const lots = [], yards = [];
+  const sideEnd = (front, side) => (front === 'N' || front === 'S') ? (side === 'W' ? 0 : 1) : (side === 'N' ? 0 : 1);
+  LZ.blocks.forEach(([z0, z1], bj) => LX.blocks.forEach(([x0, x1], bi) => {
+    const E = { W: LX.streets[bi].ave, E: LX.streets[bi + 1].ave, N: LZ.streets[bj].ave, S: LZ.streets[bj + 1].ave };
+    const bw = x1 - x0 + 1, bd = z1 - z0 + 1;
+    const dc = Math.min(1, Math.hypot((x0 + x1) / 2 - aveX, (z0 + z1) / 2 - aveZ) / 46);   // 0 at the avenues' crossing
+    const meta = { bi, bj, dc, x0b: x0, x1b: x1, z0b: z0, z1b: z1, E };
+    if (C.stage === 1) { for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) set(x, G, z, MC.concrete); }
+    if (C.stage === 2) {
+      for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) {
+        set(x, G, z, MC.concrete);
+        const onW = x === x0, onE = x === x1, onN = z === z0, onS = z === z1;
+        if (onW || onE || onN || onS) set(x, G + 1, z, (onW && E.W) || (onE && E.E) || (onN && E.N) || (onS && E.S) ? 10 : 8);
+      }
+      return;
+    }
+    if (C.stage === 1) return;
+    const whole = rnd() < (dc < .45 ? .3 : .07);
+    if (whole) {
+      const front = E.W ? 'W' : E.E ? 'E' : E.N ? 'N' : E.S ? 'S' : ['N', 'S', 'W', 'E'][ri(0, 3)];
+      lots.push(Object.assign({ x0, z0, x1, z1, front, corner: false, whole: true, ave: E.W || E.E || E.N || E.S }, meta)); return;
+    }
+    const d = Math.max(4, Math.min(Math.floor(Math.min(bw, bd) / 2) - 1, C.depth + ri(-1, 1)));
+    const corner = (cx0, cz0, cx1, cz1, ns, we) => {   // two frontages; the avenue one leads
+      const front = E[we] && !E[ns] ? we : ns, side = front === ns ? we : ns;
+      lots.push(Object.assign({ x0: cx0, z0: cz0, x1: cx1, z1: cz1, front, corner: true, sideAt: sideEnd(front, side), whole: false, ave: E[ns] || E[we] }, meta));
+    };
+    // a strip too short for a lot of its own (a 2-3 wide sliver) goes to the corner before it, PINWHEEL-wise: NW grows
+    // east, NE south, SE west, SW north - so no two corners grow into the same cells
+    const lenX = bw - 2 * d, lenZ = bd - 2 * d, ex = lenX > 0 && lenX < C.lotMin ? lenX : 0, ez = lenZ > 0 && lenZ < C.lotMin ? lenZ : 0;
+    corner(x0, z0, x0 + d - 1 + ex, z0 + d - 1, 'N', 'W');
+    corner(x1 - d + 1, z0, x1, z0 + d - 1 + ez, 'N', 'E');
+    corner(x1 - d + 1 - ex, z1 - d + 1, x1, z1, 'S', 'E');
+    corner(x0, z1 - d + 1 - ez, x0 + d - 1, z1, 'S', 'W');
+    const strip = (front, a0, a1, f0, f1) => {         // cut across the frontage: a = the along-frontage coordinate
+      let a = a0;
+      while (a <= a1) {
+        let w = ri(C.lotMin, Math.max(C.lotMin, C.lotMax));
+        if (a1 - (a + w - 1) < C.lotMin) w = a1 - a + 1;                   // the last lot takes the rest
+        const b = a + w - 1;
+        const L = (front === 'N' || front === 'S') ? { x0: a, x1: b, z0: f0, z1: f1 } : { z0: a, z1: b, x0: f0, x1: f1 };
+        lots.push(Object.assign(L, { front, corner: false, whole: false, ave: E[front] }, meta));
+        a = b + 1;
+      }
+    };
+    if (!ex) { strip('N', x0 + d, x1 - d, z0, z0 + d - 1); strip('S', x0 + d, x1 - d, z1 - d + 1, z1); }
+    if (!ez) { strip('W', z0 + d, z1 - d, x0, x0 + d - 1); strip('E', z0 + d, z1 - d, x1 - d + 1, x1); }
+    if (bw - 2 * d >= 1 && bd - 2 * d >= 1) yards.push({ x0: x0 + d, z0: z0 + d, x1: x1 - d, z1: z1 - d });
+  }));
+  if (C.stage <= 2) { cityInfo = { stage: C.stage, blocks: 16 }; AIBASE = G + 1; rebuildMasks(); return; }
+  const frameOf = (L) => {                              // (u, v) -> (x, z): u along the frontage, v away from the street
+    const ns = L.front === 'N' || L.front === 'S';
+    const wU = ns ? L.x1 - L.x0 + 1 : L.z1 - L.z0 + 1, dV = ns ? L.z1 - L.z0 + 1 : L.x1 - L.x0 + 1;
+    const to = L.front === 'N' ? (u, v) => [L.x0 + u, L.z0 + v] : L.front === 'S' ? (u, v) => [L.x0 + u, L.z1 - v]
+             : L.front === 'W' ? (u, v) => [L.x0 + v, L.z0 + u] : (u, v) => [L.x1 - v, L.z0 + u];
+    return { wU, dV, to };
+  };
+  // ---- 4. OUTLINE
+  // `rect`: a circuit building keeps to right angles - every vertical edge of one wears a frame post, so a chamfer or a
+  // round corner (a staircase of cells) became a staircase of posts
+  const shapeLot = (L, F, rect) => {
+    const { wU, dV } = F, m = new Uint8Array(wU * dV).fill(1), ops = [], S = C.shape;
+    const cut = (f) => { for (let v = 0; v < dV; v++) for (let u = 0; u < wU; u++) if (f(u, v)) m[u + v * wU] = 0; };
+    if (L.whole) {
+      if (rnd() < .5) { const t = ri(4, 5); if (wU - 2 * t >= 2 && dV - 2 * t >= 2) { cut((u, v) => u >= t && u < wU - t && v >= t && v < dV - t); ops.push('court building'); } }
+      else ops.push('podium');
+      const c = ri(2, 4); if (!rect && rnd() < .6 * S) { cut((u, v) => Math.min(u, wU - 1 - u) + Math.min(v, dV - 1 - v) < c); ops.push('chamfered block'); }
+      return { m, ops };
+    }
+    let turret = null;
+    if (L.corner && rnd() < .8 * S) {                   // the street corner
+      const cu = L.sideAt === 0 ? (u) => u : (u) => wU - 1 - u, c = Math.max(2, Math.round(Math.min(wU, dV) * (.3 + .25 * rnd()))), k = rect ? 1 : rnd();
+      if (k < .4) { cut((u, v) => cu(u) + v < c); ops.push('chamfer'); }
+      else if (k < .8) { const r = c + 1; cut((u, v) => { const a = r - cu(u) - .5, b = r - v - .5; return a > 0 && b > 0 && a * a + b * b > r * r; }); ops.push('round corner'); turret = { cu, c: r }; }
+      else { cut((u, v) => cu(u) < c - 1 && v < c - 1); ops.push('notch'); }
+    }
+    if (!L.corner && dV >= 6 && rnd() < .25 * S) { cut((u, v) => v === 0); ops.push('forecourt'); }
+    if (dV >= 7 && wU >= 5 && rnd() < .35 * S) {        // an L: a rear corner cut away
+      const left = rnd() < .5, cu0 = Math.max(2, Math.floor(wU * (.4 + .2 * rnd()))), cv0 = Math.floor(dV * (.5 + .15 * rnd()));
+      cut((u, v) => v >= cv0 && (left ? u < cu0 : u >= wU - cu0)); ops.push('L');
+    } else if (dV >= 8 && wU >= 8 && rnd() < .4 * S) {  // a light court: open at the back (U) or closed
+      const open = rnd() < .5, c0 = Math.floor(dV * .45), c1 = open ? dV - 1 : dV - 3;
+      cut((u, v) => u >= 2 && u <= wU - 3 && v >= c0 && v <= c1); ops.push(open ? 'U' : 'light court');
+    }
+    // PILASTERS: the front row cut back except every third cell. Every third, not every other: the window gene spaces its
+    // windows 3 apart from the run's start, so the pilasters land BETWEEN windows (every other split windows in half)
+    if (!rect && wU >= 5 && rnd() < .2 * S) { cut((u, v) => v === 0 && (u % 3) !== 0 && u > 0 && u < wU - 1); ops.push('pilasters'); }
+    return { m, ops, turret };
+  };
+  // ---- 5. PRISM: one tier = a run of storeys over one mask, as a shell
+  const emit = (F, m, y0, y1, o) => {
+    const { wU, dV, to } = F, inM = (u, v) => mAt(m, wU, dV, u, v);
+    const fv = []; for (let u = 0; u < wU; u++) { let v = 0; while (v < dV && !inM(u, v)) v++; fv.push(v); }   // each column's front cell
+    const core = o.rooms ? mErode(m, wU, dV, 2) : null;          // the rooms: one block in behind the walls
+    for (let yy = y0; yy <= y1; yy++) {
+      const yW = G + 1 + yy; if (yW > TOP) break;
+      const slab = ((yy + 1) % o.storey === 0) || yy === o.roofY;
+      const sIdx = (yy / o.storey) | 0, sLit = o.rooms ? o.rooms.lit * (.3 + 1.4 * cityHash(o.rooms.seed, sIdx, 77)) : 0;   // some floors busier than others
+      for (let v = 0; v < dV; v++) for (let u = 0; u < wU; u++) {
+        if (!inM(u, v)) continue;
+        const edge = !inM(u - 1, v) || !inM(u + 1, v) || !inM(u, v - 1) || !inM(u, v + 1);
+        let put = edge ? ((yy === o.roofY && o.trim) ? o.trim : o.wall) : (slab ? o.slab : 0);
+        const arcade = o.arcade && yy < o.arcade;
+        if (arcade) {                                   // the ARCADE: piers on the front, a gallery, a back wall two in
+          const sideEdge = !inM(u - 1, v) || !inM(u + 1, v);
+          if (v === fv[u] && !sideEdge) put = (u % 3 === 0) ? o.wall : 0;
+          else if (v === fv[u] + 2 && !edge) put = o.wall;
+        }
+        const [x, z] = to(u, v);
+        if (!put && core && core[u + v * wU] && !arcade) put = cityHash(x, yW + o.rooms.seed, z) < sLit ? MC.room : MC.asphalt;
+        if (put) set(x, yW, z, put);
+      }
+    }
+  };
+  const isEdge = (m, wU, dV, u, v) => mAt(m, wU, dV, u, v) && (!mAt(m, wU, dV, u - 1, v) || !mAt(m, wU, dV, u + 1, v) || !mAt(m, wU, dV, u, v - 1) || !mAt(m, wU, dV, u, v + 1));
+  const ring = (F, m, yy, mt) => { const { wU, dV, to } = F; if (G + 1 + yy > TOP) return;
+    for (let v = 0; v < dV; v++) for (let u = 0; u < wU; u++) if (isEdge(m, wU, dV, u, v)) { const [x, z] = to(u, v); set(x, G + 1 + yy, z, mt); } };
+  const fill = (F, m, yy, mt) => { const { wU, dV, to } = F; if (G + 1 + yy > TOP) return;
+    for (let v = 0; v < dV; v++) for (let u = 0; u < wU; u++) if (m[u + v * wU]) { const [x, z] = to(u, v); set(x, G + 1 + yy, z, mt); } };
+  // a projecting CORNICE: the ring just OUTSIDE the outline, wherever nothing stands yet. Air beneath and free at its
+  // ends, so the overhang gene hangs teeth under it - dentils.
+  const cornice = (F, m, yy, mt) => { const { wU, dV, to } = F; const yW = G + 1 + yy; if (yW > TOP) return;
+    for (let v = -1; v <= dV; v++) for (let u = -1; u <= wU; u++) {
+      if (mAt(m, wU, dV, u, v) || !(mAt(m, wU, dV, u - 1, v) || mAt(m, wU, dV, u + 1, v) || mAt(m, wU, dV, u, v - 1) || mAt(m, wU, dV, u, v + 1))) continue;
+      const [x, z] = to(u, v); if (inb(x, yW, z) && !mat[idx(x, yW, z)]) set(x, yW, z, mt);
+    } };
+  const pickStyle = (L) => {
+    const down = 1 - L.dc, r = rnd();
+    if (down > .55) return r < .4 ? 'glass' : r < .65 ? 'ai' : r < .85 ? 'concrete' : 'stone';
+    if (down > .25) return r < .35 ? 'concrete' : r < .65 ? 'stone' : r < .85 ? 'brick' : 'glass';
+    return r < .6 ? 'brick' : r < .85 ? 'stone' : 'concrete';
+  };
+  // ---- THE CIRCUIT CITY (owner, same day: "i really like the cyberpunk buildings with circuits... let's make more of
+  // just those"). `ai` = the share of lots that become circuit hardware. A circuit building is SOLID (no rooms, no
+  // windows: the boards are its facade), keeps to right angles, and is one of four kinds:
+  //   RACK tower   board-faced racks stepping back, crowned by a memory penthouse, a fibre mast or chips on the roof
+  //   CORE tower   the landmarks (whole blocks, avenue corners): a die podium (circuit2 on every face), a rack shaft,
+  //                a die crown, a fibre mast - tiers alternate so each one wears its own boards
+  //   MEMORY bank  a memory block on fibre stilts (the district's "memory banks on fibre stems")
+  //   FIBRE grove  a board plinth with 2x2 fibre shafts of mixed heights (level-2 columns: they turn, their flutes glow)
+  // Every TIER gets its own building id: a face's boards are fitted to its material's stack, and that stack used to run
+  // on down through the tier beneath (same material inside), so a setback tower's boards straddled the setback line.
+  const AIM = { sub: 13, rack: 14, core: 15, fiber: 16, mem: 17 };
+  const circuit = C.ai >= .5;
+  const aiTops = [];                                    // neuron candidates: every circuit building's top
+  const aiBuild = (L, F, shp, li) => {
+    const { wU, dV, to } = F, down = 1 - L.dc, r0 = rnd(), small = wU <= 5 || dV <= 5;
+    // (first mix: 25 core towers, 17 memory slabs and 50 masts out of 99 - the cores' copper dies went muddy brown en
+    // masse, the memory slabs read as giant purple walls, the masts as a forest of chimneys. Racks carry the city;
+    // dies are for landmarks)
+    const kind = L.whole ? (r0 < .65 ? 'core' : 'rack') : (L.corner && L.ave) ? (r0 < .5 ? 'core' : 'rack')
+               : small ? (r0 < .35 ? 'grove' : 'rack') : r0 < .6 ? 'rack' : r0 < .74 ? 'memory' : r0 < .84 ? 'core' : 'grove';
+    bump(tally.styles, kind);
+    let hs = (kind === 'core' ? 4.5 : kind === 'memory' ? 2.5 : 3.5) + rnd() * 3;
+    hs *= 1 + 1.6 * down * down * C.tower; if (L.corner) hs *= 1.2; if (L.ave) hs *= 1.15; if (L.whole) hs *= 1.2;
+    const Hc = Math.max(8, Math.min(Math.round(hs) * 4, C.maxH, TOP - G - 1)), tall = Hc >= 24;
+    let tierN = 0, m = shp.m, y = 0;
+    const tier = () => { curB = 4096 + li * 16 + (tierN++ & 15); };
+    const solid = (mm, y0, y1, mt) => { tier(); for (let yy = y0; yy <= y1; yy++) fill(F, mm, yy, mt); };
+    const erode = (n) => { const e = mErode(m, wU, dV, n); if (e && mCount(e) >= 16) { m = e; return true; } return false; };
+    const at = (u, v, yy, mt) => { const [x, z] = to(u, v); if (G + 1 + yy <= TOP) set(x, G + 1 + yy, z, mt); };
+    // a fibre mast: 2x2 where it fits (a level-2 column: a fluted shaft), else a lone 1x1 stack
+    const mast = (h) => {
+      const c = mCentre(m, wU, dV), two = mAt(m, wU, dV, c[0] + 1, c[1]) && mAt(m, wU, dV, c[0], c[1] + 1) && mAt(m, wU, dV, c[0] + 1, c[1] + 1);
+      tier(); for (let s = 0; s < h; s++) for (const [a, b] of two ? [[0, 0], [1, 0], [0, 1], [1, 1]] : [[0, 0]]) at(c[0] + a, c[1] + b, y + s, AIM.fiber);
+      y += h; bump(tally.ops, 'fibre mast');
+    };
+    // chips and capacitors on a flat roof, like the district's board: 2x2 core dies, 1x1 fibre caps two high
+    const chips = (n) => {
+      const e = mErode(m, wU, dV, 1); if (!e) return;
+      const cells = []; for (let v = 0; v < dV; v++) for (let u = 0; u < wU; u++) if (e[u + v * wU]) cells.push([u, v]);
+      for (let i = 0; i < n; i++) {
+        const [u, v] = cells[ri(0, cells.length - 1)]; tier();
+        if (rnd() < .6 && mAt(e, wU, dV, u + 1, v) && mAt(e, wU, dV, u, v + 1) && mAt(e, wU, dV, u + 1, v + 1)) for (const [a, b] of [[0, 0], [1, 0], [0, 1], [1, 1]]) at(u + a, v + b, y, AIM.core);
+        else { at(u, v, y, AIM.fiber); at(u, v, y + 1, AIM.fiber); }
+      }
+      bump(tally.ops, 'roof chips');
+    };
+    if (kind === 'grove') {
+      solid(m, 0, 0, AIM.sub);                          // a board plinth, then shafts on a 3-block grid
+      let best = null;
+      for (let v = 1; v + 1 < dV; v += 3) for (let u = 1; u + 1 < wU; u += 3) {
+        if (!(mAt(m, wU, dV, u, v) && mAt(m, wU, dV, u + 1, v) && mAt(m, wU, dV, u, v + 1) && mAt(m, wU, dV, u + 1, v + 1))) continue;
+        const h = Math.max(6, Math.round((Hc + 6) * (.3 + .7 * rnd())));
+        tier(); for (let s = 1; s <= h; s++) for (const [a, b] of [[0, 0], [1, 0], [0, 1], [1, 1]]) at(u + a, v + b, s, AIM.fiber);
+        if (!best || h > best.h) best = { u: u + 1, v: v + 1, h };
+      }
+      if (best) { const [x, z] = to(best.u, best.v); aiTops.push({ x, z, top: Math.min(TOP, G + 2 + best.h), r: 1.5, kind }); }
+      return;
+    }
+    if (kind === 'memory') {
+      const stem = 4 * ri(1, 2);
+      tier();                                           // the stilts: the outline's corners and every third edge cell
+      for (let v = 0; v < dV; v++) for (let u = 0; u < wU; u++) {
+        if (!isEdge(m, wU, dV, u, v)) continue;
+        const cornerC = (!mAt(m, wU, dV, u - 1, v) || !mAt(m, wU, dV, u + 1, v)) && (!mAt(m, wU, dV, u, v - 1) || !mAt(m, wU, dV, u, v + 1));
+        if (cornerC || (u + v) % 3 === 0) for (let s = 0; s < stem; s++) at(u, v, s, AIM.fiber);
+      }
+      const top = Math.min(Math.max(stem + 3, Hc - 1), stem + 11);   // a bank, not a slab: three storeys at most
+      solid(m, stem, top, AIM.mem); y = top + 1;
+      chips(ri(1, 3));
+    } else if (kind === 'rack') {
+      if (tall && rnd() < C.setback) { solid(m, 0, 7, AIM.rack); y = 8; if (erode(rnd() < .5 ? 2 : 1)) bump(tally.ops, 'podium + tower'); }
+      while (y < Hc) {
+        const y1 = Math.min(Hc, y + 4 * ri(2, 4)) - 1;
+        solid(m, y, y1, AIM.rack); y = y1 + 1;
+        if (tall && y < Hc && rnd() < C.setback * .6 && erode(1)) bump(tally.ops, 'setback');
+      }
+      const k = rnd(), pm = mErode(m, wU, dV, 1);
+      if (k < .3 && pm && mCount(pm) >= 9) { m = pm; const h = 4 * ri(1, 2); solid(m, y, y + h - 1, AIM.mem); y += h; bump(tally.ops, 'memory crown'); }
+      else if (tall && k < .55) mast(ri(4, 10));
+      else chips(ri(2, 4));
+    } else {                                            // core: die podium, rack shaft, die crown, mast
+      const podH = 4 * ri(2, 3);
+      solid(m, 0, podH - 1, AIM.core); y = podH;
+      if (Hc - podH >= 12) {
+        erode(1); const shaftTop = Hc - 8;
+        solid(m, y, shaftTop - 1, AIM.rack); y = shaftTop;
+        erode(1); solid(m, y, y + 7, AIM.core); y += 8;
+      }
+      mast(ri(5, 10));
+    }
+    const c = mCentre(m, wU, dV), [x, z] = to(c[0], c[1]);
+    aiTops.push({ x: x + .5, z: z + .5, top: Math.min(TOP, G + 1 + y) + .5, r: Math.max(wU, dV) / 2, kind });
+  };
+  const PAINT = [MC.marble, 4, 3, MC.concrete, 21, 2];
+  lots.forEach((L, li) => {
+    const F = frameOf(L), { wU, dV, to } = F;
+    const sk = rnd() < C.ai ? 'ai' : pickStyle(L), st = CITY_STYLES[sk];
+    const shp = shapeLot(L, F, sk === 'ai');
+    shp.ops.forEach((o) => bump(tally.ops, o)); if (sk !== 'ai' || C.stage < 5) bump(tally.styles, sk);
+    // the lot's ground: stage 3 paints each lot its own colour; later, pavement in front, grass behind
+    curB = 0;
+    for (let v = 0; v < dV; v++) for (let u = 0; u < wU; u++) {
+      const [x, z] = to(u, v);
+      set(x, G, z, C.stage === 3 ? PAINT[li % PAINT.length] : (shp.m[u + v * wU] || v <= 1) ? MC.concrete : 1);
+    }
+    curB = li + 1;                                      // everything from here on is this lot's building
+    const wall = st.walls[ri(0, st.walls.length - 1)];
+    if (C.stage === 3) return;
+    if (C.stage === 4) { ring(F, shp.m, 0, wall); return; }
+    if (sk === 'ai') { aiBuild(L, F, shp, li); return; }
+    // ---- the height: the style's range, taller downtown, on the avenue, at corners and for whole blocks
+    const down = 1 - L.dc;
+    let hs = st.h[0] + rnd() * (st.h[1] - st.h[0]);
+    // downtown-ness SQUARED: linear, nearly every block in a 96-wide city counted as downtown - a town of towers
+    hs *= 1 + 1.6 * down * down * C.tower; if (L.corner) hs *= 1.2; if (L.ave) hs *= 1.15; if (L.whole) hs *= 1.2;
+    let Hc = Math.min(Math.round(hs) * st.storey, C.maxH, TOP - G - 1);
+    Hc = Math.max(st.storey * 2, Hc - (Hc % st.storey));
+    const tall = Hc >= st.storey * 6;
+    const baseH = st.storey * ((tall && rnd() < .6) ? 2 : 1);
+    const arc = (!L.whole && dV >= 5 && wU >= 4 && rnd() < C.arcade * ((sk === 'stone' || sk === 'concrete') ? 1.3 : .6)) ? st.storey - 1 : 0;
+    if (arc) bump(tally.ops, 'arcade');
+    const rooms = { lit: C.lit, seed: li * 131 + C.seed % 997 };
+    // the base, a string course of trim along its top
+    emit(F, shp.m, 0, baseH - 1, { wall: st.base, slab: st.base, storey: st.storey, arcade: arc, rooms, trim: st.trim, roofY: baseH - 1 });
+    // the body: tall ones stand back from the podium, then keep stepping back every few storeys
+    let m = shp.m, y = baseH;
+    if (tall && rnd() < C.setback) {
+      // the tower stands TWO back from the podium's edge when it can, and the edge gets a balustrade or a hedge: one
+      // back would put the rail against the tower's wall, and a wall with anything against it is no longer thin -
+      // the storey above every terrace lost its windows
+      // (a tower may not shrink below ~4x4: a 3x3 shell is corner piers round a window - it read as STACKED CUBES)
+      const e2 = mErode(m, wU, dV, 2), e = e2 && mCount(e2) >= 16 ? e2 : mErode(m, wU, dV, 1);
+      if (e && mCount(e) >= 16) {
+        if (e === e2) { ring(F, m, y, rnd() < .5 ? 6 : st.trim); bump(tally.ops, 'terrace'); }
+        m = e; bump(tally.ops, 'podium + tower');
+      }
+    }
+    const seg = st.storey * ri(2, 4);
+    while (y < Hc - st.storey) {
+      const y1 = Math.min(Hc - st.storey, y + seg) - 1;
+      emit(F, m, y, y1, { wall, slab: st.roof, storey: st.storey, rooms });
+      y = y1 + 1;
+      if (tall && y < Hc - st.storey && rnd() < C.setback * .6) { const e = mErode(m, wU, dV, 1); if (e && mCount(e) >= 16) { m = e; bump(tally.ops, 'setback'); } }
+    }
+    // the top storey, its roof edge in the trim, then a crown chosen by what the building is
+    emit(F, m, y, y + st.storey - 1, { wall, slab: st.roof, storey: st.storey, trim: st.trim, roofY: y + st.storey - 1, rooms });
+    if ((sk === 'stone' || sk === 'brick') && rnd() < .55) { cornice(F, m, y + st.storey - 1, st.trim); bump(tally.ops, 'cornice'); }
+    y += st.storey;
+    // a rounded street corner carries on up as a TURRET: the quarter-round end of the outline, a storey over the roof,
+    // capped with a copper hip (it flows into a cone-ish dome). Only where the body still has that corner.
+    let turreted = false;
+    if (shp.turret && m === shp.m && rnd() < .75) {
+      const T = shp.turret, tm = new Uint8Array(wU * dV);
+      for (let v = 0; v < dV; v++) for (let u = 0; u < wU; u++) if (m[u + v * wU] && T.cu(u) <= T.c && v <= T.c) tm[u + v * wU] = 1;
+      if (mCount(tm) >= 4) {
+        emit(F, tm, y, y + st.storey - 1, { wall, slab: st.roof, storey: st.storey, trim: st.trim, roofY: y + st.storey - 1 });
+        let hm = tm, hy = y + st.storey, n = 0; while (hm && n < 4) { fill(F, hm, hy, MC.copper); hm = mErode(hm, wU, dV, 1); hy++; n++; }
+        bump(tally.ops, 'turret'); turreted = true;
+      }
+    }
+    const k = rnd(), pm = mErode(m, wU, dV, 2), roomy = pm && mCount(pm) >= 4;
+    // a needle: a lone stack, so the column gene turns it (base and capital flares). Short ones only - a 9-high copper
+    // one read as a PIPE, and a 3x3 drum under it (a level-2 column) flared into a BELL. Masonry towers get steeples.
+    const spire = (sm, sh) => { const c = mCentre(m, wU, dV), [x, z] = to(c[0], c[1]); for (let s = 0; s < sh; s++) if (G + 1 + y + s <= TOP) set(x, G + 1 + y + s, z, sm); y += sh; };
+    // a STEEPLE: the hip roof's rule (step the outline in a block per layer) at two layers a step - twice as steep
+    const steeple = (mt) => { let hm = m, n = 0; while (hm && n < 12) { fill(F, hm, y, mt); if (n % 2) hm = mErode(hm, wU, dV, 1); y++; n++; } };
+    if (turreted) { if (k < .6) { ring(F, m, y, st.trim); bump(tally.ops, 'parapet'); } }   // the turret IS the crown
+    else if (st.hip && rnd() < st.hip[1]) {             // a pitched roof: the outline stepped in a block per layer; it FLOWS
+      let hm = m, n = 0;
+      while (hm && n < 6) { fill(F, hm, y, st.hip[0]); hm = mErode(hm, wU, dV, 1); y++; n++; }
+      bump(tally.ops, 'hip roof');                      // (no lantern on top: a lone copper stack read as a pipe)
+    }
+    else if (k < .4) { ring(F, m, y, st.trim); bump(tally.ops, 'parapet'); }
+    else if (roomy && k < .7) { emit(F, pm, y, y + st.storey - 1, { wall, slab: st.roof, storey: st.storey, trim: st.trim, roofY: y + st.storey - 1, rooms }); y += st.storey; bump(tally.ops, 'penthouse'); }
+    else if (tall && k < .8) {
+      if (sk === 'glass') { spire(8, ri(3, 6)); bump(tally.ops, 'crystal spire'); }
+      else if (sk === 'concrete') { spire(9, ri(4, 7)); bump(tally.ops, 'antenna'); }   // obsidian: fibre (16) is AI hardware - it glowed
+      else { steeple(sk === 'stone' ? MC.copper : MC.slate); bump(tally.ops, 'steeple'); }
+    }
+    else if (sk === 'brick' && pm) {                    // a water tank on legs: a lone stack, so it turns
+      const c = mCentre(pm, wU, dV), [x, z] = to(c[0], c[1]); for (let s = 0; s < 3; s++) set(x, G + 1 + y + s, z, 5);
+      bump(tally.ops, 'water tank');
+    }
+  });
+  curB = 0;
+  // a circuit city stands on the BOARD: streets, pavements and yards all become substrate (the district's plaza, city-
+  // wide), its yards carry chips and capacitors instead of trees, its avenues fibre posts instead of trees and lamps
+  if (circuit && C.stage >= 4) {
+    for (let z = 0; z < D; z++) for (let x = 0; x < W; x++) { const i = idx(x, G, z), g = mat[i]; if (g === MC.asphalt || g === MC.concrete || g === 1) mat[i] = AIM.sub; }
+    for (const Y of yards) {
+      for (let z = Y.z0; z <= Y.z1; z++) for (let x = Y.x0; x <= Y.x1; x++) set(x, G, z, AIM.sub);
+      const n = Math.floor((Y.x1 - Y.x0 + 1) * (Y.z1 - Y.z0 + 1) / 10);
+      for (let i = 0; i < n; i++) {
+        const x = ri(Y.x0, Y.x1 - 1), z = ri(Y.z0, Y.z1 - 1); curB = 50000 + i;
+        if (mat[idx(x, G + 1, z)]) continue;
+        if (rnd() < .55) { if (!mat[idx(x + 1, G + 1, z)] && !mat[idx(x, G + 1, z + 1)] && !mat[idx(x + 1, G + 1, z + 1)]) for (const [a, b] of [[0, 0], [1, 0], [0, 1], [1, 1]]) set(x + a, G + 1, z + b, AIM.core); }
+        else { set(x, G + 1, z, AIM.fiber); set(x, G + 2, z, AIM.fiber); }
+      }
+      curB = 0;
+    }
+  }
+  // the yards: grass, and a tree or two
+  if (!circuit && C.stage >= 4) for (const Y of yards) {
+    for (let z = Y.z0; z <= Y.z1; z++) for (let x = Y.x0; x <= Y.x1; x++) set(x, G, z, 1);
+    const n = ((Y.x1 - Y.x0 + 1) * (Y.z1 - Y.z0 + 1)) >= 16 ? ri(1, 2) : 0;
+    for (let i = 0; i < n; i++) {
+      const x = ri(Y.x0, Y.x1), z = ri(Y.z0, Y.z1), th = ri(3, 4);
+      for (let y = 1; y <= th; y++) set(x, G + y, z, 5);
+      for (let a = -2; a <= 2; a++) for (let b = -2; b <= 2; b++) for (let c = -1; c <= 2; c++)
+        if (a * a + b * b + c * c * 1.5 <= 5.5 && !(a === 0 && b === 0 && c < 1) && x + a >= Y.x0 && x + a <= Y.x1 && z + b >= Y.z0 && z + b <= Y.z1 && !mat[idx(x + a, G + th + c, z + b)]) set(x + a, G + th + c, z + b, 6);
+    }
+  }
+  // the AVENUES get a wider pavement (2 a side, the road 2) and, on its outer cell, trees and lamps in turn. Nothing may
+  // stand right against a facade (it would stop being a thin wall and lose its windows), so the crowns lean roadward.
+  if (C.stage >= 4) {
+    const ave = [[LX.streets[2], LZ, (s, t) => [s, t]], [LZ.streets[2], LX, (s, t) => [t, s]]];
+    const crossAt = (Lc, t) => Lc.streets.some((S) => t >= S.a - 1 && t <= S.b + 1);
+    for (const [S, cross, xz] of ave) {
+      if (!circuit) for (let t = 0; t < (xz === ave[0][2] ? D : W); t++) for (const s of [S.a, S.a + 1, S.b - 1, S.b]) { const [x, z] = xz(s, t); if (mat[idx(x, G, z)] === MC.asphalt) set(x, G, z, MC.concrete); }
+      for (const [s, dir] of [[S.a + 1, 1], [S.b - 1, -1]]) {
+        let k = 0;
+        for (let t = 3; t < (xz === ave[0][2] ? D : W) - 3; t += 4) {
+          if (crossAt(cross, t) || crossAt(cross, t - 1) || crossAt(cross, t + 1)) continue;
+          const [x, z] = xz(s, t);
+          if (circuit) { curB = 51000 + t; for (let y = 1; y <= 3; y++) set(x, G + y, z, AIM.fiber); curB = 0; continue; }   // a light post: it turns, its flutes glow
+          if (k++ % 2 === 0) {                          // a tree: trunk, then a crown over the road
+            for (let y = 1; y <= 2; y++) set(x, G + y, z, 5);
+            for (const [ds, dt, dy] of [[0, 0, 3], [0, -1, 3], [0, 1, 3], [dir, 0, 3], [dir, -1, 3], [dir, 1, 3], [0, 0, 4], [dir, 0, 4]]) {
+              const [cx, cz] = xz(s + ds, t + dt); if (!mat[idx(cx, G + dy, cz)]) set(cx, G + dy, cz, 6);
+            }
+          } else {                                      // a lamp: a lone stack, so it turns; its crystal head glows
+            for (let y = 1; y <= 3; y++) set(x, G + y, z, MC.marble);
+            set(x, G + 4, z, 8);
+          }
+        }
+      }
+    }
+  }
+  // SKYBRIDGES: a 2-wide board deck across a street, at a height both facing circuit buildings stand at. Walk out from
+  // the street's middle to the first solid cell each way; both must be circuit hardware, the span clear above and below.
+  // A deck held at both ends is an arch to the morphogens, and a substrate arch is a framed PATHWAY to the skin.
+  if (circuit && C.stage >= 5) {
+    const aiAt = (x, y, z) => inb(x, y, z) && mat[idx(x, y, z)] !== 0 && bid[idx(x, y, z)] >= 4096 && bid[idx(x, y, z)] < 50000;
+    const freeAt = (x, y, z) => inb(x, y, z) && !mat[idx(x, y, z)];
+    let nb = 0; tally.bridges = [];
+    for (const [Ls, alongZ] of [[LX, true], [LZ, false]]) for (const S of Ls.streets) {
+      const P = (s, t) => alongZ ? [s, t] : [t, s], mid = (S.a + S.b) >> 1;
+      for (let t = 4; t < 90 && nb < 16; t += 4 + ri(0, 5)) {
+        if (rnd() > .45) continue;
+        const y = G + 7 + ri(0, 20);
+        let lo = mid, hi = mid + 1, ok = true;
+        while (lo > S.a - 8) { const [x, z] = P(lo, t); if (!freeAt(x, y, z)) break; lo--; }
+        while (hi < S.b + 8) { const [x, z] = P(hi, t); if (!freeAt(x, y, z)) break; hi++; }
+        const hitAI = (s, tt) => { const [x, z] = P(s, tt); return aiAt(x, y, z); };
+        for (const tt of [t, t + 1]) {
+          if (!hitAI(lo, tt) || !hitAI(hi, tt)) ok = false;
+          for (let s = lo + 1; s < hi && ok; s++) { const [x, z] = P(s, tt); if (!freeAt(x, y, z) || !freeAt(x, y - 1, z) || !freeAt(x, y + 1, z)) ok = false; }
+        }
+        if (!ok || hi - lo - 1 < 3) continue;
+        curB = 60000 + nb;
+        for (const tt of [t, t + 1]) for (let s = lo + 1; s < hi; s++) { const [x, z] = P(s, tt); set(x, y, z, AIM.sub); }
+        const [bx, bz] = P((lo + hi) / 2, t + 1); tally.bridges.push({ x: bx, y, z: bz, alongZ }); nb++;
+      }
+    }
+    curB = 0; if (nb) tally.ops.skybridge = nb;
+  }
+  // the NEURONS: the 24 tallest circuit buildings (the shader holds 24), each wired to its two nearest; the tallest of
+  // all - the mind - to its four nearest
+  aiTops.sort((a, b) => b.top - a.top);
+  for (const T of aiTops.slice(0, 24)) netAddNode(T.x, T.z, T.top, T.r);
+  const d2 = (i, j) => { const A = NET.nodes[i], B = NET.nodes[j]; return (A.x - B.x) ** 2 + (A.z - B.z) ** 2; };
+  const nearest = (i, n) => NET.nodes.map((q, j) => j).filter((j) => j !== i).sort((a, b) => d2(i, a) - d2(i, b)).slice(0, n);
+  NET.nodes.forEach((n, i) => nearest(i, 2).forEach((j) => netLink(i, j)));
+  if (NET.nodes.length > 4) nearest(0, 4).forEach((j) => netLink(0, j));
+  AIBASE = G + 1;
+  cityInfo = { stage: C.stage, lots: lots.length, yards: yards.length, styles: tally.styles, ops: tally.ops, tops: aiTops, bridges: tally.bridges || [] };
+  rebuildMasks();
+}
+
 // ---------------------------------------------------------------- GL
 const cv = document.getElementById('c');
 const gl = cv.getContext('webgl2', { antialias: false, alpha: false });
@@ -406,16 +935,21 @@ uniform int uMode;              // 0 world, 1 preview, 2 pick
 uniform int uPrevMat; uniform vec4 uPrevRect;
 uniform ivec3 uSel; uniform int uSelOn;
 uniform int uShadows;
-uniform vec4 uA[24];  // k, gain, L, iso
-uniform vec4 uB[24];  // fill, R, scale, variation
-uniform vec4 uC0[24]; // surface rgb, kind
-uniform vec4 uC1[24]; // crevice rgb, emission
-uniform vec4 uE[24];  // gloss, emit-in-crevice
+uniform vec4 uA[32];  // k, gain, L, iso            (32 materials since the frontage city, 2026-10-13)
+uniform vec4 uB[32];  // fill, R, scale, variation
+uniform vec4 uC0[32]; // surface rgb, kind
+uniform vec4 uC1[32]; // crevice rgb, emission
+uniform vec4 uE[32];  // gloss, emit-in-crevice
 out vec4 outC;
 uniform int uL26, uL27, uL4, uL3, uL2, uL96;   // loop bounds as uniforms so fxc cannot unroll them
 uniform vec4 uG;   // genes: round, column, arch, window
 uniform vec4 uG2;  // weather, differentiation, show roles, flow
-uniform vec4 uF[24]; // flow, AI skin id
+uniform vec4 uF[32]; // flow, AI skin id
+uniform float uFog;  // fog per unit of distance (the frontage city's overview stands back further than the world's)
+uniform float uRainbow;     // 0 = the two-colour palette (uPal), 1 = rainbow: every building its own hue, 2 = rising rainbow
+uniform float uEdge, uEdgeShare;   // frame light: 0 dark, 1 running pulses, 2 solid line | share of buildings that have one
+uniform float uMemWrite;           // memory banks: 0 still bits, 1 random access (each bit its own clock), 2 the diagonal sweep
+float gBld = 0., gHue = 0.; // this hit's building seed (aiSkin) and the hue the rainbow palette paints it (shadeHit)
 uniform float uSky; uniform vec3 uSunCol; uniform float uAmbK;   // 0 day, 1 dusk, 2 night
 uniform int uHDR;               // 1 = write linear colour for the bloom pass
 uniform float uPickMax;
@@ -426,6 +960,10 @@ uniform mediump sampler2DArray uCirc;    // the owner's concept boards (LSS/conc
 uniform mediump sampler2DArray uPhase;   // per board: (cos, sin) of distance along its lines, line strength, speed
 uniform float uCircTile, uUnder, uCircSize, uBoards, uFloorBoard, uDots;
 uniform float uCoreBoard;   // layer of circuit2 (the die face), -1 if it did not load
+uniform float uWideFirst, uWideCount;   // the wide boards' layers (first, how many; first -1 = none loaded)
+uniform float uDieFirst, uDieCount;     // die-only boards after circuit2 (uCoreBoard): a core face picks among all
+uniform float uVary;        // 1 = each face its own board + each board its own turn (8 symmetries); 0 = the old pick
+uniform float uForce;       // >= 0: every board-faced surface wears this gen board (to judge one picture on the city)
 uniform float uCoreMode;
 uniform float uPal;         // 1 = the green / purple city palette, 0 = the original cyan / pink
 uniform float uFrame;       // building edge frames (0 = none, 1 = default width)
@@ -569,25 +1107,56 @@ vec3 aiCore(vec2 q, float L, float rnd, float t, float act, float age, float pxW
 // the column gene cuts, so the light sits in the geometry), pulses climbing those fibres, and dark metal
 // collars at base and capital (ends = 1 there). Owner: the pillars were "too glowy... some parts could be
 // contrasted more". vv = height up the stack, ang = angle round it, per = fibre spacing (for the LOD fade).
+// PACKETS, NOT LINES (owner, after the memory chips: "same with the energy pillars that are more or less solid lines
+// going up and down"): every strand was lit its whole length all the time - solid stripes close up, a solid glowing
+// bar far off. Now a strand is dark glass with light RUNNING in it: packets, each strand on its own clock, speed and
+// direction (some climb, some fall), quicker when the tower thinks; and the shaft is cut into SEGMENTS, three blocks
+// each with a dark collar between, busy or idle - so far off a pillar is a stack of lit and dark sections, and only
+// past that does it fade, to a dim average. (The memory banks' rule: give the far average a coarser pattern.)
 vec3 aiFiber(float vv, float ang, float nf, float per, float rnd, float t, float act, float ends, float pxW){
   float lod = smoothstep(.3, .8, pxW/per);
-  float strands = mix(pow(.5 + .5*cos(ang*nf), 8.), .2, lod);
-  float sp = .7 + .6*rnd + 2.*act;
-  float pulse = pow(fract(vv*.3 - t*sp), 18.) + .6*pow(fract(vv*.3 - t*sp*1.37 + .5), 24.);
+  float si = floor(ang*nf/6.2832 + .5), sh = aiH(vec2(si, rnd*17.3 + 1.1));        // which strand, its own seed
+  float strands = mix(pow(.5 + .5*cos(ang*nf), 8.), .27, lod);
+  // (first cut: a packet every 4.5 blocks per strand, strands at .025 - the pillars went dark glass with the odd dash
+  // in them; close up a grove read as black. Denser packets, flutes faintly lit)
+  float ph = fract(vv*.36*(sh > .5 ? 1. : -1.) - t*(.3 + .6*fract(sh*7.1) + 1.*act) + sh*5.);
+  float pk = mix(smoothstep(0., .04, ph)*(1. - smoothstep(.04, .26, ph)), .13, smoothstep(.3, .8, pxW*2.));
+  float sg = floor(vv/3.), sf = fract(vv/3.);
+  float busy = mix(step(aiH(vec2(sg, rnd*9.1 + 2.)), .55 + .3*act), .55 + .3*act, smoothstep(.3, .8, pxW/3.));
+  float collar = mix(smoothstep(.04, .12, min(sf, 1. - sf)), .8, smoothstep(.3, .8, pxW/.25));
   vec3 col = fract(rnd*3.1) > .6 ? vec3(.9, .55, 1.) : vec3(.35, .85, 1.);
-  return col*(1. - ends)*(.02 + strands*(.5 + 3.*pulse*(.5 + act) + 1.2*act) + .15*pulse);
+  return col*(1. - ends)*collar*(.015 + strands*(.06 + busy*pk*(3. + 2.*act)));
 }
 // MEMORY - bits on a grid that a write head rewrites as it passes: each bit holds its value between
 // passes (it changes exactly when the front crosses it), and the front flashes as it writes.
+// HOW IT WRITES (owner, 2026-10-13: "not sure i like the diagonal sweeping white lines across the buildings with the
+// solid colored cubes"): uMemWrite 0 = still bits, 1 = RANDOM ACCESS - every bit on its own clock, flipping (or not)
+// when its clock ticks, with a short blink in its own colour, quicker when the bank thinks - 2 = the old write head,
+// a white front sweeping diagonally and re-rolling the bits it crosses.
+// CHIPS (owner, same evening: the cube walls "look cool from close, but from far they look solid and just pastel
+// ugly"): far off, the bits went below a pixel and faded - by the no-twinkle rule - to their average, and half-on bits
+// averaged to one bright flat pastel slab. Now the bits sit in CHIPS, one per block face (4x4 bits) with a dark gutter
+// round each, and only some chips are busy (more when the bank thinks): when the bits shrink away a face is a mosaic of
+// lit and dark chips, like a tower's windows at night, and only when the chips shrink too does it fade - to a DARK
+// average. Bits more saturated, the "off" ones nearly black.
 vec3 aiMemory(vec2 uv, float rnd, float t, float act, float pxW){
+  vec2 cc = floor(uv), cf = fract(uv) - .5;
+  float pb = .4 + .35*act;                                                  // the share of chips that are busy
+  float busy = step(aiH(cc + vec2(rnd*13.1, 7.7)), pb), lvl = .55 + .45*aiH(cc + vec2(3.3, rnd*5.1));
+  float gut = aiAA(max(abs(cf.x), abs(cf.y)), .43, pxW);              // 1 inside a chip, 0 in its gutter
   vec2 bc = floor(uv*4.), bf = fract(uv*4.) - .5;
-  float wv = uv.x*.2 + uv.y*.07 - t*(.25 + .5*act);
-  float bit = step(.5, aiH(bc + vec2(floor(wv)*17.3, rnd*5.)));
-  float flash = pow(fract(wv), 18.);
-  float lod = smoothstep(.3, .8, pxW*4.);
+  float lodB = smoothstep(.3, .8, pxW*4.), lodC = smoothstep(.3, .8, pxW);
   float cell = aiAA(max(abs(bf.x), abs(bf.y)), .36, pxW*4.);
-  vec3 on = vec3(.75, .35, 1.), off = vec3(.12, .05, .2);
-  return mix(off, on, bit)*cell*(.5 + act)*(1. - lod) + mix(off, on, .5)*.52*(.5 + act)*lod + vec3(.8, .7, 1.)*cell*flash*1.8;
+  vec3 on = vec3(.62, .18, 1.), off = vec3(.03, .01, .05);
+  float wv = uv.x*.2 + uv.y*.07 - t*(.25 + .5*act);                       // the sweep's front (mode 2)
+  float k = (uMemWrite > .5 ? t*(.12 + .45*aiH(bc + vec2(rnd*7., 3.3)) + .9*act) : 0.) + 9.*aiH(bc + vec2(11.1, rnd*3.));
+  float bit = step(.5, aiH(bc + vec2((uMemWrite > 1.5 ? floor(wv) : floor(k))*17.3, rnd*5.)));
+  float glint = uMemWrite > .5 && uMemWrite < 1.5 ? exp(-fract(k)*14.)*bit : 0.;   // a bit just written, in its own colour
+  float sweep = uMemWrite > 1.5 ? pow(fract(wv), 18.) : 0.;
+  vec3 bits = mix(mix(off, on, bit)*cell*(1. + 1.1*glint) + vec3(.8, .7, 1.)*cell*sweep*1.8, mix(off, on, .5)*.52, lodB);
+  vec3 chip = bits*gut*mix(.12, lvl, busy)*(.6 + act);                      // an idle chip keeps a faint glow
+  vec3 far = mix(off, on, .5)*.52*.74*(pb*.775 + (1. - pb)*.12)*(.6 + act);   // the chips' own average (gutters, busy share)
+  return mix(chip, far, lodC);
 }
 // UNDERLAY - the owner's concept board (LSS/concept/shaders/circuits.png) beneath every AI surface.
 // One image, split by colour: its grey plates become the albedo, its saturated cyan/magenta lines become
@@ -696,14 +1265,15 @@ float sdBox2(vec2 p, vec2 b){ vec2 q = abs(p) - b; return length(max(q,0.)) + mi
 // genes either reshape that distance (round, column) or declare more air (window, arch, overhang).
 // The eml then carves against it exactly as before.
 // a wall's windows, at any scale: per = spacing along the run, stor = storey height, w = half width
-float windowSD(float along, float L, float wy, float Lv, float per, float stor, float w, float y0, float top){
+float windowSD(float along, float L, float wy, float Lv, float per, float stor, float w, float y0, float top, bool square){
   float nW = floor((L - 1.) / per);
   float nS = max(1., floor((Lv - .5) / stor)), sh = Lv / nS;
   wy -= clamp(floor(wy / sh), 0., nS - 1.) * sh;
   float y1 = sh - top, ym = y1 - w;
   float sp = L / max(nW, 1.), cx = (clamp(floor(along / sp), 0., max(nW, 1.) - 1.) + .5)*sp, u = along - cx;
-  float win = min(sdBox2(vec2(u, wy - .5*(y0 + ym)), vec2(w, .5*(ym - y0))), length(vec2(u, wy - ym)) - w);
-  return (nW >= 1. && w > .02 && y1 - y0 > .9) ? win : 9.;
+  float win = square ? sdBox2(vec2(u, wy - .5*(y0 + y1)), vec2(w, .5*(y1 - y0)))
+                     : min(sdBox2(vec2(u, wy - .5*(y0 + ym)), vec2(w, .5*(ym - y0))), length(vec2(u, wy - ym)) - w);
+  return (nW >= 1. && L > 3.5 && w > .02 && y1 - y0 > .9) ? win : 9.;   // (a 3-long wall at spacing 2 was all window)
 }
 // a joint between two parts: dd = distance to the designed surface, g = distance to the joint plane.
 // The parts round off where the joint meets the surface; deep inside the joint closes (no cracks through).
@@ -722,7 +1292,7 @@ float airDist(vec3 wp, vec3 local, uvec4 v, uint v2, out float def){
   bool ghost = (ma & 2147483648u) != 0u;
   // the fillet scales with what stands there: a chip gets a small one, a tower sweeps into the ground
   float jw = clamp(uG3.z*uG2.y, 0., 1.), jr = jw*clamp(.15 + .12*float((mb >> 8u) & 15u), .25, .85), gF = 9., gS = 9.;
-  float skF = uE[m].w, skO = uE[int(clamp(float(mb & 255u), 1., 23.))].w;
+  float skF = uE[m].w, skO = uE[int(clamp(float(mb & 255u), 1., 31.))].w;
   for(int b=0; b<uL26; b++){
     if(((mask >> uint(b)) & 1u) == 0u) continue;
     int i = b + (b >= 13 ? 1 : 0);
@@ -766,7 +1336,12 @@ float airDist(vec3 wp, vec3 local, uvec4 v, uint v2, out float def){
   // gene WINDOW: a thin wall opens windows, spaced along its run and stacked by storey
   if((cls == 2 || cls == 3) && Lv >= 3.){
     float along = cls == 2 ? xN + local.x + .5 : zN + local.z + .5, L = cls == 2 ? Lx : Lz;
-    float win = windowSD(along, L, hDn + local.y + .5, Lv, 3., 3.5, .36*clamp(uG.w*ex, 0., 1.), .9, .7);
+    // a material may carry its own window (uF.z half width, uF.w spacing; the frontage city's): a positive spacing is
+    // MODERN - square and taller, and a block apart it becomes a curtain wall's ribbon; a negative one keeps the arch.
+    // (The default, one every 3 blocks, left the city's 4-9 wide lots one or two small windows a storey: blank fronts.)
+    bool own = uF[m].z > 0., modern = own && uF[m].w > 0.;
+    float wPer = own ? abs(uF[m].w) : 3., wW = own ? uF[m].z : .36, wPad = wPer < 1.6 ? .22 : .45;
+    float win = windowSD(along, L, hDn + local.y + .5, Lv, wPer, 3.5, wW*clamp(uG.w*ex, 0., 1.), modern ? wPad : own ? .75 : .9, modern ? wPad : own ? .6 : .7, modern);
     dist = min(dist, win + sk);
     if(win < 9.) def = max(def, .6*clamp(uG.w*ex, 0., 1.));
   }
@@ -788,7 +1363,7 @@ float airDist(vec3 wp, vec3 local, uvec4 v, uint v2, out float def){
   }
   if(big && cls2 >= 2){                               // a thick wall: windows sized to the whole
     float along = cls2 == 2 ? xN + local.x + .5 : zN + local.z + .5, L = cls2 == 2 ? Lx : Lz;
-    float win = windowSD(along, L, hDn2 + local.y + .5, Lv2, 4.5, 5., .75*clamp(uG.w*ex, 0., 1.)*e2, 1.3, 1.1);
+    float win = windowSD(along, L, hDn2 + local.y + .5, Lv2, 4.5, 5., .75*clamp(uG.w*ex, 0., 1.)*e2, 1.3, 1.1, false);
     dist = min(dist, win + sk);
     def = max(def, .75*e2);
   }
@@ -987,6 +1562,7 @@ vec3 aiSkin(int ai, vec3 p, vec3 rd, vec3 nrm, ivec3 c, uvec4 v, uint v2, float 
   vec2 uvW = pl == 1 ? p.xz : (pl == 0 ? p.zy : p.xy);
   bool topF = pl == 1;
   float rnd = aiH(vec2(float(c.x) - xN, float(c.z) - zN) + .37);
+  gBld = rnd;                                         // the rainbow palette's per-building hue (one per tier: runs stop at tiers)
   int skin = ai;
   vec3 e = vec3(0);
   float pxIso = th*2.*uTanF/uRes.y, ndv = abs(dot(nrm, rd));
@@ -999,17 +1575,34 @@ vec3 aiSkin(int ai, vec3 p, vec3 rd, vec3 nrm, ivec3 c, uvec4 v, uint v2, float 
   vec2 qf = topF ? vec2((xN + local.x + .5)/Lx, (zN + local.z + .5)/Lz)
                  : vec2(((pl == 0 ? zN + local.z : xN + local.x) + .5)/L, fract((p.y - bot)/tH));
   // the floor wears one board; every building picks its own from its seed
-  float lay = ai == 1 ? uFloorBoard : floor(rnd*uBoards*.9999), tileF = floor(uCircTile + .5);
+  // VARIETY from the same boards (owner, 2026-10-13: "should i get more circuit texture variety?"): with uVary on, each
+  // FACE picks its own board, and each whole board on it its own turn - one of the square's 8 symmetries (mirror u,
+  // mirror v, swap). Frames, the die's heart and the dots that ride the lines all survive any of them. A WIDE face (two
+  // or more times as wide as its stack is tall: podiums, whole-block bases) wears the owner's circuit_horizontal board
+  // once across it, mirrored at most - it is a 3:1 picture, squeezed square in the array, so a wide face un-squeezes it.
+  float side = topF ? 2. : (pl == 0 ? step(0., local.x) : step(0., local.z));
+  float fr = fract(rnd + uVary*(float(pl)*.37 + side*.21));
+  float lay = ai == 1 ? uFloorBoard : uForce >= 0. ? uForce : floor(fr*uBoards*.9999), tileF = floor(uCircTile + .5);
+  float o8 = floor(aiH(vec2(fr*61.7 + side*3.1, floor((p.y - bot)/tH) + 2.5))*8.)*uVary;
+  bool wide = !topF && ai == 2 && uWideFirst >= 0. && uVary > .5 && uForce < 0. && L >= 2.*max(top - bot, 1.);
+  vec2 qo = wide ? vec2(((pl == 0 ? zN + local.z : xN + local.x) + .5)/L, (p.y - bot)/max(top - bot, 1.)) : qf;
+  if(wide){ lay = uWideFirst + floor(fract(fr*7.3)*uWideCount*.9999); o8 = mod(o8, 4.); }
+  // a core face's die: circuit2 or one of the die-only boards, per face
+  float dPick = uVary > .5 ? floor(fract(fr*3.7)*(uDieCount + 1.)*.9999) : 0.;
+  float dieLay = dPick < .5 ? uCoreBoard : uDieFirst + dPick - 1.;
+  if(mod(o8, 2.) >= 1.) qo.x = 1. - qo.x;
+  if(mod(floor(o8*.5), 2.) >= 1.) qo.y = 1. - qo.y;
+  if(o8 >= 4.) qo = qo.yx;
   if(ai == 1) e += aiUnderlay(uvW/tileF, tileF, lay, pxIso, ndv, uTime, act, age, wave, alb);
-  else if(ai == 2 || (ai == 3 && uCoreBoard < 0.) || (ai == 5 && topF)) e += aiUnderlay(qf, L, lay, pxIso, ndv, uTime, act, age, wave, alb);
+  else if(ai == 2 || (ai == 3 && uCoreBoard < 0.) || (ai == 5 && topF)) e += aiUnderlay(qo, wide ? max(top - bot, 1.) : L, lay, pxIso, ndv, uTime, act, age, wave, alb);
   if(topF && (ai == 2 || ai == 5)) skin = 1;          // racks and memory banks wear circuit roofs
   // ONE circuit, not two (owner: "the floor looks messy because the underlay doesn't match the overlay"):
   // the procedural traces only show where the board is turned down
   if(skin == 1){ if(uUnder < .999){ vec3 a0 = alb; vec3 ep = aiCircuit(uvW, topF ? 0. : 1., uTime, act, wave, pxW, 0., a0); alb = mix(a0, alb, uUnder); e += ep*(1. - uUnder); } }
   else if(skin == 2) e += aiRack(vec2(pl == 0 ? p.z : p.x, p.y - uAIBase), rnd, uTime, act, wave, pxW, 1. - uDots, 1. - uUnder, alb);
   else if(skin == 3){
-    vec2 q = qf;
-    if(uCoreBoard >= 0.) e += aiCoreBoard(q, L, uCoreBoard, pxIso, ndv, uTime, act, age, alb, glo);
+    vec2 q = qo;
+    if(uCoreBoard >= 0.) e += aiCoreBoard(q, L, dieLay, pxIso, ndv, uTime, act, age, alb, glo);
     // behind: the die's pins and core array sit on the board (its own micro-traces step aside for circuit2's)
     if(uCoreBoard < 0. || uCoreMode > .5) e += aiCore(q, L, rnd, uTime, act, age, pxW, uCoreBoard < 0. ? 1. : 0., alb, glo);
   }
@@ -1031,7 +1624,7 @@ vec3 aiSkin(int ai, vec3 p, vec3 rd, vec3 nrm, ivec3 c, uvec4 v, uint v2, float 
   // both ends where it meets the buildings.
   bool beam = ai == 1 && (v.a & 512u) != 0u && (v.a & 2147483648u) == 0u;
   if((ai == 2 || ai == 3 || beam) && uFrame > 0.){
-    float dE;
+    float dE, sAl = p.y;                                // sAl = where along the nearest frame line this is (pulses)
     if(beam){
       bool alongZ = (v.a & 256u) != 0u;
       float S = float(v.a & 15u) + float((v.a >> 4u) & 15u) + 1.;
@@ -1040,26 +1633,37 @@ vec3 aiSkin(int ai, vec3 p, vec3 rd, vec3 nrm, ivec3 c, uvec4 v, uint v2, float 
       float dEnd = min(u, S - u), dSide = min(w, Lc - w), dVert = min(p.y - bot, top - p.y);
       bool acrossFace = alongZ ? pl == 0 : pl == 2;                            // the long side faces
       dE = topF ? min(dSide, dEnd) : (acrossFace ? min(dVert, dEnd) : min(dVert, dSide));
+      sAl = topF ? (dSide < dEnd ? u : w) : acrossFace ? (dVert < dEnd ? u : p.y) : (dVert < dSide ? w : p.y);
     }
-    else if(topF) dE = min(min(xN + local.x + .5, Lx - xN - local.x - .5), min(zN + local.z + .5, Lz - zN - local.z - .5));
+    else if(topF){
+      float ex = min(xN + local.x + .5, Lx - xN - local.x - .5), ez = min(zN + local.z + .5, Lz - zN - local.z - .5);
+      dE = min(ex, ez); sAl = ex < ez ? zN + local.z : xN + local.x;
+    }
     else {
       // the base band sits on the BUILDING, just above where the floor's connector fillet meets the wall
       // (owner: "it should go on the bottom of the rectangular based prism", not on the connector). The fillet
       // height is the junction's own rule: it scales with how tall the building is.
       float jrE = clamp(uG3.z*uG2.y, 0., 1.)*clamp(.15 + .12*min(top - bot, 15.), .25, .85);
       float al = (pl == 0 ? zN + local.z : xN + local.x) + .5;
-      dE = min(min(al, L - al), min(top - p.y, p.y - bot - jrE));
+      float dPost = min(al, L - al), dBand = min(top - p.y, p.y - bot - jrE);
+      dE = min(dPost, dBand); sAl = dPost < dBand ? p.y : al;
     }
     float fw = .17*uFrame, px = pxIso/max(ndv, .2);
     float fm = 1. - smoothstep(fw - px, fw + px, dE);
     float strip = aiAA(abs(dE - fw*.55), .02*uFrame, px) * fm;
     vec3 sc = beam ? vec3(.3, .85, 1.) : (fract(rnd*3.7) > .5 ? vec3(1., .35, .85) : vec3(.3, .85, 1.));
     alb = mix(alb, vec3(.05, .055, .065), fm); glo = mix(glo, .55, fm);
-    e = e*(1. - fm) + sc*strip*(.8 + 2.5*act);
+    // EDGE LIGHT (owner, 2026-10-13: "i'm not sure how i like how every building has a solid bright line for a
+    // corner/edge"): the frame stays - it hides where the boards meet round a corner - but its light is a choice.
+    // uEdge 0 = dark frames, 1 = light that RUNS along them (comets up the posts and round the bands, quicker when the
+    // tower thinks, a faint trace between), 2 = the old solid line. uEdgeShare = how many buildings carry one at all.
+    float lit = step(fract(rnd*7.13 + .21), uEdgeShare) * step(.5, uEdge);
+    float run = pow(fract(sAl*.07 - uTime*(.35 + 1.2*act) + rnd*9.), 14.);
+    e = e*(1. - fm) + sc*strip*lit*(uEdge > 1.5 ? 1. : .03 + 2.6*run)*(.8 + 2.5*act);
   }
   // the connector fillet where the floor meets an AI building (or chip, plinth, stem) is plain black
   // (owner: "it could just be black") - the frame band above it does the framing
-  if((v.a & 2147483648u) != 0u && int(uF[int(clamp(float(v.b & 255u), 0., 23.))].y + .5) >= 2){
+  if((v.a & 2147483648u) != 0u && int(uF[int(clamp(float(v.b & 255u), 0., 31.))].y + .5) >= 2){
     alb = vec3(.012, .013, .016); glo = .25; e = vec3(0);
   }
   return e;
@@ -1076,12 +1680,19 @@ vec3 aiRgb2hsv(vec3 c){
   return vec3(abs(q.z + (q.w - q.y) / (6.*d + 1e-10)), d / (q.x + 1e-10), q.x);
 }
 vec3 aiHsv2rgb(vec3 c){ vec3 p = abs(fract(c.xxx + vec3(1., 2./3., 1./3.))*6. - 3.); return c.z*mix(vec3(1.), clamp(p - 1., 0., 1.), c.y); }
+// RAINBOW (owner, 2026-10-13: "what if instead of green and purple we have rainbow"): the same two bands, sent to the
+// hue the hit was given (gHue, set by shadeHit: a building's own, a sweep across the floor, or a band rising up the
+// towers) - the cyan band takes it, the pink band its neighbour a sixth of the wheel on, so a building stays one
+// family and the CITY is the rainbow. Gold/copper stays gold.
 vec3 aiPalette(vec3 e){
   vec3 h = aiRgb2hsv(max(e, vec3(0.)));
   float cy = smoothstep(.40, .46, h.x)*(1. - smoothstep(.64, .70, h.x));
-  float pk = smoothstep(.78, .83, h.x)*(1. - smoothstep(.975, .995, h.x));
+  // (the pink band reaches down to violet .70 since the rainbow: the memory banks' bits are violet (.77) and stayed
+  // purple in every rainbow; for green/purple it changes nothing - its target IS violet)
+  float pk = smoothstep(.70, .75, h.x)*(1. - smoothstep(.975, .995, h.x));
   vec3 g = aiHsv2rgb(vec3(mix(mix(h.x, .37, cy), .76, pk), h.y, h.z));
-  return mix(e, g, uPal);
+  vec3 r = aiHsv2rgb(vec3(mix(mix(h.x, gHue, cy), fract(gHue + .17), pk), h.y, h.z));
+  return uRainbow > .5 ? r : mix(e, g, uPal);
 }
 // JUNCTION colour: where two materials meet, each borrows the other's colour as it nears the seam, up
 // to an even 50/50 exactly at it - from both sides - so the contrast turns into a gradient.
@@ -1109,7 +1720,7 @@ vec3 shadeHit(vec3 p, vec3 rd, vec3 nrm, float nv, ivec3 c, uvec4 v, uint v2, fl
   vec3 c0 = pow(uC0[m].rgb, vec3(2.2)), c1 = pow(uC1[m].rgb, vec3(2.2));
   vec3 alb = mix(c0, c1, crev);
   if(m == 1) alb = mix(mix(c1, c1*.7, crev), mix(c0, c0*.6, crev), smoothstep(.3, .6, nrm.y));   // grass top, dirt sides
-  if(m == 7) alb = mix(c0*(.85 + .3*h3(ivec3(floor(p*vec3(2,4,2) + vec3(0,.5,0))))), c1, crev);
+  if(m == 7 || m == 27) alb = mix(c0*(.85 + .3*h3(ivec3(floor(p*vec3(2,4,2) + vec3(0,.5,0))))), c1, crev);
   float glo = uE[m].x;
   vec3 emit = vec3(0);
   int ai = int(uF[m].y + .5);
@@ -1127,17 +1738,25 @@ vec3 shadeHit(vec3 p, vec3 rd, vec3 nrm, float nv, ivec3 c, uvec4 v, uint v2, fl
   }
   float em = uC1[m].w;
   if(em > 0.) col += (uE[m].y > .5 ? c1*crev*crev : c0*(.4 + .6*crev)) * em;
+  // the rainbow's hue for this hit: a building its own (per tier); the floor and the bridges one slow sweep across the
+  // city (per-building on the floor would be per ROW - its runs are rows); mode 2 lifts it into bands that climb
+  if(ai > 0 && uRainbow > .5){
+    float hb = ai == 1 ? fract((p.x - p.z)*.0055 + .3) : gBld;
+    gHue = uRainbow > 1.5 ? fract(hb*.3 + p.y*.022 - uTime*.04) : hb;
+  }
   return col + aiPalette(emit)*uAIGlow;
 }
 // The city's conversation: light links between the towers' masts, packets riding them, and a beacon on
 // every mast that flares when its tower fires. Each arc is 4 straight pieces; lines widen to stay about
 // a pixel wide at range with their energy kept (the LSS neon-strip rule, v36.07).
+// (rainbow: each link and each beacon its own hue, already final - the call site skips the palette)
 vec3 aiLinks(vec3 ro, vec3 rd, float depth){
   vec3 glow = vec3(0);
   float pxK = 2.*uTanF/uRes.y;
   for(int i=0; i<uNLinks; i++){
     vec4 A = texelFetch(uLinks, ivec2(i*3, 0), 0), B = texelFetch(uLinks, ivec2(i*3 + 1, 0), 0), M = texelFetch(uLinks, ivec2(i*3 + 2, 0), 0);
     float S = length(B.xyz - A.xyz) / .7;
+    vec3 lc = uRainbow > .5 ? aiHsv2rgb(vec3(fract(float(i)*.618 - (uRainbow > 1.5 ? uTime*.04 : 0.)), .72, 1.)) : vec3(.25, .8, 1.);
     vec3 prev = A.xyz;
     for(int k=1; k<=uL4; k++){
       float s = float(k)*.25;
@@ -1153,7 +1772,7 @@ vec3 aiLinks(vec3 ro, vec3 rd, float depth){
         float gs = (float(k) - 1. + sq)*.25;
         float pk = exp(-pow((gs - A.w)*S, 2.)) + exp(-pow((gs - B.w)*S, 2.));
         float fogK = exp(-max(sr - 20., 0.)*.012);
-        glow += (vec3(.25, .8, 1.)*(.35 + .65*M.w)*(core*1.2 + halo*.04) + vec3(.85, .95, 1.)*pk*(core*8. + halo*.3)) * fogK;
+        glow += (lc*(.35 + .65*M.w)*(core*1.2 + halo*.04) + vec3(.85, .95, 1.)*pk*(core*8. + halo*.3)) * fogK;
       }
       prev = cur;
     }
@@ -1163,7 +1782,8 @@ vec3 aiLinks(vec3 ro, vec3 rd, float depth){
     float sr = dot(P - ro, rd);
     if(sr > 0. && sr < depth + .5){
       float dd = length(ro + rd*sr - P), px = sr*pxK, wc = max(.18, px), act = uNode[i].z;
-      glow += vec3(.4, .85, 1.)*(exp(-dd*dd/(wc*wc))*(.18/wc)*(1.2 + 6.*act) + exp(-dd/max(.8, px*2.))*.15*act) * exp(-max(sr - 20., 0.)*.012);
+      vec3 bc = uRainbow > .5 ? aiHsv2rgb(vec3(fract(float(i)*.381 + .1), .6, 1.)) : vec3(.4, .85, 1.);
+      glow += bc*(exp(-dd*dd/(wc*wc))*(.18/wc)*(1.2 + 6.*act) + exp(-dd/max(.8, px*2.))*.15*act) * exp(-max(sr - 20., 0.)*.012);
     }
   }
   return glow * uLinkGlow;
@@ -1228,9 +1848,10 @@ void main(){
     vec3 p = ro + rd*th0;
     col = shadeHit(p, rd, nrm, nv, hc0, hv0, hw0, th0, sh, aoAt(p, nrm));
     if(uG2.z > .5) col = mix(col, roleTint(hv0, hw0) * (.25 + .75*max(dot(nrm, uSun), 0.)*sh + .25), .55);
-    col = mix(col, sky(rd)*.95, 1. - exp(-max(th0 - 20., 0.)*.012));
+    col = mix(col, sky(rd)*.95, 1. - exp(-max(th0 - 20., 0.)*uFog));
   } else col = sky(rd);
-  col += aiPalette(aiLinks(ro, rd, hit ? th0 : 1e4));
+  vec3 lk = aiLinks(ro, rd, hit ? th0 : 1e4);
+  col += uRainbow > .5 ? lk : aiPalette(lk);
   if(uSelOn == 1){
     float t0, t1;
     if(boxRange(ro, rd, vec3(uSel) - .003, vec3(uSel) + 1.003, t0, t1) && (!hit || t0 < th0 + .02 || (hv0.a & 2147483648u) != 0u)){
@@ -1248,7 +1869,7 @@ const prog = gl.createProgram();
 gl.attachShader(prog, mk(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, mk(gl.FRAGMENT_SHADER, FS)); gl.linkProgram(prog);
 if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
 gl.useProgram(prog);
-const U = {}; ['uVox','uVox2','uG3','uDim','uRes','uCam','uBasis','uTanF','uSun','uTime','uMode','uPrevMat','uPrevRect','uSel','uSelOn','uShadows','uA','uB','uC0','uC1','uE','uL26','uL27','uL4','uL3','uL2','uL96','uG','uG2','uF','uSky','uSunCol','uAmbK','uHDR','uPickMax','uNNodes','uNode','uNode2','uLinks','uNLinks','uAIBase','uAIGlow','uLinkGlow','uCirc','uCircTile','uUnder','uCircSize','uPhase','uBoards','uFloorBoard','uDots','uCoreBoard','uCoreMode','uFrame','uPal']
+const U = {}; ['uVox','uVox2','uG3','uDim','uRes','uCam','uBasis','uTanF','uSun','uTime','uMode','uPrevMat','uPrevRect','uSel','uSelOn','uShadows','uA','uB','uC0','uC1','uE','uL26','uL27','uL4','uL3','uL2','uL96','uG','uG2','uF','uSky','uSunCol','uAmbK','uHDR','uPickMax','uNNodes','uNode','uNode2','uLinks','uNLinks','uAIBase','uAIGlow','uLinkGlow','uCirc','uCircTile','uUnder','uCircSize','uPhase','uBoards','uFloorBoard','uDots','uCoreBoard','uCoreMode','uFrame','uPal','uFog','uWideFirst','uWideCount','uDieFirst','uDieCount','uVary','uForce','uRainbow','uEdge','uEdgeShare','uMemWrite']
   .forEach(n => U[n] = gl.getUniformLocation(prog, n));
 gl.bindVertexArray(gl.createVertexArray());
 
@@ -1281,10 +1902,25 @@ const nodeA = new Float32Array(96), nodeB = new Float32Array(96);
 // cropped boards do not tile, but a trace that reaches an edge runs on into its own reflection), plus a
 // second array of line phases so dots can travel along the lines. circuit2-5 carry a ~33-45 px flat dark
 // frame (measured), cropped at 48. Everything is resampled to 1024 so the layers match.
-const BOARDS = ['circuits.png', 'circuit2.png', 'circuit3.png', 'circuit4.png', 'circuit5.png'];
+// THREE SETS (2026-10-13, the circuit city), each picture loaded once, laid into the array in this order:
+//   gen   any face - racks, memory roofs (each face its own pick)          -> layers 0 .. uBoards-1
+//   die   core faces: a processor die, its heart in the CENTRE (the dots stream out of it). circuit2 is a gen board AND
+//         the first die; die-only pictures go here. Symmetric dies gain nothing from the 8 turns, so every core
+//         tower wore the same face until there is more than one.
+//   wide  faces at least twice as wide as tall (podiums, whole-block bases): 3:1 pictures, squeezed square like the
+//         rest and stretched back by the face. The owner's circuit_horizontal (2172x724) sat unused until now.
+// TO ADD ONE: drop the PNG into LSS/concept/shaders/ and put its name in the right list. A missing file is skipped.
+// (the owner's second set, 2026-10-13 evening: arctile = concentric neon arcs, neon = diagonal cyan/magenta, copper = a
+// dense copper PCB, obsidian = organic purple/cyan veins, pearl = WHITE plates with neon seams. None is a die - no
+// heart in the middle - so the core towers still all wear circuit2)
+const BOARD_SETS = {
+  gen: ['circuits.png', 'circuit2.png', 'circuit3.png', 'circuit4.png', 'circuit5.png',
+        'circuit_arctile.png', 'circuit_neon.png', 'circuit_copper.png', 'circuit_obsidian.png', 'circuit_pearl.png'],
+  die: [], wide: ['circuit_horizontal.png'] };
+const DIE_SEED = 'circuit2.png';                        // the gen board that is also the first die
 // frames KEPT (owner: tiles must fit): fitted one board per face / floor tile, each reads as a framed panel
-const BOARD_CROP = [0, 0, 0, 0, 0], BOARD_N = 1024;
-let circSize = 1, boardCount = 1, coreBoardLayer = -1;
+const BOARD_N = 1024;
+let circSize = 1, boardCount = 1, coreBoardLayer = -1, dieFirst = 0, dieCount = 0, wideFirst = -1, wideCount = 0;
 const circTex = gl.createTexture(), phaseTex = gl.createTexture();
 function boardArray(tex, unit, fmt, w, layers, data, mips) {
   gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
@@ -1360,23 +1996,29 @@ function boardPhase(d, out, off, N, fromCentre) {
   }
 }
 (async () => {
-  const imgs = await Promise.all(BOARDS.map(f => new Promise(res => { const im = new Image(); im.onload = () => res(im); im.onerror = () => res(null); im.src = '../LSS/concept/shaders/' + f; })));
-  const ok = imgs.map((im, i) => [im, i]).filter(([im]) => im);
+  const want = [...BOARD_SETS.gen.map(f => [f, 'gen']), ...BOARD_SETS.die.map(f => [f, 'die']), ...BOARD_SETS.wide.map(f => [f, 'wide'])];
+  const imgs = await Promise.all(want.map(([f]) => new Promise(res => { const im = new Image(); im.onload = () => res(im); im.onerror = () => res(null); im.src = '../LSS/concept/shaders/' + f; })));
+  const ok = want.map(([f, set], i) => ({ f, set, im: imgs[i] })).filter(b => b.im);   // already in set order
   if (!ok.length) return;
   const N = BOARD_N, L = ok.length, alb = new Uint8Array(N * N * 4 * L), ph = new Uint8Array(N * N * 4 * L);
   const c2 = document.createElement('canvas'); c2.width = c2.height = N; const cx = c2.getContext('2d', { willReadFrequently: true });
   const t0 = performance.now();
-  ok.forEach(([im, i], l) => {
-    const c = BOARD_CROP[i]; cx.drawImage(im, c, c, im.width - 2 * c, im.height - 2 * c, 0, 0, N, N);
-    const d = cx.getImageData(0, 0, N, N).data; alb.set(d, l * N * N * 4); boardPhase(d, ph, l * N * N * 4, N, i === 1);
-    if (i === 1) coreBoardLayer = l;
+  ok.forEach(({ f, set, im }, l) => {
+    cx.drawImage(im, 0, 0, im.width, im.height, 0, 0, N, N);
+    const die = set === 'die' || f === DIE_SEED;        // a die's line networks are walked from its centre
+    const d = cx.getImageData(0, 0, N, N).data; alb.set(d, l * N * N * 4); boardPhase(d, ph, l * N * N * 4, N, die);
   });
   gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
   boardArray(circTex, 5, gl.SRGB8_ALPHA8, N, L, alb, true);
   boardArray(phaseTex, 6, gl.RGBA8, N, L, ph, true);
   gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-  circSize = N; boardCount = L;
-  console.log('[boards]', L, 'boards, line phases in', Math.round(performance.now() - t0), 'ms');
+  const layersOf = (set) => ok.map((b, l) => b.set === set ? l : -1).filter(l => l >= 0);
+  const gen = layersOf('gen'), dies = layersOf('die'), wides = layersOf('wide');
+  coreBoardLayer = ok.findIndex(b => b.f === DIE_SEED);
+  dieFirst = dies.length ? dies[0] : 0; dieCount = dies.length;
+  wideFirst = wides.length ? wides[0] : -1; wideCount = wides.length;
+  circSize = N; boardCount = Math.max(1, gen.length);
+  console.log('[boards]', gen.length, 'gen,', dieCount, 'die-only,', wideCount, 'wide - line phases in', Math.round(performance.now() - t0), 'ms');
 })();
 function uploadNet() {
   const nn = Math.min(NET.nodes.length, 24), nl = Math.min(NET.links.length, MAXL);
@@ -1451,7 +2093,9 @@ const SKIES = {
   night: { sky: 2, el: 35, sun: [.13, .16, .26],   amb: .13 },
 };
 const ENV = { sky: 1, sun: [1.5, .72, .42], amb: .42, T: SKIES.dusk, name: 'dusk' };
-const AIP = { glow: 1, links: 1, bloom: .8, under: 1, tile: 12, dots: 1, floorBoard: 0, coreMode: 0, frame: 1, pal: 1 };   // tile 12: the board's routing reads at district scale (6 = grain)
+const AIP = { glow: 1, links: 1, bloom: .8, under: 1, tile: 12, dots: 1, floorBoard: 0, coreMode: 0, frame: 1, pal: 1, vary: 1, force: -1, rainbow: 1,   // rainbow 1 = per building (owner asked, 2026-10-13); 0 = pal
+  edge: 1, edgeShare: .6,                               // edge light: pulses on 60% (the solid line on every one: owner unsure)
+  memWrite: 1 };                                        // memory banks: random access (the white diagonal sweep: owner unsure)   // tile 12: the board's routing reads at district scale (6 = grain)
 function setSky(name, instant) {
   ENV.T = SKIES[name]; ENV.name = name; sunElT = ENV.T.el;
   if (instant) { ENV.sky = ENV.T.sky; ENV.sun = ENV.T.sun.slice(); ENV.amb = ENV.T.amb; sunEl = sunElT; }
@@ -1465,7 +2109,7 @@ function skinSink(q) {                               // how far the noise-free e
   return b * q.R;
 }
 function uploadDNA() {
-  const A = new Float32Array(96), B = new Float32Array(96), C0 = new Float32Array(96), C1 = new Float32Array(96), E = new Float32Array(96);
+  const A = new Float32Array(128), B = new Float32Array(128), C0 = new Float32Array(128), C1 = new Float32Array(128), E = new Float32Array(128);
   for (let m = 1; m <= NM; m++) { const q = MATS[m], o = m * 4;
     A.set([q.k, q.g, q.L, q.iso], o); B.set([q.fill, q.R, q.sc, q.vr], o);
     C0.set([...q.c0, q.kind], o); C1.set([...q.c1, q.em], o); E.set([q.gloss, EMIT_CREVICE[m] ? 1 : 0, q.pl, skinSink(q)], o); }
@@ -1473,7 +2117,7 @@ function uploadDNA() {
   gl.uniform4f(U.uG, GENES.round, GENES.column, GENES.arch, GENES.window);
   gl.uniform4f(U.uG2, GENES.weather, GENES.diff, showRoles ? 1 : 0, GENES.flow);
   gl.uniform4f(U.uG3, GENES.whole, GENES.parts, GENES.junction, 0);
-  const F = new Float32Array(96); for (let m = 1; m <= NM; m++) { F[m * 4] = MATS[m].fl; F[m * 4 + 1] = MATS[m].ai || 0; } gl.uniform4fv(U.uF, F);
+  const F = new Float32Array(128); for (let m = 1; m <= NM; m++) { F[m * 4] = MATS[m].fl; F[m * 4 + 1] = MATS[m].ai || 0; F[m * 4 + 2] = MATS[m].ww || 0; F[m * 4 + 3] = MATS[m].wp || 0; } gl.uniform4fv(U.uF, F);
 }
 const GENES = { diff: 1, round: 1, column: 1, arch: 1, window: 1, weather: .6, flow: 1, whole: 1, parts: 1, junction: 1 };
 let showRoles = false;
@@ -1572,7 +2216,10 @@ addEventListener('keydown', e => {
   if (e.code === 'KeyM') setMode((skinMode + 1) % 3);
   if (e.code === 'KeyR') setRoles(!showRoles);
   if (e.code === 'KeyT') poke();
-  if (e.code === 'KeyG') goView(Math.hypot(cam.x - AI_VIEW.x, cam.z - AI_VIEW.z) < 30 ? SHOW_VIEW : AI_VIEW);
+  if (e.code === 'KeyG') {
+    if (worldKind === 'city') goView(cam.y > 30 ? CITY_AVE : CITY_VIEW);
+    else goView(Math.hypot(cam.x - AI_VIEW.x, cam.z - AI_VIEW.z) < 30 ? SHOW_VIEW : AI_VIEW);
+  }
   if (e.code === 'KeyN') setSky({ day: 'dusk', dusk: 'night', night: 'day' }[ENV.name]);
 });
 addEventListener('keyup', e => keys[e.code] = false);
@@ -1620,7 +2267,7 @@ GL_.forEach(([key, lab]) => {
   gBox.appendChild(r);
 });
 const aiBox = document.getElementById('aiSl');
-[['under', 'board underlay', 0, 1, AIP], ['tile', 'floor tile (blocks)', 2, 16, AIP, 1], ['dots', 'dots on lines', 0, 1, AIP], ['floorBoard', 'floor board #', 0, 4, AIP, 1], ['coreMode', 'die over board', 0, 1, AIP, 1], ['frame', 'building frame', 0, 2, AIP], ['pal', 'palette: cyan/pink → green/purple', 0, 1, AIP], ['glow', 'AI glow', 0, 3, AIP], ['links', 'link glow', 0, 3, AIP], ['bloom', 'bloom', 0, 2, AIP], ['drive', 'thought rate', 0, 3, NET], ['weight', 'excitability', 0, 1, NET]].forEach(([key, lab, lo, hi, obj, st]) => {
+[['under', 'board underlay', 0, 1, AIP], ['tile', 'floor tile (blocks)', 2, 16, AIP, 1], ['dots', 'dots on lines', 0, 1, AIP], ['floorBoard', 'floor board #', 0, 9, AIP, 1], ['coreMode', 'die over board', 0, 1, AIP, 1], ['frame', 'building frame', 0, 2, AIP], ['edge', 'edge light: 0 dark · 1 pulses · 2 solid', 0, 2, AIP, 1], ['edgeShare', 'buildings with edge light', 0, 1, AIP], ['memWrite', 'memory: 0 still · 1 random · 2 sweep', 0, 2, AIP, 1], ['rainbow', 'rainbow: 0 off · 1 per building · 2 rising', 0, 2, AIP, 1], ['pal', 'palette: cyan/pink → green/purple', 0, 1, AIP], ['vary', 'board variety: per face + 8 turns', 0, 1, AIP, 1], ['force', 'one board everywhere (-1 = off)', -1, 9, AIP, 1], ['glow', 'AI glow', 0, 3, AIP], ['links', 'link glow', 0, 3, AIP], ['bloom', 'bloom', 0, 2, AIP], ['drive', 'thought rate', 0, 3, NET], ['weight', 'excitability', 0, 1, NET]].forEach(([key, lab, lo, hi, obj, st]) => {
   const r = document.createElement('div'); r.className = 'row';
   r.innerHTML = `<label>${lab}</label><input type="range" min="${lo}" max="${hi}" step="${st || 0.01}" value="${obj[key]}"><span class="v">${obj[key].toFixed(2)}</span>`;
   r.querySelector('input').oninput = e => { obj[key] = +e.target.value; r.querySelector('.v').textContent = obj[key].toFixed(2); };
@@ -1630,6 +2277,31 @@ document.querySelectorAll('#skies button').forEach(b => b.onclick = () => setSky
 document.getElementById('goAI').onclick = () => goView(AI_VIEW);
 document.getElementById('goShow').onclick = () => goView(SHOW_VIEW);
 document.getElementById('pokeMind').onclick = () => netFire(0, true);
+// the frontage city
+const CITY_STAGES = ['', 'tiles', 'frontage', 'lots', 'outlines', 'prisms'];
+function cityInfoText() {
+  const I = cityInfo; if (!I) return '';
+  if (!I.lots) return `stage ${I.stage}: ${CITY_STAGES[I.stage]}`;
+  const list = (o) => Object.entries(o).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} ${n}`).join(' · ');
+  return `stage ${I.stage}: ${CITY_STAGES[I.stage]} · ${I.lots} lots, ${I.yards} yards<br>${list(I.styles)}<br>${list(I.ops)}`;
+}
+function cityRebuild() { genCity(); uploadAll(); document.getElementById('cityInfo').innerHTML = cityInfoText(); }
+const cityBox = document.getElementById('citySl');
+[['stage', 'stage', 1, 5, 1], ['ai', 'circuit share', 0, 1, .05], ['lotMin', 'lot min width', 2, 8, 1], ['lotMax', 'lot max width', 3, 14, 1], ['depth', 'lot depth', 4, 10, 1], ['maxH', 'max height', 8, 42, 1],
+ ['tower', 'downtown height', 0, 1.5, .05], ['shape', 'outline shaping', 0, 1.3, .05], ['arcade', 'arcades', 0, 1, .05], ['setback', 'setbacks', 0, 1, .05],
+ ['lit', 'lit rooms', 0, 1, .05], ['fog', 'fog (live)', 0, .02, .001]].forEach(([key, lab, lo, hi, st]) => {
+  const r = document.createElement('div'); r.className = 'row';
+  const fmt = (v) => key === 'stage' ? `${v} ${CITY_STAGES[v]}` : st < .01 ? (+v).toFixed(3) : st < 1 ? (+v).toFixed(2) : String(v);
+  r.innerHTML = `<label>${lab}</label><input type="range" min="${lo}" max="${hi}" step="${st}" value="${CITY[key]}"><span class="v" style="flex-basis:${key === 'stage' ? 64 : 40}px">${fmt(CITY[key])}</span>`;
+  const inp = r.querySelector('input');
+  inp.oninput = () => { r.querySelector('.v').textContent = fmt(inp.value); if (key === 'fog') CITY.fog = +inp.value; };
+  inp.onchange = () => { if (key === 'fog') return; CITY[key] = +inp.value; cityRebuild(); };   // on release: a rebuild is ~0.3 s
+  cityBox.appendChild(r);
+});
+document.getElementById('cityGo').onclick = () => { const was = worldKind; cityRebuild(); if (was !== 'city') goView(CITY_VIEW); };
+document.getElementById('cityRoll').onclick = () => { CITY.seed = (Math.random() * 1e9) | 0; cityRebuild(); };
+document.getElementById('cityView').onclick = () => goView(CITY_VIEW);
+document.getElementById('cityAve').onclick = () => goView(CITY_AVE);
 const roleBox = document.getElementById('showRoles');
 function setRoles(on) { showRoles = on; roleBox.checked = on; uploadDNA(); }
 roleBox.onchange = e => setRoles(e.target.checked);
@@ -1654,7 +2326,7 @@ document.getElementById('shadows').onchange = e => shadows = e.target.checked ? 
 document.getElementById('regen').onclick = () => { SEED = (Math.random() * 1e9) | 0; genWorld(); uploadAll(); };
 document.getElementById('save').onclick = () => { try { localStorage.setItem('eml_blocks_world', btoa(String.fromCharCode.apply(null, Array.from(mat)))); localStorage.setItem('eml_blocks_dna', JSON.stringify(MATS)); } catch (e) { console.warn(e); } };
 document.getElementById('load').onclick = () => { try {
-  const s = localStorage.getItem('eml_blocks_world'); if (s) { const b = atob(s); for (let i = 0; i < b.length; i++) mat[i] = b.charCodeAt(i); rebuildMasks(); uploadAll(); }
+  const s = localStorage.getItem('eml_blocks_world'); if (s) { const b = atob(s); for (let i = 0; i < b.length; i++) mat[i] = b.charCodeAt(i); bid.fill(0); rebuildMasks(); uploadAll(); }
   const d = JSON.parse(localStorage.getItem('eml_blocks_dna') || 'null'); if (d) { d.forEach((q, i) => q && Object.assign(MATS[i], q)); uploadDNA(); syncPanel(); }
 } catch (e) { console.warn(e); } };
 
@@ -1666,9 +2338,12 @@ function resize() {
 addEventListener('resize', resize);
 
 // ---------------------------------------------------------------- loop
-let last = performance.now(), fpsE = 60, frame = 0;
-function loop(now) {
-  const dt = Math.min(.05, (now - last) / 1000); last = now; fpsE += (1 / Math.max(dt, 1e-4) - fpsE) * .05; frame++;
+let last = performance.now(), fpsE = 60, frame = 0, capClean = false;
+// the frame itself, apart from its rAF: a capture can draw one and read the canvas in the same task - in a pane whose
+// window is throttled, rAF delivered under 1 frame a second (2026-10-13) and a rAF-driven capture took minutes
+function loop(now) { drawFrame(now); requestAnimationFrame(loop); }
+function drawFrame(now) {
+  const dt = Math.max(0, Math.min(.05, (now - last) / 1000)); last = now; if (dt > 0 && !capClean) fpsE += (1 / Math.max(dt, 1e-4) - fpsE) * .05; frame++;
   const pad = pollPad(dt);
   const { f, r } = basis(), fl = Math.hypot(f[0], f[2]) || 1;
   let mx = (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0), mz = (keys.KeyW ? 1 : 0) - (keys.KeyS ? 1 : 0), my = (keys.Space ? 1 : 0) - (keys.ShiftLeft || keys.ShiftRight ? 1 : 0);
@@ -1687,6 +2362,10 @@ function loop(now) {
   gl.useProgram(prog);
   gl.uniform1f(U.uSky, ENV.sky); gl.uniform3f(U.uSunCol, ...ENV.sun); gl.uniform1f(U.uAmbK, ENV.amb);
   gl.uniform1f(U.uAIBase, AIBASE); gl.uniform1f(U.uAIGlow, AIP.glow); gl.uniform1f(U.uLinkGlow, AIP.links);
+  gl.uniform1f(U.uFog, worldKind === 'city' ? CITY.fog : .012);
+  gl.uniform1f(U.uWideFirst, wideFirst); gl.uniform1f(U.uWideCount, wideCount); gl.uniform1f(U.uDieFirst, dieFirst); gl.uniform1f(U.uDieCount, dieCount); gl.uniform1f(U.uVary, AIP.vary);
+  gl.uniform1f(U.uForce, AIP.force >= 0 ? Math.min(AIP.force, boardCount - 1) : -1); gl.uniform1f(U.uRainbow, AIP.rainbow);
+  gl.uniform1f(U.uEdge, AIP.edge); gl.uniform1f(U.uEdgeShare, AIP.edgeShare); gl.uniform1f(U.uMemWrite, AIP.memWrite);
   gl.uniform1f(U.uUnder, AIP.under); gl.uniform1f(U.uCircTile, AIP.tile); gl.uniform1f(U.uCircSize, circSize);
   gl.uniform1f(U.uBoards, boardCount); gl.uniform1f(U.uFloorBoard, Math.min(AIP.floorBoard, boardCount - 1)); gl.uniform1f(U.uDots, AIP.dots); gl.uniform1f(U.uCoreBoard, coreBoardLayer); gl.uniform1f(U.uCoreMode, AIP.coreMode); gl.uniform1f(U.uFrame, AIP.frame); gl.uniform1f(U.uPal, AIP.pal);
   uploadNet();
@@ -1696,7 +2375,8 @@ function loop(now) {
   gl.uniform1i(U.uShadows, shadows);
   setCamUniforms();
 
-  if (frame % 3 === 0) { const p = pick(); hover = p ? p.hit : null; }
+  if (frame % 3 === 0 && !capClean) { const p = pick(); hover = p ? p.hit : null; }
+  if (capClean) hover = null;
   gl.uniform1i(U.uSelOn, hover ? 1 : 0); if (hover) gl.uniform3i(U.uSel, ...hover);
 
   const fx = AIP.bloom > .01;
@@ -1708,17 +2388,28 @@ function loop(now) {
   gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.uniform1i(U.uHDR, 0);
 
   // preview: the selected block alone, isolated, turning
-  const ps = Math.round(170 * (cv.width / innerWidth)), px = cv.width - ps - Math.round(12 * cv.width / innerWidth), py = Math.round(14 * cv.height / innerHeight);
-  gl.enable(gl.SCISSOR_TEST); gl.scissor(px, py, ps, ps); gl.viewport(px, py, ps, ps);
-  gl.uniform3i(U.uDim, 1, 1, 1); gl.uniform1i(U.uMode, 1); gl.uniform1i(U.uPrevMat, sel); gl.uniform4f(U.uPrevRect, px, py, ps, ps);
-  gl.drawArrays(gl.TRIANGLES, 0, 3);
-  gl.disable(gl.SCISSOR_TEST); gl.uniform3i(U.uDim, W, H, D);
+  if (!capClean) {
+    const ps = Math.round(170 * (cv.width / innerWidth)), px = cv.width - ps - Math.round(12 * cv.width / innerWidth), py = Math.round(14 * cv.height / innerHeight);
+    gl.enable(gl.SCISSOR_TEST); gl.scissor(px, py, ps, ps); gl.viewport(px, py, ps, ps);
+    gl.uniform3i(U.uDim, 1, 1, 1); gl.uniform1i(U.uMode, 1); gl.uniform1i(U.uPrevMat, sel); gl.uniform4f(U.uPrevRect, px, py, ps, ps);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.disable(gl.SCISSOR_TEST); gl.uniform3i(U.uDim, W, H, D);
+  }
 
   if (frame % 10 === 0) document.getElementById('fps').textContent = `${fpsE.toFixed(0)} fps · ${cv.width}×${cv.height} · ${['fused', 'per type', 'isolated'][skinMode]} · ${ENV.name}${HDR ? '' : ' · LDR bloom'}`;
-  requestAnimationFrame(loop);
 }
 
-genWorld(); uploadAll(); uploadDNA(); resize(); setSel(7); setMode(0); setSky('dusk', true); goView(AI_VIEW);
+// ?city boots straight into the frontage city (?city=<seed> picks the seed, ?stage=1-5 stops the pipeline early)
+const QS = new URLSearchParams(location.search);
+if (QS.has('city')) {
+  if (+QS.get('city')) CITY.seed = +QS.get('city');
+  if (QS.get('stage')) CITY.stage = Math.max(1, Math.min(5, +QS.get('stage') | 0));
+  cityBox.querySelectorAll('input')[0].value = CITY.stage;
+  genCity();
+} else genWorld();
+// the circuit city opens at NIGHT: its traces, links and floor glow; at dusk the dies' copper went muddy brown
+uploadAll(); uploadDNA(); resize(); setSel(7); setMode(0); setSky(worldKind === 'city' && CITY.ai >= .5 ? 'night' : 'dusk', true); goView(worldKind === 'city' ? CITY_VIEW : AI_VIEW);
+if (worldKind === 'city') { document.getElementById('cityInfo').innerHTML = cityInfoText(); document.getElementById('citySl').closest('.grp').scrollIntoView({ block: 'start' }); }
 requestAnimationFrame(loop);
 
 // test hooks
@@ -1732,7 +2423,24 @@ async function abShot(view, a, b, frames = 20) {
   if (a) a(); await grab(0); if (b) { b(); await grab(cv.width); }
   window.__shot = out.toDataURL('image/jpeg', .82); return window.__shot.length;
 }
-window.EB = { ab: abShot, NET, ENV, AIP, setSky, poke, netFire, goView, AI_VIEW, SHOW_VIEW, get HDR() { return HDR; }, cam, vox2, cls2, MATS, GENES, uploadDNA, setRoles, vox, morphAt, editAt, pick, setSel, setMode, genWorld: () => { genWorld(); uploadAll(); }, get fps() { return fpsE; }, mat, idx };
+// several views at an exact size in one go (JPEG data URLs keyed like `views`); puts the camera, panel and canvas back.
+// Draws its own frames (drawFrame + toDataURL in one task), so it works in a hidden or throttled pane; no preview
+// block, no hover box. `t` = the time to draw at (the city's motion), default now.
+function capViews(views, w = 1280, h = 800, t) {
+  const keep = { ...cam }, panel = document.getElementById('panel'), was = panel.classList.contains('hide');
+  panel.classList.add('hide'); cv.width = w; cv.height = h; allocRT(); capClean = true;
+  const out = {};
+  try {
+    for (const [k, v] of Object.entries(views)) {
+      goView(v); const now = t ?? performance.now();
+      drawFrame(now - 16); drawFrame(now);
+      out[k] = cv.toDataURL('image/jpeg', .85);
+    }
+  } finally { capClean = false; goView(keep); if (!was) panel.classList.remove('hide'); resize(); }
+  return out;
+}
+window.EB = { ab: abShot, cap: capViews, NET, ENV, AIP, setSky, poke, netFire, goView, AI_VIEW, SHOW_VIEW, get HDR() { return HDR; }, cam, vox2, cls2, MATS, GENES, uploadDNA, setRoles, vox, morphAt, editAt, pick, setSel, setMode, genWorld: () => { genWorld(); uploadAll(); }, get fps() { return fpsE; }, mat, idx,
+  CITY, CITY_VIEW, CITY_AVE, city: cityRebuild, get cityInfo() { return cityInfo; }, get worldKind() { return worldKind; } };
 </script>
 </body>
 </html>

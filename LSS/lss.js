@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "54.24";
+const LSS_BUILD = "54.28";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -35086,6 +35086,7 @@ const HUB_CITY = {
     industry: 0.22,
     parks: 0.26,
     stilts: 0.30,
+    frontage: true,   // ⭐ (v54.26) every block through the lab's frontage pipeline (_hcFrontageBlock); false = the v35 city
   },
 };
 
@@ -35339,6 +35340,13 @@ function _hubCityBuild(g, site) {
 
 
   const towers = [];
+  const memTwr = [];   // (v54.25) twr instances that are memory banks under the AI look (aiFlag 3)
+  const dieTwr = [];   // (v54.26) twr instances that wear circuit2 dies (aiFlag 1) - the frontage city's core towers + roof chips
+  const trStubs = [];  // (v54.27) each building's stub from its street face to the walkway's trace bus (x0, z0, x1, z1, district)
+  const trDist = [];   // (v54.27) each district's grid (origin, axes, steps, its cells) - the trace roads are routed from it
+  const TR_M = 3, TR_SP = 0.1, TR_OUT = TR_SP * TR_M;   // a bus: 3 traces each side of a median, 0.1 of the band apart (the outer at 0.3)
+  let nAds = 0;        // (v54.27) holo ads the frontage city hung
+  const adRng = _hcMulberry32((g.seed ^ 0x5AD5) >>> 0);   // (v54.27) the ads' own dice (see hang in _hcFrontageBlock)
   let nBlocks = 0, nBldg = 0;
   for (let di = 0; di < districts.length; di++) {
     const d = districts[di];
@@ -35364,10 +35372,11 @@ function _hubCityBuild(g, site) {
       dCells.push([i, j, cx, cz]);
       nBldg += _hcEmitBlock(d, cx, cz);
     }
+    if (g.frontage) trDist.push({ di, sw: d.sw, ox: CX + d.x, oz: CZ + d.z, ax, az, bx, bz, stepU, stepV, cells: dCells.map((q) => q[0] + ',' + q[1]) });
     for (const [i, j, cx, cz] of dCells) {
       const hu = stepU * 0.5, hv = stepV * 0.5;
-      walkSegs.push([cx - ax * hu - bx * hv, cz - az * hu - bz * hv, cx + ax * hu - bx * hv, cz + az * hu - bz * hv]);
-      walkSegs.push([cx - ax * hu - bx * hv, cz - az * hu - bz * hv, cx - ax * hu + bx * hv, cz - az * hu + bz * hv]);
+      walkSegs.push([cx - ax * hu - bx * hv, cz - az * hu - bz * hv, cx + ax * hu - bx * hv, cz + az * hu - bz * hv, d.sw]);
+      walkSegs.push([cx - ax * hu - bx * hv, cz - az * hu - bz * hv, cx - ax * hu + bx * hv, cz - az * hu + bz * hv, d.sw]);
       if (rng() < 0.8) {
         const nB = 3 + Math.floor(rng() * 3);
         for (let k = 0; k < nB; k++) {
@@ -35399,6 +35408,7 @@ function _hubCityBuild(g, site) {
       }
       return 0;
     }
+    if (g.frontage) return _hcFrontageBlock(d, cx, cz, local, fall);   // (v54.26) the hub: the lab's pipeline
 
     if (type === 'core') {
       const nT = bw > 1280 ? 2 : 1;
@@ -35447,6 +35457,7 @@ function _hubCityBuild(g, site) {
         const [px, pz] = local(-bw / 2 + segW * (k + 0.5), (rng() - 0.5) * bh * 0.15);
         const h = 200 + rng() * 280;
         const sd = bh * 0.55 + rng() * bh * 0.15;
+        memTwr.push(L.twr.length / 12);   // (v54.25) a shed is a MEMORY BANK under the AI look (aiFlag 3) - no rng() call
         solid('twr', px, PY, pz, segW - 80, h, sd, ang, jit(pick(_HC_FACADE_L), 0.1), 1, rng());
         count++;
         for (let bIdx = 0; bIdx < 3; bIdx++) {
@@ -35641,6 +35652,307 @@ function _hubCityBuild(g, site) {
     return count;
   }
 
+  function _hcFrontageBlock(d, cx, cz, local, fall) {
+    const { bw, bh, ang, type } = d;
+    const FCELL = 50, DEPTH = 8, LMIN = 6, LMAX = 12;
+    const W = Math.max(8, Math.round(bw / FCELL)), D = Math.max(8, Math.round(bh / FCELL));
+    const cwx = bw / W, cwz = bh / D;
+    const ri = (a, b) => a + Math.floor(rng() * (b - a + 1));
+    const mAt = (m, wU, dV, u, v) => u >= 0 && v >= 0 && u < wU && v < dV && m[u + v * wU] === 1;
+    const mCount = (m) => { let n = 0; for (let i = 0; i < m.length; i++) n += m[i]; return n; };
+    const mErode = (m, wU, dV, n) => {
+      let a = m;
+      for (let k = 0; k < n; k++) {
+        const b = new Uint8Array(wU * dV);
+        for (let v = 0; v < dV; v++) for (let u = 0; u < wU; u++)
+          if (mAt(a, wU, dV, u, v) && mAt(a, wU, dV, u - 1, v) && mAt(a, wU, dV, u + 1, v) && mAt(a, wU, dV, u, v - 1) && mAt(a, wU, dV, u, v + 1)) b[u + v * wU] = 1;
+        a = b;
+      }
+      return mCount(a) ? a : null;
+    };
+    const mRects = (m, wU, dV) => {
+      const used = new Uint8Array(wU * dV), out = [];
+      for (let v = 0; v < dV; v++) for (let u = 0; u < wU; u++) {
+        if (!m[u + v * wU] || used[u + v * wU]) continue;
+        let u1 = u; while (u1 + 1 < wU && m[u1 + 1 + v * wU] && !used[u1 + 1 + v * wU]) u1++;
+        let v1 = v;
+        for (;;) {
+          if (v1 + 1 >= dV) break;
+          let ok = true; for (let k = u; k <= u1; k++) if (!m[k + (v1 + 1) * wU] || used[k + (v1 + 1) * wU]) { ok = false; break; }
+          if (!ok) break; v1++;
+        }
+        for (let vv = v; vv <= v1; vv++) for (let k = u; k <= u1; k++) used[k + vv * wU] = 1;
+        out.push([u, v, u1, v1]);
+      }
+      return out;
+    };
+    const frameOf = (Lt) => {
+      const ns = Lt.front === 'N' || Lt.front === 'S';
+      const wU = ns ? Lt.i1 - Lt.i0 + 1 : Lt.j1 - Lt.j0 + 1, dV = ns ? Lt.j1 - Lt.j0 + 1 : Lt.i1 - Lt.i0 + 1;
+      const to = Lt.front === 'N' ? (u, v) => [Lt.i0 + u, Lt.j0 + v] : Lt.front === 'S' ? (u, v) => [Lt.i0 + u, Lt.j1 - v]
+               : Lt.front === 'W' ? (u, v) => [Lt.i0 + v, Lt.j0 + u] : (u, v) => [Lt.i1 - v, Lt.j0 + u];
+      return { wU, dV, to };
+    };
+    const cellBox = (iA, jA, iB, jB) => {
+      const i0 = Math.min(iA, iB), i1 = Math.max(iA, iB), j0 = Math.min(jA, jB), j1 = Math.max(jA, jB);
+      const [wx, wz] = local(-bw / 2 + (i0 + i1 + 1) * 0.5 * cwx, -bh / 2 + (j0 + j1 + 1) * 0.5 * cwz);
+      return { wx, wz, sx: (i1 - i0 + 1) * cwx, sz: (j1 - j0 + 1) * cwz };
+    };
+    const centreOf = (F, m) => {
+      let su = 0, sv = 0, n = 0;
+      for (let v = 0; v < F.dV; v++) for (let u = 0; u < F.wU; u++) if (m[u + v * F.wU]) { su += u; sv += v; n++; }
+      const cu = su / n, cv = sv / n; let best = null, bd = 1e9;
+      for (let v = 0; v < F.dV; v++) for (let u = 0; u < F.wU; u++) if (m[u + v * F.wU]) { const q = (u - cu) ** 2 + (v - cv) ** 2; if (q < bd) { bd = q; best = [u, v]; } }
+      return best;
+    };
+    let TB = [];                                          // the current building's tiers (box lists), bottom up
+    const tier = (F, m, y0, h, flag) => {
+      const rnd = rng(), col = jit(pick(_HC_FACADE_L), 0.1), out = [];
+      for (const [u0, v0, u1, v1] of mRects(m, F.wU, F.dV)) {
+        const a = F.to(u0, v0), b = F.to(u1, v1), B = cellBox(a[0], a[1], b[0], b[1]);
+        const ti = L.twr.length / 12;
+        solid('twr', B.wx, PY + y0, B.wz, B.sx, h, B.sz, ang, col, 1, rnd);
+        if (flag === 1) dieTwr.push(ti); else if (flag === 3) memTwr.push(ti);
+        out.push(Object.assign(B, { u0, v0, u1, v1, y0, h }));
+      }
+      TB.push(out);
+      return out;
+    };
+    const FN = { N: [0, -1], S: [0, 1], W: [-1, 0], E: [1, 0] };
+    const ca0 = Math.cos(ang), sa0 = Math.sin(ang), di = districts.indexOf(d);
+    const streetFaces = (Lt, F) => {
+      const f = FN[Lt.front], ua = (Lt.front === 'N' || Lt.front === 'S') ? [1, 0] : [0, 1], out = [{ sel: 'v0', nl: f }];
+      if (Lt.whole) out.push({ sel: 'v1', nl: [-f[0], -f[1]] }, { sel: 'u0', nl: [-ua[0], -ua[1]] }, { sel: 'u1', nl: ua });
+      else if (Lt.corner) {
+        const a0 = F.to(0, 0), at0 = a0[0] === Lt.ci && a0[1] === Lt.cj;
+        out.push(at0 ? { sel: 'u0', nl: [-ua[0], -ua[1]] } : { sel: 'u1', nl: ua });
+      }
+      return out;
+    };
+    const boxFor = (boxes, sel) => {
+      let B = null;
+      for (const q of boxes || []) {
+        if (!B) { B = q; continue; }
+        const better = sel === 'v0' ? q.v0 < B.v0 || (q.v0 === B.v0 && q.u1 - q.u0 > B.u1 - B.u0)
+                     : sel === 'v1' ? q.v1 > B.v1 || (q.v1 === B.v1 && q.u1 - q.u0 > B.u1 - B.u0)
+                     : sel === 'u0' ? q.u0 < B.u0 || (q.u0 === B.u0 && q.v1 - q.v0 > B.v1 - B.v0)
+                     : q.u1 > B.u1 || (q.u1 === B.u1 && q.v1 - q.v0 > B.v1 - B.v0);
+        if (better) B = q;
+      }
+      return B;
+    };
+    const faceGeom = (B, nl) => {
+      const n = [ca0 * nl[0] - sa0 * nl[1], sa0 * nl[0] + ca0 * nl[1]], alongZ = nl[0] === 0;
+      const half = (alongZ ? B.sz : B.sx) * 0.5;
+      return { n, cx: B.wx + n[0] * half, cz: B.wz + n[1] * half, w: alongZ ? B.sx : B.sz, yaw: alongZ ? ang : ang + Math.PI / 2 };
+    };
+    const hang = (B, nl, big, r3, r4, r5) => {
+      if (!B) return;
+      const G = faceGeom(B, nl);
+      const bw2 = Math.min(G.w * 0.85, (big ? 320 : 220) + r3 * (big ? 300 : 220)), bh2 = Math.min(B.h * 0.62, (big ? 170 : 120) + r4 * 170);
+      if (bw2 < 120 || bh2 < 80) return;
+      const yy = B.y0 + bh2 * 0.6 + r5 * Math.max(0, B.h - bh2 * 1.2), c = _HC_NEON_L[Math.floor(adRng() * _HC_NEON_L.length)];
+      L.holo.push(G.cx + G.n[0] * 10, PY + yy, G.cz + G.n[1] * 10, bw2, bh2, 1, G.yaw, c[0], c[1], c[2], 0, adRng());
+      nAds++;
+    };
+    const adLegacy = (Lt, boxes) => {
+      if (!boxes || !boxes.length) return;
+      let B = boxes[0]; for (const q of boxes) if (q.v0 < B.v0 || (q.v0 === B.v0 && q.u1 - q.u0 > B.u1 - B.u0)) B = q;
+      const ns = Lt.front === 'N' || Lt.front === 'S', faceW = ns ? B.sx : B.sz;
+      const bw2 = Math.min(faceW * 0.8, 200 + rng() * 260), bh2 = Math.min(B.h * 0.6, 120 + rng() * 160);
+      rng();
+      if (bw2 < 120 || bh2 < 80) return;
+      pick(_HC_NEON_L); rng();
+    };
+    const adsOn = (Lt, F, TB, Hc) => {
+      if (!TB.length) return;
+      for (const fc of streetFaces(Lt, F)) {
+        const r1 = adRng(), r2 = adRng(), r3 = adRng(), r4 = adRng(), r5 = adRng(), r6 = adRng();
+        const B0 = boxFor(TB[0], fc.sel); if (!B0) continue;
+        const G0 = faceGeom(B0, fc.nl), ox = G0.cx - CX, oz = G0.cz - CZ, rr = Math.hypot(ox, oz) || 1;
+        const outward = (G0.n[0] * ox + G0.n[1] * oz) / rr, radial = rr / R;
+        const px = ox + G0.n[0] * 700, pz = oz + G0.n[1] * 700;
+        const route = !inCity(px, pz) || ownerOf(px, pz) !== di;
+        const out = outward * Math.min(1, Math.max(0, (radial - 0.3) / 0.45));
+        const p = 0.06 + 0.75 * Math.max(0, out) + 0.55 * (route ? 1 : 0) + 0.08 * fall;
+        if (r1 >= p) continue;
+        const big = out > 0.3 || route;
+        const ti = Math.min(TB.length - 1, Math.floor(TB.length * (0.35 + 0.65 * r2)));
+        hang(boxFor(TB[ti], fc.sel), fc.nl, big, r3, r4, r5);
+        if (big && Hc > 1500 && r6 < 0.55 && ti > 0) hang(boxFor(TB[0], fc.sel), fc.nl, true, r4, r3, r6);
+      }
+    };
+    const stubsOn = (Lt, F, boxes) => {
+      for (const fc of streetFaces(Lt, F)) {
+        const B = boxFor(boxes, fc.sel); if (!B) continue;
+        const G = faceGeom(B, fc.nl), lx = ca0 * (G.cx - cx) + sa0 * (G.cz - cz), lz = -sa0 * (G.cx - cx) + ca0 * (G.cz - cz);
+        const gap = fc.nl[1] < 0 ? lz + bh / 2 : fc.nl[1] > 0 ? bh / 2 - lz : fc.nl[0] < 0 ? lx + bw / 2 : bw / 2 - lx;
+        const L2 = gap + (0.5 - TR_OUT) * d.sw;
+        trStubs.push([G.cx, G.cz, G.cx + G.n[0] * L2, G.cz + G.n[1] * L2, di]);
+      }
+    };
+    const fibre = (F, u, v, two, y0, h, w, beacon) => {
+      const a = F.to(u, v), b = F.to(u + (two ? 1 : 0), v + (two ? 1 : 0)), B = cellBox(a[0], a[1], b[0], b[1]);
+      push('cyl', B.wx, PY + y0, B.wz, w, h, w, 0, [0.16, 0.18, 0.2], 0, rng());
+      solids.push({ cx: B.wx, cz: B.wz, yaw: 0, hw: w * 0.5, hd: w * 0.5, y0: PY + y0, y1: PY + y0 + h });
+      if (beacon) push('neon', B.wx, PY + y0 + h, B.wz, w * 0.7, w * 0.7, w * 0.7, 0, [1.0, 0.12, 0.10], 2, rng());
+      return B;
+    };
+    const chips = (F, m, y0, n) => {
+      const e = mErode(m, F.wU, F.dV, 1); if (!e) return;
+      const cells = []; for (let v = 0; v < F.dV; v++) for (let u = 0; u < F.wU; u++) if (e[u + v * F.wU]) cells.push([u, v]);
+      for (let k = 0; k < n && cells.length; k++) {
+        const [u, v] = cells[Math.floor(rng() * cells.length)];
+        if (rng() < 0.6 && mAt(e, F.wU, F.dV, u + 1, v) && mAt(e, F.wU, F.dV, u, v + 1) && mAt(e, F.wU, F.dV, u + 1, v + 1)) {
+          const a = F.to(u, v), b = F.to(u + 1, v + 1), B = cellBox(a[0], a[1], b[0], b[1]);
+          const ti = L.twr.length / 12;
+          solid('twr', B.wx, PY + y0, B.wz, B.sx * 0.9, 34 + rng() * 26, B.sz * 0.9, ang, [0.03, 0.03, 0.04], 1, rng());
+          dieTwr.push(ti);
+        } else fibre(F, u, v, false, y0, 70 + rng() * 70, 22, false);
+      }
+    };
+    const lots = [];
+    let yard = null;
+    const wholeP = type === 'core' ? 0.34 : type === 'industrial' ? 0.3 : 0.06 + 0.22 * fall;
+    if (rng() < wholeP) lots.push({ i0: 0, j0: 0, i1: W - 1, j1: D - 1, front: W >= D ? 'N' : 'W', whole: true });
+    else {
+      const dd = Math.max(4, Math.min(Math.floor(Math.min(W, D) / 2) - 1, DEPTH + ri(-1, 1)));
+      const lenX = W - 2 * dd, lenZ = D - 2 * dd;
+      const ex = lenX > 0 && lenX < LMIN ? lenX : 0, ez = lenZ > 0 && lenZ < LMIN ? lenZ : 0;
+      const corner = (i0, j0, i1, j1, ns, we, ci, cj) => lots.push({ i0, j0, i1, j1, front: rng() < 0.5 ? ns : we, corner: true, ci, cj });
+      corner(0, 0, dd - 1 + ex, dd - 1, 'N', 'W', 0, 0);
+      corner(W - dd, 0, W - 1, dd - 1 + ez, 'N', 'E', W - 1, 0);
+      corner(W - dd - ex, D - dd, W - 1, D - 1, 'S', 'E', W - 1, D - 1);
+      corner(0, D - dd - ez, dd - 1, D - 1, 'S', 'W', 0, D - 1);
+      const strip = (front, a0, a1, f0, f1) => {
+        let a = a0;
+        while (a <= a1) {
+          let w = ri(LMIN, LMAX);
+          if (a1 - (a + w - 1) < LMIN) w = a1 - a + 1;
+          const b = a + w - 1;
+          lots.push((front === 'N' || front === 'S') ? { i0: a, i1: b, j0: f0, j1: f1, front } : { j0: a, j1: b, i0: f0, i1: f1, front });
+          a = b + 1;
+        }
+      };
+      if (!ex) { strip('N', dd, W - dd - 1, 0, dd - 1); strip('S', dd, W - dd - 1, D - dd, D - 1); }
+      if (!ez) { strip('W', dd, D - dd - 1, 0, dd - 1); strip('E', dd, D - dd - 1, W - dd, W - 1); }
+      if (W - 2 * dd >= 2 && D - 2 * dd >= 2) yard = { i0: dd, j0: dd, i1: W - dd - 1, j1: D - dd - 1, front: 'N' };
+    }
+    let count = 0;
+    const hMul = 1 + 3.6 * Math.pow(fall, 1.3);           // downtown-ness: the core district's megatowers
+    for (const Lt of lots) {
+      if (rng() > 0.45 + 0.55 * dens) continue;
+      const F = frameOf(Lt), wU = F.wU, dV = F.dV;
+      const m = new Uint8Array(wU * dV).fill(1);
+      const cut = (f) => { for (let v = 0; v < dV; v++) for (let u = 0; u < wU; u++) if (f(u, v)) m[u + v * wU] = 0; };
+      if (Lt.corner && rng() < 0.45) {                    // a notch at the street corner
+        const a0 = F.to(0, 0), cu = (a0[0] === Lt.ci && a0[1] === Lt.cj) ? (u) => u : (u) => wU - 1 - u;
+        const c = Math.max(2, Math.round(Math.min(wU, dV) * (0.25 + 0.2 * rng())));
+        cut((u, v) => cu(u) < c && v < c);
+      }
+      if (!Lt.corner && !Lt.whole && dV >= 7 && rng() < 0.22) cut((u, v) => v === 0);   // a forecourt
+      if (dV >= 8 && wU >= 7 && rng() < 0.28) {           // an L: a rear corner cut away
+        const left = rng() < 0.5, cu0 = Math.max(2, Math.floor(wU * (0.38 + 0.2 * rng()))), cv0 = Math.floor(dV * (0.5 + 0.15 * rng()));
+        cut((u, v) => v >= cv0 && (left ? u < cu0 : u >= wU - cu0));
+      } else if (dV >= 9 && wU >= 9 && rng() < 0.22) {    // a U: open at the back
+        const c0 = Math.floor(dV * 0.45);
+        cut((u, v) => u >= 3 && u <= wU - 4 && v >= c0);
+      }
+      if (Lt.whole && wU >= 14 && dV >= 14 && rng() < 0.35) { const t = Math.max(4, Math.floor(Math.min(wU, dV) * 0.3)); cut((u, v) => u >= t && u < wU - t && v >= t && v < dV - t); }   // a court
+      if (mCount(m) < 9) continue;
+      const r0 = rng(), small = wU <= 6 || dV <= 6;
+      let kind;
+      if (Lt.whole) kind = type === 'industrial' ? (r0 < 0.6 ? 'memory' : 'grove') : (r0 < 0.6 ? 'core' : 'rack');
+      else if (type === 'industrial') kind = r0 < 0.45 ? 'memory' : r0 < 0.7 ? 'grove' : 'rack';
+      else if (type === 'core') kind = r0 < 0.3 ? 'core' : r0 < 0.9 ? 'rack' : 'grove';
+      else if (type === 'dense') kind = small ? (r0 < 0.35 ? 'grove' : 'rack') : r0 < 0.55 ? 'rack' : r0 < 0.8 ? 'memory' : 'grove';
+      else kind = small ? (r0 < 0.3 ? 'grove' : 'rack') : r0 < 0.6 ? 'rack' : r0 < 0.72 ? 'core' : r0 < 0.86 ? 'memory' : 'grove';
+      const ind = type === 'industrial' ? 0.6 : 1;
+      let Hc = (kind === 'core' ? 700 + 900 * rng() : 300 + 700 * rng()) * hMul * ind;
+      if (Lt.corner) Hc *= 1.15; if (Lt.whole) Hc *= 1.25;
+      Hc = Math.max(240, Math.min(Hc, kind === 'core' ? 4200 : 3900));
+      const t0 = L.twr.length / 12, c0 = L.cyl.length / 12;
+      let mm = m, y = 0, dieFrom = t0, top = 0;
+      TB = [];
+      const erode = (n) => { const e = mErode(mm, wU, dV, n); if (e && mCount(e) >= 16) { mm = e; return true; } return false; };
+      if (kind === 'grove') {
+        tier(F, mm, 0, 36, 0);                          // a low board plinth
+        let best = null;
+        for (let v = 1; v + 1 < dV; v += 3) for (let u = 1; u + 1 < wU; u += 3) {
+          if (!(mAt(mm, wU, dV, u, v) && mAt(mm, wU, dV, u + 1, v) && mAt(mm, wU, dV, u, v + 1) && mAt(mm, wU, dV, u + 1, v + 1))) continue;
+          const h = Math.max(200, (Hc + 300) * (0.3 + 0.7 * rng()));
+          const B = fibre(F, u, v, true, 36, h, Math.min(cwx, cwz) * 1.7, h > 900);
+          if (!best || h > best.h) best = { x: B.wx, z: B.wz, h };
+        }
+        top = best ? 36 + best.h : 36;
+        if (best && top >= 1280) towers.push({ x: best.x, z: best.z, y1: PY + top, w: cwx * 2, d: cwz * 2, yaw: ang,
+          t0, t1: L.twr.length / 12, c0, c1: L.cyl.length / 12, d0: t0, top: PY + top + 40 });
+        stubsOn(Lt, F, TB[0]);
+        count++; continue;
+      }
+      if (kind === 'memory') {
+        const stem = 100 + Math.floor(rng() * 2) * 90;   // the stilts: the outline's corners + every third edge cell
+        for (let v = 0; v < dV; v++) for (let u = 0; u < wU; u++) {
+          if (!mAt(mm, wU, dV, u, v)) continue;
+          const eX = !mAt(mm, wU, dV, u - 1, v) || !mAt(mm, wU, dV, u + 1, v), eZ = !mAt(mm, wU, dV, u, v - 1) || !mAt(mm, wU, dV, u, v + 1);
+          if ((eX && eZ) || ((eX || eZ) && (u + v) % 3 === 0)) fibre(F, u, v, false, 0, stem, 26, false);
+        }
+        const bodyH = Math.max(160, Math.min(Hc, 520) * (1 + 0.6 * fall));
+        tier(F, mm, stem, bodyH, 3);
+        y = stem + bodyH; top = y;
+        chips(F, mm, y, ri(1, 3));
+        adsOn(Lt, F, TB, Hc); stubsOn(Lt, F, TB[0]);
+        count++; continue;
+      }
+      const tall = Hc >= 1400;
+      if (kind === 'core') {
+        const podH = 220 + rng() * 160;
+        dieFrom = L.twr.length / 12; tier(F, mm, 0, podH, 1); y = podH;
+        if (Hc - podH > 900) {
+          erode(Math.max(1, Math.round(Math.min(wU, dV) * (Lt.whole ? 0.2 : 0.12))));
+          const crownH = Math.min(520, Hc * 0.14), shaftTop = Hc - crownH;
+          tier(F, mm, y, shaftTop - y, 0); y = shaftTop;
+          erode(1); tier(F, mm, y, crownH, 1); y += crownH;
+        } else { tier(F, mm, y, Hc - podH, 1); y = Hc; }
+      } else {
+        let adT = null;
+        if (tall && rng() < 0.6) { tier(F, mm, 0, 240, 0); y = 240; erode(rng() < 0.5 ? 2 : 1); }
+        while (y < Hc - 1) {
+          const seg = Math.min(Hc - y, 330 + rng() * 520);
+          const bx = tier(F, mm, y, seg, 0); if (!adT) adT = bx; y += seg;
+          if (tall && y < Hc - 1 && rng() < 0.36) erode(1);
+        }
+        if (Hc > 600 && rng() < 0.22) adLegacy(Lt, adT);   // (54.26's dice - kept so the city does not move)
+      }
+      top = y;
+      const k = rng(), pm = mErode(mm, wU, dV, 1), c = centreOf(F, mm);
+      const roof = cellBox(...F.to(c[0], c[1]), ...F.to(c[0], c[1]));
+      const two = mAt(mm, wU, dV, c[0] + 1, c[1]) && mAt(mm, wU, dV, c[0], c[1] + 1) && mAt(mm, wU, dV, c[0] + 1, c[1] + 1);
+      if (kind === 'core' || (tall && k < 0.4)) {
+        const mh = 160 + rng() * (kind === 'core' ? 420 : 300);
+        fibre(F, c[0], c[1], two, top, mh, Math.min(cwx, cwz) * (two ? 1.4 : 0.6), true);
+        top += mh;
+      } else if (kind === 'rack' && k < 0.62 && pm && mCount(pm) >= 9) {   // a memory crown
+        mm = pm; const h = 120 + rng() * 160; tier(F, mm, top, h, 3); top += h;
+      } else if (k < 0.8 && wU >= 7 && dV >= 7 && pm) {   // a roof pad (the traffic lands on roofs too)
+        const r = Math.min(300, Math.min(wU, dV) * Math.min(cwx, cwz) * 0.36);
+        if (r >= 80) landPad(roof.wx, PY + top, roof.wz, r, true); else chips(F, mm, top, ri(2, 4));
+      } else chips(F, mm, top, ri(2, 4));
+      adsOn(Lt, F, TB, Hc); stubsOn(Lt, F, TB[0]);
+      count++;
+      if (top >= 1280 || kind === 'core') {
+        const ext = cellBox(...F.to(0, 0), ...F.to(wU - 1, dV - 1));
+        towers.push({ x: roof.wx, z: roof.wz, y1: PY + y, w: ext.sx, d: ext.sz, yaw: ang,
+                      t0, t1: L.twr.length / 12, c0, c1: L.cyl.length / 12, d0: dieFrom, top: PY + top + 40 });
+      }
+    }
+    if (yard) {
+      const F = frameOf(yard), m = new Uint8Array(F.wU * F.dV).fill(1);
+      chips(F, m, 0, Math.floor(F.wU * F.dV / 14));
+    }
+    return count;
+  }
+
   let nBridges = 0;
   for (let i = 0; i < towers.length && nBridges < 60; i++) {
     for (let j = i + 1; j < towers.length && nBridges < 60; j++) {
@@ -35668,8 +35980,25 @@ function _hubCityBuild(g, site) {
   {
     const PAD_R = 200, PLAZA_R = 320;
     const seeded = [];
+    const onTraceRoad = (x, z, r) => {
+      for (const D of trDist) {
+        const cs = D._cs || (D._cs = new Set(D.cells)), h = D.sw / 2;
+        const u = (x - D.ox) * D.ax + (z - D.oz) * D.az, v = (x - D.ox) * D.bx + (z - D.oz) * D.bz;
+        for (let q = Math.floor((v - h - r) / D.stepV + 0.5); q <= Math.ceil((v + h + r) / D.stepV + 0.5); q++) {   // a rows
+          if (Math.abs(v - (q - 0.5) * D.stepV) >= h + r) continue;
+          for (let p = Math.floor((u - r - h) / D.stepU - 0.5); p <= Math.ceil((u + r + h) / D.stepU + 0.5); p++)
+            if ((cs.has(p + ',' + q) || cs.has(p + ',' + (q - 1))) && (p - 0.5) * D.stepU - h < u + r && (p + 0.5) * D.stepU + h > u - r) return true;
+        }
+        for (let p = Math.floor((u - h - r) / D.stepU + 0.5); p <= Math.ceil((u + h + r) / D.stepU + 0.5); p++) {   // b columns
+          if (Math.abs(u - (p - 0.5) * D.stepU) >= h + r) continue;
+          for (let q = Math.floor((v - r - h) / D.stepV - 0.5); q <= Math.ceil((v + r + h) / D.stepV + 0.5); q++)
+            if ((cs.has(p + ',' + q) || cs.has((p - 1) + ',' + q)) && (q - 0.5) * D.stepV - h < v + r && (q + 0.5) * D.stepV + h > v - r) return true;
+        }
+      }
+      return false;
+    };
     let have = 0; for (const p of pads) if (p.park) have++;
-    for (let k = 0; k < 420 && have < 26; k++) {
+    for (let k = 0; k < (trDist.length ? 1200 : 420) && have < 26; k++) {
       const a = rng() * 6.283, rr2 = R * (0.20 + rng() * 0.55);
       const qx = CX + Math.cos(a) * rr2, qz = CZ + Math.sin(a) * rr2;
       let clear = true;
@@ -35679,6 +36008,7 @@ function _hubCityBuild(g, site) {
         if (dx * dx + dz * dz < rr3 * rr3) { clear = false; break; }
       }
       if (!clear) continue;
+      if (trDist.length && onTraceRoad(qx, qz, PAD_R + 40)) continue;
       for (const p of pads) {
         const dx = qx - p.x, dz = qz - p.z;
         const need = PAD_R + (p.r || 0) + 90;
@@ -35850,6 +36180,158 @@ function _hubCityBuild(g, site) {
   }
   m2.globalCompositeOperation = 'source-over';
 
+  let aiTrace = null;
+  const trStat = { buses: 0, junctions: 0, pieces: 0, clipped: 0 };
+  if (g.frontage && trDist.length) {
+    const TS = _full ? 2048 : 1024, upx = 2 * EXT / TS, PER = 300, QD = 255 / 64, QV = 255 / 48, TR_SEAM = 70, R2 = Math.SQRT2;
+    const tX = (wx) => (wx - CX + EXT) / upx, tY = (wz) => (CZ + EXT - wz) / upx;
+    const px = new Uint8Array(TS * TS * 4), ph = new Uint16Array(TS * TS);
+    new Uint32Array(px.buffer).fill(0xFF8080FF);         // R 255 (64 u+), G B 128 (no phase), A 255 (24 u+ off a rim) - little-endian
+    const band = (x0, z0, x1, z1, sp, M, off) => {
+      const len = Math.sqrt((x1 - x0) * (x1 - x0) + (z1 - z0) * (z1 - z0)); if (len < 0.5) return;
+      const ux = (x1 - x0) / len, uz = (z1 - z0) / len, half = sp * M + 64;
+      const j0 = Math.max(0, Math.floor(tY(Math.max(z0, z1) + half))), j1 = Math.min(TS - 1, Math.ceil(tY(Math.min(z0, z1) - half)));
+      for (let j = j0; j <= j1; j++) {
+        const dz = CZ + EXT - (j + 0.5) * upx - z0;
+        let lo = -1e9, hi = 1e9;
+        if (Math.abs(ux) > 1e-6) { let a = (-64 - dz * uz) / ux, b = (len + 64 - dz * uz) / ux; if (a > b) { const q = a; a = b; b = q; } if (a > lo) lo = a; if (b < hi) hi = b; }
+        else if (dz * uz < -64 || dz * uz > len + 64) continue;
+        if (Math.abs(uz) > 1e-6) { let a = (dz * ux - half) / uz, b = (dz * ux + half) / uz; if (a > b) { const q = a; a = b; b = q; } if (a > lo) lo = a; if (b < hi) hi = b; }
+        else if (Math.abs(dz * ux) > half) continue;
+        if (lo > hi) continue;
+        const i0 = Math.max(0, Math.floor(tX(x0 + lo))), i1 = Math.min(TS - 1, Math.ceil(tX(x0 + hi)));
+        for (let i = i0; i <= i1; i++) {
+          const dx = CX - EXT + (i + 0.5) * upx - x0, t = dx * ux + dz * uz, s = dz * ux - dx * uz;
+          if (t < -64 || t > len + 64 || s > half || s < -half) continue;
+          let k = 0;
+          if (M > 0) { k = Math.round(s / sp); if (k > M) k = M; else if (k < -M) k = -M; else if (k === 0) k = s < 0 ? -1 : 1; }
+          const da = t < 0 ? -t : (t > len ? t - len : 0), e = s - k * sp, q = Math.round(Math.sqrt(da * da + e * e) * QD), p = j * TS + i;
+          if (q < px[p * 4]) {
+            px[p * 4] = q;
+            const f = (off + (t < 0 ? 0 : t > len ? len : t)) / PER, f1 = f - Math.floor(f);
+            ph[p] = Math.floor((k > 0 ? 1 - f1 : f1) * 65536) & 0xFFFF;
+          }
+        }
+      }
+    };
+    const via = (x, z, r) => {
+      const ci = tX(x), cj = tY(z), rr = (r + 24) / upx;
+      const i0 = Math.max(0, Math.floor(ci - rr)), i1 = Math.min(TS - 1, Math.ceil(ci + rr));
+      for (let j = Math.max(0, Math.floor(cj - rr)); j <= Math.min(TS - 1, Math.ceil(cj + rr)); j++) {
+        const ez = CZ + EXT - (j + 0.5) * upx - z;
+        for (let i = i0; i <= i1; i++) {
+          const ex = CX - EXT + (i + 0.5) * upx - x, sv = Math.sqrt(ex * ex + ez * ez) - r, o = (j * TS + i) * 4 + 3;
+          const q = sv >= 24 ? 255 : Math.round((Math.max(-24, sv) + 24) * QV);
+          if (q < px[o]) px[o] = q;
+        }
+      }
+    };
+    const HP = [];
+    for (const D of trDist) {
+      const sI = seeds[D.di], out = [];
+      for (let k = 0; k < seeds.length; k++) {
+        if (k === D.di) continue;
+        const nx = seeds[k].x - sI.x, nz = seeds[k].z - sI.z, nl = Math.sqrt(nx * nx + nz * nz) || 1;
+        out.push([nx / nl, nz / nl, CX + (seeds[k].x + sI.x) / 2, CZ + (seeds[k].z + sI.z) / 2]);
+      }
+      HP[D.di] = out;
+    }
+    const clipT = (di, x0, z0, x1, z1) => {
+      let ta = 0, tb = 1;
+      for (const [nx, nz, mx, mz] of HP[di]) {
+        const f0 = (x0 - mx) * nx + (z0 - mz) * nz + TR_SEAM, f1 = (x1 - mx) * nx + (z1 - mz) * nz + TR_SEAM;
+        if (f0 > 0 && f1 > 0) return null;
+        if (f0 > 0) ta = Math.max(ta, f0 / (f0 - f1)); else if (f1 > 0) tb = Math.min(tb, f0 / (f0 - f1));
+      }
+      return ta < tb - 1e-6 ? [ta, tb] : null;
+    };
+    const inside = (di, x, z) => { for (const [nx, nz, mx, mz] of HP[di]) if ((x - mx) * nx + (z - mz) * nz + TR_SEAM > 0) return false; return true; };
+    const trace = (di, x0, z0, x1, z1, off) => {
+      const c = clipT(di, x0, z0, x1, z1); if (!c) return;
+      const dx = x1 - x0, dz = z1 - z0, len = Math.sqrt(dx * dx + dz * dz);
+      const xa = x0 + dx * c[0], za = z0 + dz * c[0], xb = x0 + dx * c[1], zb = z0 + dz * c[1];
+      band(xa, za, xb, zb, 0, 0, off + c[0] * len);
+      trStat.pieces++;
+      if (c[0] > 0) { via(xa, za, 9); trStat.clipped++; }
+      if (c[1] < 1) { via(xb, zb, 9); trStat.clipped++; }
+    };
+    const bus = (di, sp, sx, sz, ex, ez, off) => {
+      const len = Math.sqrt((ex - sx) * (ex - sx) + (ez - sz) * (ez - sz)); if (len < 1) return;
+      const nx = -(ez - sz) / len, nz = (ex - sx) / len, w = TR_M * sp;
+      trStat.buses++;
+      const c1 = clipT(di, sx + nx * w, sz + nz * w, ex + nx * w, ez + nz * w), c2 = clipT(di, sx - nx * w, sz - nz * w, ex - nx * w, ez - nz * w);
+      if (c1 && c2 && c1[0] === 0 && c1[1] === 1 && c2[0] === 0 && c2[1] === 1) { band(sx, sz, ex, ez, sp, TR_M, off); trStat.pieces += 2 * TR_M; return; }
+      for (let k = 1; k <= TR_M; k++) {
+        const ox = nx * k * sp, oz = nz * k * sp;
+        trace(di, sx - ox, sz - oz, ex - ox, ez - oz, off);
+        trace(di, ex + ox, ez + oz, sx + ox, sz + oz, -(off + len));
+      }
+    };
+    for (const D of trDist) {
+      const di = D.di, sp = TR_SP * D.sw, h = D.sw / 2, cF = 0.5 * sp, cs = new Set(D.cells);
+      const has = (i, j) => cs.has(i + ',' + j);
+      const eA = (p, q) => has(p, q) || has(p, q - 1), eB = (p, q) => has(p, q) || has(p - 1, q);   // edge (p,q)->(p+1,q) / (p,q)->(p,q+1)
+      const CW = (p, q) => [D.ox + D.ax * (p - 0.5) * D.stepU + D.bx * (q - 0.5) * D.stepV, D.oz + D.az * (p - 0.5) * D.stepU + D.bz * (q - 0.5) * D.stepV];
+      const cu = (x, z) => (x - D.ox) * D.ax + (z - D.oz) * D.az, cv = (x, z) => (x - D.ox) * D.bx + (z - D.oz) * D.bz;
+      const DIR = [[D.ax, D.az], [D.bx, D.bz], [-D.ax, -D.az], [-D.bx, -D.bz]];
+      const phIn = (i, x, z) => (i & 1 ? cv(x, z) : cu(x, z)) * (i < 2 ? -1 : 1);   // the phase flowing IN along arm i
+      const corners = new Set();
+      for (const key of D.cells) { const [ci, cj] = key.split(',').map(Number); corners.add(ci + ',' + cj); corners.add((ci + 1) + ',' + cj); corners.add(ci + ',' + (cj + 1)); corners.add((ci + 1) + ',' + (cj + 1)); }
+      for (const key of corners) {
+        const [p, q] = key.split(',').map(Number), J = CW(p, q);
+        if (eA(p, q)) { const B = CW(p + 1, q), sx = J[0] + D.ax * h, sz = J[1] + D.az * h; bus(di, sp, sx, sz, B[0] - D.ax * h, B[1] - D.az * h, cu(sx, sz)); }
+        if (eB(p, q)) { const B = CW(p, q + 1), sx = J[0] + D.bx * h, sz = J[1] + D.bz * h; bus(di, sp, sx, sz, B[0] - D.bx * h, B[1] - D.bz * h, cv(sx, sz)); }
+        const pr = [eA(p, q), eB(p, q), eA(p - 1, q), eB(p, q - 1)], n = pr[0] + pr[1] + pr[2] + pr[3];
+        if (n < 2) continue;
+        trStat.junctions++;
+        const path = (pts, ph0) => {
+          let acc = ph0;
+          for (let k = 0; k + 1 < pts.length; k++) {
+            const xa = pts[k][0], za = pts[k][1], xb = pts[k + 1][0], zb = pts[k + 1][1];
+            trace(di, xa, za, xb, zb, acc);
+            acc += Math.sqrt((xb - xa) * (xb - xa) + (zb - za) * (zb - za));
+          }
+        };
+        const corner = (i, m) => {
+          const A = DIR[i], B = DIR[(i + 1) & 3], c = cF + (TR_M - m) * (2 - R2) * sp, o = m * sp;
+          const EA = [J[0] + A[0] * h + B[0] * o, J[1] + A[1] * h + B[1] * o];
+          const P1 = [J[0] + A[0] * (o + c) + B[0] * o, J[1] + A[1] * (o + c) + B[1] * o];
+          const P2 = [J[0] + A[0] * o + B[0] * (o + c), J[1] + A[1] * o + B[1] * (o + c)];
+          const EB = [J[0] + A[0] * o + B[0] * h, J[1] + A[1] * o + B[1] * h];
+          if (m > 0) path([EA, P1, P2, EB], phIn(i, EA[0], EA[1])); else path([EB, P2, P1, EA], phIn((i + 1) & 3, EB[0], EB[1]));
+        };
+        const straight = (i, s) => {
+          const A = DIR[i], S = DIR[s & 3];
+          for (let m = 1; m <= TR_M; m++) {
+            const o = m * sp, E1 = [J[0] + A[0] * h + S[0] * o, J[1] + A[1] * h + S[1] * o], E2 = [J[0] - A[0] * h + S[0] * o, J[1] - A[1] * h + S[1] * o];
+            if (((s - i) & 3) === 1) path([E1, E2], phIn(i, E1[0], E1[1])); else path([E2, E1], phIn((i + 2) & 3, E2[0], E2[1]));
+          }
+        };
+        if (n === 4) {                                       // a crossroads: four nested corners round the island
+          for (let i = 0; i < 4; i++) for (let m = 1; m <= TR_M; m++) corner(i, m);
+          if (inside(di, J[0], J[1])) via(J[0], J[1], 1.3 * sp);
+        } else if (n === 3) {                                // a T: the stem's halves turn, the far side runs on
+          const x = pr.indexOf(false), y = (x + 2) & 3;
+          for (let m = 1; m <= TR_M; m++) { corner(y, m); corner((y + 3) & 3, m); }
+          straight((x + 1) & 3, x);
+        } else if (pr[0] !== pr[2]) {                        // an L: the whole bus turns
+          const i = pr[0] && pr[1] ? 0 : pr[1] && pr[2] ? 1 : pr[2] && pr[3] ? 2 : 3;
+          for (let m = -TR_M; m <= TR_M; m++) if (m) corner(i, m);
+        } else { const i = pr[0] ? 0 : 1; straight(i, i + 1); straight(i, i + 3); }   // straight on
+      }
+    }
+    for (const [x0, z0, x1, z1, di] of trStubs) {
+      if (!HP[di]) continue;
+      trace(di, x1, z1, x0, z0, 0);                          // (flowing in to the building)
+      if (inside(di, x0, z0)) via(x0, z0, 15);
+      if (inside(di, x1, z1)) via(x1, z1, 11);
+    }
+    const LC = new Uint8Array(4096), LS = new Uint8Array(4096);
+    for (let k = 0; k < 4096; k++) { const a = (k + 0.5) / 4096 * Math.PI * 2; LC[k] = Math.round((Math.cos(a) * 0.5 + 0.5) * 255); LS[k] = Math.round((Math.sin(a) * 0.5 + 0.5) * 255); }
+    for (let p = 0, o = 0; p < TS * TS; p++, o += 4) if (px[o] < 254) { const k = ph[p] >> 4; px[o + 1] = LC[k]; px[o + 2] = LS[k]; }
+    aiTrace = { data: px, size: TS };
+  }
+
   const CELL = 256;
   const hash = new Map();
   for (let s = 0; s < solids.length; s++) {
@@ -35882,6 +36364,8 @@ function _hubCityBuild(g, site) {
   const skirtR = new Float32Array(nTwr), aiFlag = new Uint8Array(nTwr);
   for (const t of towers) if (t.core) { aiFlag[t.t0] = 2; for (let i = t.d0; i < t.t1; i++) aiFlag[i] = 1; }
   if (hero && hero.t1 > hero.t0) for (let i = hero.core ? hero.d0 : hero.t0; i < hero.t1; i++) aiFlag[i] = 1;
+  for (const i of memTwr) if (!aiFlag[i]) aiFlag[i] = 3;   // (v54.25) memory banks (the industrial sheds; see _hcTowerMat)
+  for (const i of dieTwr) if (!aiFlag[i]) aiFlag[i] = 1;   // (v54.26) the frontage city's dies
   for (let i = 0; i < nTwr; i++) {
     const o = i * 12;
     if (aiFlag[i] === 2 || Math.abs(L.twr[o + 1] - PY) > 0.5) continue;
@@ -35896,11 +36380,14 @@ function _hubCityBuild(g, site) {
     layers, solids, hash, cellSize: CELL, pads, treePts, hero,
     albCanvas: alb, emiCanvas: emi,
     towers, gAng, aiMask: aim, skirtR, aiFlag,   // (v51.95) the AI city: network nodes, board grid angle, ground mask
+    aiTrace,                                      // (v54.27) the circuit-trace roads' distance field (frontage cities)
     stats: {
       districts: districts.length, blocks: nBlocks, buildings: nBldg,
       bridges: nBridges, solids: solids.length, pads: pads.length,
       trees: treePts.length / 4, genMs: Math.round(performance.now() - t0),
       nodes: towers.length, skirts: L.skirt.length / 12,
+      ads: L.holo.length / 12, frAds: nAds, roads: trStat.buses, junctions: trStat.junctions, stubs: trStubs.length,   // (v54.27)
+      trPieces: trStat.pieces, trClipped: trStat.clipped,
     },
   };
 }
@@ -35954,10 +36441,11 @@ function _padGlowPatch(mat, instanced) {
       : '(modelMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz';
     sh.vertexShader = sh.vertexShader
       .replace('#include <common>',
-        '#include <common>\nuniform vec3 uShip;\nuniform vec4 uClaim;\nuniform float uNear,uFar,uDim,uBoost,uPadT,uChargeS,uChargeA;\nvarying float vPadGlow;')
+        '#include <common>\nuniform vec3 uShip;\nuniform vec4 uClaim;\nuniform float uNear,uFar,uDim,uBoost,uPadT,uChargeS,uChargeA;\nvarying float vPadGlow;\nvarying float vPadH;')
       .replace('#include <begin_vertex>', [
         '#include <begin_vertex>',
         'vec3 _po = ' + origin + ';',
+        'vPadH = fract(sin(dot(_po.xz * 0.001, vec2(12.9898, 78.233))) * 43758.5453);',   // (v54.25) the rainbow: a hue per pad
         'float _f = 1.0 - smoothstep(uNear, uFar, distance(_po, uShip));',
         '_f = _f * _f * (3.0 - 2.0 * _f);',               // ease the ramp itself
         'float _c = (uClaim.w > 0.5) ? (1.0 - smoothstep(30.0, 300.0, distance(_po, uClaim.xyz))) : 0.0;',
@@ -35965,9 +36453,9 @@ function _padGlowPatch(mat, instanced) {
         'vPadGlow = max(uDim + (uBoost - uDim) * _f, _c * 2.7) * mix(1.0, uChargeA, _c);'
       ].join('\n'));
     sh.fragmentShader = sh.fragmentShader
-      .replace('#include <common>', '#include <common>\nvarying float vPadGlow;')
+      .replace('#include <common>', '#include <common>\nvarying float vPadGlow;\nvarying float vPadH;')
       .replace('#include <dithering_fragment>', '#include <dithering_fragment>\n' +
-        (instanced ? 'gl_FragColor.rgb = mix(gl_FragColor.rgb, aiPal(gl_FragColor.rgb), uAiOn);\n' : '') + 'gl_FragColor.rgb *= vPadGlow;');
+        (instanced ? 'aiRbH = vPadH;\ngl_FragColor.rgb = mix(gl_FragColor.rgb, aiPal(gl_FragColor.rgb), uAiOn);\n' : '') + 'gl_FragColor.rgb *= vPadGlow;');
     if (instanced) {
       sh.uniforms.uAiOn = _AI_CITY.u.uAiOn; sh.uniforms.uAiPal = _AI_CITY.u.uAiPal; sh.uniforms.uAiHue = _aiHueOf(mat);
       sh.fragmentShader = 'uniform float uAiOn;\nuniform float uAiPal;\n' + _AI_PAL_GLSL + sh.fragmentShader;
@@ -36019,16 +36507,18 @@ const _AI_CITY = {
     uAiNet:  { value: new THREE.Vector4(1, 1.0, 4.0, 2.0) },    // NETWORK: on, link glow, packet glow, beacon glow
     uAiAct:  { value: new THREE.Vector4(1, 1, 0, 0) },          // a firing tower: spike along its lines, activation glow
     uAiSk:   { value: 1 },                                       // black junction skirts
-    uAiFib:  { value: new THREE.Vector4(1, 1, 0, 0) },          // FIBRE pillars: on, glow
+    uAiFib:  { value: new THREE.Vector4(1, 1, 1, 0) },          // FIBRE pillars: on, glow, (v54.25) z 1 = packets + segments, 0 = lit strands
     uAiDie:  { value: 1 },                                       // circuit2 DIES on the core district + the hero tower
+    uAiX:    { value: new THREE.Vector4(1, 1, 0.6, 1) },
     uAiTex: { value: (() => { const t = new THREE.DataArrayTexture(new Uint8Array(4), 1, 1, 1); t.needsUpdate = true; return t; })() },
     uAiPh:  { value: (() => { const t = new THREE.DataArrayTexture(new Uint8Array([128, 128, 0, 255]), 1, 1, 1); t.needsUpdate = true; return t; })() },
     uAiBev:   { value: (() => { const t = new THREE.DataTexture(new Uint8Array(4), 1, 1); t.needsUpdate = true; return t; })() },
     uAiBevPh: { value: (() => { const t = new THREE.DataTexture(new Uint8Array([128, 128, 0, 255]), 1, 1); t.needsUpdate = true; return t; })() },
     uAiBevN:  { value: 0 },
   },
-  texV: '52.00',
-  hue0: { value: new THREE.Vector4(0.37, 0.76, 1, 1) },
+  texV: '54.25',
+  hue0: { value: new THREE.Vector4(-1, -1, 1, 1) },
+  hueGP: [0.37, 0.76, 1, 1],
   themes: {},
 };
 function _aiHueOf(m) { return (m && m.userData && m.userData.aiHue) || _AI_CITY.hue0; }
@@ -36040,19 +36530,23 @@ if (typeof window !== 'undefined') window.__aiTheme = function (name, v) {
 };
 const _AI_PAL_GLSL = [
   'uniform vec4 uAiHue;',
+  'float aiRbH = 0.0;',
   'vec3 aiRgb2hsv(vec3 c){ vec4 K = vec4(0.0, -1.0/3.0, 2.0/3.0, -1.0);',
   '  vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g)); vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));',
   '  float d = q.x - min(q.w, q.y); return vec3(abs(q.z + (q.w - q.y) / (6.0 * d + 1e-10)), d / (q.x + 1e-10), q.x); }',
   'vec3 aiHsv2rgb(vec3 c){ vec3 p = abs(fract(c.xxx + vec3(1.0, 2.0/3.0, 1.0/3.0)) * 6.0 - 3.0); return c.z * mix(vec3(1.0), clamp(p - 1.0, 0.0, 1.0), c.y); }',
   'vec3 aiPal(vec3 e){ vec3 h = aiRgb2hsv(max(e, vec3(0.0)));',
+  '  bool rb = uAiHue.x < -0.5; float pk0 = rb ? 0.70 : 0.78;',
   '  float cy = smoothstep(0.40, 0.46, h.x) * (1.0 - smoothstep(0.64, 0.70, h.x));',
-  '  float pk = smoothstep(0.78, 0.83, h.x) * (1.0 - smoothstep(0.975, 0.995, h.x));',
-  '  vec3 a = aiHsv2rgb(vec3(uAiHue.x, h.y * uAiHue.z, h.z)), b = aiHsv2rgb(vec3(uAiHue.y, h.y * uAiHue.w, h.z));',
+  '  float pk = smoothstep(pk0, pk0 + 0.05, h.x) * (1.0 - smoothstep(0.975, 0.995, h.x));',
+  '  vec3 a = aiHsv2rgb(vec3(rb ? aiRbH : uAiHue.x, h.y * (rb ? 1.0 : uAiHue.z), h.z));',
+  '  vec3 b = aiHsv2rgb(vec3(rb ? fract(aiRbH + 0.17) : uAiHue.y, h.y * (rb ? 1.0 : uAiHue.w), h.z));',
   '  return mix(e, mix(mix(e, a, cy), b, pk), uAiPal); }',
 ].join('\n') + '\n';
 const _AI_GND_HEAD = 'uniform float uHcT;\nuniform float uAiOn;\nuniform float uAiN;\nuniform vec4 uAiK;\nuniform float uAiPal;\n' +
   'uniform highp sampler2DArray uAiTex;\nuniform highp sampler2DArray uAiPh;\nuniform vec4 uAiGnd;\nuniform vec4 uAiGndK;\n' +
-  'uniform int uAiRipN;\nuniform vec4 uAiRip[16];\nuniform vec4 uAiGR;\nuniform sampler2D uAiMask;\n' + _AI_PAL_GLSL;
+  'uniform int uAiRipN;\nuniform vec4 uAiRip[16];\nuniform vec4 uAiGR;\nuniform sampler2D uAiMask;\n' +
+  'uniform sampler2D uAiTrc;\nuniform vec4 uAiTrcK;\nuniform vec4 uAiTrcC;\n' + _AI_PAL_GLSL;   // (v54.27) the circuit-trace roads
 const _AI_GND_DIFF = `
 vec2 aiGp = vHcWp.xz - uAiGR.zw;
 vec2 aiGq = vec2(aiGp.x * uAiGR.x + aiGp.y * uAiGR.y, aiGp.y * uAiGR.x - aiGp.x * uAiGR.y) / uAiGnd.x;
@@ -36088,6 +36582,28 @@ if (aiGon) {
   float aiGls = smoothstep(0.12, 0.5, length(aiGcs));
   float aiGdot = pow(max(cos(atan(aiGcs.y, aiGcs.x + 1e-5) - uHcT * 5.0), 0.0), 28.0) * aiGls;
   aiGe += mix(aiGc / max(aiGmx, 0.03), vec3(1.0), 0.45) * (aiGdot * 2.5 * uAiK.z * (1.0 + 2.0 * aiAc) + aiGls * aiWv * uAiGndK.z * 0.5);
+  // ⭐ (v54.27) THE CIRCUIT-TRACE ROADS (see _hubCityBuild): the board goes dark under each walkway's bus; on it, the traces
+  // (crisp at any range - the field is a DISTANCE, its edge found per pixel), packets riding them (the boards' dot rule: a
+  // peak of cos(phase - speed t)), gold via rings (a rim round a dark drill hole) where the b buses dive under and where
+  // every building's stub leaves it and lands. A firing tower's ripple runs along the traces too. The trace colour
+  // (uAiTrcC.rgb) goes through the palette like every AI glow: its default sits in the PINK band -> the city's second
+  // colour (the hub: its rainbow sweep + 0.17), apart from the board's own lines; uAiTrcC.w = the dim base, packets on top.
+  if (uAiTrcK.x > 0.5) {
+    vec4 aiTr = texture2D(uAiTrc, vMapUv);
+    float aiTd = aiTr.r * 64.0, aiVs = aiTr.a * 48.0 - 24.0;
+    float aiTp = max(fwidth(aiTd), 0.6), aiVp = max(fwidth(aiVs), 0.6), aiTw = uAiTrcK.y;
+    float aiTc = 1.0 - smoothstep(aiTw - aiTp, aiTw + aiTp, aiTd);
+    float aiTb = 1.0 - smoothstep(34.0, 52.0, aiTd);                            // the bus's own dark street
+    float aiVr = 1.0 - smoothstep(2.0 - aiVp, 2.0 + aiVp, abs(aiVs + 2.0));    // a via: a gold rim (its outer 4 u)...
+    float aiVh = 1.0 - smoothstep(-4.0 - aiVp, -4.0 + aiVp, aiVs);             // ...round a dark drill hole
+    vec2 aiTcs = aiTr.gb * 2.0 - 1.0;
+    float aiTpk = pow(max(cos(atan(aiTcs.y, aiTcs.x + 1e-5) - uHcT * uAiTrcK.z), 0.0), 20.0) * smoothstep(0.2, 0.6, length(aiTcs));
+    aiGe *= 1.0 - 0.7 * max(aiTb, aiVh);
+    aiGe += (uAiTrcC.rgb * aiTc * (uAiTrcC.w + 3.2 * aiTpk + 2.0 * aiAc + uAiGndK.z * aiWv) * (1.0 - aiVh)
+          + vec3(1.0, 0.74, 0.3) * aiVr * (0.55 + 1.5 * aiAc)) * uAiTrcK.w;
+  }
+  // (v54.25) the rainbow deck: one slow sweep across the city (a per-building hue on the deck would come out per ROW)
+  aiRbH = fract(dot(aiGp, vec2(0.7071, 0.7071)) * 0.000055 + 0.3);
   totalEmissiveRadiance = aiPal(aiGe) * mix(1.0, aiGm.r, 0.6);
 }
 `;
@@ -36162,12 +36678,19 @@ if (typeof window !== 'undefined') window.__aiCity = function (o) {
     if ('fibre' in o) F.x = o.fibre ? 1 : 0; if ('fglow' in o) F.y = +o.fglow;
     if ('die' in o) U.uAiDie.value = o.die ? 1 : 0;
     if ('drive' in o) _AI_NET.drive = +o.drive; if ('speed' in o) _AI_NET.speed = +o.speed; if ('weight' in o) _AI_NET.weight = +o.weight;
+    const X = U.uAiX.value;
+    if ('vary' in o) X.x = o.vary ? 1 : 0;
+    if ('edge' in o) X.y = +o.edge; if ('edgeShare' in o) X.z = +o.edgeShare; if ('mem' in o) X.w = +o.mem;
+    if ('fpk' in o) F.z = o.fpk ? 1 : 0;
+    if ('rainbow' in o) { const H = _AI_CITY.themes.hub; if (H) { if (o.rainbow) H.value.set(-1, -1, 1, 1); else H.value.fromArray(_AI_CITY.hueGP); } }
   }
-  const G = U.uAiGnd.value, GK = U.uAiGndK.value, NT = U.uAiNet.value, A = U.uAiAct.value, F = U.uAiFib.value;
+  const G = U.uAiGnd.value, GK = U.uAiGndK.value, NT = U.uAiNet.value, A = U.uAiAct.value, F = U.uAiFib.value, X = U.uAiX.value;
+  const _hub = _AI_CITY.themes.hub;
   return { on: U.uAiOn.value, self: U.uAiSelf.value, glow: K.x, alb: K.y, dots: K.z, frame: K.w, pal: U.uAiPal.value, layers: U.uAiN.value,
     gnd: G.w, gsize: G.x, gself: G.y, gglow: G.z, galb: GK.w, ripple: GK.z, rspeed: GK.x, rwidth: GK.y,
     net: NT.x, link: NT.y, packet: NT.z, beacon: NT.w, spike: A.x, act: A.y, skirt: U.uAiSk.value, fibre: F.x, fglow: F.y,
-    die: U.uAiDie.value, drive: _AI_NET.drive, speed: _AI_NET.speed, weight: _AI_NET.weight };
+    die: U.uAiDie.value, drive: _AI_NET.drive, speed: _AI_NET.speed, weight: _AI_NET.weight,
+    vary: X.x, edge: X.y, edgeShare: X.z, mem: X.w, fpk: F.z, rainbow: _hub ? (_hub.value.x < -0.5 ? 1 : 0) : null };
 };
 
 const _AI_NET = {
@@ -36273,9 +36796,9 @@ function _aiBevelMat(sunV) {
     sh.uniforms.uAiOn = U.uAiOn; sh.uniforms.uAiN = U.uAiN;
     sh.uniforms.uHcT = _swU.uTime; sh.uniforms.uHcSunV = sunV || { value: new THREE.Vector3(0.27, 0.8, 0.4) };
     sh.uniforms.uAiK = U.uAiK; sh.uniforms.uAiPal = U.uAiPal; sh.uniforms.uAiSelf = U.uAiSelf; sh.uniforms.uAiAct = U.uAiAct;
-    sh.uniforms.uAiHue = _aiHueOf(mat);
+    sh.uniforms.uAiHue = _aiHueOf(mat); sh.uniforms.uAiX = U.uAiX;   // (v54.25) edge light
     sh.uniforms.uAiBev = U.uAiBev; sh.uniforms.uAiBevPh = U.uAiBevPh; sh.uniforms.uAiBevN = U.uAiBevN;
-    sh.fragmentShader = ('uniform float uHcT;\nuniform vec3 uHcSunV;\nuniform float uAiOn;\nuniform vec4 uAiK;\nuniform float uAiPal;\nuniform float uAiSelf;\nuniform vec4 uAiAct;\n' +
+    sh.fragmentShader = ('uniform float uHcT;\nuniform vec3 uHcSunV;\nuniform float uAiOn;\nuniform vec4 uAiK;\nuniform float uAiPal;\nuniform float uAiSelf;\nuniform vec4 uAiAct;\nuniform vec4 uAiX;\n' +
       'uniform sampler2D uAiBev;\nuniform sampler2D uAiBevPh;\nuniform float uAiBevN;\nvarying float vBvU;\nvarying float vBvT;\nvarying vec4 vBvG;\nvarying float vBvF;\n' + _AI_PAL_GLSL) +
       sh.fragmentShader.replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
 {
@@ -36309,8 +36832,13 @@ function _aiBevelMat(sunV) {
     float bvStrip = (1.0 - smoothstep(bvFw * 0.07, bvFw * 0.07 + bvPx, abs(bvDE - bvFw * 0.55))) * bvFm;
     vec3 bvSc = vBvG.w > 0.5 ? vec3(1.0, 0.35, 0.85) : vec3(0.3, 0.85, 1.0);
     diffuseColor.rgb = mix(vec3(dot(bvC, vec3(0.3, 0.55, 0.15)) * uAiK.y), vec3(0.03, 0.033, 0.04), bvFm);
-    bvE = bvE * (1.0 - bvFm) + bvSc * bvStrip * 1.2 * (1.0 + 2.0 * bvAct);
+    // (v54.25) the edge light as on the towers (uAiX.y: 0 dark, 1 running pulses, 2 solid; .z the share that carry one)
+    bool bvPost = min(vBvU + bvHw, bvHw - vBvU) < min(vBvT, 1.0 - vBvT) * bvSl;
+    float bvRun = pow(fract((bvPost ? vBvT * bvSl : vBvU) / 700.0 - uHcT * (0.55 + 1.6 * bvAct) + vBvG.w * 9.0), 14.0);
+    float bvEL = step(fract(vBvG.w * 7.13 + 0.21), uAiX.z) * step(0.5, uAiX.y) * (uAiX.y > 1.5 ? 1.0 : 0.03 + 2.6 * bvRun);
+    bvE = bvE * (1.0 - bvFm) + bvSc * bvStrip * 1.2 * (1.0 + 2.0 * bvAct) * bvEL;
     float bvSun = mix(1.0, 0.22, clamp(dot(normalize(normal), normalize(uHcSunV)), 0.0, 1.0));
+    aiRbH = fract(vBvG.w * 7.31 + 0.13);   // (v54.25) the rainbow: a hue per bevel
     totalEmissiveRadiance += aiPal(bvE) * bvSun;
   }
 }`);
@@ -36361,14 +36889,34 @@ function _aiCylMat() {
     float fbAge = uHcT - vFbP.z; fbAge = fbAge < 0.0 ? 99.0 : fbAge;
     float fbAct = exp(-fbAge * 2.2) * uAiAct.y;
     // strands at the ten facet edges (CylinderGeometry puts them at atan(x, z) = 2 pi i / 10), averaged at range
-    float fbStr = mix(pow(0.5 + 0.5 * cos(atan(vFbL.x, vFbL.z) * 10.0), 8.0), 0.2, smoothstep(0.3, 0.8, fbPx / (0.6283 * fbR)));
-    float fbV = vFbL.y / max(fbR * 0.8, 1.0);
-    float fbSp = 0.7 + 0.6 * fbRnd;
-    float fbPu = pow(fract(fbV * 0.3 - uHcT * fbSp), 18.0) + 0.6 * pow(fract(fbV * 0.3 - uHcT * fbSp * 1.37 + 0.5), 24.0);
+    float fbAng = atan(vFbL.x, vFbL.z);
+    float fbStr = mix(pow(0.5 + 0.5 * cos(fbAng * 10.0), 8.0), uAiFib.z > 0.5 ? 0.27 : 0.2, smoothstep(0.3, 0.8, fbPx / (0.6283 * fbR)));
     float fbEnd = 1.0 - smoothstep(0.3 * fbR, 0.65 * fbR, min(vFbL.y, vFbS.y - vFbL.y));   // collars at base and capital
     vec3 fbCol = fract(fbRnd * 3.1) > 0.6 ? vec3(0.9, 0.55, 1.0) : vec3(0.35, 0.85, 1.0);
-    vec3 fbE = fbCol * (1.0 - fbEnd) * (0.02 + fbStr * (0.5 + 3.0 * fbPu * (0.5 + fbAct) + 1.2 * fbAct) + 0.15 * fbPu);
+    vec3 fbE;
+    if (uAiFib.z > 0.5) {
+      // ⭐ (v54.25) PACKETS, NOT LINES. Owner, in the lab: "same with the energy pillars that are more or less solid lines
+      // going up and down" (after the memory banks' far look). A strand is dark glass with light RUNNING in it: packets,
+      // each strand on its own clock, speed and direction (some climb, some fall), quicker as its tower fires; and the
+      // shaft is cut into SEGMENTS three diameters tall, a dark collar between, busy or idle - so far off a pillar is a
+      // stack of lit and dark sections, and only past that does it fade, to a dim average. Every term has its average for
+      // when it goes below a pixel (the no-twinkle rule). In diameters: s = height up the shaft.
+      float fbD = max(2.0 * fbR, 1.0), fbS = vFbL.y / fbD, fbPd = fbPx / fbD;
+      float fbSi = floor(fbAng * 10.0 / 6.2832 + 0.5), fbSh = fract(sin(fbSi * 12.9898 + fbRnd * 78.233) * 43758.5453);
+      float fbPh = fract(fbS * 0.36 * (fbSh > 0.5 ? 1.0 : -1.0) - uHcT * (0.3 + 0.6 * fract(fbSh * 7.1) + 1.0 * fbAct) + fbSh * 5.0);
+      float fbPk = mix(smoothstep(0.0, 0.04, fbPh) * (1.0 - smoothstep(0.04, 0.26, fbPh)), 0.13, smoothstep(0.3, 0.8, fbPd * 2.0));
+      float fbSg = floor(fbS / 3.0), fbSf = fract(fbS / 3.0), fbPb = 0.55 + 0.3 * fbAct;
+      float fbBusy = mix(step(fract(sin(fbSg * 7.13 + fbRnd * 91.7) * 43758.5453), fbPb), fbPb, smoothstep(0.3, 0.8, fbPd / 3.0));
+      float fbCol2 = mix(smoothstep(0.04, 0.12, min(fbSf, 1.0 - fbSf)), 0.8, smoothstep(0.3, 0.8, fbPd / 0.25));
+      fbE = fbCol * (1.0 - fbEnd) * fbCol2 * (0.015 + fbStr * (0.06 + fbBusy * fbPk * (3.0 + 2.0 * fbAct)));
+    } else {
+      float fbV = vFbL.y / max(fbR * 0.8, 1.0);
+      float fbSp = 0.7 + 0.6 * fbRnd;
+      float fbPu = pow(fract(fbV * 0.3 - uHcT * fbSp), 18.0) + 0.6 * pow(fract(fbV * 0.3 - uHcT * fbSp * 1.37 + 0.5), 24.0);
+      fbE = fbCol * (1.0 - fbEnd) * (0.02 + fbStr * (0.5 + 3.0 * fbPu * (0.5 + fbAct) + 1.2 * fbAct) + 0.15 * fbPu);
+    }
     diffuseColor.rgb = mix(vec3(0.03, 0.04, 0.05), vec3(0.06, 0.065, 0.075), fbEnd);
+    aiRbH = fract(fbRnd * 7.31 + 0.13);   // (v54.25) the rainbow: a hue per pillar
     totalEmissiveRadiance += aiPal(fbE) * uAiFib.y;
   }
 }`);
@@ -36384,10 +36932,12 @@ function _aiNetMat() {
     sh.uniforms.uHcPxH = HUB_CITY._uPxH;
     sh.uniforms.uAiOn = _AI_CITY.u.uAiOn; sh.uniforms.uAiN = _AI_CITY.u.uAiN; sh.uniforms.uAiPal = _AI_CITY.u.uAiPal;
     sh.uniforms.uAiNet = _AI_CITY.u.uAiNet; sh.uniforms.uAiHue = _aiHueOf(mat);
-    sh.vertexShader = 'attribute vec4 aNet;\nattribute vec4 aNetD;\nuniform float uHcPxH;\nuniform float uAiOn;\nuniform float uAiN;\nuniform vec4 uAiNet;\nvarying vec4 vNet;\nvarying vec4 vNetD;\n' +
+    sh.vertexShader = 'attribute vec4 aNet;\nattribute vec4 aNetD;\nuniform float uHcPxH;\nuniform float uAiOn;\nuniform float uAiN;\nuniform vec4 uAiNet;\nvarying vec4 vNet;\nvarying vec4 vNetD;\nvarying float vNetH;\n' +
       sh.vertexShader.replace('#include <begin_vertex>', `#include <begin_vertex>
  vNet = vec4(aNet.x, mix(aNet.y, aNet.z, position.y), aNet.w, 1.0);
  vNetD = aNetD;
+ // (v54.25) the rainbow: a hue per link (its four pieces are consecutive instances) and per beacon
+ vNetH = fract((aNet.x < 0.5 ? floor(float(gl_InstanceID) * 0.25) : float(gl_InstanceID) + 0.5) * 0.618);
  #ifdef USE_INSTANCING
  {
    // the neon strips' line-AA (v36.07): a thin axis under two pixels is widened to two, so a link never pops between
@@ -36406,7 +36956,7 @@ function _aiNetMat() {
  }
  #endif
  if (uAiOn < 0.5 || uAiN < 0.5 || uAiNet.x < 0.5) transformed = vec3(0.0);`);
-    sh.fragmentShader = 'uniform float uHcT;\nuniform float uAiPal;\nuniform vec4 uAiNet;\nvarying vec4 vNet;\nvarying vec4 vNetD;\n' + _AI_PAL_GLSL +
+    sh.fragmentShader = 'uniform float uHcT;\nuniform float uAiPal;\nuniform vec4 uAiNet;\nvarying vec4 vNet;\nvarying vec4 vNetD;\nvarying float vNetH;\n' + _AI_PAL_GLSL +
       sh.fragmentShader.replace('#include <opaque_fragment>', `{
   float nAge = uHcT - vNetD.w; nAge = nAge < 0.0 ? 99.0 : nAge;
   vec3 nC;
@@ -36417,6 +36967,7 @@ function _aiNetMat() {
   } else {
     nC = vec3(0.4, 0.85, 1.0) * (0.5 + 6.0 * exp(-nAge * 2.2)) * uAiNet.w;   // a roof beacon: flares as its tower fires
   }
+  aiRbH = vNetH;
   outgoingLight = aiPal(nC) * vNet.w;
 }
 #include <opaque_fragment>`);
@@ -36570,14 +37121,15 @@ function _hcTowerMat() {
     sh.uniforms.uAiPal = _AI_CITY.u.uAiPal; sh.uniforms.uAiTex = _AI_CITY.u.uAiTex; sh.uniforms.uAiPh = _AI_CITY.u.uAiPh;
     sh.uniforms.uAiSelf = _AI_CITY.u.uAiSelf; sh.uniforms.uAiHue = _aiHueOf(mat);
     sh.uniforms.uAiSk = _AI_CITY.u.uAiSk; sh.uniforms.uAiAct = _AI_CITY.u.uAiAct; sh.uniforms.uAiDie = _AI_CITY.u.uAiDie;   // (v51.95)
+    sh.uniforms.uAiX = _AI_CITY.u.uAiX;   // (v54.25) board variety, edge light, memory banks
     sh.vertexShader = 'attribute vec3 aSize;\nattribute vec2 aPrm;\nattribute vec3 aAi;\nuniform float uAiOn;\nuniform float uAiN;\nvarying vec3 vHcL;\nvarying vec3 vHcN;\nvarying vec3 vHcS;\nvarying vec2 vHcP;\nvarying vec3 vHcF;\n' +
       sh.vertexShader.replace('#include <begin_vertex>',
         '#include <begin_vertex>\n vHcL = position * aSize; vHcN = normal; vHcS = aSize; vHcP = aPrm; vHcF = aAi;\n' +
-        ' if (aAi.z > 1.5 && uAiOn > 0.5 && uAiN > 0.5) transformed = vec3(0.0);');
+        ' if (aAi.z > 1.5 && aAi.z < 2.5 && uAiOn > 0.5 && uAiN > 0.5) transformed = vec3(0.0);');   // podiums only (3 = a memory bank, v54.25)
     sh.fragmentShader = ('uniform float uHcT;\nuniform vec3 uHcSunV;\nuniform float uHcLodOn;\nvarying vec3 vHcL;\nvarying vec3 vHcN;\nvarying vec3 vHcS;\nvarying vec2 vHcP;\nvarying vec3 vHcF;\n' +
       'float hcH21(vec2 p){ p=fract(p*vec2(123.34,456.21)); p+=dot(p,p+45.32); return fract(p.x*p.y); }\n' +
       'uniform float uAiOn;\nuniform float uAiN;\nuniform vec4 uAiK;\nuniform float uAiPal;\nuniform float uAiSelf;\n' +
-      'uniform float uAiSk;\nuniform vec4 uAiAct;\nuniform float uAiDie;\n' +
+      'uniform float uAiSk;\nuniform vec4 uAiAct;\nuniform float uAiDie;\nuniform vec4 uAiX;\n' +
       'uniform highp sampler2DArray uAiTex;\nuniform highp sampler2DArray uAiPh;\n' + _AI_PAL_GLSL) +
       sh.fragmentShader.replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
 {
@@ -36629,9 +37181,20 @@ function _hcTowerMat() {
     float aiAge = uHcT - vHcF.x; aiAge = aiAge < 0.0 ? 99.0 : aiAge;
     float aiAct = exp(-aiAge * 2.2) * uAiAct.y;
     float aiDie = step(0.5, vHcF.z) * step(vHcF.z, 1.5) * step(0.5, uAiDie);   // flag 1 only (2 = a podium)
-    vec3 aiQ = vec3(fract(aiTc), aiDie > 0.5 ? min(1.0, uAiN - 1.0) : floor(hcRnd * uAiN * 0.9999));
-    vec3 aiC = textureGrad(uAiTex, aiQ, aiGx, aiGy).rgb;
-    vec4 aiP = textureGrad(uAiPh, aiQ, aiGx, aiGy);
+    float aiMem = step(2.5, vHcF.z) * step(vHcF.z, 3.5);                       // (v54.25) flag 3 = a memory bank
+    // (v54.25) VARIETY (uAiX.x): each FACE its own board (fc is exact +-2/3/5, the v36.02 rule for hash inputs) and each
+    // whole board on it one of the square's 8 turns - the coordinate AND its derivatives turned together, so textureGrad
+    // still picks the right mip. Dies keep circuit2, unturned. 0 = the v51.92 pick, one board per tower.
+    float aiFc = floor(dot(vHcN, vec3(2.0, 3.0, 5.0)) + 0.5);
+    float aiFr = fract(hcRnd + uAiX.x * (aiFc * 0.137 + 0.71));
+    float aiO8 = (uAiX.x > 0.5 && aiDie < 0.5) ? floor(hcH21(floor(aiTc) + vec2(aiFc * 7.0 + 3.0, hcRnd * 61.0)) * 8.0) : 0.0;
+    vec2 aiF = fract(aiTc), aiGxT = aiGx, aiGyT = aiGy;
+    if (mod(aiO8, 2.0) >= 1.0) { aiF.x = 1.0 - aiF.x; aiGxT.x = -aiGxT.x; aiGyT.x = -aiGyT.x; }
+    if (mod(floor(aiO8 * 0.5), 2.0) >= 1.0) { aiF.y = 1.0 - aiF.y; aiGxT.y = -aiGxT.y; aiGyT.y = -aiGyT.y; }
+    if (aiO8 >= 4.0) { aiF = aiF.yx; aiGxT = aiGxT.yx; aiGyT = aiGyT.yx; }
+    vec3 aiQ = vec3(aiF, aiDie > 0.5 ? min(1.0, uAiN - 1.0) : floor(aiFr * uAiN * 0.9999));
+    vec3 aiC = textureGrad(uAiTex, aiQ, aiGxT, aiGyT).rgb;
+    vec4 aiP = textureGrad(uAiPh, aiQ, aiGxT, aiGyT);
     float aiMx = max(aiC.r, max(aiC.g, aiC.b)), aiMn = min(aiC.r, min(aiC.g, aiC.b));
     // the board is SELF-LIT (uAiSelf: the whole image emits, plates and copper too), and its neon lines
     // (saturation picks them) glow on top of that (uAiK.x) - harder while the tower fires
@@ -36655,14 +37218,51 @@ function _hcTowerMat() {
       aiE += aiC * aiNeon * aiHt * (1.0 + 5.0 * aiAct) * uAiK.x
            + mix(vec3(0.3, 0.8, 1.0), vec3(1.0, 0.45, 0.95), aiAct) * aiHt * (0.12 + 0.9 * aiAct);
     }
+    // ⭐ (v54.25) MEMORY BANKS (aiFlag 3) - the lab's bits, in CHIPS. Owner, in the lab, of the cube walls: "they look cool
+    // from close, but from far they look solid and just pastel ugly" - sub-pixel bits fade (no twinkle) to their average,
+    // and half-on bits averaged to one flat bright slab. So the bits sit in chips (one per 64 u of face, 4 x 4 bits, a
+    // dark gutter round each) and only some chips are busy (more as the bank fires): far off a face is a mosaic of lit
+    // and dark chips, like a tower's windows at night, and only when the chips shrink too does it fade - to a DARK average.
+    // Bits write by uAiX.w: 0 still, 1 random access (each bit its own clock, a blink in its own colour), 2 the lab's sweep.
+    if (aiMem > 0.5) {
+      vec2 aiMu = vec2(aiU, aiV) / 64.0;
+      float aiMp = aiPx / 64.0;                              // a pixel, in chips
+      vec2 aiMc = floor(aiMu), aiMf = fract(aiMu) - 0.5;
+      float aiMpb = 0.4 + 0.35 * aiAct;                      // the share of busy chips
+      float aiMbz = step(hcH21(aiMc + vec2(hcRnd * 13.1 + aiFc, 7.7)), aiMpb), aiMlv = 0.55 + 0.45 * hcH21(aiMc + vec2(3.3, hcRnd * 5.1));
+      float aiMg = 1.0 - smoothstep(0.43 - aiMp, 0.43 + aiMp, max(abs(aiMf.x), abs(aiMf.y)));
+      vec2 aiMb = floor(aiMu * 4.0), aiMbf = fract(aiMu * 4.0) - 0.5;
+      float aiMlb = smoothstep(0.3, 0.8, aiMp * 4.0), aiMlc = smoothstep(0.3, 0.8, aiMp);
+      float aiMcl = 1.0 - smoothstep(0.36 - aiMp * 4.0, 0.36 + aiMp * 4.0, max(abs(aiMbf.x), abs(aiMbf.y)));
+      vec3 aiMon = vec3(0.62, 0.18, 1.0), aiMof = vec3(0.03, 0.01, 0.05);
+      float aiMwv = aiMu.x * 0.2 + aiMu.y * 0.07 - uHcT * (0.25 + 0.5 * aiAct);
+      float aiMk = (uAiX.w > 0.5 ? uHcT * (0.12 + 0.45 * hcH21(aiMb + vec2(hcRnd * 7.0, 3.3)) + 0.9 * aiAct) : 0.0) + 9.0 * hcH21(aiMb + vec2(11.1, hcRnd * 3.0));
+      float aiMbit = step(0.5, hcH21(aiMb + vec2((uAiX.w > 1.5 ? floor(aiMwv) : floor(aiMk)) * 17.3, hcRnd * 5.0)));
+      float aiMgl = (uAiX.w > 0.5 && uAiX.w < 1.5) ? exp(-fract(aiMk) * 14.0) * aiMbit : 0.0;
+      float aiMsw = uAiX.w > 1.5 ? pow(fract(aiMwv), 18.0) : 0.0;
+      vec3 aiMbits = mix(mix(aiMof, aiMon, aiMbit) * aiMcl * (1.0 + 1.1 * aiMgl) + vec3(0.8, 0.7, 1.0) * aiMcl * aiMsw * 1.8,
+                         mix(aiMof, aiMon, 0.5) * 0.52, aiMlb);
+      vec3 aiMchip = aiMbits * aiMg * mix(0.12, aiMlv, aiMbz);
+      vec3 aiMfar = mix(aiMof, aiMon, 0.5) * 0.52 * 0.74 * (aiMpb * 0.775 + (1.0 - aiMpb) * 0.12);
+      aiE = mix(aiMchip, aiMfar, aiMlc) * (1.3 + 2.0 * aiAct);
+      aiC = vec3(0.06);
+    }
     // the frame: gunmetal band on every edge of the face, a light strip in it (the tower's own hue)
     float aiFw = clamp(0.035 * aiT, 6.0, 26.0) * uAiK.w;
     float aiFm = (1.0 - smoothstep(aiFw - aiPx, aiFw + aiPx, aiDE)) * step(0.01, uAiK.w);
     float aiStrip = (1.0 - smoothstep(aiFw * 0.07, aiFw * 0.07 + aiPx, abs(aiDE - aiFw * 0.55))) * aiFm;
     vec3 aiSc = fract(hcRnd * 3.7) > 0.5 ? vec3(1.0, 0.35, 0.85) : vec3(0.3, 0.85, 1.0);
     diffuseColor.rgb = mix(vec3(dot(aiC, vec3(0.3, 0.55, 0.15)) * uAiK.y) * hcWeath, vec3(0.03, 0.033, 0.04), aiFm);
-    aiE = aiE * (1.0 - aiFm) + aiSc * aiStrip * 1.2 * (1.0 + 2.0 * aiAct);
+    // ⭐ (v54.25) EDGE LIGHT (uAiX.y: 0 dark, 1 running, 2 the old solid line; .z = the share of towers that carry one).
+    // Owner, in the lab: "i'm not sure how i like how every building has a solid bright line for a corner/edge". The frame
+    // stays (it hides where boards meet round a corner); its light RUNS along it - comets up the posts and round the bands,
+    // ~700 u apart, quicker while the tower fires, a faint trace between - on some towers, not all.
+    bool aiPost = min(aiU, aiSu - aiU) < min(aiVb, aiSv - aiV);
+    float aiRun = pow(fract((aiPost ? aiV : aiU) / 700.0 - uHcT * (0.55 + 1.6 * aiAct) + hcRnd * 9.0), 14.0);
+    float aiEL = step(fract(hcRnd * 7.13 + 0.21), uAiX.z) * step(0.5, uAiX.y) * (uAiX.y > 1.5 ? 1.0 : 0.03 + 2.6 * aiRun);
+    aiE = aiE * (1.0 - aiFm) + aiSc * aiStrip * 1.2 * (1.0 + 2.0 * aiAct) * aiEL;
     float aiSunDim = mix(1.0, 0.22, clamp(dot(normalize(normal), normalize(uHcSunV)), 0.0, 1.0));
+    aiRbH = fract(hcRnd * 7.31 + 0.13);   // (v54.25) the rainbow: a hue per tower stage
     totalEmissiveRadiance += aiPal(aiE) * aiSunDim;
   } else if (hcMode > 0.5 && abs(vHcN.y) < 0.5) {
     bool onX = abs(vHcN.x) > 0.5;
@@ -36784,6 +37384,7 @@ function _hcNeonMat() {
  #endif`);
     sh.fragmentShader = 'uniform float uHcT;\nvarying vec2 vHcP;\nvarying float vHcDim;\nuniform float uAiOn;\nuniform float uAiPal;\n' + _AI_PAL_GLSL +
       sh.fragmentShader.replace('#include <opaque_fragment>',
+        'aiRbH = fract(floor(vHcP.y * 4096.0 + 0.5) * (1.0 / 4096.0) * 7.31 + 0.13);\n' +
         'outgoingLight = mix(outgoingLight, aiPal(outgoingLight), uAiOn);\noutgoingLight *= vHcDim;\nif (vHcP.x > 1.5) { outgoingLight *= 0.2 + 1.7 * step(fract(uHcT * 0.9 + vHcP.y), 0.22); }\n#include <opaque_fragment>');
   };
   return mat;
@@ -36874,7 +37475,7 @@ function _hcHoloMat() {
     uniforms: { uHcT: _swU.uTime, uHcLodOn: HUB_CITY._uLodOn,
                 uAds: { value: _atlas }, uAdsOn: { value: _atlas ? 1.0 : 0.0 },   // (v44.36)
                 uAdsGrid: { value: new THREE.Vector3(_ADS_COLS, _ADS_ROWS, Math.min(_LSS_ADS.length, _ADS_COLS * _ADS_ROWS)) },
-                uAdsFrac: { value: (_A.frac != null) ? +_A.frac : 0.55 },
+                uAdsFrac: { value: (_A.frac != null) ? +_A.frac : 0.85 },
                 uAdsGround: { value: (_A.ground != null) ? +_A.ground : 0.95 },   // (v44.62) the sign's panel opacity
                 uAdsGFade: { value: new THREE.Vector2(
                   (_A.gfadeOut != null) ? +_A.gfadeOut : 0.06,
@@ -37041,10 +37642,30 @@ function _hcMakeMeshes(city, site) {
   const albTex = new THREE.CanvasTexture(city.albCanvas);
   const emiTex = new THREE.CanvasTexture(city.emiCanvas);
   const aiMaskTex = city.aiMask ? new THREE.CanvasTexture(city.aiMask) : null;
+  let aiTrcTex = null;
+  if (city.aiTrace) {
+    aiTrcTex = new THREE.DataTexture(city.aiTrace.data, city.aiTrace.size, city.aiTrace.size, THREE.RGBAFormat, THREE.UnsignedByteType);
+    aiTrcTex.colorSpace = THREE.NoColorSpace;
+    aiTrcTex.wrapS = aiTrcTex.wrapT = THREE.ClampToEdgeWrapping;
+    aiTrcTex.magFilter = THREE.LinearFilter; aiTrcTex.minFilter = THREE.LinearMipmapLinearFilter; aiTrcTex.generateMipmaps = true;
+    aiTrcTex.needsUpdate = true;
+  }
+  if (!_AI_CITY._trc1) { const t = new THREE.DataTexture(new Uint8Array([255, 128, 128, 255]), 1, 1); t.needsUpdate = true; _AI_CITY._trc1 = t; }
   const gU = {
     uAiRip: { value: Array.from({ length: 16 }, () => new THREE.Vector4(0, 0, -1e4, 0)) },
     uAiGR: { value: new THREE.Vector4(Math.cos(city.gAng || 0), Math.sin(city.gAng || 0), _site.x, _site.z) },
     uAiMask: { value: aiMaskTex || _aiFallbackMask() },
+    uAiTrc: { value: aiTrcTex || _AI_CITY._trc1 },
+    uAiTrcK: { value: new THREE.Vector4(aiTrcTex ? 1 : 0, 4, 5.0, 1.0) },
+    uAiTrcC: { value: new THREE.Vector4(0.75, 0.2, 1.0, 0.14) },
+  };
+  if (_site === HUB_CITY && typeof window !== 'undefined') window.__cityRoads = (o) => {
+    const K = gU.uAiTrcK.value, Cc = gU.uAiTrcC.value;
+    if (o && typeof o === 'object') {
+      if ('on' in o) K.x = o.on ? 1 : 0; if ('width' in o) K.y = +o.width; if ('speed' in o) K.z = +o.speed; if ('glow' in o) K.w = +o.glow;
+      if (Array.isArray(o.col)) Cc.set(+o.col[0], +o.col[1], +o.col[2], Cc.w); if ('base' in o) Cc.w = +o.base;
+    }
+    return { on: K.x, width: K.y, speed: K.z, glow: K.w, col: [Cc.x, Cc.y, Cc.z], base: Cc.w, size: city.aiTrace ? city.aiTrace.size : 0 };
   };
   const EXT = g.radius * 1.12;
   const gnd = new THREE.Mesh(
@@ -37064,6 +37685,7 @@ function _hcMakeMeshes(city, site) {
     sh.uniforms.uAiHue = _aiHueOf(gnd.material);
     sh.uniforms.uAiGnd = _AI_CITY.u.uAiGnd; sh.uniforms.uAiGndK = _AI_CITY.u.uAiGndK; sh.uniforms.uAiRipN = _AI_CITY.u.uAiRipN;
     sh.uniforms.uAiRip = gU.uAiRip; sh.uniforms.uAiGR = gU.uAiGR; sh.uniforms.uAiMask = gU.uAiMask;
+    sh.uniforms.uAiTrc = gU.uAiTrc; sh.uniforms.uAiTrcK = gU.uAiTrcK; sh.uniforms.uAiTrcC = gU.uAiTrcC;   // (v54.27) the circuit-trace roads
     sh.vertexShader = 'varying vec3 vHcWp;\n' + sh.vertexShader.replace('#include <begin_vertex>',
       '#include <begin_vertex>\n vHcWp = (modelMatrix * vec4(transformed, 1.0)).xyz;');
     sh.fragmentShader = ('varying vec3 vHcWp;\nuniform vec3 uHcCam;\n' +
@@ -37080,6 +37702,7 @@ function _hcMakeMeshes(city, site) {
       .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\n' + _AI_GND_EMIT);
   };
   gnd.material.userData._aiMask = aiMaskTex;   // (v51.95) freed with the city (it is not a map, so say so)
+  gnd.material.userData._aiTrc = aiTrcTex;     // (v54.27) and the trace roads' field
   gnd.material.userData.aiHue = aiHue;          // (v52.01) this city's pair
   gnd.rotation.x = -Math.PI / 2;
   gnd.position.set(_site.x, _site.padY + 0.8, _site.z);
@@ -37158,8 +37781,9 @@ function _hcMakeMeshes(city, site) {
   }));
   beamMat.onBeforeCompile = (sh) => {
     sh.uniforms.uAiOn = _AI_CITY.u.uAiOn; sh.uniforms.uAiPal = _AI_CITY.u.uAiPal; sh.uniforms.uAiHue = _aiHueOf(beamMat);
-    sh.fragmentShader = 'uniform float uAiOn;\nuniform float uAiPal;\n' + _AI_PAL_GLSL +
-      sh.fragmentShader.replace('#include <opaque_fragment>', 'outgoingLight = mix(outgoingLight, aiPal(outgoingLight), uAiOn);\n#include <opaque_fragment>');
+    sh.uniforms.uHcT = _swU.uTime;   // (v54.25) the rainbow beacon walks the wheel, slowly
+    sh.fragmentShader = 'uniform float uAiOn;\nuniform float uAiPal;\nuniform float uHcT;\n' + _AI_PAL_GLSL +
+      sh.fragmentShader.replace('#include <opaque_fragment>', 'aiRbH = fract(uHcT * 0.02);\noutgoingLight = mix(outgoingLight, aiPal(outgoingLight), uAiOn);\n#include <opaque_fragment>');
   };
   beamMat.userData.aiHue = aiHue;
   const beam = new THREE.Mesh(new THREE.CylinderGeometry(28, 44, 6000, 10, 1, true), beamMat);
@@ -38245,7 +38869,7 @@ function _hubCityDispose() {
         try {
           const m = o.material;   // (v39.85) same churn as _owDrop - retain the program, free the canvases
           if (m) {
-            try { if (m.map) m.map.dispose(); if (m.emissiveMap) m.emissiveMap.dispose(); if (m.userData && m.userData._aiMask) m.userData._aiMask.dispose(); } catch (_) {}
+            try { if (m.map) m.map.dispose(); if (m.emissiveMap) m.emissiveMap.dispose(); if (m.userData && m.userData._aiMask) m.userData._aiMask.dispose(); if (m.userData && m.userData._aiTrc) m.userData._aiTrc.dispose(); } catch (_) {}
             if (typeof _lssRetainMat === 'function') _lssRetainMat(m); else if (m.dispose) m.dispose();
           }
         } catch (_) {}
@@ -41484,7 +42108,7 @@ function _owDrop(c) {
             const _keep = (typeof _lssRetainMat === 'function');
             const _one = (x) => {
               if (!x) return;
-              try { if (x.map) x.map.dispose(); if (x.emissiveMap) x.emissiveMap.dispose(); if (x.userData && x.userData._aiMask) x.userData._aiMask.dispose(); } catch (_) {}
+              try { if (x.map) x.map.dispose(); if (x.emissiveMap) x.emissiveMap.dispose(); if (x.userData && x.userData._aiMask) x.userData._aiMask.dispose(); if (x.userData && x.userData._aiTrc) x.userData._aiTrc.dispose(); } catch (_) {}
               if (_keep) _lssRetainMat(x); else if (x.dispose) x.dispose();
             };
             if (Array.isArray(m)) m.forEach(_one); else _one(m);

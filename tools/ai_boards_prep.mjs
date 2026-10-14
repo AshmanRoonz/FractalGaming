@@ -8,7 +8,7 @@
 //      two stacked boards showed the border twice (~6 % of a tile of black between every row and column),
 //      while at a face's edges the building frame hid the same border. The panel's edge line is KEPT, so
 //      fitted boards still read as panels and now meet on a hairline. circuits.png tiles seamlessly: untouched.
-// OUT: LSS/tex/ai_boards.webp  - the five boards resized to 1024 and stacked vertically (1024 x 5120),
+// OUT: LSS/tex/ai_boards.webp  - the boards resized to 1024 and stacked vertically (1024 x 1024n; ten since v54.25),
 //                                lossy q88. Layer i = rows [i*1024, (i+1)*1024).
 //      LSS/tex/ai_phase.webp   - per pixel, where along its LINE NETWORK it sits, so dots can ride the
 //                                real traces (lossless): R,G = 0.5 + 0.5*(cos,sin)(2pi*dist/90px)*strength,
@@ -23,9 +23,14 @@ import fs from 'node:fs';
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..');
 const SRC = path.join(ROOT, 'LSS', 'concept', 'shaders');
 const OUT = path.join(ROOT, 'LSS', 'tex');
-const BOARDS = ['circuits.png', 'circuit2.png', 'circuit3.png', 'circuit4.png', 'circuit5.png'];
-const FROM_CENTRE = [false, true, false, false, false];   // circuit2 is radial: its dots stream out of the heart
-const FRAMED = [false, true, true, true, true];           // circuit2-5 sit in a flat border (trimmed, see panelRect)
+// (v54.25) + the owner's second set (2026-10-13, made for the lab's circuit city): arctile (concentric neon arcs), neon
+// (diagonal cyan / magenta), copper (a dense copper PCB), obsidian (organic purple / cyan veins), pearl (WHITE plates with
+// neon seams). Square framed panels like circuit2-5, so they go through panelRect too (it stops at once on a board with
+// no flat border). The ORDER is load-bearing: layer 1 stays circuit2 - the game's processor die (_hcTowerMat's aiDie).
+const BOARDS = ['circuits.png', 'circuit2.png', 'circuit3.png', 'circuit4.png', 'circuit5.png',
+                'circuit_arctile.png', 'circuit_neon.png', 'circuit_copper.png', 'circuit_obsidian.png', 'circuit_pearl.png'];
+const FROM_CENTRE = [false, true, false, false, false, false, false, false, false, false];   // circuit2 is radial: its dots stream out of the heart
+const FRAMED = [false, true, true, true, true, true, true, true, true, true];              // a flat border is trimmed (see panelRect)
 const N = 1024, PERIOD = 90, DMAX = 1100;
 
 // The panel inside a flat border: walk in from each side while the whole line is still the border colour
