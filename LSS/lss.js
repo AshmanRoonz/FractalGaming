@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "54.30";
+const LSS_BUILD = "54.31";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -78725,7 +78725,7 @@ function commitLoadout(key) {
   player.euler = new THREE.Euler(0, 0, 0, 'YXZ');
   
   
-  if (!midMatch && !game._liveSwap) {   
+  if (!midMatch && !game._liveSwap && !game._campReentry) {
     player.kills = 0;
     player.monKills = 0;   // (v38.77)
     player.deaths = 0;
@@ -79430,6 +79430,8 @@ function playerDie(attacker) {
     player._puncTrigPrev = false;   // (v44.99) the trigger latch dies with the charge - a stale one would fire a release on respawn
   }
   player.railgunCharge = 0;
+  player.deaths = (player.deaths | 0) + 1;
+  try { if (player.position && player.chassis) spawnExplosion(player.position, player.chassis.hullLength); } catch (_) {}
   player.powerShotCharging = false;
   player.powerShotCharge = 0;
   try { if (player._bcgOn) _blasterChargeGlowOff(); } catch (_) {}
