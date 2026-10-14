@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "54.28";
+const LSS_BUILD = "54.30";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -98264,8 +98264,10 @@ document.addEventListener('contextmenu', e => e.preventDefault());
       if (show) _layoutSticksSoon();
     }
     if (show) _refreshTouchLabels();
-    const _ffHub = show && (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight');
-    const _shp = document.getElementById('tc-ship'); if (_shp) _shp.style.display = _ffHub ? '' : 'none';
+    const _md = (typeof LSS !== 'undefined') ? LSS.MODE : '';
+    const _shipOk = show && (_md === 'freeflight' || (_md === 'campaign' && !!(game && game.campaign) &&
+                    Array.isArray(game.campaign.unlockedLoadouts) && game.campaign.unlockedLoadouts.length > 1));
+    const _shp = document.getElementById('tc-ship'); if (_shp) _shp.style.display = _shipOk ? '' : 'none';
     const _vw = document.getElementById('tc-view'); if (_vw) _vw.style.display = show ? '' : 'none';
     const _fsb = document.getElementById('tc-fs');
     if (_fsb) {
@@ -109296,7 +109298,8 @@ const CAMP_SEQS = {
               orbOn: false, orbA: 0, headOn: false, headA: 0, spotOn: [], spotA: [], sweepT: -1, fuseT: -1,
               fuseFrom: null, camP: null, camL: null, fractal: null, buildP: null, failT: 0,
               _getIn: null, _viewPick: null, wired: false,
-              fxGen: 0, fxHiP: null, fxHiUrl: null, fxImg: null, fxInfo: null };   // (v49.78) the sharp fractal, _fxHiRes
+              fxGen: 0, fxHiP: null, fxHiUrl: null, fxImg: null, fxInfo: null,   // (v49.78) the sharp fractal, _fxHiRes
+              ld: false };   // (v54.29) the veil lent out as the caverns battle's loading screen (loadVeil)
   const $ = (id) => document.getElementById(id);
   const wait = (sec) => new Promise((r) => setTimeout(r, sec * 1000));
   const snd = (k) => { try { if (typeof playSound === 'function') playSound(k); } catch (_) {} };
@@ -109488,7 +109491,7 @@ const CAMP_SEQS = {
     try { fx.animate([{ opacity: 0 }, { opacity: peak }, { opacity: 0.08 }, { opacity: peak * 0.75 }, { opacity: 0 }],
                      { duration: 420, easing: 'linear' }); } catch (_) {}
   }
-  function _dissolve() {
+  function _dissolve(lent) {
     const v = $('camp-open-veil'), fx = v && v.querySelector('.co-fx'); if (!v) return;
     _hole(0, 95, 2.2);   // the cavern opens out of the middle of the fractal
     try { if (fx) fx.animate([{ transform: 'scale(1)', opacity: 1 }, { transform: 'scale(4.5)', opacity: 0 }], { duration: 2400, easing: 'ease-in' }); } catch (_) {}
@@ -109496,9 +109499,30 @@ const CAMP_SEQS = {
     v.style.backgroundColor = 'rgba(0,0,0,0)';
     try { v.animate([{ backgroundColor: 'rgba(0,0,0,1)' }, { backgroundColor: 'rgba(0,0,0,0)' }], { duration: 1900, delay: 350, easing: 'ease-in', fill: 'backwards' }); } catch (_) {}
     setTimeout(() => {
+      if (lent && (O.on || O.ld)) return;   // (v54.29) taken back (the opening started) or lent out again
       v.classList.remove('on', 'co-top', 'co-hole'); v.style.opacity = '0'; v.style.removeProperty('--co-hole');
       if (fx) { fx.style.opacity = '0'; fx.style.transform = ''; }
     }, 2500);
+  }
+  function loadVeil(on, quick) {
+    const v = $('camp-open-veil'); if (!v || O.on) return false;
+    if (on) {
+      if (O.ld) return true;
+      O.ld = true;
+      _fxPrep();
+      _veilShow(true, 0.6);
+      _fx(1, 0.9);
+      v.classList.add('co-loading');
+      return true;
+    }
+    if (!O.ld) return false;
+    O.ld = false;
+    v.classList.remove('co-loading');
+    if (quick) {
+      v.classList.remove('on', 'co-top', 'co-hole'); v.style.opacity = '0'; v.style.removeProperty('--co-hole');
+      const fx = v.querySelector('.co-fx'); if (fx) { fx.style.opacity = '0'; fx.style.transform = ''; }
+    } else _dissolve(true);
+    return true;
   }
 
   function _clone(key) {
@@ -111696,6 +111720,7 @@ const CAMP_SEQS = {
     _wire();
     document.body.classList.add('camp-opening');
     _fxPrep();
+    if (O.ld) { O.ld = false; const lv = $('camp-open-veil'); if (lv) lv.classList.remove('co-loading'); }
     _veilShow(false);
     try { enterShipSelect(); } catch (e) { console.warn('[campaign-opening] enterShipSelect:', e && e.message); }
     const sel = $('ship-select'); if (sel) sel.classList.add('camp-open');
@@ -111735,7 +111760,7 @@ const CAMP_SEQS = {
     return 'beaming into ' + (S && S.key);
   };
   const phaseNow = () => (O.on ? O.phase : '');
-  try { window.__campOpening = { start, reset, state, arrive, stage, tick, onConfirm, blockPreview, cfg, look, skip, gameshow, beam, phaseNow, talk, talkOn, tk: () => O.tk, it: () => O.it }; } catch (_) {}
+  try { window.__campOpening = { start, reset, state, arrive, stage, tick, onConfirm, blockPreview, cfg, look, skip, gameshow, beam, phaseNow, talk, talkOn, tk: () => O.tk, it: () => O.it, loadVeil }; } catch (_) {}
 })();
 
 const CAMP_PROLOGUE = {
@@ -113826,6 +113851,9 @@ const CAMP_PROLOGUE = {
     _veil(1, failed ? 0 : 1.2);
     await wait(failed ? 0.05 : 1.25);
     skipUi(false);
+    let ldv = false;
+    try { ldv = !!(window.__campBattle && window.__campBattle.cfg.on && window.__campOpening && window.__campOpening.loadVeil(true)); } catch (_) {}
+    if (ldv) await wait(0.25);
     try { if (_cinematic.active) { _cinematic.after = null; _lssEndSpectatorCinematic(); } } catch (_) {}
     _dropSys();
     try { _hkEnd(); } catch (e) { console.warn('[prologue] hack teardown:', e && e.message); }   // (v52.35) while game._campPrologue still reads
@@ -113840,7 +113868,7 @@ const CAMP_PROLOGUE = {
     };
     let battle = false;
     try { battle = !!(window.__campBattle && window.__campBattle.start(() => opening(false))); } catch (e) { console.warn('[prologue] battle:', e && e.message); }
-    if (!battle) { opening(true); setTimeout(() => _veil(0, 0), 300); }   // the opening's own black veil is up by now
+    if (!battle) { opening(true); setTimeout(() => _veil(0, 0), 300); }   // the opening's own black veil is up by now (it takes the loading screen back)
   }
 
   function start() {
@@ -113977,6 +114005,7 @@ const CAMP_BATTLE = {
     if (op <= 0) setTimeout(() => { if (v.style.opacity === '0') v.style.visibility = 'hidden'; }, (sec || 0) * 1000 + 60);
   }
   const _skipUi = (on) => { try { if (window.__campPrologue) window.__campPrologue.skipUi(on); } catch (_) {} };
+  const _load = (on, quick) => { try { return !!(window.__campOpening && window.__campOpening.loadVeil(on, quick)); } catch (_) { return false; } };
 
   function start(then) {
     if (B.on) return true;
@@ -113988,6 +114017,7 @@ const CAMP_BATTLE = {
     B.queue.length = 0;
     B.skipP = new Promise((r) => { B.skipR = r; });
     _veil(1, 0);
+    _load(true);   // (v54.29) (already up when the prologue raised it)
     let ann = true; try { ann = announcer.enabled; announcer.enabled = false; } catch (_) {}   // no ship AI in this scene
     B.saved = { ann, bots: game.eliminationBots, fov: camera.fov };
     game._campBattle = B;
@@ -114037,7 +114067,7 @@ const CAMP_BATTLE = {
     if (!live()) { _end(tok); return; }
     _skipUi(true);
     try { document.body.classList.add('lss-cine-subs'); } catch (_) {}
-    _veil(0, 1.6);
+    if (_load(false)) _veil(0, 0); else _veil(0, 1.6);
     await until(wait(2.2));
     if (live() && D) await until(D.sayLines(CAMP_SEQS.caverns || []));
     if (live()) await until(wait(1.4));
@@ -114050,6 +114080,7 @@ const CAMP_BATTLE = {
     if (B.failT) { clearTimeout(B.failT); B.failT = 0; }
     try { if (window.CampDialogue) window.CampDialogue.clear(); } catch (_) {}
     _veil(1, failed ? 0 : 1.0);
+    _load(false, true);   // (v54.29) a load that never came up: the loading screen goes with it (black under it already)
     await wait(failed ? 0.05 : 1.05);
     _skipUi(false);
     try { if (_RPL.kc) _rplKcEnd(); } catch (_) {}   // (v52.54) a replay still running under the black
