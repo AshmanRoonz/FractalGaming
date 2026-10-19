@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Phi Resonance: Android bridge harness</title>
+<!-- Created: 2026-10-18. Runs ../www/index.html inside a frame with a pretend Capacitor on
+     'android', so the app's bridge can be checked in a desktop browser without a phone.
+     Every plugin call lands in frame.contentWindow.__calls as [plugin, method, args]; the
+     notification's Stop button is frame.contentWindow.__fire('PlaybackService', 'stopRequested').
+     Serve the folder over http (a file:// page cannot fetch the app's page); see ../README.md. -->
+<style>
+  html, body { margin: 0; height: 100%; background: #05050f; }
+  iframe { width: 100%; height: 100%; border: 0; display: block; }
+</style>
+</head>
+<body>
+<script>
+(async () => {
+  const html = await (await fetch('../www/index.html', { cache: 'no-store' })).text();
+  const fake = '<base href="../www/">' +
+    '<script>' +
+    'window.__calls = []; window.__listeners = {};' +
+    'window.__fire = function (plugin, event, data) {' +
+    '  (window.__listeners[plugin + ":" + event] || []).forEach(function (f) { f(data || {}); });' +
+    '};' +
+    'window.Capacitor = {' +
+    '  isNativePlatform: function () { return true; },' +
+    '  getPlatform: function () { return "android"; },' +
+    '  registerPlugin: function (name) {' +
+    '    return new Proxy({}, { get: function (t, method) {' +
+    '      if (method === "then") return undefined;' +
+    '      return function () {' +
+    '        var args = Array.prototype.slice.call(arguments);' +
+    '        window.__calls.push([name, method, args]);' +
+    '        if (method === "addListener") {' +
+    '          var key = name + ":" + args[0];' +
+    '          (window.__listeners[key] = window.__listeners[key] || []).push(args[1]);' +
+    '        }' +
+    '        if (method === "writeFile") return Promise.resolve({ uri: "file:///cache/" + args[0].path });' +
+    '        return Promise.resolve({});' +
+    '      };' +
+    '    } });' +
+    '  }' +
+    '};' +
+    '<\/script>';
+  const frame = document.createElement('iframe');
+  frame.title = 'Phi Resonance';
+  frame.srcdoc = html.replace('<head>', '<head>' + fake);
+  document.body.appendChild(frame);
+})();
+</script>
+</body>
+</html>
