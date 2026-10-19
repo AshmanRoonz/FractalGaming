@@ -1,8 +1,8 @@
 # FractalGaming
 
 Created: 2026-04-28
-Last updated: 2026-10-02
-Version: 1.5
+Last updated: 2026-10-18
+Version: 1.6
 
 Games and game engines built on the Circumpunct Framework by Ashman Roonz. The framework treats every whole as a circumpunct (⊙ = Φ(•, ○)) at some scale, with parts that are themselves circumpuncts; the games here put that structure on screen, sometimes literally (the dimensional ladder maps to engine layers in Microverse Megabattle), sometimes through theme and feel (ship classes as constraint-archetypes in Last Ship Sailing).
 
@@ -55,6 +55,9 @@ FractalGaming/
 │   ├── microverse_architecture_layers.md
 │   ├── circumpunct_particle_taxonomy.md
 │   └── microverse_element_dna.md
+├── labs/                             the 42 public R&D labs; index.html + manifest make them the "Fractal Reality Labs" app
+├── phi_resonance/                    Phi Resonance, the φ sound lab with its Composer as a paid Android + iPhone app (Capacitor; not deployed)
+├── store/                            app store plan and packaging kit for the web apps and labs (not deployed)
 ├── LSS_old/                          earlier LSS iterations and experiments
 └── microverse/                       earliest MMB prototype
 ```
@@ -115,3 +118,4 @@ Framework: Circumpunct Framework by Ashman Roonz (companion repository: Fractal_
 - 2026-08-16 v1.4: link-rot fix for the above — `labs/`, `goopling.html`, `table_legends.html` and `baseball_blitz.html` are staged alongside `LSS/` again (`EXTRA_DIRS`/`EXTRA_FILES` in `tools/deploy_cf.py`), so the lab links on fractalreality.ca and the old `ashmanroonz.github.io/FractalGaming/...` URLs resolve instead of silently loading the game
 - 2026-10-02 v1.5: added Gimbal Drone (`GimbalDrone/`), a copy of LSS modded into a gimbal drone flight sim; LSS itself unchanged
 - 2026-05-29 v1.2: current LSS build bumped to v27, now served as `index.html`. This release adds multiplayer netcode hardening (validated/clamped peer damage, state-gated round + timer sync, round-end and Outline-perk fixes), per-frame performance optimizations, and moves spatial-audio and reverb occlusion from full-mesh raycasts to the SDF ray-march (~15% of combat CPU reclaimed). Also: default Nexus map/theme now applies on the ship-select screen, an optional FPS/CPU counter under Settings > Performance, and the gamepad indicator removed
+- 2026-10-18 v1.6: merged the app-store work of 2026-09-29 and 2026-10-18. `store/` added: the plan for getting the web apps and labs into app stores (`PLAN.md`) and the per-app packaging kit (`README.md`). Last Ship Sailing stays web-only by owner decision. `labs/` gained an app home screen, manifest, icons, offline worker and privacy page (Fractal Reality Labs, Microsoft Store first). `phi_resonance/` holds the Phi Resonance app, built from the φ-Entrainment Composer page by `phi_resonance/scripts/build_page.py`
