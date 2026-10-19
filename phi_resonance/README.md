@@ -1,14 +1,14 @@
 # Phi Resonance: the φ sound lab as an Android and iPhone app
 
 Created: 2026-09-29
-Last updated: 2026-10-18
-Version: 2.0
+Last updated: 2026-10-19
+Version: 2.1
 
 The φ-Entrainment Composer from fractalreality.ca, packaged as a paid app for Google Play and the Apple App Store with [Capacitor 8](https://capacitorjs.com/). It has the full sound lab (eight engines, layers, texture, tuning, presets, saved settings, breath guide, visual beat) plus the Composer, which grows music from the field: Fibonacci form, tempo locked to the beat, a golden-section peak. The whole app runs on the device: it makes no network requests, collects nothing, and works offline.
 
 ## Where it comes from
 
-- `www/index.html` is **built** from the web Composer edition, `Fractal_Reality/docs/phi_resonance_composer.html`, by `scripts/build_page.py`. The current build is from Fractal_Reality commit `b35b2598` (2026-10-18). The web page itself is not changed.
+- `www/index.html` is **built** from the web Composer edition, `Fractal_Reality/docs/phi_resonance_composer.html`, by `scripts/build_page.py`. The current build is from Fractal_Reality commit `c8843f5d` (2026-10-19). The web page itself is not changed.
 - The script applies a short list of app edits, each marked `[PHI-APP]` in the output, so `grep -n "PHI-APP" www/index.html` shows exactly what the app changed. Each edit must find its anchor exactly once or the build stops, so a web change that moves an anchor is caught instead of shipped half-edited.
 - To bring a later web change into the app, run the script again (the path is wherever the Fractal_Reality repo sits; beside FractalGaming it is `../../Fractal_Reality`):
 
@@ -153,6 +153,7 @@ Full notes and sources: `../store/PLAN.md`, section "φ Resonance".
 
 ## Revision history
 
+- 2026-10-19 v2.1: rebuilt from the Composer page at `c8843f5d`: the app now starts on Ashman1, the owner's setting (binaural, 144 Hz base, 2.1 Hz beat, octave-spaced triangle layers, the Composer on piece 75C2C6), which also leads the preset list
 - 2026-10-18 v2.0: the app is now built from the Composer edition by `scripts/build_page.py` (was a hand-edited copy of the plain lab page); bundled fonts (Orbitron, Rajdhani, OFL); the Android notification follows the sound; the page's screen-off loop is off on Android; September's timer changes replaced by the web page's own; the Android harness; the build-tools flag and a first debug APK built on the owner's PC; README rewritten for all of it
 - 2026-09-29 v1.2: privacy page merged into Fractal_Reality `main` (PR #773)
 - 2026-09-29 v1.1: privacy policy published on fractalreality.ca (phi_resonance_privacy.html); bundled copy links to it
