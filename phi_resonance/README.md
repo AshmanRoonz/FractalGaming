@@ -43,7 +43,7 @@ The web page has its own way to keep playing with a phone locked: on request (th
 
 ## Fonts
 
-The page uses Orbitron and Rajdhani (both under the SIL Open Font License 1.1). `www/fonts/fonts.css` points at five files that still have to be added: `orbitron-latin.woff2` (a variable font, weights 400 to 900) and `rajdhani-400-latin.woff2`, `-500-`, `-600-`, `-700-`, from Google Fonts, with the license texts as `OFL-Orbitron.txt` and `OFL-Rajdhani.txt`. Until they are there the page falls back to the system's sans-serif, which works, only plainer.
+The page uses Orbitron and Rajdhani, both under the SIL Open Font License 1.1, bundled in `www/fonts/`: `orbitron-latin.woff2` (a variable font, weights 400 to 900) and `rajdhani-400-latin.woff2`, `-500-`, `-600-` and `-700-`, the latin subsets as Google Fonts served them on 2026-10-18 (about 73 KB together), with the license texts `OFL-Orbitron.txt` and `OFL-Rajdhani.txt`. `fonts.css` declares them. Greek letters such as φ are in neither font and come from the system's, as they do on the web.
 
 ## Native pieces
 
@@ -52,6 +52,7 @@ The page uses Orbitron and Rajdhani (both under the SIL Open Font License 1.1). 
   - `PlaybackServicePlugin.java` exposes the service to the page as `start`, `stop` and a `stopRequested` event. On Android 13+ it asks for notification permission on the first session; the app plays either way.
   - `MainActivity.java` registers the plugin.
   - The manifest declares the service and the `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_MEDIA_PLAYBACK` and `POST_NOTIFICATIONS` permissions. `res/drawable/ic_stat_phi.xml` is the notification icon.
+  - `android/build.gradle` takes an optional `-PandroidBuildTools=<version>` for an SDK that lacks the build-tools the Android Gradle plugin asks for (see "Build and run").
 - **iOS (`ios/`)**
   - `Info.plist` has `UIBackgroundModes` set to `audio`.
   - `AppDelegate.swift` sets the audio session to `.playback`, so sound keeps going with the silent switch on and the screen locked.
@@ -77,6 +78,17 @@ npx cap open ios      # Xcode: set your Team under Signing; Run; Product > Archi
 
 After rebuilding `www/index.html`, run `npx cap sync` again. iOS uses Swift Package Manager, so there is no `pod install`.
 
+**On the owner's PC**, from the command line, with Visual Studio's JDK and SDK. That SDK is read-only and has build-tools 36.0.0 but not the 35.0.0 the Android Gradle plugin asks for, so the build names the ones it has (`android/build.gradle` applies the flag to every module; without it nothing changes):
+
+```bash
+export JAVA_HOME="/c/Program Files/Android/openjdk/jdk-21.0.8"
+export ANDROID_HOME="C:/Program Files (x86)/Android/android-sdk"
+cd phi_resonance && npx cap sync android && cd android
+./gradlew assembleDebug -PandroidBuildTools=36.0.0
+```
+
+The debug APK lands in `android/app/build/outputs/apk/debug/app-debug.apk`. For Google Play, build a signed App Bundle with your upload key (Android Studio's Build > Generate Signed App Bundle walks through making and using one; keep the key and its password safe, outside the repo).
+
 ## Testing without a phone
 
 `tests/android-harness.html` runs `www/index.html` in a frame with a pretend Capacitor on Android. Serve the folder over http (a `file://` page cannot fetch the app's page), open the harness, and drive it from the browser's console: every plugin call lands in `frame.contentWindow.__calls` as `[plugin, method, args]`, and `frame.contentWindow.__fire('PlaybackService', 'stopRequested')` presses the notification's Stop.
@@ -90,9 +102,11 @@ After rebuilding `www/index.html`, run `npx cap sync` again. iOS uses Swift Pack
 - BEGIN SESSION starts the playback service with the line "Ambient Field · 97.1 BPM". Turning the composer off changes it to "Drone · 256 Hz", on again to the composer's style and tempo. While the page is hidden it sends no update (Android may refuse one from the background).
 - The notification's Stop ends the session, and the service stops 0.6 s later.
 - Saving settings to a file writes the JSON to the app cache and opens the share sheet; the Composer's audio download rendered a 1:16 piece (12.7 MB WAV) and did the same.
-- Every request the page made stayed inside the app's own files: no Google Fonts or anything else from the internet.
+- Every request the page made stayed inside the app's own files: no Google Fonts or anything else from the internet. Orbitron and Rajdhani load from `www/fonts/`.
 
-**Not verified here:** no APK or iOS build has been made yet; the Java checks from 2026-09-29 (the three Android classes compile against the API 36 framework with zero warnings) still apply, since that code did not change.
+**Android build (2026-10-18, on the owner's PC):** `assembleDebug` succeeded with AGP 8.13 and Gradle 8.14.3, compileSdk and targetSdk 36. The 6.3 MB debug APK's `assets/public` holds the new page (23 `[PHI-APP]` marks, no Google Fonts), the bridge, the fonts and the privacy policy. The only build warnings come from Capacitor's own template and plugins.
+
+**Not verified yet:** the app on a phone (the checklist below), a signed release bundle, and anything on iOS.
 
 **Device checklist (please run these before submitting):**
 
@@ -139,7 +153,7 @@ Full notes and sources: `../store/PLAN.md`, section "φ Resonance".
 
 ## Revision history
 
-- 2026-10-18 v2.0: the app is now built from the Composer edition by `scripts/build_page.py` (was a hand-edited copy of the plain lab page); bundled fonts; the Android notification follows the sound; the page's screen-off loop is off on Android; September's timer changes replaced by the web page's own; the Android harness; README rewritten for all of it
+- 2026-10-18 v2.0: the app is now built from the Composer edition by `scripts/build_page.py` (was a hand-edited copy of the plain lab page); bundled fonts (Orbitron, Rajdhani, OFL); the Android notification follows the sound; the page's screen-off loop is off on Android; September's timer changes replaced by the web page's own; the Android harness; the build-tools flag and a first debug APK built on the owner's PC; README rewritten for all of it
 - 2026-09-29 v1.2: privacy page merged into Fractal_Reality `main` (PR #773)
 - 2026-09-29 v1.1: privacy policy published on fractalreality.ca (phi_resonance_privacy.html); bundled copy links to it
 - 2026-09-29 v1.0: initial app: verbatim copy of the web page, Capacitor 8 scaffold, app changes (screen-off audio, timer on the audio clock, share-sheet export, disclaimer), Android media foreground service and iOS background audio, icons, tests, listing drafts
