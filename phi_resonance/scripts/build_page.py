@@ -1,8 +1,8 @@
 """Build www/index.html, the Phi Resonance app's page, from the web Composer edition.
 
 Created: 2026-10-18
-Last updated: 2026-10-18
-Version: 1.0
+Last updated: 2026-10-19
+Version: 1.3
 
 Usage, from phi_resonance/ (the path is wherever the Fractal_Reality repo sits; beside FractalGaming
 it is ../../Fractal_Reality):
@@ -16,6 +16,14 @@ half-edited page. To bring a later web change into the app, run this again; when
 anchor below, not the output.
 
 Revision history:
+- 2026-10-19 v1.3: measured on the owner's phone over USB: the full-screen flashes skip the WebView's
+  full-screen mode (the overlay covers the page already); the latency notes now carry the numbers
+- 2026-10-19 v1.2: the owner still heard the sound cut in and out, most when moving around the
+  app: on Android the latency hint is now 0.15 s (Chromium renders up to about 170 ms ahead, where
+  'playback' gave about 21 ms); iOS keeps 'playback'
+- 2026-10-19 v1.1: after the owner's first Android test (hitching every few seconds, sound stopped
+  on lock, no lock button): the 'playback' latency hint (Android's power-saving audio path), a
+  ten-second silent clip, and the page's screen-off loop and lock button kept on Android too
 - 2026-10-18 v1.0: initial; replaces September's hand-edited copy of the plain lab page
 """
 import io
@@ -69,11 +77,51 @@ rep('<link rel="preconnect" href="https://fonts.googleapis.com">\n'
     '<!-- [PHI-APP] Orbitron and Rajdhani are bundled in fonts/ (SIL Open Font License) instead of\n'
     '     coming from Google Fonts: the app makes no network requests. -->\n'
     '<link rel="stylesheet" href="fonts/fonts.css">')
-rep('</style>',
-    '  /* [PHI-APP] On Android the native playback service keeps the live sound going with the screen\n'
-    '     off, so the page\'s own screen-off loop and its lock button stay hidden (end of the script). */\n'
-    '  .phi-app-android #lockBtn, .phi-app-android #bgStatus { display: none !important; }\n'
-    '</style>')
+# The page's own screen-off loop and its lock button stay on every platform: the owner tried the
+# first Android build (2026-10-19), missed the button, and the loop is what plays well on the same
+# phone in the browser. The native playback service still keeps the app allowed to play with the
+# screen off.
+
+# ---- sound that holds up inside an app's WebView ----
+# On the owner's phone the app's sound cut in and out, most when moving around the app, while the
+# browser on the same phone played cleanly: inside a WebView the page's audio thread misses its
+# deadlines while the screen is busy. The fix is a deeper buffer, rendered further ahead.
+# - Android: a latency hint in seconds. Chromium renders that much ahead (up to 8192 frames, about
+#   170 ms), where the default renders one hardware buffer (a few ms) and 'playback' about 21 ms
+#   (media/base/audio_latency.cc; media/audio/android/audio_manager_android.cc). Build script v1.1
+#   used 'playback'; the owner still heard dropouts.
+# - iOS: 'playback', WebKit's own choice for long listening.
+# A sound lab needs no low latency; the screen-off path is the lock button's loop either way.
+# Measured on the owner's Pixel 9 over USB (2026-10-19): with the page's drawing capped at 30 frames a
+# second (Composer page v1.7), 0.15 played with no underruns at either level, while 'playback' (21 ms
+# ahead) starved the page's audio, 391 underruns a minute. The dropouts came from the drawing: at the
+# screen's 120 Hz it took about three cores, the phone throttled to 700 MHz, and Android's low-latency
+# path (2 ms bursts, about 6 ms of margin) missed over 1,000 deadlines a minute.
+rep('state.ctx = new (window.AudioContext || window.webkitAudioContext)();',
+    "state.ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: APP_LATENCY_HINT });"
+    '   // [PHI-APP]')
+rep('  function ensureAudio() {',
+    '  // [PHI-APP] how far ahead the sound is rendered (see ../scripts/build_page.py): deep on Android,\n'
+    '  // where the WebView\'s audio thread misses short deadlines while the screen is busy\n'
+    "  const APP_LATENCY_HINT = (window.PhiApp && window.PhiApp.platform === 'android') ? 0.15 : 'playback';\n\n"
+    '  function ensureAudio() {')
+# The full-screen flashes: the overlay already covers the app's whole page, and asking the WebView
+# for full screen as well doubled the app's own drawing work on the owner's Pixel 9 (measured over USB,
+# 2026-10-19: the app's UI and render threads went from about 11% and 16% of a core to 24% and 28%,
+# and a run on a warm phone counted 666 Android audio underruns a minute). In the app, the overlay alone.
+rep("""      // Request fullscreen (best effort; silently falls back to fixed overlay)
+      if (overlay.requestFullscreen) {""",
+    """      // Request fullscreen (best effort; silently falls back to fixed overlay)
+      if (window.PhiApp && window.PhiApp.native) {
+        // [PHI-APP] not in the app: the overlay already covers the whole page (see ../scripts/build_page.py)
+      } else if (overlay.requestFullscreen) {""")
+# The silent clip that keeps the screen-off loop's <audio> element ready plays all session; the web's
+# is half a second, so it restarts twice a second. Ten seconds at 8 kHz (320 KB) restarts rarely.
+rep('      const z = new Float32Array(22050);\n'
+    '      loopState.silentUrl = URL.createObjectURL(encodeWav([z, z], 44100));',
+    '      // [PHI-APP] ten seconds (the web\'s is half a second), so the element restarts rarely\n'
+    '      const z = new Float32Array(80000);\n'
+    '      loopState.silentUrl = URL.createObjectURL(encodeWav([z, z], 8000));')
 
 # ---- the page ----
 rep('<div class="brand"><span class="lss-tag"><span class="lt-text">φ-COMPOSER</span></span></div>',
@@ -154,16 +202,6 @@ rep('\n})();\n</script>\n',
       return (STYLES[state.music.style] || STYLES.ambient).label + ' · ' + composerTempo().bpm.toFixed(1) + ' BPM';
     }
     return state.mode.charAt(0).toUpperCase() + state.mode.slice(1) + ' · ' + Math.round(state.params.base) + ' Hz';
-  }
-
-  // [PHI-APP] Android: the native playback service (PlaybackService.java) keeps the live sound going
-  // with the screen off, so the page's own screen-off loop, and the lock button that prepares it,
-  // stay out of the way. iOS keeps them: whether WKWebView keeps live Web Audio running in the
-  // background is an open item on the README's device checklist, and the loop plays through an
-  // <audio> element, which iOS does keep playing.
-  if (window.PhiApp && window.PhiApp.platform === 'android') {
-    loopState.disabled = true;
-    document.body.classList.add('phi-app-android');
   }
 
   // [PHI-APP] Hand the session to the app bridge (app-bridge.js): the playback service and its

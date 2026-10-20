@@ -2,13 +2,13 @@
 
 Created: 2026-09-29
 Last updated: 2026-10-19
-Version: 2.1
+Version: 2.7
 
 The φ-Entrainment Composer from fractalreality.ca, packaged as a paid app for Google Play and the Apple App Store with [Capacitor 8](https://capacitorjs.com/). It has the full sound lab (eight engines, layers, texture, tuning, presets, saved settings, breath guide, visual beat) plus the Composer, which grows music from the field: Fibonacci form, tempo locked to the beat, a golden-section peak. The whole app runs on the device: it makes no network requests, collects nothing, and works offline.
 
 ## Where it comes from
 
-- `www/index.html` is **built** from the web Composer edition, `Fractal_Reality/docs/phi_resonance_composer.html`, by `scripts/build_page.py`. The current build is from Fractal_Reality commit `c8843f5d` (2026-10-19). The web page itself is not changed.
+- `www/index.html` is **built** from the web Composer edition, `Fractal_Reality/docs/phi_resonance_composer.html`, by `scripts/build_page.py`. The current build is from Fractal_Reality commit `631902cd` (2026-10-19, the Composer page v1.7: lighter setting changes, cheap flashes, and the frame cap for phones). The web page itself is not changed.
 - The script applies a short list of app edits, each marked `[PHI-APP]` in the output, so `grep -n "PHI-APP" www/index.html` shows exactly what the app changed. Each edit must find its anchor exactly once or the build stops, so a web change that moves an anchor is caught instead of shipped half-edited.
 - To bring a later web change into the app, run the script again (the path is wherever the Fractal_Reality repo sits; beside FractalGaming it is `../../Fractal_Reality`):
 
@@ -28,16 +28,30 @@ The φ-Entrainment Composer from fractalreality.ca, packaged as a paid app for G
 | Orbitron and Rajdhani from `www/fonts/` instead of Google Fonts | The app makes no network requests, and the privacy policy says so. See "Fonts" below. |
 | `app-bridge.js` loaded before the main script | The Android playback service and its notification, resuming after the screen wakes, native export. In a browser it does nothing. |
 | `PhiApp.sessionStarted()` / `sessionStopped()` in `startSession` / `stopSession`, `PhiApp.sessionChanged()` in `updateMediaSession` | Start and stop the Android foreground service, and keep its notification's line in step with the sound (mode and base, or the composer's style and tempo). A composer style change also refreshes the Media Session. |
-| Android only: the page's screen-off loop is turned off and its lock button hidden | See "Screen-off sound" below. |
+| The AudioContext asks for `latencyHint: 0.15` on Android (150 ms rendered ahead) and `'playback'` on iOS | Inside the Android WebView the sound cut in and out with the default (a few ms rendered ahead) and with `'playback'` (about 21 ms). See "Dropouts and screen-off sound" below. |
+| The silent clip that keeps the lock loop's `<audio>` element ready is ten seconds long (the web's is half a second) | It plays for the whole session, so it now restarts every ten seconds instead of twice a second. |
 | Saving settings to a file and the Composer's audio download call `PhiApp.saveFile()` first | `a.download` does nothing inside an app, so the file is written to the app cache and opened in the share sheet (Save to Files, Drive, AirDrop). |
 | A "not a medical device" paragraph in the About tab | Wording required by Google Play's Health Content and Services policy. |
 | The site's links point to `https://fractalreality.ca/...` (they open in the phone's browser), plus a Privacy link in the About tab and the footer | The app bundles only this page. `privacy.html` is bundled because Apple 5.1.1(i) wants the policy reachable in the app. |
 
-## Screen-off sound
+## Dropouts and screen-off sound
 
-The web page has its own way to keep playing with a phone locked: on request (the lock button) it renders the session into a seamless loop and plays it from an `<audio>` element, because mobile browsers suspend Web Audio when the screen locks. The app has a native way: on Android, `PlaybackService` keeps the app allowed to play with the screen off, so the live engine, the composer included, just keeps going.
+The web page has its own way to keep playing with a phone locked: on request (the lock button, "Prepare for screen lock") it renders the session into a seamless loop and plays it from an `<audio>` element, because mobile browsers suspend Web Audio when the screen locks. The app keeps that, and adds native help: on Android, `PlaybackService` keeps the app allowed to play with the screen off.
 
-- **Android:** the native service carries it, and the page's loop is off (`loopState.disabled`), with its lock button and status line hidden. Just start a session and lock the phone. If device testing shows the sound stopping with the screen off, delete the four `[PHI-APP]` lines at the end of the script in `scripts/build_page.py` that set `loopState.disabled`, rebuild, and the lock button comes back as a fallback.
+- **Android:** the lock button and its loop work as on the web (since build script v1.1). The owner's tests, all on one phone whose browser plays the same page cleanly:
+  - **v1.0** turned the loop off and hid the button, trusting the native service to carry the live engine. It hitched every few seconds and went silent when the screen locked.
+  - **v1.1** brought the button back and asked for `latencyHint: 'playback'`. The sound still cut in and out, most when moving around the app.
+  - **v1.2** renders 150 ms ahead on Android (`latencyHint: 0.15`). The page's audio stopped starving, but setting changes and then the visuals still stuttered. v1.3 to v1.5 lightened changes and the flashes, which helped on a desktop and less on the phone.
+  - **v1.6 and v1.7** came from measuring the phone over USB (`tests/device/`, results there). The page's drawing at the screen's 120 Hz took about three CPU cores. The phone throttled its big core to 700 MHz, and Android counted over 1,000 audio underruns a minute, 8,000 once it was hotter. Now the page draws at most 30 frames a second on phones (Composer page v1.7), the title tag's glitch fires as a one-off, and the app skips the WebView's full-screen mode for the flashes. The latency hint stays 0.15: `'playback'` (21 ms ahead) starved the page's audio even at 30 frames.
+
+  What the source shows (Chromium, `media/base/audio_latency.cc` and `media/audio/android/`):
+  - **The default hint** renders one hardware buffer ahead (a few ms), on a low-latency AAudio stream.
+  - **`'playback'`** renders 1024 frames (about 21 ms), on a power-saving stream.
+  - **A hint in seconds** renders that much (capped near 170 ms), on a low-latency stream.
+
+  On the Pixel the low-latency stream is Android's MMAP path. The app hands it 2 ms bursts with about 6 ms of margin, so any stall in the app's process is an audible gap. Lighter drawing is what keeps that hand-off on time. Capacitor does not pause the WebView in the background (its `KeepRunning` setting defaults to true).
+
+  Whether the live engine keeps going with the screen locked without the lock button is a device check (item 1 below). The lock button is the path the browser already proves.
 - **iOS:** the loop stays available, because whether WKWebView keeps live Web Audio running in the background is still open (device checklist), and an `<audio>` element is what iOS reliably keeps playing. The bridge does not resume the live engine while the loop plays.
 - **Timer:** the web page's timer now counts clock time and starts its closing fade early enough to reach silence at the chosen minute, which covers what September's audio-clock gate did, so the gate was not carried over. Device check 7 confirms it with the screen locked.
 
@@ -91,18 +105,73 @@ The debug APK lands in `android/app/build/outputs/apk/debug/app-debug.apk`. For 
 
 ## Testing without a phone
 
-`tests/android-harness.html` runs `www/index.html` in a frame with a pretend Capacitor on Android. Serve the folder over http (a `file://` page cannot fetch the app's page), open the harness, and drive it from the browser's console: every plugin call lands in `frame.contentWindow.__calls` as `[plugin, method, args]`, and `frame.contentWindow.__fire('PlaybackService', 'stopRequested')` presses the notification's Stop.
+`tests/android-harness.html` runs `www/index.html` in a frame with a pretend Capacitor on Android. Serve the folder over http (a `file://` page cannot fetch the app's page), open the harness, and drive it from the browser's console: every plugin call lands in `frame.contentWindow.__calls` as `[plugin, method, args]`, and `frame.contentWindow.__fire('PlaybackService', 'stopRequested')` presses the notification's Stop. Two 404s in the console (`tests/fonts/fonts.css` and `tests/app-bridge.js`) are the harness, not the app: the frame's first fetch runs before the injected `<base>` applies, and both files then load from `www/`.
 
 ## Verified here, and what needs a real phone
+
+**Verified on 2026-10-19 (build script v1.2, Chromium, through the harness):**
+
+- The page builds with 24 `[PHI-APP]` marks and passes `node --check`.
+- On Android the AudioContext is created with `latencyHint: 0.15` and reports `baseLatency` 0.15 s.
+- The breath guide's lane shows on the main screen by default (from the web pages, 2026-10-19).
+- Start, Prepare for screen lock, Ready (loop playing, live engine suspended) and Stop work as before. The service gets one start and one stop.
+
+**Verified on 2026-10-19 (build script v1.1, Chromium, through the harness):**
+
+- The page builds with 23 `[PHI-APP]` marks and passes `node --check`.
+- On Android the lock button shows ("Play with screen off", then "Prepare for screen lock" once a session plays).
+- BEGIN SESSION creates the AudioContext with `latencyHint: 'playback'` and starts the playback service ("Ambient Field · 126.0 BPM" for Ashman1).
+- The lock button renders the loop (Ashman1 with the Composer, about 3 s on this PC) and reaches "Ready: lock your screen". The loop takes over, and the live engine is suspended.
+- Stop ends the session and stops the service once.
+- The ten-second silent clip plays without an error.
 
 **Verified on 2026-10-18 (Chromium, through the harness):**
 
 - The page builds from the Composer edition with 23 `[PHI-APP]` marks; its script and the bridge pass `node --check`, and every element id the script uses exists (the form's playhead is made at run time).
-- It loads as Phi Resonance with the Composer tab first; on Android the lock button is hidden.
+- It loads as Phi Resonance with the Composer tab first; on Android the lock button was hidden (build script v1.0).
 - BEGIN SESSION starts the playback service with the line "Ambient Field · 97.1 BPM". Turning the composer off changes it to "Drone · 256 Hz", on again to the composer's style and tempo. While the page is hidden it sends no update (Android may refuse one from the background).
 - The notification's Stop ends the session, and the service stops 0.6 s later.
 - Saving settings to a file writes the JSON to the app cache and opens the share sheet; the Composer's audio download rendered a 1:16 piece (12.7 MB WAV) and did the same.
 - Every request the page made stayed inside the app's own files: no Google Fonts or anything else from the internet. Orbitron and Rajdhani load from `www/fonts/`.
+
+**Android build v1.7 (2026-10-19, on the owner's PC, installed on the owner's Pixel 9 over USB):** build script v1.3 on the Composer page v1.7. Measured on the phone with `tests/device/verify.sh`, nothing forced, zero underruns at both levels in each phase:
+- 60 s of plain playback
+- 60 s of the flashes, with the breath guide over them
+- 60 s of setting changes, 42 in all
+
+The phone's big core ended capped at 1,396 MHz (it had been held at 700 under the old drawing load). The owner listened and confirmed it sounds good. The committed page differs from the installed one only in its source-commit comment, which now names `631902cd`. APK v1.6 (the same page, with the WebView's full-screen mode still used for the flashes) counted 666 Android underruns in a minute of full-screen flashes on a warm phone.
+
+**Android build v1.5 (2026-10-19, on the owner's PC):** the Composer page v1.6, with cheap flashes. The owner found v1.4 "good until I started the visuals". Measured in Chromium with the full-screen flashes on (the old engine first):
+- The whole hidden page kept drawing underneath, about 119,000 canvas calls a second. Now nothing under the flashes is drawn.
+- The panel was repainted in a new colour 60 times a second, each change restarting a 40 ms colour transition. Now one opacity per frame moves a layer of the colour; the compositor does that without repainting.
+- The HUD text was rewritten 120 times a second. Now it changes only when its text does.
+
+The colour itself is unchanged: below 50% lightness HSL is a straight blend toward black, above it toward white, so a black panel with a 50% hue layer and a white layer shows exactly the old colour. Flashes in the main window, the canvas shapes and stopping were checked too. The page in the 6.4 MB APK is byte-identical to `www/index.html`.
+
+**Android build v1.4 (2026-10-19, on the owner's PC):** build script v1.2 on the Composer page v1.5, with lighter setting changes. The owner found v1.3 got "really hitchy" after a while of changing settings. Desktop checks found no build-up after about 70 changes of every kind: audio sources, output connections, timers, memory, page elements and animation loops all held steady. So the remaining load is each change's moment of doubled sound. v1.5 shrinks it in three ways:
+- The old sound's sources now stop on the audio clock the moment its fade ends. Before, a timer stopped them 80 ms or more later, depending on how busy the page was.
+- The crossfade is 0.25 s (it was 0.35).
+- Noise is made once per audio context and reused. Before, every change made megabytes of it again.
+
+Checked in Chromium:
+- Right after a change's fade, the source count was back to steady.
+- Eleven changes with a noise bed made no new buffers.
+- Noise mode made its three colours once.
+- The lock loop, a change while it plays, and Stop all work.
+
+The page in the 6.4 MB APK is byte-identical to `www/index.html`.
+
+**Android build v1.3 (2026-10-19, on the owner's PC):** build script v1.2 on the Composer page v1.4, where one reverb runs across setting changes. The owner heard v1.2 play cleanly when left alone but stutter while changing settings; on most changes the engine rebuilt the whole sound and ran a second reverb, made from fresh noise, beside the first. Checked in Chromium with the output redirected into an analyser:
+- Three Base changes made no new reverb (the old engine made three).
+- The level stayed flat across five rebuilds.
+- A Reverb size change made exactly one new reverb.
+- Prepare for screen lock, a change while the loop plays, and Stop all work.
+
+The page in the 6.4 MB APK is byte-identical to `www/index.html`.
+
+**Android build v1.2 (2026-10-19, on the owner's PC):** `assembleDebug` succeeded (6.4 MB). It was built just before the web change was committed, so its page differs from today's `www/index.html` only in the source-commit comment ("c8843f5d plus uncommitted changes", now `66afa2ed`).
+
+**Android build v1.1 (2026-10-19, on the owner's PC):** `assembleDebug` succeeded in 46 s with build script v1.1. The page in the 6.3 MB APK's `assets/public` is byte-identical to `www/index.html` (the `'playback'` latency hint, the lock button kept on Android, 23 `[PHI-APP]` marks).
 
 **Android build (2026-10-18, on the owner's PC):** `assembleDebug` succeeded with AGP 8.13 and Gradle 8.14.3, compileSdk and targetSdk 36. The 6.3 MB debug APK's `assets/public` holds the new page (23 `[PHI-APP]` marks, no Google Fonts), the bridge, the fonts and the privacy policy. The only build warnings come from Capacitor's own template and plugins.
 
@@ -110,7 +179,7 @@ The debug APK lands in `android/app/build/outputs/apk/debug/app-debug.apk`. For 
 
 **Device checklist (please run these before submitting):**
 
-1. **Android:** start a session (composer on) and lock the phone for 30+ minutes. Sound and music continue without gaps, the notification shows on the lock screen, and **Stop** ends it.
+1. **Android:** start a session (composer on) and listen for a few minutes with the screen on, moving between the tabs: the sound never cuts out. Then change Base, Beat and Mode while it plays: each change crossfades without stuttering. Then lock the phone, first without the lock button (does the live sound keep going?), then after "Prepare for screen lock" reaches Ready, for 30+ minutes. Sound and music continue without gaps, the notification shows on the lock screen, and **Stop** ends it.
 2. **Android:** change the preset, then the composer's style, while playing: the notification's line follows.
 3. **Android 13+:** the notification permission is asked once. Deny it: sound still plays.
 4. **Android:** swipe the app away from Recents. The notification disappears.
@@ -153,6 +222,12 @@ Full notes and sources: `../store/PLAN.md`, section "φ Resonance".
 
 ## Revision history
 
+- 2026-10-19 v2.7: measured on the owner's Pixel 9 over USB (`tests/device/`): the drawing at 120 Hz was the cause; APK v1.6 and v1.7 from the Composer page v1.7 (a 30 fps cap on phones, the title tag's glitch as a one-off) and build script v1.3 (no WebView full screen for the flashes)
+- 2026-10-19 v2.6: APK v1.5 from the Composer page v1.6 (cheap flashes: the colour moves by opacity, the HUD is written only when it changes, nothing is drawn under the full-screen flashes), after the owner found v1.4 good until the visuals started
+- 2026-10-19 v2.5: APK v1.4 from the Composer page v1.5 (the old sound stops on the audio clock when its fade ends, a 0.25 s crossfade, noise made once), after the owner found v1.3 got hitchy after a while of changing settings; the source is now the owner's commit `4d15418d`
+- 2026-10-19 v2.4: APK v1.3 from the Composer page v1.4 (one reverb across setting changes), after the owner heard v1.2 stutter while changing settings; device check 1 now covers changes while playing
+- 2026-10-19 v2.3: build script v1.2, after the owner heard the v1.1 sound cut in and out, most when moving around the app: a 150 ms latency hint on Android (`'playback'` stays on iOS); "Screen-off sound" is now "Dropouts and screen-off sound" with the three test builds and the next steps; the page now starts with the breath lane on the main screen (from the web pages)
+- 2026-10-19 v2.2: build script v1.1, after the owner's first Android test (hitching every few seconds, silent on lock, no lock button): the `'playback'` latency hint (Android's power-saving audio path), a ten-second silent clip, and the page's lock button and loop kept on Android; "Screen-off sound", the change table, the harness results and device check 1 updated
 - 2026-10-19 v2.1: rebuilt from the Composer page at `c8843f5d`: the app now starts on Ashman1, the owner's setting (binaural, 144 Hz base, 2.1 Hz beat, octave-spaced triangle layers, the Composer on piece 75C2C6), which also leads the preset list
 - 2026-10-18 v2.0: the app is now built from the Composer edition by `scripts/build_page.py` (was a hand-edited copy of the plain lab page); bundled fonts (Orbitron, Rajdhani, OFL); the Android notification follows the sound; the page's screen-off loop is off on Android; September's timer changes replaced by the web page's own; the Android harness; the build-tools flag and a first debug APK built on the owner's PC; README rewritten for all of it
 - 2026-09-29 v1.2: privacy page merged into Fractal_Reality `main` (PR #773)

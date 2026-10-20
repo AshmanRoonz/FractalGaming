@@ -5,9 +5,25 @@
 <!--
   φ-Entrainment Composer: the full sound lab plus generative music.
   Created: 2026-10-18
-  Last updated: 2026-10-18
-  Version: 1.2
+  Last updated: 2026-10-19
+  Version: 1.7
   Revision history:
+  - 2026-10-19 v1.7: a frame cap: phones draw at most 30 frames a second, other
+    screens 60, with fades scaled to the frame time, and on phones the title tag's
+    glitch fires as a one-off instead of a never-ending animation (measured on the
+    owner's Pixel 9, a 120 Hz screen: the page's drawing took about three cores, the
+    phone throttled, and Android counted over 1,000 audio underruns a minute)
+  - 2026-10-19 v1.6: cheap flashes: the flash colour moves by opacity alone (no
+    repaint per frame), the HUD text is written only when it changes, and the page
+    under the full-screen flashes is not drawn (the phone app hitched with visuals)
+  - 2026-10-19 v1.5: lighter setting changes: the old sound stops on the audio clock
+    when its fade ends, the crossfade is 0.25 s (was 0.35), and noise is made once
+    and reused (the phone app got hitchy after a while of changing settings)
+  - 2026-10-19 v1.4: one reverb runs across setting changes (it was rebuilt beside
+    the old one on every change, which stuttered in the phone app)
+  - 2026-10-19 v1.3: the breath guide's lane is on the main screen by default; since
+    v1.2 also: Base, Beat and Mode as buttons with editors, the File tab, the session
+    card that folds to a bar, and the Ashman1 starting setting
   - 2026-10-18 v1.2: the settings tabs sit along the top of the main screen (no
     separate settings screen, no full-screen button); the generated part is called
     the Composer, not music
@@ -23,7 +39,7 @@
      coming from Google Fonts: the app makes no network requests. -->
 <link rel="stylesheet" href="fonts/fonts.css">
 <!-- [PHI-APP] This file is built by ../scripts/build_page.py from Fractal_Reality/docs/phi_resonance_composer.html
-     (Fractal_Reality commit c8843f5d). Do not edit it by hand: change the web page, or the
+     (Fractal_Reality commit 631902cd). Do not edit it by hand: change the web page, or the
      edits in the script, and build again. Every app change is marked [PHI-APP]; see ../README.md. -->
 <!-- [PHI-APP] The app's name. "Entrainment" reads as a claim to change the body, which store
      health rules treat as a medical claim (see ../README.md, "Positioning"). -->
@@ -139,6 +155,18 @@
     97.5% { clip-path: polygon(0 20%, 100% 20%, 100% 80%, 0 80%); transform: translate(1px, 0); filter: hue-rotate(45deg); }
     98.0% { clip-path: none; transform: translate(-1px, 0); }
   }
+  /* Phones (.lite-motion, set by the script's frame cap): the tag's constant jitter
+     rests and its glitch fires as a one-off every 4.7 s, so the screen can rest
+     between frames (owner, 2026-10-19: measured on a Pixel 9, the never-ending
+     animations kept the 120 Hz screen redrawing) */
+  .lite-motion .lss-tag, .lite-motion .dot { animation: none; }
+  .lite-motion .lss-tag.glitch-shot { animation: tagGlitchShot 94ms steps(1) 1; }
+  @keyframes tagGlitchShot {
+    0% { clip-path: polygon(0 0, 100% 0, 100% 45%, 0 45%); transform: translate(2px, 0); }
+    25% { clip-path: polygon(0 55%, 100% 55%, 100% 100%, 0 100%); transform: translate(-2px, 0); }
+    50% { clip-path: polygon(0 20%, 100% 20%, 100% 80%, 0 80%); transform: translate(1px, 0); filter: hue-rotate(45deg); }
+    75%, 100% { clip-path: none; transform: translate(-1px, 0); }
+  }
   @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
   /* ── the app frame ── */
@@ -247,6 +275,12 @@
   .stage-flash { position: absolute; inset: 0; display: none; background: #000; }
   .stage.flashing .stage-flash { display: block; }
   .stage-flash canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: none; }
+  /* The flash colour moves by opacity alone, which a phone composites without
+     repainting: a black panel, the hue at 50% lightness, white on top (owner,
+     2026-10-19: the app's sound hitched once the visuals started) */
+  .flash-tint { position: absolute; inset: 0; opacity: 0; pointer-events: none; will-change: opacity; }
+  .flash-tint.white { background: #fff; }
+  #flashPanel .flash-tint { transition: opacity 40ms linear; }
   .stage.flashing .stage-now { color: #e6eef7; text-shadow: 0 0 3px #000, 0 0 10px rgba(0, 0, 0, 0.85); }
 
   /* the breath lane: the breath guide on the main screen, between the
@@ -1470,9 +1504,6 @@
     border-bottom: 1px solid;
     border-image: linear-gradient(to right, rgba(255, 170, 0, 0.45), rgba(255, 170, 0, 0)) 1;
   }
-  /* [PHI-APP] On Android the native playback service keeps the live sound going with the screen
-     off, so the page's own screen-off loop and its lock button stay hidden (end of the script). */
-  .phi-app-android #lockBtn, .phi-app-android #bgStatus { display: none !important; }
 </style>
 </head>
 <body>
@@ -1502,8 +1533,8 @@
   <div class="main">
 
     <!-- THE STAGE: the field behind, the breath lane, the waveform -->
-    <section class="stage" id="stage" aria-label="The field">
-      <div class="stage-flash" id="stageFlash" aria-hidden="true"><canvas id="stageFlashCanvas"></canvas></div>
+    <section class="stage breath-on" id="stage" aria-label="The field">
+      <div class="stage-flash" id="stageFlash" aria-hidden="true"><i class="flash-tint"></i><i class="flash-tint white"></i><canvas id="stageFlashCanvas"></canvas></div>
       <div class="stage-now">
         <span class="stage-balance">Balance <b id="betaStat">0.25</b></span>
         <span class="stage-chips">
@@ -1973,7 +2004,7 @@
       <div class="row-note">A dot that rises as you breathe in and falls as you breathe out. It has its own view, and it can also sit on the main screen and ride over the flashes, all on one breath.</div>
       <div class="setting-row check">
         <span class="lbl">On the main screen</span>
-        <button class="toggle" type="button" data-breath-where="stage" aria-pressed="false">OFF</button>
+        <button class="toggle" type="button" data-breath-where="stage" aria-pressed="true">ON</button>
       </div>
       <div class="setting-row check">
         <span class="lbl">Over the flashes</span>
@@ -2191,7 +2222,7 @@
       </div>
       <div class="setting-row check">
         <span class="lbl">On the main screen</span>
-        <button class="toggle" type="button" data-breath-where="stage" aria-pressed="false">OFF</button>
+        <button class="toggle" type="button" data-breath-where="stage" aria-pressed="true">ON</button>
       </div>
       <div class="setting-row check">
         <span class="lbl">Over the flashes</span>
@@ -2205,7 +2236,7 @@
 
 <!-- Full-screen flash overlay (hidden by default) -->
 <div id="flashOverlay" role="dialog" aria-label="Full-screen visual beat">
-  <div id="flashPanel"></div>
+  <div id="flashPanel"><i class="flash-tint"></i><i class="flash-tint white"></i></div>
   <canvas id="flashCanvas" style="position:absolute; inset:0; width:100%; height:100%; display:none;"></canvas>
   <div class="flash-breath" id="flashBreath" aria-hidden="true">
     <canvas id="flashBreathCanvas"></canvas>
@@ -2379,13 +2410,52 @@
   // ============= UTILITIES =============
   const $ = (id) => document.getElementById(id);
 
+  // Animation is capped: phones draw at most 30 frames a second, other screens 60
+  // (owner, 2026-10-19: measured on a Pixel 9, whose screen runs at 120 Hz, the
+  // page's drawing took about three CPU cores, the phone throttled, and the
+  // audio broke up). Each loop asks frameDue before it draws, and fades scale
+  // with the time since its last frame, so trails last as long at any rate.
+  const FRAME_MS = (/Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
+    (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent)) ? 1000 / 30 : 1000 / 60) - 2;
+  const frameLast = {};
+  // ms since this loop last drew, or 0 when it is not yet due
+  function frameDue(key, now, ms) {
+    now = now || performance.now();
+    const last = frameLast[key] || 0;
+    if (now - last < (ms || FRAME_MS)) return 0;
+    frameLast[key] = now;
+    return last ? Math.min(now - last, 250) : 1000 / 60;
+  }
+  // a fade of `alpha` per 60th of a second, over a frame of `dt` ms
+  function fadeFor(alpha, dt) {
+    return 1 - Math.pow(1 - alpha, dt / (1000 / 60));
+  }
+  // Phones also rest the title tag's never-ending CSS animation, which kept the
+  // screen redrawing at its full rate: the jitter stops, and the glitch fires as a
+  // one-off every 4.7 s, its old period (see .lite-motion in the style)
+  if (FRAME_MS > 1000 / 60) {
+    document.documentElement.classList.add('lite-motion');
+    const still = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (!still) setInterval(() => {
+      if (document.hidden) return;
+      document.querySelectorAll('.lss-tag').forEach(t => {
+        t.classList.add('glitch-shot');
+        setTimeout(() => t.classList.remove('glitch-shot'), 140);
+      });
+    }, 4700);
+  }
+
+  // [PHI-APP] how far ahead the sound is rendered (see ../scripts/build_page.py): deep on Android,
+  // where the WebView's audio thread misses short deadlines while the screen is busy
+  const APP_LATENCY_HINT = (window.PhiApp && window.PhiApp.platform === 'android') ? 0.15 : 'playback';
+
   function ensureAudio() {
     if (state.rendering) return state.ctx;
     if (!state.ctx) {
       // Safari 16.4+: declare this as media playback, so it ignores the
       // silent switch and is allowed to keep going on a locked screen
       try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
-      state.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      state.ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: APP_LATENCY_HINT });   // [PHI-APP]
     }
     if (state.ctx.state !== 'running') state.ctx.resume();
     return state.ctx;
@@ -2475,8 +2545,9 @@
 
   function silentUrl() {
     if (!loopState.silentUrl) {
-      const z = new Float32Array(22050);
-      loopState.silentUrl = URL.createObjectURL(encodeWav([z, z], 44100));
+      // [PHI-APP] ten seconds (the web's is half a second), so the element restarts rarely
+      const z = new Float32Array(80000);
+      loopState.silentUrl = URL.createObjectURL(encodeWav([z, z], 8000));
     }
     return loopState.silentUrl;
   }
@@ -2795,10 +2866,11 @@
     if (old && old.url !== url) URL.revokeObjectURL(old.url);
     const g = detachGraph();
     if (fadeSec > 0) fadeOutGraph(g, fadeSec); else teardownGraph(g);
+    reverbLevel(state.ctx && state.ctx.phiVerb, 0, fadeSec);   // the shared reverb goes with it
     state.nodes = g.nodes;   // keep the layer descriptors for the visuals
     if (crossfade) rampElementVolume(el, 1, fadeSec);
     const sleep = () => {
-      if (loopState.active && state.ctx && state.ctx.state === 'running') state.ctx.suspend();
+      if (loopState.active && state.ctx && state.ctx.state === 'running') { dropReverb(state.ctx, 0); state.ctx.suspend(); }
     };
     if (fadeSec > 0) setTimeout(sleep, fadeSec * 1000 + 200); else sleep();
     if (loopState.asked) {
@@ -2892,7 +2964,19 @@
     });
   }
 
+  // Noise is made once per audio context, type and length, then reused: every
+  // setting change used to make it again (megabytes of fresh noise each time)
+  const noiseCache = new WeakMap();
   function createNoise(type, durationSec = 4) {
+    const ctx = state.ctx;
+    let kept = noiseCache.get(ctx);
+    if (!kept) noiseCache.set(ctx, kept = new Map());
+    const key = type + '|' + durationSec;
+    if (!kept.has(key)) kept.set(key, makeNoise(type, durationSec));
+    return kept.get(key);
+  }
+
+  function makeNoise(type, durationSec) {
     const ctx = state.ctx;
     const rate = ctx.sampleRate;
     const len = Math.floor(rate * durationSec);
@@ -2938,6 +3022,53 @@
       }
     }
     return buf;
+  }
+
+  // ----- one reverb across setting changes -----
+  // Most setting changes rebuild the field and crossfade to the new one. The
+  // reverb is the heaviest part, so it is no longer rebuilt with them (owner,
+  // 2026-10-19: in the phone app, changing settings stuttered; each change
+  // ran a second reverb, made from fresh noise, beside the first). Each audio
+  // context keeps one reverb; every graph feeds it through its own fade, and
+  // it is replaced only when Reverb size changes. It lives while the live
+  // engine sounds: a stop, or the lock loop taking over, fades it out and
+  // lets it go.
+  function sharedReverb(ctx, dest, size) {
+    const v = ctx.phiVerb;
+    if (v && v.size === size && v.dest === dest) {
+      reverbLevel(v, state.params.rev / 100, 0.05);   // back up if a stop was fading it
+      return v;
+    }
+    if (v) dropReverb(ctx, FADE_CHANGE + v.size + 0.5);   // the old one rings out first
+    const input = ctx.createGain();
+    const convolver = ctx.createConvolver();
+    convolver.buffer = createReverbImpulse(size, 2.5);
+    const wet = ctx.createGain();
+    wet.gain.value = state.params.rev / 100;
+    input.connect(convolver);
+    convolver.connect(wet);
+    wet.connect(dest);
+    [input, convolver, wet].forEach(n => { n.phiShared = true; });   // teardownGraph leaves these
+    ctx.phiVerb = { size, dest, input, convolver, wet };
+    return ctx.phiVerb;
+  }
+
+  // Ramp the shared reverb's output (it follows the live sound out)
+  function reverbLevel(v, level, sec) {
+    if (!v) return;
+    const g = v.wet.gain, now = v.wet.context.currentTime;
+    g.cancelScheduledValues(now);
+    g.setValueAtTime(g.value, now);
+    g.linearRampToValueAtTime(level, now + Math.max(0.01, sec));
+  }
+
+  // Let a context's reverb go, after afterSec (0: now)
+  function dropReverb(ctx, afterSec) {
+    const v = ctx && ctx.phiVerb;
+    if (!v) return;
+    ctx.phiVerb = null;
+    const off = () => [v.input, v.convolver, v.wet].forEach(n => { try { n.disconnect(); } catch (e) {} });
+    if (afterSec > 0) setTimeout(off, afterSec * 1000); else off();
   }
 
   function spacingRatio(kind, i) {
@@ -3945,8 +4076,10 @@
   }
 
   // ============= SOUND ENGINE =============
-  // Fade times (seconds): sessions breathe in and out; parameter changes crossfade
-  const FADE_IN = 3, FADE_OUT = 1.5, FADE_TIMER_END = 8, FADE_CHANGE = 0.35;
+  // Fade times (seconds): sessions breathe in and out; parameter changes crossfade.
+  // A change's crossfade is 0.25 s (it was 0.35): for that long the old and the
+  // new sound both play, the heaviest moment for a phone.
+  const FADE_IN = 3, FADE_OUT = 1.5, FADE_TIMER_END = 8, FADE_CHANGE = 0.25;
 
   function rampGain(param, target, sec) {
     const now = state.ctx.currentTime;
@@ -3975,15 +4108,29 @@
       try { g.noiseNodes.source && g.noiseNodes.source.stop(); } catch(e){}
       (g.noiseNodes.extras || []).forEach(n => { try { n.stop && n.stop(); } catch(e){} });
     }
+    // the shared reverb outlives the graphs (sharedReverb)
     ['masterGain','filter','convolver','wetGain','dryGain','fade','bedBus'].forEach(k => {
-      if (g[k]) { try { g[k].disconnect(); } catch(e){} }
+      if (g[k] && !g[k].phiShared) { try { g[k].disconnect(); } catch(e){} }
     });
   }
 
   function fadeOutGraph(g, sec) {
     if (!g.fade) { teardownGraph(g); return; }
     rampGain(g.fade.gain, 0, sec);
+    // Its sources stop on the audio clock the moment the fade ends, so the old
+    // sound costs nothing once it is silent, however late the timer below runs
+    // on a busy phone (owner, 2026-10-19: changing settings got hitchy)
+    stopGraphAt(g, g.fade.context.currentTime + sec);
     setTimeout(() => teardownGraph(g), sec * 1000 + 80);
+  }
+
+  // Schedule every source of a detached graph to stop at context time t
+  function stopGraphAt(g, t) {
+    (g.nodes || []).forEach(n => { if (n && n.stopAll) { try { n.stopAll(t); } catch (e) {} } });
+    if (g.noiseNodes) {
+      try { g.noiseNodes.source && g.noiseNodes.source.stop(t); } catch (e) {}
+      (g.noiseNodes.extras || []).forEach(n => { try { n.stop && n.stop(t); } catch (e) {} });
+    }
   }
 
   // User-facing start: safety notice, fade in, timer, screen wake
@@ -4046,6 +4193,7 @@
       } else {
         fadeOutGraph(detachGraph(), fadeSec);
       }
+      reverbLevel(state.ctx.phiVerb, 0, fadeSec);   // the shared reverb fades with the sound
     }
     composerStop(fadeSec);
     state.playing = false;
@@ -4057,6 +4205,7 @@
       if (state.playing) return;
       if (loopState.el) loopState.el.pause();
       // Nothing left to render; let the engine sleep (start resumes it)
+      dropReverb(state.ctx, 0);
       if (state.ctx && state.ctx.state === 'running') state.ctx.suspend();
     }, fadeSec * 1000 + 150);
     updateMediaSession();
@@ -4086,13 +4235,13 @@
     const ctx = ensureAudio();
     const p = state.params;
 
-    // Per-graph fade stage: dry + wet -> fade -> destination
+    // Per-graph fade stage: the dry sound -> fade -> destination, and on into the shared reverb
     state.fade = ctx.createGain();
     state.fade.gain.setValueAtTime(0, ctx.currentTime);
     state.fade.gain.linearRampToValueAtTime(1, ctx.currentTime + fadeInSec);
     state.fade.connect(dest || ctx.destination);
 
-    // master + effects chain: [sources] -> filter? -> master -> (dry + wet via convolver) -> destination
+    // master + effects chain: [sources] -> filter? -> master -> dry -> fade -> destination (+ the shared reverb)
     state.masterGain = ctx.createGain();
     state.masterGain.gain.value = p.vol / 100;
 
@@ -4112,18 +4261,17 @@
     state.bedBus.gain.value = bedLevel();
     state.bedBus.connect(filterInput);
 
-    // Reverb
-    state.convolver = ctx.createConvolver();
-    state.convolver.buffer = createReverbImpulse(p.revSz, 2.5);
-    state.wetGain = ctx.createGain();
+    // Reverb: the context's one reverb (sharedReverb), fed after this graph's
+    // fade, so a crossfade or a fade-out moves this graph out of the reverb as
+    // well as out of the dry sound
+    const verb = sharedReverb(ctx, dest || ctx.destination, p.revSz);
+    state.convolver = verb.convolver;
+    state.wetGain = verb.wet;
     state.dryGain = ctx.createGain();
-    state.wetGain.gain.value = p.rev / 100;
     state.dryGain.gain.value = 1;
     state.masterGain.connect(state.dryGain);
-    state.masterGain.connect(state.convolver);
-    state.convolver.connect(state.wetGain);
     state.dryGain.connect(state.fade);
-    state.wetGain.connect(state.fade);
+    state.fade.connect(verb.input);
 
     // Build layers based on mode
     const N = state.layerCount;
@@ -4174,7 +4322,7 @@
       o.type = waveType;
       o.frequency.value = freq;
       o.detune.value = state.params.detune;
-      return { primary: o, inputs: [o], startAll: () => o.start(), stopAll: () => { try{o.stop();}catch(e){} } };
+      return { primary: o, inputs: [o], startAll: () => o.start(), stopAll: (t) => { try{o.stop(t);}catch(e){} } };
     }
     if (waveType === 'fm') {
       const carrier = ctx.createOscillator();
@@ -4192,7 +4340,7 @@
         primary: carrier,
         inputs: [carrier],
         startAll: () => { carrier.start(); mod.start(); },
-        stopAll: () => { try{carrier.stop();}catch(e){} try{mod.stop();}catch(e){} }
+        stopAll: (t) => { try{carrier.stop(t);}catch(e){} try{mod.stop(t);}catch(e){} }
       };
     }
     if (waveType === 'am') {
@@ -4214,7 +4362,7 @@
         primary: g,
         inputs: [carrier],
         startAll: () => { carrier.start(); mod.start(); },
-        stopAll: () => { try{carrier.stop();}catch(e){} try{mod.stop();}catch(e){} }
+        stopAll: (t) => { try{carrier.stop(t);}catch(e){} try{mod.stop(t);}catch(e){} }
       };
     }
     if (waveType === 'organ') {
@@ -4238,7 +4386,7 @@
         primary: mix,
         inputs: oscs,
         startAll: () => oscs.forEach(o => o.start()),
-        stopAll: () => oscs.forEach(o => { try{o.stop();}catch(e){} })
+        stopAll: (t) => oscs.forEach(o => { try{o.stop(t);}catch(e){} })
       };
     }
     if (waveType === 'vocal') {
@@ -4266,7 +4414,7 @@
         primary: mix,
         inputs: oscs,
         startAll: () => oscs.forEach(o => o.start()),
-        stopAll: () => oscs.forEach(o => { try{o.stop();}catch(e){} })
+        stopAll: (t) => oscs.forEach(o => { try{o.stop(t);}catch(e){} })
       };
     }
     if (waveType === 'bowed') {
@@ -4283,14 +4431,14 @@
         primary: f,
         inputs: [o],
         startAll: () => o.start(),
-        stopAll: () => { try{o.stop();}catch(e){} }
+        stopAll: (t) => { try{o.stop(t);}catch(e){} }
       };
     }
     // default fallback
     const o = ctx.createOscillator();
     o.type = 'sine';
     o.frequency.value = freq;
-    return { primary: o, inputs: [o], startAll: () => o.start(), stopAll: () => { try{o.stop();}catch(e){} } };
+    return { primary: o, inputs: [o], startAll: () => o.start(), stopAll: (t) => { try{o.stop(t);}catch(e){} } };
   }
 
   function applyCommonMod(gainNode, panVal, i) {
@@ -4377,13 +4525,13 @@
 
     return {
       freq, beat, layer: i,
-      stopAll: () => {
-        leftOsc.stopAll();
-        rightOsc.stopAll();
-        if (rightCarrier) rightCarrier.stopAll();
-        leftMod.extras.forEach(n => { try{n.stop();}catch(e){} });
-        rightMod.extras.forEach(n => { try{n.stop();}catch(e){} });
-        if (vib) { try{vib.stop();}catch(e){} }
+      stopAll: (t) => {
+        leftOsc.stopAll(t);
+        rightOsc.stopAll(t);
+        if (rightCarrier) rightCarrier.stopAll(t);
+        leftMod.extras.forEach(n => { try{n.stop(t);}catch(e){} });
+        rightMod.extras.forEach(n => { try{n.stop(t);}catch(e){} });
+        if (vib) { try{vib.stop(t);}catch(e){} }
       }
     };
   }
@@ -4422,11 +4570,11 @@
 
     return {
       freq, beat, layer: i,
-      stopAll: () => {
-        osc.stopAll();
-        try{pulse.stop();}catch(e){}
-        try{dc.stop();}catch(e){}
-        mod.extras.forEach(n => { try{n.stop();}catch(e){} });
+      stopAll: (t) => {
+        osc.stopAll(t);
+        try{pulse.stop(t);}catch(e){}
+        try{dc.stop(t);}catch(e){}
+        mod.extras.forEach(n => { try{n.stop(t);}catch(e){} });
       }
     };
   }
@@ -4449,10 +4597,10 @@
     osc2.startAll();
     return {
       freq, beat, layer: i,
-      stopAll: () => {
-        osc1.stopAll();
-        osc2.stopAll();
-        mod.extras.forEach(n => { try{n.stop();}catch(e){} });
+      stopAll: (t) => {
+        osc1.stopAll(t);
+        osc2.stopAll(t);
+        mod.extras.forEach(n => { try{n.stop(t);}catch(e){} });
       }
     };
   }
@@ -4470,9 +4618,9 @@
     osc.startAll();
     return {
       freq, beat: 0, layer: i,
-      stopAll: () => {
-        osc.stopAll();
-        mod.extras.forEach(n => { try{n.stop();}catch(e){} });
+      stopAll: (t) => {
+        osc.stopAll(t);
+        mod.extras.forEach(n => { try{n.stop(t);}catch(e){} });
       }
     };
   }
@@ -4500,9 +4648,9 @@
     mod.panner.connect(layerGain);
     return {
       freq, beat: 0, layer: i,
-      stopAll: () => {
-        oscs.forEach(o => { try{o.stop();}catch(e){} });
-        mod.extras.forEach(n => { try{n.stop();}catch(e){} });
+      stopAll: (t) => {
+        oscs.forEach(o => { try{o.stop(t);}catch(e){} });
+        mod.extras.forEach(n => { try{n.stop(t);}catch(e){} });
       }
     };
   }
@@ -4528,9 +4676,9 @@
     src.start();
     return {
       freq, beat: 0, layer: i,
-      stopAll: () => {
-        try{src.stop();}catch(e){}
-        mod.extras.forEach(n => { try{n.stop();}catch(e){} });
+      stopAll: (t) => {
+        try{src.stop(t);}catch(e){}
+        mod.extras.forEach(n => { try{n.stop(t);}catch(e){} });
       }
     };
   }
@@ -4551,9 +4699,9 @@
     osc.startAll();
     return {
       freq: freq * mult, beat: 0, layer: i,
-      stopAll: () => {
-        osc.stopAll();
-        mod.extras.forEach(n => { try{n.stop();}catch(e){} });
+      stopAll: (t) => {
+        osc.stopAll(t);
+        mod.extras.forEach(n => { try{n.stop(t);}catch(e){} });
       }
     };
   }
@@ -4755,7 +4903,9 @@
   resize();
   window.addEventListener('resize', resize);
 
-  function drawBG() {
+  function drawBG(now) {
+    const dt = coveredByFlash() ? 0 : frameDue('bg', now);
+    if (!dt) { requestAnimationFrame(drawBG); return; }
     const t = Date.now() / 1000;
     // the field radiates from the centre of the stage (the screen centre if it
     // is not laid out); the canvas is fixed, so the rings follow a scroll
@@ -4766,7 +4916,7 @@
     // trails fade toward transparent (not black) so the backdrop shows through
     bctx.save();
     bctx.globalCompositeOperation = 'destination-out';
-    bctx.fillStyle = 'rgba(0,0,0,0.05)';
+    bctx.fillStyle = 'rgba(0,0,0,' + fadeFor(0.05, dt).toFixed(4) + ')';
     bctx.fillRect(0, 0, bg.width, bg.height);
     bctx.restore();
 
@@ -4805,11 +4955,13 @@
     requestAnimationFrame(drawBG);
   }
 
-  function drawViz() {
+  function drawViz(now) {
+    const dt = coveredByFlash() ? 0 : frameDue('viz', now);
+    if (!dt) { requestAnimationFrame(drawViz); return; }
     const w = viz.width, h = viz.height;
     vctx.save();
     vctx.globalCompositeOperation = 'destination-out';
-    vctx.fillStyle = 'rgba(0,0,0,0.12)';
+    vctx.fillStyle = 'rgba(0,0,0,' + fadeFor(0.12, dt).toFixed(4) + ')';
     vctx.fillRect(0, 0, w, h);
     vctx.restore();
     const t = Date.now() / 1000;
@@ -5406,8 +5558,39 @@
     if (el) el.textContent = r.toFixed(3) + ' Hz';
   }
 
+  // While the full-screen flashes cover the page, nothing under them is drawn
+  function coveredByFlash() {
+    return !!(state.vbeat && state.vbeat.active && state.vbeat.where !== 'stage');
+  }
+
+  // The flash colour without a repaint per frame: the panel stays black, a
+  // layer of the hue at 50% lightness and a white layer sit on it (shell
+  // markup), and only their opacities move. Below 50% HSL lightness is a
+  // straight blend toward black, above it toward white, so this shows exactly
+  // hsl(hue, sat, light). Each frame used to repaint the panel in a new colour.
+  function paintTint(panel, hue, sat, light) {
+    const t = panel.querySelectorAll('.flash-tint');
+    if (t.length < 2) { panel.style.background = hslCss(hue, sat, light); return; }
+    const col = hslCss(hue, sat, 50);
+    if (t[0].phiCol !== col) { t[0].style.background = col; t[0].phiCol = col; }
+    setOpacity(t[0], Math.min(1, light / 50));
+    setOpacity(t[1], Math.max(0, (light - 50) / 50));
+  }
+  function setOpacity(el, v) {
+    const s = v.toFixed(3);
+    if (el.phiOp !== s) { el.style.opacity = s; el.phiOp = s; }
+  }
+  function hideTint(panel) {
+    panel.querySelectorAll('.flash-tint').forEach(el => setOpacity(el, 0));
+  }
+  // Text is written only when it changes (rewriting it every frame forced a layout)
+  function setText(el, s) {
+    if (el && el.textContent !== s) el.textContent = s;
+  }
+
   function flashLoop(now) {
     if (!state.vbeat.active) return;
+    if (!frameDue('flash', now, 1000 / 60 - 2)) { state.vbeat.raf = requestAnimationFrame(flashLoop); return; }
     if (!state.vbeat.t0) state.vbeat.t0 = now;
     const elapsed = (now - state.vbeat.t0) / 1000; // seconds
     const rate = Math.max(0.01, effectiveFlashRate()); // Hz, sync-aware
@@ -5471,6 +5654,7 @@
     if (state.vbeat.shape === 'radial' || state.vbeat.shape === 'ring' || state.vbeat.shape === 'split') {
       panel.style.background = '#000';
       canvas.style.display = 'block';
+      hideTint(panel);
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
       const box = inStage ? panel.getBoundingClientRect() : { width: window.innerWidth, height: window.innerHeight };
       const w = Math.floor(box.width * dpr), h = Math.floor(box.height * dpr);
@@ -5511,12 +5695,12 @@
       }
     } else {
       canvas.style.display = 'none';
-      panel.style.background = hslCss(hue, sat, 10 + 45 * I);
+      paintTint(panel, hue, sat, 10 + 45 * I);
     }
 
     // HUD
-    $('flashHUDNote').textContent = note + ' · ' + colorName;
-    $('flashHUDRate').textContent = rate.toFixed(3) + ' Hz · ' + state.vbeat.shape + ' · ' + state.vbeat.sync;
+    setText($('flashHUDNote'), note + ' · ' + colorName);
+    setText($('flashHUDRate'), rate.toFixed(3) + ' Hz · ' + state.vbeat.shape + ' · ' + state.vbeat.sync);
 
     state.vbeat.raf = requestAnimationFrame(flashLoop);
   }
@@ -5538,7 +5722,9 @@
     } else {
       overlay.classList.add('active');
       // Request fullscreen (best effort; silently falls back to fixed overlay)
-      if (overlay.requestFullscreen) {
+      if (window.PhiApp && window.PhiApp.native) {
+        // [PHI-APP] not in the app: the overlay already covers the whole page (see ../scripts/build_page.py)
+      } else if (overlay.requestFullscreen) {
         overlay.requestFullscreen().catch(() => {});
       } else if (overlay.webkitRequestFullscreen) {
         overlay.webkitRequestFullscreen();
@@ -5557,6 +5743,8 @@
     $('stage').classList.remove('flashing');
     $('stageFlashStop').hidden = true;
     $('stageFlash').style.background = '';
+    hideTint($('stageFlash'));
+    hideTint($('flashPanel'));
     // leave the app's own full screen alone; only the flash view's ends here
     if (document.fullscreenElement === overlay) {
       document.exitFullscreen().catch(() => {});
@@ -5705,20 +5893,25 @@
   // every view of it (owner: "the breathing bar should be able to be paired
   // with flashing visuals"): its own popup, a lane on the main screen, and a
   // layer over the flashes, wherever they run.
-  const BREATH_WHERE_KEY = 'phi_resonance_breath_where';
+  // The lane on the main screen is on by default (owner: "we should also have
+  // the breathing on the main screen by default"). The key is v2 because a
+  // choice saved under the old default (off) should start over once.
+  const BREATH_WHERE_KEY = 'phi_resonance_breath_where_v2';
 
   state.breath = {
     playing: false,
     raf: 0,
     t0: 0,           // timestamp (ms) of the current breath's start
     rate: 6.0,       // breaths per minute
-    onStage: false,  // shown on the main screen
+    onStage: true,   // shown on the main screen
     onFlash: false   // shown over the flashes
   };
   try {
-    const saved = JSON.parse(localStorage.getItem(BREATH_WHERE_KEY) || '{}');
-    state.breath.onStage = !!saved.stage;
-    state.breath.onFlash = !!saved.flash;
+    const saved = JSON.parse(localStorage.getItem(BREATH_WHERE_KEY) || 'null');
+    if (saved) {
+      state.breath.onStage = !!saved.stage;
+      state.breath.onFlash = !!saved.flash;
+    }
   } catch (e) {}
 
   const breathPlay = $('breathPlay');
@@ -5738,7 +5931,7 @@
       padX: 26, padTop: 28, padBot: 24, dot: 9 },
     { canvas: $('stageBreathCanvas'), label: $('stageBreathPhase'), cls: 'stage-breath-phase', idle: 'TAP TO BREATHE',
       padX: 24, padTop: 14, padBot: 18, dot: 7,
-      edge: () => flashIn('stage'), show: () => stageEl.classList.contains('breath-on') },
+      edge: () => flashIn('stage'), show: () => stageEl.classList.contains('breath-on') && !coveredByFlash() },
     { canvas: $('flashBreathCanvas'), label: $('flashBreathPhase'), cls: 'flash-breath-phase', idle: 'READY',
       padX: 36, padTop: 20, padBot: 20, dot: 11,
       edge: () => true, show: () => state.breath.onFlash && flashIn('full') }
@@ -5847,6 +6040,7 @@
   // One loop paints every open view, so they all share one breath
   function breathLoop(now) {
     state.breath.raf = requestAnimationFrame(breathLoop);
+    if (!frameDue('breath', now)) return;   // the frame cap (see frameDue)
     const u = breathU(now);
     breathViews.forEach(v => {
       if (v.show && !v.show()) return;
@@ -6243,8 +6437,10 @@
   }
 
   // Playhead, bar and chord readout; cheap enough to run every frame
-  function composerUiFrame() {
+  function composerUiFrame(now) {
     requestAnimationFrame(composerUiFrame);
+    // nothing to show under the full-screen flashes; otherwise the frame cap (see frameDue)
+    if (coveredByFlash() || !frameDue('composerUi', now)) return;
     const m = state.music;
     const key = [state.params.base, state.params.beat, m.tempo, m.bpm, m.seed, m.bars, m.style, m.scale, m.on].join('|');
     if (key !== _uiKey) { _uiKey = key; renderPieceInfo(); }
@@ -6707,16 +6903,6 @@
       return (STYLES[state.music.style] || STYLES.ambient).label + ' · ' + composerTempo().bpm.toFixed(1) + ' BPM';
     }
     return state.mode.charAt(0).toUpperCase() + state.mode.slice(1) + ' · ' + Math.round(state.params.base) + ' Hz';
-  }
-
-  // [PHI-APP] Android: the native playback service (PlaybackService.java) keeps the live sound going
-  // with the screen off, so the page's own screen-off loop, and the lock button that prepares it,
-  // stay out of the way. iOS keeps them: whether WKWebView keeps live Web Audio running in the
-  // background is an open item on the README's device checklist, and the loop plays through an
-  // <audio> element, which iOS does keep playing.
-  if (window.PhiApp && window.PhiApp.platform === 'android') {
-    loopState.disabled = true;
-    document.body.classList.add('phi-app-android');
   }
 
   // [PHI-APP] Hand the session to the app bridge (app-bridge.js): the playback service and its
