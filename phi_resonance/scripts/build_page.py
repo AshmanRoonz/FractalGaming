@@ -2,7 +2,7 @@
 
 Created: 2026-10-18
 Last updated: 2026-10-19
-Version: 1.3
+Version: 1.4
 
 Usage, from phi_resonance/ (the path is wherever the Fractal_Reality repo sits; beside FractalGaming
 it is ../../Fractal_Reality):
@@ -16,6 +16,8 @@ half-edited page. To bring a later web change into the app, run this again; when
 anchor below, not the output.
 
 Revision history:
+- 2026-10-19 v1.4: the footer is one link to fractalreality.ca (the owner's wish); the privacy policy
+  stays linked from the About tab, as Apple and Google Play want
 - 2026-10-19 v1.3: measured on the owner's phone over USB: the full-screen flashes skip the WebView's
   full-screen mode (the overlay covers the page already); the latency notes now carry the numbers
 - 2026-10-19 v1.2: the owner still heard the sound cut in and out, most when moving around the
@@ -135,16 +137,25 @@ rep('This is a sound tool for relaxation and exploration, not a medical treatmen
     ' a medical device and does not diagnose, treat, cure, or prevent any medical condition. For any health'
     ' concern, talk to a healthcare professional.</div>\n')
 # the app bundles only this page: the site's pages open in the phone's browser, and the privacy
-# policy is bundled (Apple 5.1.1(i) wants it reachable inside the app)
+# policy is bundled (Apple 5.1.1(i) and Google Play's User Data policy want it reachable inside the
+# app; the About tab's link does that)
 rep('How Reality Is Built</a><br>',
     'How Reality Is Built</a> ·\n'
     '        <a href="privacy.html" style="color:var(--chip);">Privacy</a><br><!-- [PHI-APP] bundled -->')
-rep('<a href="how_reality_is_built.html">How Reality Is Built</a>\n  </footer>',
-    '<a href="how_reality_is_built.html">How Reality Is Built</a> ·\n'
-    '    <a href="privacy.html">Privacy</a><!-- [PHI-APP] bundled -->\n  </footer>')
+# the footer is one link home (the owner, 2026-10-19: "just one to fractalreality.ca")
+rep('  <footer class="app-foot">\n'
+    '    <a href="circumpunct_consciousness_theory.html">Consciousness Theory</a> ·\n'
+    '    <a href="attune.html">Attune</a> ·\n'
+    '    <a href="hemispheric_resonance.html">Hemispheric Resonance</a> ·\n'
+    '    <a href="how_reality_is_built.html">How Reality Is Built</a>\n'
+    '  </footer>',
+    '  <footer class="app-foot">\n'
+    '    <!-- [PHI-APP] one link home; the privacy policy is linked from the About tab -->\n'
+    '    <a href="https://fractalreality.ca/" target="_blank" rel="noopener">fractalreality.ca</a>\n'
+    '  </footer>')
 for page in ('circumpunct_consciousness_theory', 'attune', 'hemispheric_resonance', 'how_reality_is_built'):
     rep('<a href="%s.html"' % page,
-        '<a href="https://fractalreality.ca/%s.html" target="_blank" rel="noopener"' % page, count=2)
+        '<a href="https://fractalreality.ca/%s.html" target="_blank" rel="noopener"' % page)   # the About tab's
 leftover = sorted(set(re.findall(r'href="(?!https?:|#|privacy\.html|fonts/)([^"]+)"', s)))
 assert not leftover, 'relative links the app cannot follow: %r' % leftover
 

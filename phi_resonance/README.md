@@ -2,7 +2,7 @@
 
 Created: 2026-09-29
 Last updated: 2026-10-19
-Version: 2.7
+Version: 2.9
 
 The φ-Entrainment Composer from fractalreality.ca, packaged as a paid app for Google Play and the Apple App Store with [Capacitor 8](https://capacitorjs.com/). It has the full sound lab (eight engines, layers, texture, tuning, presets, saved settings, breath guide, visual beat) plus the Composer, which grows music from the field: Fibonacci form, tempo locked to the beat, a golden-section peak. The whole app runs on the device: it makes no network requests, collects nothing, and works offline.
 
@@ -32,7 +32,9 @@ The φ-Entrainment Composer from fractalreality.ca, packaged as a paid app for G
 | The silent clip that keeps the lock loop's `<audio>` element ready is ten seconds long (the web's is half a second) | It plays for the whole session, so it now restarts every ten seconds instead of twice a second. |
 | Saving settings to a file and the Composer's audio download call `PhiApp.saveFile()` first | `a.download` does nothing inside an app, so the file is written to the app cache and opened in the share sheet (Save to Files, Drive, AirDrop). |
 | A "not a medical device" paragraph in the About tab | Wording required by Google Play's Health Content and Services policy. |
-| The site's links point to `https://fractalreality.ca/...` (they open in the phone's browser), plus a Privacy link in the About tab and the footer | The app bundles only this page. `privacy.html` is bundled because Apple 5.1.1(i) wants the policy reachable in the app. |
+| The footer is one link, to `https://fractalreality.ca/` (the web page's footer links four of the site's pages) | The owner wanted one link home at the bottom of the app (2026-10-19). |
+| The About tab's links to the site point to `https://fractalreality.ca/...`, and it links the bundled Privacy policy | Links to the site open in the phone's browser; the app bundles only this page. `privacy.html` is bundled because Apple 5.1.1(i) and Google Play's User Data policy want the policy reachable in the app. |
+| The flashes never ask for the WebView's full-screen mode (their overlay still fills the app's window) | Full-screen mode doubled the app's UI and render threads, and Android counted 666 underruns in a minute of full-screen flashes (APK v1.6). See "Dropouts and screen-off sound" below. |
 
 ## Dropouts and screen-off sound
 
@@ -134,6 +136,8 @@ The debug APK lands in `android/app/build/outputs/apk/debug/app-debug.apk`. For 
 - Saving settings to a file writes the JSON to the app cache and opens the share sheet; the Composer's audio download rendered a 1:16 piece (12.7 MB WAV) and did the same.
 - Every request the page made stayed inside the app's own files: no Google Fonts or anything else from the internet. Orbitron and Rajdhani load from `www/fonts/`.
 
+**Android build v1.8 (2026-10-19, on the owner's PC, installed on the owner's Pixel 9 over USB):** build script v1.4 on the same page as v1.7. The page builds with 25 `[PHI-APP]` marks and passes `node --check`. On the phone the footer shows only fractalreality.ca, and tapping it opened the site in Chrome while the app stayed on its own page. The About tab still lists the site's pages and Privacy. The sound path is unchanged from v1.7, so it was not measured again. The Presets store screenshot was retaken from this build.
+
 **Android build v1.7 (2026-10-19, on the owner's PC, installed on the owner's Pixel 9 over USB):** build script v1.3 on the Composer page v1.7. Measured on the phone with `tests/device/verify.sh`, nothing forced, zero underruns at both levels in each phase:
 - 60 s of plain playback
 - 60 s of the flashes, with the breath guide over them
@@ -206,6 +210,8 @@ Full notes and sources: `../store/PLAN.md`, section "φ Resonance".
 
 ## Draft store listing
 
+The finished Google Play kit is in `store-listing/`: the listing text, framed screenshots from the owner's phone, the feature graphic, the App content answers and the release steps (`store-listing/README.md`). The signed bundle comes from `scripts/build_release.ps1`, which the owner runs: it makes the upload key on its first run and never writes the password to disk. The draft below is where the kit started.
+
 - **Name:** Phi Resonance (13/30).
 - **Apple subtitle:** Sound lab for calm and focus (28/30).
 - **Play short description:** Golden-ratio sound lab: binaural, isochronic and drone tones for calm and focus. (80/80)
@@ -222,6 +228,8 @@ Full notes and sources: `../store/PLAN.md`, section "φ Resonance".
 
 ## Revision history
 
+- 2026-10-19 v2.9: build script v1.4, at the owner's wish: the footer is one link to fractalreality.ca, and the About tab keeps the site's links and Privacy; APK v1.8 checked on the owner's phone; the Presets store screenshot retaken; the change table gains the row for the flashes' full-screen mode (build script v1.3)
+- 2026-10-19 v2.8: release signing from the environment in `android/app/build.gradle` (unsigned without a key; checked with a throwaway key, since deleted), `scripts/build_release.ps1` for the owner, key files ignored by git, and the Google Play kit in `store-listing/`
 - 2026-10-19 v2.7: measured on the owner's Pixel 9 over USB (`tests/device/`): the drawing at 120 Hz was the cause; APK v1.6 and v1.7 from the Composer page v1.7 (a 30 fps cap on phones, the title tag's glitch as a one-off) and build script v1.3 (no WebView full screen for the flashes)
 - 2026-10-19 v2.6: APK v1.5 from the Composer page v1.6 (cheap flashes: the colour moves by opacity, the HUD is written only when it changes, nothing is drawn under the full-screen flashes), after the owner found v1.4 good until the visuals started
 - 2026-10-19 v2.5: APK v1.4 from the Composer page v1.5 (the old sound stops on the audio clock when its fade ends, a 0.25 s crossfade, noise made once), after the owner found v1.3 got hitchy after a while of changing settings; the source is now the owner's commit `4d15418d`
