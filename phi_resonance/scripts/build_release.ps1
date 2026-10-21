@@ -2,8 +2,8 @@
 Build the signed Android App Bundle (.aab) for Google Play.
 
 Created: 2026-10-19
-Last updated: 2026-10-19
-Version: 1.0
+Last updated: 2026-10-20
+Version: 1.1
 
 Run it yourself, in PowerShell, from anywhere:
 
@@ -20,6 +20,9 @@ Run it yourself, in PowerShell, from anywhere:
   the web page changed). Before each new upload, raise versionCode in android/app/build.gradle.
 
 Revision history:
+- 2026-10-20 v1.1: finds git when it is not on Windows' PATH (the first real run stopped right after
+  cap sync, because Git for Windows was on Git Bash's path only), checks its tools before asking for
+  anything, and judges each program by its exit code instead of by what it prints on stderr
 - 2026-10-19 v1.0: initial
 #>
 param(
@@ -37,13 +40,34 @@ if (-not (Test-Path (Join-Path $app 'node_modules'))) {
     throw "phi_resonance\node_modules is missing: run 'npm ci' in $app first."
 }
 
+# Find every tool before asking for anything. git is often missing from Windows' PATH (Git for Windows
+# can leave it to Git Bash), so look in its usual homes too.
+$git = (Get-Command git.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+if (-not $git) {
+    $git = @("$env:ProgramFiles\Git\cmd\git.exe", "$env:LOCALAPPDATA\Programs\Git\cmd\git.exe") |
+        Where-Object { Test-Path $_ } | Select-Object -First 1
+}
+if (-not $git) { throw 'git was not found. Install Git for Windows (git-scm.com), then run this again.' }
+if (-not (Get-Command npx -ErrorAction SilentlyContinue)) { throw 'npx was not found. Install Node.js (nodejs.org), then run this again.' }
+if (-not (Test-Path $keytool)) { throw "keytool was not found at $keytool." }
+if (-not (Test-Path $sdk)) { throw "The Android SDK was not found at $sdk." }
+
+function Invoke-Native([scriptblock]$Command, [string]$Failure) {
+    # Programs run under 'Continue' and are judged by their exit code: Windows PowerShell can turn a
+    # warning a program prints on stderr into an error, which 'Stop' would make fatal. A program that
+    # cannot start leaves no exit code, which also counts as a failure.
+    $ErrorActionPreference = 'Continue'
+    $global:LASTEXITCODE = $null
+    & $Command
+    if ($LASTEXITCODE -ne 0) { throw $Failure }
+}
+
 if (-not (Test-Path $Keystore)) {
     New-Item -ItemType Directory -Force (Split-Path $Keystore) | Out-Null
     Write-Host ''
     Write-Host "Making your upload key at $Keystore"
     Write-Host 'keytool asks for a new password twice. Choose a strong one and keep it somewhere safe.'
-    & $keytool -genkeypair -keystore $Keystore -storetype PKCS12 -alias $Alias -keyalg RSA -keysize 4096 -validity 10000 -dname 'CN=Ashman Roonz, O=Fractal Reality, C=CA'
-    if ($LASTEXITCODE -ne 0) { throw 'keytool could not make the key.' }
+    Invoke-Native { & $keytool -genkeypair -keystore $Keystore -storetype PKCS12 -alias $Alias -keyalg RSA -keysize 4096 -validity 10000 -dname 'CN=Ashman Roonz, O=Fractal Reality, C=CA' } 'keytool could not make the key.'
     Write-Host "Upload key made. Back up $Keystore now (and its password)."
 }
 
@@ -61,14 +85,12 @@ try {
 
     Push-Location $app
     try {
-        & npx --no cap sync android
-        if ($LASTEXITCODE -ne 0) { throw 'cap sync failed.' }
+        Invoke-Native { & npx --no cap sync android } 'cap sync failed.'
         # cap sync writes absolute paths here when node_modules is a link; keep the committed files
-        & git -C $repo checkout -- phi_resonance/android/app/capacitor.build.gradle phi_resonance/android/capacitor.settings.gradle
+        Invoke-Native { & $git -C $repo checkout -q -- phi_resonance/android/app/capacitor.build.gradle phi_resonance/android/capacitor.settings.gradle } 'git could not restore the Capacitor Gradle files.'
         Push-Location (Join-Path $app 'android')
         try {
-            & .\gradlew.bat bundleRelease --no-daemon --console=plain
-            if ($LASTEXITCODE -ne 0) { throw 'The release build failed (see above). A wrong password shows up here as a keystore error.' }
+            Invoke-Native { & .\gradlew.bat bundleRelease --no-daemon --console=plain } 'The release build failed (see above). A wrong password shows up here as a keystore error.'
         } finally { Pop-Location }
     } finally { Pop-Location }
 
