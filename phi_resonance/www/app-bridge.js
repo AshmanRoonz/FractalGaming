@@ -1,5 +1,5 @@
 // Phi Resonance: app bridge.
-// Created: 2026-09-29. Last updated: 2026-10-18. Version: 1.1.
+// Created: 2026-09-29. Last updated: 2026-10-21. Version: 1.2.
 // Loaded by index.html before its main script. Outside the app (no Capacitor, e.g. index.html
 // opened in a browser) every function here is a harmless no-op, so the page still runs as it does
 // on fractalreality.ca.
@@ -27,6 +27,10 @@
 //   PhiApp.saveFile(blob, filename) -> true if handled natively        from both export paths
 //
 // Revision history:
+// - 2026-10-21 v1.2: native plugins are found in Capacitor.Plugins, where the native bridge puts
+//   them. registerPlugin belongs to @capacitor/core, which this plain page never loads, so on a
+//   phone the playback service, Filesystem and Share were never reached: no notification, no
+//   lock-screen controls, and saving to a file did nothing. The harness had hidden it.
 // - 2026-10-18 v1.1: the page is now the Composer edition: the Media Session is left to the page,
 //   the notification's line follows sound changes (sessionChanged), no resume while the page's
 //   screen-off loop plays
@@ -38,9 +42,14 @@
   var native = !!(Cap && typeof Cap.isNativePlatform === 'function' && Cap.isNativePlatform());
   var platform = native && typeof Cap.getPlatform === 'function' ? Cap.getPlatform() : 'web';
 
+  // The native bridge puts every native plugin in Capacitor.Plugins. registerPlugin comes from
+  // @capacitor/core, which a plain page like this one does not load; it is used only if present.
   function plugin(name) {
-    try { return native && typeof Cap.registerPlugin === 'function' ? Cap.registerPlugin(name) : null; }
-    catch (_) { return null; }
+    if (!native) return null;
+    try {
+      if (Cap.Plugins && Cap.Plugins[name]) return Cap.Plugins[name];
+      return typeof Cap.registerPlugin === 'function' ? Cap.registerPlugin(name) : null;
+    } catch (_) { return null; }
   }
   var Playback = platform === 'android' ? plugin('PlaybackService') : null;
   var Filesystem = plugin('Filesystem');

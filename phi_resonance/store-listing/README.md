@@ -1,8 +1,8 @@
 # Phi Resonance on Google Play: the listing kit
 
 Created: 2026-10-19
-Last updated: 2026-10-19
-Version: 1.1
+Last updated: 2026-10-21
+Version: 1.2
 
 Everything to paste or upload in Play Console, in the order Play asks for it. The screenshots are real captures from the owner's Pixel 9, taken over USB on 2026-10-19 with build v1.7; the Presets one was retaken with build v1.8, whose footer is one link to fractalreality.ca. The wording follows "Positioning" in `../README.md`: a sound tool for relaxation, focus and exploration, never a treatment.
 
@@ -41,14 +41,14 @@ Policy and programs, App content:
 | Target audience | 18 and over is simplest. Any choice that includes children under 13 brings in the Families policy. |
 | Data safety | No data collected, no data shared. The app makes no network requests; saved settings stay on the phone, and exports go only where the owner sends them through the share sheet. |
 | Health apps | Declare "Stress management, relaxation, mental acuity". It is not a medical device; the required sentence ends the description and is in the app's About tab. |
-| Foreground service | Media playback: "User-started sound sessions keep playing with the screen off; a notification shows the session with a Stop button." Play may ask for a short video: record the phone starting a session, locking the screen while the sound keeps going, and the notification. |
+| Foreground service | Tick "Media playback". Play asks for a video link: `foreground-service-demo.mp4` (recorded over USB on 2026-10-21 with build v1.9; kept out of git) shows a session starting, the app going to the background, and the notification with its Stop button. Upload it to YouTube as Unlisted and paste the link. |
 | Government, financial, health research, news | None of these apply. |
 
 ## Release and testing
 
 1. **Build the bundle.** In PowerShell, run `..\scripts\build_release.ps1`.
    - The first run makes the upload key (keytool asks for a new password twice). It keeps the key at `%USERPROFILE%\phi-resonance-keys\phi-resonance-upload.jks`, outside the repo. Back up that file and its password: every future update must be signed with it.
-   - Every run asks for the password and builds `android\app\build\outputs\bundle\release\phi-resonance-1.0-1.aab`.
+   - Every run asks for the password and builds `android\app\build\outputs\bundle\release\phi-resonance-<versionName>-<versionCode>.aab` (`phi-resonance-1.0.1-2.aab` since 2026-10-21; the 1.0 bundle, code 1, had no playback notification).
    - Google Play re-signs the app for phones with its own key (Play App Signing), which it offers on the first upload.
 2. **Closed test.**
    - Testing, Closed testing: create a track and choose the countries.
@@ -66,4 +66,5 @@ Policy and programs, App content:
 ## Revision history
 
 - 2026-10-19 v1.0: initial
+- 2026-10-21 v1.2: the foreground-service video (recorded with build v1.9) and the 1.0.1 bundle name
 - 2026-10-19 v1.1: the Presets screenshot retaken with the app's one-link footer (build v1.8)

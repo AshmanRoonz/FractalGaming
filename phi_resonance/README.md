@@ -1,8 +1,8 @@
 # Phi Resonance: the φ sound lab as an Android and iPhone app
 
 Created: 2026-09-29
-Last updated: 2026-10-19
-Version: 2.9
+Last updated: 2026-10-21
+Version: 2.10
 
 The φ-Entrainment Composer from fractalreality.ca, packaged as a paid app for Google Play and the Apple App Store with [Capacitor 8](https://capacitorjs.com/). It has the full sound lab (eight engines, layers, texture, tuning, presets, saved settings, breath guide, visual beat) plus the Composer, which grows music from the field: Fibonacci form, tempo locked to the beat, a golden-section peak. The whole app runs on the device: it makes no network requests, collects nothing, and works offline.
 
@@ -136,6 +136,14 @@ The debug APK lands in `android/app/build/outputs/apk/debug/app-debug.apk`. For 
 - Saving settings to a file writes the JSON to the app cache and opens the share sheet; the Composer's audio download rendered a 1:16 piece (12.7 MB WAV) and did the same.
 - Every request the page made stayed inside the app's own files: no Google Fonts or anything else from the internet. Orbitron and Rajdhani load from `www/fonts/`.
 
+**Android build v1.9 (2026-10-21, on the owner's PC, installed on the owner's Pixel 9 over USB):** `app-bridge.js` v1.2. Recording Play's foreground-service video showed that no build so far had a playback notification or lock-screen entry: the bridge looked its native plugins up with `Capacitor.registerPlugin`, which belongs to `@capacitor/core` and does not exist in this plain page, so `PlaybackService`, `Filesystem` and `Share` were never reached (the harness's pretend Capacitor had offered `registerPlugin` and hidden it). The bridge now takes them from `Capacitor.Plugins`, where the native bridge puts them. Checked on the phone:
+- BEGIN SESSION starts `PlaybackService` in the foreground (media playback type) and posts its notification: "Phi Resonance", the session line (for example "Ambient Field · 126.0 BPM") and a Stop button, public on the lock screen.
+- Stopping the session ends the service.
+- `PhiApp.saveFile` returns true and opens the share sheet with the file.
+- The notification only shows once notifications are allowed: the first session asks, and a dismissed prompt is not asked again (Settings, Apps, Phi Resonance, Notifications).
+
+Release builds from here are version 1.0.1 (code 2); the bundle uploaded as 1.0 (code 1) has the bug.
+
 **Android build v1.8 (2026-10-19, on the owner's PC, installed on the owner's Pixel 9 over USB):** build script v1.4 on the same page as v1.7. The page builds with 25 `[PHI-APP]` marks and passes `node --check`. On the phone the footer shows only fractalreality.ca, and tapping it opened the site in Chrome while the app stayed on its own page. The About tab still lists the site's pages and Privacy. The sound path is unchanged from v1.7, so it was not measured again. The Presets store screenshot was retaken from this build.
 
 **Android build v1.7 (2026-10-19, on the owner's PC, installed on the owner's Pixel 9 over USB):** build script v1.3 on the Composer page v1.7. Measured on the phone with `tests/device/verify.sh`, nothing forced, zero underruns at both levels in each phase:
@@ -228,6 +236,7 @@ The finished Google Play kit is in `store-listing/`: the listing text, framed sc
 
 ## Revision history
 
+- 2026-10-21 v2.10: app-bridge.js v1.2 finds native plugins in Capacitor.Plugins (registerPlugin never existed in the app, so the playback notification, lock-screen entry and file saving had never worked on a phone); the harness's pretend Capacitor now matches the native bridge; APK v1.9 checked on the owner's phone; version 1.0.1 (code 2)
 - 2026-10-19 v2.9: build script v1.4, at the owner's wish: the footer is one link to fractalreality.ca, and the About tab keeps the site's links and Privacy; APK v1.8 checked on the owner's phone; the Presets store screenshot retaken; the change table gains the row for the flashes' full-screen mode (build script v1.3)
 - 2026-10-19 v2.8: release signing from the environment in `android/app/build.gradle` (unsigned without a key; checked with a throwaway key, since deleted), `scripts/build_release.ps1` for the owner, key files ignored by git, and the Google Play kit in `store-listing/`
 - 2026-10-19 v2.7: measured on the owner's Pixel 9 over USB (`tests/device/`): the drawing at 120 Hz was the cause; APK v1.6 and v1.7 from the Composer page v1.7 (a 30 fps cap on phones, the title tag's glitch as a one-off) and build script v1.3 (no WebView full screen for the flashes)
