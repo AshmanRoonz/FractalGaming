@@ -8707,7 +8707,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "54.36";
+const LSS_BUILD = "54.37";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -14491,6 +14491,45 @@ function _endlessAegisXpMulFor(d) {
   const m = _EAEGIS_XP_MUL[d];
   return (typeof m === 'number' && m > 0) ? m : _EAEGIS_XP_MUL.medium;
 }
+// ⭐⭐ (v54.37) ENDLESS FLIES THE HOARD - WITH A RARE PLAYABLE HULL. Owner, from a co-op run: "when the other player joined
+// endless, i noticed the bots turned into the main 7 ships and they weren't the hoard ships", then: "endless should have hoard
+// ships, and a rare chance for a main ship".
+// MEASURED first (two tabs, 54.36): the waves had ALWAYS been the seven playable hulls - _spawnWave has dealt them from the
+// picker's hand (game._botShipDeal.enemy, LOADOUTS keys only) since v35.72, solo included, and the prebake's scope note said
+// "endless ... no hoard ships exist there at all". A join swapped no hull; what it changed was WHOSE hand the next wave came
+// from (the lowest-id peer takes the waves, v35.85), so a second pilot flying those same hulls is when it showed.
+// THE HULL ONLY. Each wave bot keeps the loadout the hand gives it - stats, weapon, the full kit - so endless plays exactly as
+// tuned (wave sizes, elites, the Aegis rails); none of the campaign's _campTuneHoardBot (teleport-only, x1.33 speed, half
+// health) comes with it. The hull is the next hoard ship off the shared rotation (_campWaveShips, the one the campaign, rift
+// guards and caverns walk), named by its file like every hoard ship (_campSetShipName); a roll under _lssEndlessMainChance
+// (6%, live: window.__endlessMainChance) leaves that bot in its own playable hull instead.
+// THE QUEUE. run._hoardQ holds the next six hulls, picked a wave ahead and handed to loadHoardModel the moment they are
+// queued, so a hull is parsed long before its wave (travel legs run 28-70 s); the first six are queued at onBuildWorld, where
+// the launch prime (_entPrimeHoardKeys) finds and draws them - that is what links the hoard hull program behind the cover
+// rather than on wave 1's first frame (the v51.31 hitch). A hull the queue never had (a co-op proxy built from another peer's
+// roster) still appears: the Bot constructor loads it and swaps it in (v44.61).
+// (!) CO-OP: the roster carries `h` (the hoard key), so every peer builds the same hull; the roll is authority-side only.
+// (!) Replays never see these: _rplEnabled records CLASSIC only, and the recorder skips hoard hulls anyway.
+function _lssEndlessMainChance() {
+  try {
+    const v = (typeof window !== 'undefined') ? window.__endlessMainChance : undefined;
+    if (typeof v === 'number' && isFinite(v) && v >= 0 && v <= 1) return v;
+  } catch (_) {}
+  return 0.06;
+}
+function _lssEndlessHoardQueue(run, need) {
+  if (!run) return [];
+  if (!Array.isArray(run._hoardQ)) run._hoardQ = [];
+  const q = run._hoardQ;
+  const add = Math.max(0, (need | 0) - q.length);
+  if (add > 0 && typeof _campWaveShips === 'function') {
+    for (const k of _campWaveShips(add)) {
+      q.push(k);
+      try { if (typeof loadHoardModel === 'function') loadHoardModel(k); } catch (_) {}   // parse it now, off the wave's frame
+    }
+  }
+  return q;
+}
 const EndlessMode = {
   onStart() {},
   onBuildWorld() {
@@ -14529,6 +14568,8 @@ const EndlessMode = {
     run.startLives = run.lives; run.livesMax = _endlessLivesCapFor(run.lives);
     run.dist = 0; run.progGid = -1; run.progT = 0; run.over = false; run.overT = 0;
     run.lastHall = { x: 0, y: 80, z: 0 };
+    // (v54.37) the first six hoard hulls, queued (and parsing) before the launch prime runs - see _lssEndlessHoardQueue
+    try { run._hoardQ = []; _lssEndlessHoardQueue(run, 6); } catch (_) {}
     // (v35.72) Stage 2+3 state: ambush director phase machine (phaseT starts
     // negative = a grace period before the first travel clock), theme
     // stretches, god-ray pool.
@@ -15383,6 +15424,9 @@ const EndlessMode = {
                       : Math.min(6, 2 + Math.floor(run.dist / 3000));
     const elite = (run.waveN % 5 === 0);
     const pool = (game._botShipDeal && game._botShipDeal.enemy) || ['SLAYER', 'PYRO', 'TRACKER'];
+    // (v54.37) the hand still deals each bot's LOADOUT; the hull comes off the hoard queue (see _lssEndlessHoardQueue)
+    try { _lssEndlessHoardQueue(run, n); } catch (_) {}
+    const _mainChance = _lssEndlessMainChance();
     // Spawn AHEAD on the route (2 segments up), fanned laterally off the lane;
     // a fan point that lands in rock collapses to the lane centre (carved = open).
     // Anchor to the ship's ACTUAL position, not the progress marker — a
@@ -15411,7 +15455,10 @@ const EndlessMode = {
         const off = (i - (n - 1) / 2) * 320;
         let x = s.b.x + px * off, y = s.b.y + 140 + (i % 3) * 90, z = s.b.z + pz * off;
         if (typeof worldSDF === 'function' && worldSDF(x, y, z) > -60) { x = s.b.x; y = s.b.y + 120; z = s.b.z; }
-        const bot = new Bot(pool[i % pool.length], LSS.TEAM_FLEET_B, 9200 + run.waveN * 16 + i);
+        // (v54.37) a hoard hull, or - on the rare roll, or with the queue somehow empty - the loadout's own playable hull
+        const _hk = (Math.random() < _mainChance || !run._hoardQ || !run._hoardQ.length) ? null : run._hoardQ.shift();
+        const bot = new Bot(pool[i % pool.length], LSS.TEAM_FLEET_B, 9200 + run.waveN * 16 + i, _hk);
+        if (_hk) { try { _campSetShipName(bot, _hk); } catch (_) {} }   // the callout reads the hull, as on every hoard ship
         bot.position.set(x, y, z);
         if (bot.mesh) bot.mesh.position.copy(bot.position);
         if (elite && bot.maxHealth) { bot.maxHealth *= 1.6; bot.health = bot.maxHealth; }
@@ -15421,6 +15468,7 @@ const EndlessMode = {
         run.waveBots.push(bot);
       } catch (_) {}
     }
+    try { _lssEndlessHoardQueue(run, 6); } catch (_) {}   // (v54.37) the next wave's hulls start parsing now
     // (v35.85) Co-op: the authority just spawned real bots — ship the roster so
     // peers build their proxies now (state then streams via _botNetSync ~8 Hz).
     try { if (net && net.active && net.endless && typeof _botSendRoster === 'function') _botSendRoster(); } catch (_) {}
@@ -114137,7 +114185,9 @@ async function _prebakeGpuPrime() {
 //     14 of them for its traffic, so the marginal cost is the other 8.
 //   zone-rift cavern              : EXACTLY game._cavern._picks. The destination
 //     knows its own garrison (v36.28, _hzEnterCavern), so nothing else is parsed.
-//   endless / elimination / race / assault : no hoard ships exist there at all.
+//   endless (v54.37: it flies the hoard now) : EXACTLY the run's queue, game.endlessRun._hoardQ - the six hulls
+//     its next waves wear, picked at onBuildWorld. Later ones parse a wave ahead (_lssEndlessHoardQueue).
+//   elimination / race / assault : no hoard ships exist there at all.
 // The playable SHIP_MODELS set (7 keys) is primed everywhere and is nearly free —
 // those GLBs are already parsed by the boot preload, so it is 7 clones + 1 draw.
 //
@@ -114186,6 +114236,12 @@ function _entPrimeHoardKeys() {
     }
     const map  = (typeof game !== 'undefined') ? (game.selectedMap || '') : '';
     const mode = (typeof LSS !== 'undefined') ? LSS.MODE : '';
+    // (v54.37) endless: the queue its first waves come off - the hulls it WILL spawn, so nothing else is parsed
+    if (mode === 'endless') {
+      const q = (typeof game !== 'undefined' && game.endlessRun && Array.isArray(game.endlessRun._hoardQ)) ? game.endlessRun._hoardQ : [];
+      for (const k of q) if (k && out.indexOf(k) < 0) out.push(k);
+      return out;
+    }
     if (mode === 'campaign' || /^hub_/.test(map) || /^camp_/.test(map)) {
       // (v53.05) the Summoners' flagship FIRST: it is the one hull certain to appear - on every leg's first live frame
       // (_campArenaTick) - so a budget cap (_ENT_PRIME_MAX_MS) must never be what leaves it for FIGHT to link

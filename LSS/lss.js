@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "54.36";
+const LSS_BUILD = "54.37";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -3911,6 +3911,26 @@ function _endlessAegisXpMulFor(d) {
   const m = _EAEGIS_XP_MUL[d];
   return (typeof m === 'number' && m > 0) ? m : _EAEGIS_XP_MUL.medium;
 }
+function _lssEndlessMainChance() {
+  try {
+    const v = (typeof window !== 'undefined') ? window.__endlessMainChance : undefined;
+    if (typeof v === 'number' && isFinite(v) && v >= 0 && v <= 1) return v;
+  } catch (_) {}
+  return 0.06;
+}
+function _lssEndlessHoardQueue(run, need) {
+  if (!run) return [];
+  if (!Array.isArray(run._hoardQ)) run._hoardQ = [];
+  const q = run._hoardQ;
+  const add = Math.max(0, (need | 0) - q.length);
+  if (add > 0 && typeof _campWaveShips === 'function') {
+    for (const k of _campWaveShips(add)) {
+      q.push(k);
+      try { if (typeof loadHoardModel === 'function') loadHoardModel(k); } catch (_) {}   // parse it now, off the wave's frame
+    }
+  }
+  return q;
+}
 const EndlessMode = {
   onStart() {},
   onBuildWorld() {
@@ -3933,6 +3953,7 @@ const EndlessMode = {
     run.startLives = run.lives; run.livesMax = _endlessLivesCapFor(run.lives);
     run.dist = 0; run.progGid = -1; run.progT = 0; run.over = false; run.overT = 0;
     run.lastHall = { x: 0, y: 80, z: 0 };
+    try { run._hoardQ = []; _lssEndlessHoardQueue(run, 6); } catch (_) {}
     run.phase = 'travel'; run.phaseT = -22; run.waveN = 0; run.waveBots = null;
     run.biomeIdx = 0; run.nextBiomeAt = 11000; run.rays = null; run.rayT = 0;
     run.stormy = false; run.boltT = 0;
@@ -4507,6 +4528,8 @@ const EndlessMode = {
                       : Math.min(6, 2 + Math.floor(run.dist / 3000));
     const elite = (run.waveN % 5 === 0);
     const pool = (game._botShipDeal && game._botShipDeal.enemy) || ['SLAYER', 'PYRO', 'TRACKER'];
+    try { _lssEndlessHoardQueue(run, n); } catch (_) {}
+    const _mainChance = _lssEndlessMainChance();
     const pp = player.position;
     let ni = 0, nd = Infinity;
     for (let i = 0; i < run.segs.length; i++) {
@@ -4529,7 +4552,9 @@ const EndlessMode = {
         const off = (i - (n - 1) / 2) * 320;
         let x = s.b.x + px * off, y = s.b.y + 140 + (i % 3) * 90, z = s.b.z + pz * off;
         if (typeof worldSDF === 'function' && worldSDF(x, y, z) > -60) { x = s.b.x; y = s.b.y + 120; z = s.b.z; }
-        const bot = new Bot(pool[i % pool.length], LSS.TEAM_FLEET_B, 9200 + run.waveN * 16 + i);
+        const _hk = (Math.random() < _mainChance || !run._hoardQ || !run._hoardQ.length) ? null : run._hoardQ.shift();
+        const bot = new Bot(pool[i % pool.length], LSS.TEAM_FLEET_B, 9200 + run.waveN * 16 + i, _hk);
+        if (_hk) { try { _campSetShipName(bot, _hk); } catch (_) {} }   // the callout reads the hull, as on every hoard ship
         bot.position.set(x, y, z);
         if (bot.mesh) bot.mesh.position.copy(bot.position);
         if (elite && bot.maxHealth) { bot.maxHealth *= 1.6; bot.health = bot.maxHealth; }
@@ -4539,6 +4564,7 @@ const EndlessMode = {
         run.waveBots.push(bot);
       } catch (_) {}
     }
+    try { _lssEndlessHoardQueue(run, 6); } catch (_) {}   // (v54.37) the next wave's hulls start parsing now
     try { if (net && net.active && net.endless && typeof _botSendRoster === 'function') _botSendRoster(); } catch (_) {}
     try { if (window.Overlays && Overlays.banner) Overlays.banner(elite ? 'ELITE AMBUSH' : 'AMBUSH', n + ' hostiles'); } catch (_) {}
   },
@@ -74252,6 +74278,11 @@ function _entPrimeHoardKeys() {
     }
     const map  = (typeof game !== 'undefined') ? (game.selectedMap || '') : '';
     const mode = (typeof LSS !== 'undefined') ? LSS.MODE : '';
+    if (mode === 'endless') {
+      const q = (typeof game !== 'undefined' && game.endlessRun && Array.isArray(game.endlessRun._hoardQ)) ? game.endlessRun._hoardQ : [];
+      for (const k of q) if (k && out.indexOf(k) < 0) out.push(k);
+      return out;
+    }
     if (mode === 'campaign' || /^hub_/.test(map) || /^camp_/.test(map)) {
       if (typeof NEMESIS_SHIP === 'string' && out.indexOf(NEMESIS_SHIP) < 0) out.push(NEMESIS_SHIP);
       for (const k of HOARD_SHIPS) if (out.indexOf(k) < 0) out.push(k);
