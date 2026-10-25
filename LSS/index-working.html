@@ -8707,7 +8707,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "54.37";
+const LSS_BUILD = "54.39";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -13415,6 +13415,9 @@ async function joinRoom() {
       // (!) The roster follows the same rule; `_botSendRoster` has taken a target since v38.x and was
       //     simply being called without one here.
       if (net.openSolo && game.state !== 'select' && net.sendEvent) {
+        // (v54.38) this peer joined our match late: it does not stand for the match's seats (amStasisOwner). Marked here,
+        // in the same breath as the briefing that tells IT so, which is what keeps the two ends in agreement.
+        try { const _np = net.peers.get(peerId); if (_np) _np._briefedLate = true; } catch (_) {}
         try {
           const _brief = { type: 'dropin_state', ago: _lssModeAgo(), host: net.myPeerId,
             map: game.selectedMap, seed: (net.worldSeed != null ? net.worldSeed : 0) >>> 0,
@@ -13450,6 +13453,15 @@ async function joinRoom() {
       console.log('Peer left:', peerId);
       const _wasBotAuth = (typeof _botAuthority === 'function') ? _botAuthority() : false;   // (v38.63)
       const peer = net.peers.get(peerId);
+      // (v54.38) AN ORIGINAL PILOT LEFT: every late-join mark goes, on every client at once (each sees the same departure),
+      // and the seats fall back to the plain lowest id - see amStasisOwner. A late joiner leaving changes nothing.
+      // Computed before net.peers.delete below; the migration that follows reads the election this produces.
+      try {
+        if (!(peer && peer._briefedLate)) {
+          net._lateJoiner = false;
+          for (const p of net.peers.values()) { if (p) p._briefedLate = false; }
+        }
+      } catch (_) {}
       if (peer && peer.networkPlayer) {
         peer.networkPlayer.destroy();
         const idx = net.networkPlayers.indexOf(peer.networkPlayer);
@@ -13476,12 +13488,23 @@ async function joinRoom() {
         const _isBotAuth = (typeof _botAuthority === 'function') ? _botAuthority() : false;
         if (!_wasBotAuth && _isBotAuth && game && game.entities) {
           let _adopted = 0;
+          const _erun = game.endlessRun || null;   // (v54.38) an endless run inherits the departed host's wave too
           for (const b of game.entities) {
             if (!(b instanceof Bot) || !b.isProxy) continue;
             b.isProxy = false; b._netX = null;
             if (b.velocity) b.velocity.set(0, 0, 0);
+            // (v54.38) ...ONTO ITS WAVE. The director clears a battle by the bots IT spawned (run.waveBots), which on the
+            // inheriting peer is nothing: MEASURED, the host left mid-wave and the joiner called WAVE 4 CLEARED with both
+            // adopted bots still flying at it. Stamped too, so _spawnWave's dead sweep retires them like its own.
+            if (_erun && b.team === LSS.TEAM_FLEET_B) {
+              b._endlessWave = _erun.waveN;
+              if (!Array.isArray(_erun.waveBots)) _erun.waveBots = [];
+              if (_erun.waveBots.indexOf(b) < 0) _erun.waveBots.push(b);
+            }
             _adopted++;
           }
+          // (v54.38) a live inherited wave is a battle on this client's director, whatever its mirror last derived
+          try { if (_erun && _erun.waveBots && _erun.waveBots.some((b) => b && b.alive) && _erun.phase !== 'battle') { _erun.phase = 'battle'; _erun.phaseT = 0; } } catch (_) {}
           if (_adopted && typeof _botSendRoster === 'function') _botSendRoster();
           if (_adopted && window.Overlays && Overlays.banner) Overlays.banner('HOST LEFT', 'you are running the bots now');
           console.log('[net] bot authority migrated to us; adopted', _adopted, 'proxies');
@@ -14863,6 +14886,8 @@ const EndlessMode = {
     // _coopPhase instead: phase + banners DERIVED from proxy-bot arrival, no
     // spawning, no clock. Solo: amStasisOwner() is true when net.active is
     // false, so this is byte-identical to v35.72 behavior.
+    // (v54.38) ...and a late joiner is never it while the run's own pilots are here (see amStasisOwner): the run
+    // keeps its director, so a drop-in sees the wave in progress and counts it by the room's number (_wnAuth).
     const _ea = (typeof amStasisOwner === 'function') ? amStasisOwner() : true;
     if (_ea) { try { this._director(dt, run); } catch (_) {} }
     else { try { this._coopPhase(dt, run); } catch (_) {} }
@@ -15078,7 +15103,8 @@ const EndlessMode = {
       }
     } catch (_) {}
     if (alive && run.phase !== 'battle') {
-      run.phase = 'battle'; run.phaseT = 0; run.waveN++;
+      // (v54.38) the authority's number when the roster has brought one, else count as before
+      run.phase = 'battle'; run.phaseT = 0; run.waveN = (typeof run._wnAuth === 'number') ? run._wnAuth : run.waveN + 1;
       try { announcerSay('Warning. Hostile signatures closing.', { key: 'endless_warn', cooldown: 10, priority: true }); } catch (_) {}
       try { if (window.Overlays && Overlays.banner) Overlays.banner('AMBUSH', alive + ' hostiles'); } catch (_) {}
     } else if (!alive && run.phase === 'battle') {
@@ -23504,6 +23530,12 @@ function handleNetEvent(evt, fromPeerId) {
         if (run && typeof evt.rt === 'number' && run.startedAt) {
           const off = evt.rt - (Date.now() - run.startedAt) / 1000;
           run.clockOff = (run.clockOff == null) ? off : run.clockOff + (off - run.clockOff) * 0.3;
+        }
+        // (v54.38) the room's wave number (see _botSendRoster): _coopPhase takes it at a wave's start, and a wave already
+        // in progress takes it now
+        if (run && typeof evt.wn === 'number' && isFinite(evt.wn)) {
+          run._wnAuth = evt.wn | 0;
+          if (run.phase === 'battle') run.waveN = run._wnAuth;
         }
       } catch (_) {}
     }
@@ -121040,6 +121072,9 @@ function commitLoadout(key) {
       const _ds = net._dropin && net._dropin.since;
       net._liveSince = (typeof _ds === 'number' && isFinite(_ds) && _ds > 0) ? _ds : Date.now();
     } catch (_) {}
+    // (v54.38) ...and whether we are a LATE JOINER of it (amStasisOwner): only a drop-in launch is. A fresh launch the
+    // room starts together clears a stale flag, e.g. one left by a briefing taken and then never launched into.
+    try { net._lateJoiner = !!net._dropin; } catch (_) {}
     // (v35.06) Orientation lock/unlock removed entirely (see
     // _lssLockLandscape). The unlock that used to sit here re-evaluated
     // orientation at warmup — mid-touch — and could rotate the viewport,
@@ -121568,7 +121603,10 @@ function _botSendRoster(toPeerId) {
   }
   // (v39.64) the authority's run clock rides along so peers draw the endless critters at the same moment
   const rt = (game.endlessRun && game.endlessRun.startedAt) ? (Date.now() - game.endlessRun.startedAt) / 1000 : undefined;
-  try { if (toPeerId) net.sendEvent({ type: 'bot_roster', bots, rt }, toPeerId); else net.sendEvent({ type: 'bot_roster', bots, rt }); } catch (_) {}
+  // (v54.38) ...and its WAVE NUMBER, so a peer's HUD counts the room's waves rather than the ones it happened to see
+  // (_coopPhase used to number them from its own arrival - a drop-in into wave 5 read WAVE 1)
+  const wn = (game.endlessRun && typeof game.endlessRun.waveN === 'number') ? game.endlessRun.waveN : undefined;
+  try { if (toPeerId) net.sendEvent({ type: 'bot_roster', bots, rt, wn }, toPeerId); else net.sendEvent({ type: 'bot_roster', bots, rt, wn }); } catch (_) {}
 }
 
 function _botProxyById(id) {
@@ -136167,9 +136205,11 @@ function returnToRootMenu(opts) {
     if (net.peers) {
       for (const peer of net.peers.values()) {
         peer.ready = false;
-        peer.warmupReady = false;       
+        peer.warmupReady = false;
+        peer._briefedLate = false;      // (v54.38) the match they joined late is over (see amStasisOwner)
       }
     }
+    net._lateJoiner = false;            // (v54.38) ...and so is the one we did
   }
 
   // Flip state first; _menuActive / Tab-intercept / gamepad hold all gate on
@@ -147236,6 +147276,8 @@ function _lssYieldToLiveMatch(brief, via) {
 // (v54.33) The mode comparison is in TAG space (_lssRoomTag): dropin_state now carries the tag, and a 'cyberpunk' tag
 // against LSS.MODE 'freeflight' would otherwise read as a change and clear the mode it is about to arm.
 function _lssAdoptDropin(evt) {
+  // (v54.38) we are joining a match already under way: its own pilots keep its seats (amStasisOwner)
+  try { net._lateJoiner = true; } catch (_) {}
   try { if (typeof evt.ago === 'number' && evt.ago >= 0) { LSS._modeChosen = true; LSS._modeChosenAt = performance.now() - evt.ago; } } catch (_) {}
   try { net.roomMode = evt.mode || net.roomMode; } catch (_) {}
   try { if (evt.mode && evt.mode !== _lssRoomTag()) _lssClearModeSetup(); } catch (_) {}
@@ -157361,7 +157403,24 @@ function getStasisSphereIndex(pos) {
 function amStasisOwner() {
   if (!net.active) return true;
   // Judges can't own stasis fields (they have no ship); exclude.
-  const allIds = [net.myPeerId, ...nonJudgePeerIds()].sort();
+  // ⭐⭐⭐ (v54.38) ...NOR CAN A LATE JOINER, WHILE ONE OF THE MATCH'S OWN PILOTS IS HERE. Owner: "the player whose run it is
+  // should keep control of the waves when someone joins, so the joiner sees the current wave and the count doesn't restart."
+  // This is the one election behind the endless director and _botAuthority's endless / campaign / cyber branch (and the
+  // stasis, champion, monster, wildlife and world-object owners), and it was the lowest RANDOM id in the room, so an arriving
+  // phone took the run over the instant it connected - from the picker. MEASURED (two tabs, 54.36): the host's live wave
+  // (VORTEX + TRACKER, real bots) never reached the joiner, whose own director started again at wave 0, while the host's went
+  // quiet. Now the pilots who were in the match keep its seats: a peer this client BRIEFED (dropin_state, onPeerJoin - the
+  // mark `_briefedLate`) does not stand, and a client that took a briefing (_lssAdoptDropin - `net._lateJoiner`) stands down
+  // while anyone it did not brief is present. Both marks come from ONE event, the briefing, seen from its two ends, so the
+  // two sides agree without anything new on the wire.
+  // (!) Cleared by returnToRootMenu (the match is over), by a fresh launch that is not a drop-in (_finishCommit), and - for
+  //     everyone at once - when an ORIGINAL pilot leaves (onPeerLeave): the room then falls back to the plain lowest id below,
+  //     the rule every client already agreed on before this one.
+  const ids = nonJudgePeerIds();
+  const _stand = ids.filter((id) => { try { const p = net.peers.get(id); return !(p && p._briefedLate); } catch (_) { return true; } });
+  // a late joiner stands only when everyone left here is someone IT briefed (they, in turn, stand down for it)
+  if (net._lateJoiner) return !_stand.length;
+  const allIds = [net.myPeerId, ..._stand].sort();
   return allIds[0] === net.myPeerId;
 }
 

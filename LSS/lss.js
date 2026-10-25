@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "54.37";
+const LSS_BUILD = "54.39";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -3247,6 +3247,7 @@ async function joinRoom() {
       }
 
       if (net.openSolo && game.state !== 'select' && net.sendEvent) {
+        try { const _np = net.peers.get(peerId); if (_np) _np._briefedLate = true; } catch (_) {}
         try {
           const _brief = { type: 'dropin_state', ago: _lssModeAgo(), host: net.myPeerId,
             map: game.selectedMap, seed: (net.worldSeed != null ? net.worldSeed : 0) >>> 0,
@@ -3275,6 +3276,12 @@ async function joinRoom() {
       console.log('Peer left:', peerId);
       const _wasBotAuth = (typeof _botAuthority === 'function') ? _botAuthority() : false;   // (v38.63)
       const peer = net.peers.get(peerId);
+      try {
+        if (!(peer && peer._briefedLate)) {
+          net._lateJoiner = false;
+          for (const p of net.peers.values()) { if (p) p._briefedLate = false; }
+        }
+      } catch (_) {}
       if (peer && peer.networkPlayer) {
         peer.networkPlayer.destroy();
         const idx = net.networkPlayers.indexOf(peer.networkPlayer);
@@ -3292,12 +3299,19 @@ async function joinRoom() {
         const _isBotAuth = (typeof _botAuthority === 'function') ? _botAuthority() : false;
         if (!_wasBotAuth && _isBotAuth && game && game.entities) {
           let _adopted = 0;
+          const _erun = game.endlessRun || null;   // (v54.38) an endless run inherits the departed host's wave too
           for (const b of game.entities) {
             if (!(b instanceof Bot) || !b.isProxy) continue;
             b.isProxy = false; b._netX = null;
             if (b.velocity) b.velocity.set(0, 0, 0);
+            if (_erun && b.team === LSS.TEAM_FLEET_B) {
+              b._endlessWave = _erun.waveN;
+              if (!Array.isArray(_erun.waveBots)) _erun.waveBots = [];
+              if (_erun.waveBots.indexOf(b) < 0) _erun.waveBots.push(b);
+            }
             _adopted++;
           }
+          try { if (_erun && _erun.waveBots && _erun.waveBots.some((b) => b && b.alive) && _erun.phase !== 'battle') { _erun.phase = 'battle'; _erun.phaseT = 0; } } catch (_) {}
           if (_adopted && typeof _botSendRoster === 'function') _botSendRoster();
           if (_adopted && window.Overlays && Overlays.banner) Overlays.banner('HOST LEFT', 'you are running the bots now');
           console.log('[net] bot authority migrated to us; adopted', _adopted, 'proxies');
@@ -4314,7 +4328,7 @@ const EndlessMode = {
       }
     } catch (_) {}
     if (alive && run.phase !== 'battle') {
-      run.phase = 'battle'; run.phaseT = 0; run.waveN++;
+      run.phase = 'battle'; run.phaseT = 0; run.waveN = (typeof run._wnAuth === 'number') ? run._wnAuth : run.waveN + 1;
       try { announcerSay('Warning. Hostile signatures closing.', { key: 'endless_warn', cooldown: 10, priority: true }); } catch (_) {}
       try { if (window.Overlays && Overlays.banner) Overlays.banner('AMBUSH', alive + ' hostiles'); } catch (_) {}
     } else if (!alive && run.phase === 'battle') {
@@ -10100,6 +10114,10 @@ function handleNetEvent(evt, fromPeerId) {
         if (run && typeof evt.rt === 'number' && run.startedAt) {
           const off = evt.rt - (Date.now() - run.startedAt) / 1000;
           run.clockOff = (run.clockOff == null) ? off : run.clockOff + (off - run.clockOff) * 0.3;
+        }
+        if (run && typeof evt.wn === 'number' && isFinite(evt.wn)) {
+          run._wnAuth = evt.wn | 0;
+          if (run.phase === 'battle') run.waveN = run._wnAuth;
         }
       } catch (_) {}
     }
@@ -78900,6 +78918,7 @@ function commitLoadout(key) {
       const _ds = net._dropin && net._dropin.since;
       net._liveSince = (typeof _ds === 'number' && isFinite(_ds) && _ds > 0) ? _ds : Date.now();
     } catch (_) {}
+    try { net._lateJoiner = !!net._dropin; } catch (_) {}
 
     try { if (game._cyber && game._cyber.armed && !game._cyber.started && typeof _cyberCineLightsEnsure === 'function') _cyberCineLightsEnsure(); } catch (_) {}
     if (typeof _pinCombatEffectPrograms === 'function') _pinCombatEffectPrograms();
@@ -79148,7 +79167,8 @@ function _botSendRoster(toPeerId) {
       tm: b.team, c: (b._owCity != null) ? b._owCity : -1 });   // (v38.79) numeric team + overworld city
   }
   const rt = (game.endlessRun && game.endlessRun.startedAt) ? (Date.now() - game.endlessRun.startedAt) / 1000 : undefined;
-  try { if (toPeerId) net.sendEvent({ type: 'bot_roster', bots, rt }, toPeerId); else net.sendEvent({ type: 'bot_roster', bots, rt }); } catch (_) {}
+  const wn = (game.endlessRun && typeof game.endlessRun.waveN === 'number') ? game.endlessRun.waveN : undefined;
+  try { if (toPeerId) net.sendEvent({ type: 'bot_roster', bots, rt, wn }, toPeerId); else net.sendEvent({ type: 'bot_roster', bots, rt, wn }); } catch (_) {}
 }
 
 function _botProxyById(id) {
@@ -88649,9 +88669,11 @@ function returnToRootMenu(opts) {
     if (net.peers) {
       for (const peer of net.peers.values()) {
         peer.ready = false;
-        peer.warmupReady = false;       
+        peer.warmupReady = false;
+        peer._briefedLate = false;      // (v54.38) the match they joined late is over (see amStasisOwner)
       }
     }
+    net._lateJoiner = false;            // (v54.38) ...and so is the one we did
   }
 
   game.state = 'select';
@@ -95784,6 +95806,7 @@ function _lssYieldToLiveMatch(brief, via) {
   } catch (e) { console.warn('[net] yield to the live match failed:', e); return false; }
 }
 function _lssAdoptDropin(evt) {
+  try { net._lateJoiner = true; } catch (_) {}
   try { if (typeof evt.ago === 'number' && evt.ago >= 0) { LSS._modeChosen = true; LSS._modeChosenAt = performance.now() - evt.ago; } } catch (_) {}
   try { net.roomMode = evt.mode || net.roomMode; } catch (_) {}
   try { if (evt.mode && evt.mode !== _lssRoomTag()) _lssClearModeSetup(); } catch (_) {}
@@ -103708,7 +103731,10 @@ function getStasisSphereIndex(pos) {
 
 function amStasisOwner() {
   if (!net.active) return true;
-  const allIds = [net.myPeerId, ...nonJudgePeerIds()].sort();
+  const ids = nonJudgePeerIds();
+  const _stand = ids.filter((id) => { try { const p = net.peers.get(id); return !(p && p._briefedLate); } catch (_) { return true; } });
+  if (net._lateJoiner) return !_stand.length;
+  const allIds = [net.myPeerId, ..._stand].sort();
   return allIds[0] === net.myPeerId;
 }
 
