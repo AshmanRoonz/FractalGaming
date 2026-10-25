@@ -8707,7 +8707,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "54.31";
+const LSS_BUILD = "54.36";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -13416,12 +13416,16 @@ async function joinRoom() {
       //     simply being called without one here.
       if (net.openSolo && game.state !== 'select' && net.sendEvent) {
         try {
-          net.sendEvent({ type: 'dropin_state', ago: _lssModeAgo(), host: net.myPeerId,
+          const _brief = { type: 'dropin_state', ago: _lssModeAgo(), host: net.myPeerId,
             map: game.selectedMap, seed: (net.worldSeed != null ? net.worldSeed : 0) >>> 0,
             mst: (typeof net.matchStartedAt === 'number') ? net.matchStartedAt : undefined,   // (v38.60)
             mode: (typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : 'classic',
-            round: game.currentRound || 1, scoreA: game.scoreA || 0, scoreB: game.scoreB || 0 },
-            peerId);   // (v45.02) to the joiner only
+            round: game.currentRound || 1, scoreA: game.scoreA || 0, scoreB: game.scoreB || 0,
+            // (v54.33) when this match went live: a joiner that is ALSO live settles which match stays by it, and a
+            // drop-in carries it on as its own (_finishCommit), so the merged match keeps one age
+            since: (typeof net._liveSince === 'number') ? net._liveSince : undefined };
+          try { _lssTagPut(_brief, _lssRoomTag()); } catch (_) {}   // (v54.33) and the TAG, not just LSS.MODE
+          net.sendEvent(_brief, peerId);   // (v45.02) to the joiner only
           if (typeof _botSendRoster === 'function') _botSendRoster(peerId);   // (v45.02) ditto
         } catch (_) {}
       }
@@ -19861,6 +19865,13 @@ function _lssLaunchReady() {
   try {
     if (!_lssConfirmed()) return false;
     if (!net || !net.active) return true;                                  // solo
+    // (v54.33) A DROP-IN WAITS FOR NOBODY. Its match is already running, and checkAllLoadoutsReady's late-join branch
+    // takes it straight in without asking anyone - so the room's CONFIRMs are a gate with nothing behind it. It also
+    // stands between a merge's loser and its launch: the yield runs returnToRootMenu, which zeroes every peer's `ready`,
+    // and the winner, mid-match, never sends another, so LAUNCH would sit at "Waiting for the rest of the room" for good
+    // (read from the code and fixed before the first two-tab run, so never seen failing). An ordinary late joiner leaned
+    // on the same flag through the host's one-shot `ready` re-announce in onPeerJoin.
+    if (net._dropin && net.openSoloHostId && String(net.openSoloHostId) !== String(net.myPeerId)) return true;
     if (typeof nonJudgePeerCount === 'function' && nonJudgePeerCount() === 0) return true;   // alone in the room
     return (typeof allPeersReady === 'function') ? !!allPeersReady() : false;
   } catch (_) { return false; }
@@ -21408,6 +21419,13 @@ function checkAllLoadoutsReady() {
   // released only by returnToRootMenu - the one place a genuinely new launch can begin.
   if (game._launchCommitted) return;
   if (!player.loadoutKey) return;
+  // ⭐ (v54.35) ...COMMITTED FOR THIS LAUNCH, not merely once. player.loadoutKey is the last ship flown and survives
+  // returnToRootMenu, so a two-live merge's loser - briefed into the winner's match a moment after its own teardown -
+  // read as already committed, and the late-join branch below took it "straight in" before it had picked a ship or
+  // built the winner's world. MEASURED: `_lateJoin` set, `_launchCommitted` set, picker re-raised a beat later by the
+  // winner's briefing, and LAUNCH could then never take it anywhere. A fresh-page joiner never met this (no key yet).
+  // The epoch is the teardown count (_lssLaunchStale); commitLoadout stamps it beside the key.
+  if ((game._commitEpoch | 0) !== _lssLaunchEpochNow() || game._commitEpoch == null) return;
   // (v36.36) A ROUND TRANSITION IS NOT A LAUNCH HANDSHAKE. Every peer drives its
   // own between-rounds countdown locally (see the roundEnd branch); there is no
   // launch_at proposal in it and there never was. That used to be covered for
@@ -21619,7 +21637,9 @@ function _lssCineWindowMs() {
 }
 function _lssArmSyncedCountdown(atMs) {
   const _now = () => ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now());
+  const _launchEp = _lssLaunchEpochNow();   // (v54.34) see _lssLaunchStale
   setTimeout(() => {
+    if (_lssLaunchStale(_launchEp)) return;   // (v54.34) its match was torn down before the shared deadline
     // Cut an overrunning flight rather than let it push the countdown.
     try {
       if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active &&
@@ -23583,7 +23603,10 @@ function handleNetEvent(evt, fromPeerId) {
     _lssModeLog('rx', 'mode_pick', _t, null, fromPeerId, 'peer picked');
     net._forcedMode = _t;
     net._decreedMode = null;
-    try { if (_lssRoomTag() !== _t) { _lssAdoptRoomMode(_t); _lssModeChosen(_t); } } catch (_) {}
+    // (v54.32) ...not while live. _lssAdoptRoomMode already refuses mid-match, but _lssModeChosen beside it writes
+    // LSS.MODE outright, so a peer's pick re-moded a live match with none of the new mode's setup. The decide below
+    // still runs: a live match wins the election (_lssLiveMatch), so the room is told this match's mode instead.
+    try { if (_lssRoomTag() !== _t && !_lssLiveMatch()) { _lssAdoptRoomMode(_t); _lssModeChosen(_t); } } catch (_) {}
     try { _lssModeDecide(); } catch (_) {}
     try { _lssRenderLobbyMode(); } catch (_) {}
     return;
@@ -23661,6 +23684,18 @@ function handleNetEvent(evt, fromPeerId) {
   // the bot match together. Deterministic host if several click at once :
   // the lowest peerId wins (same tie-break style as the launch proposer).
   if (evt.type === 'open_solo_start') {
+    // ⭐⭐ (v54.32) NOT WHILE MY MATCH IS LIVE. This is a LOBBY's call - "the whole room starts the bot match together",
+    // sent from a hangar (_startHostedMode / startOpenSolo / _setEliminationBots, or onPeerJoin's `game.state ===
+    // 'select'` branch) - and a live match outranks a lobby. Reaching a live client it rewrote the match underneath it
+    // (openSoloHostId, worldSeed, eliminationBots, the mode setup) and raised the picker over 'playing', LAUNCH greyed:
+    // the owner's "pulled the PC back into the lobby" (see _lssLiveMatch). The arbitration below cannot be trusted with
+    // it either, because the decree that arrives first backdates our `ago` to the sender's and turns it into an id sort.
+    // Nothing is lost by dropping it: our own onPeerJoin briefs the newcomer with dropin_state, which is what brings
+    // them into THIS match.
+    if (_lssLiveMatch()) {
+      _lssModeLog('rx', 'open_solo_start', evt.mode, (typeof evt.ago === 'number' ? evt.ago : null), fromPeerId, 'IGNORED - my match is live');
+      return;
+    }
     const evtHost = evt.host || fromPeerId;
     // (v43.23) was: String(net.openSoloHostId) <= String(evtHost) - a sort of RANDOM trystero ids,
     // so which of two simultaneous hosts won was a coin flip with no join-order meaning.
@@ -23741,37 +23776,28 @@ function handleNetEvent(evt, fromPeerId) {
     // otherwise a player who picked their mode ten minutes ago would outrank a host who started
     // thirty seconds ago and REJECT the world sync, breaking ordinary drop-in. The argument this
     // guard exists for is the one where BOTH sides already launched.
-    const _iAmLive = (typeof game !== 'undefined' && game &&
-                      (game.state === 'playing' || game.state === 'warmup' || game.state === 'roundEnd'));
-    if (_iAmLive && !_lssPeerOutranksMe(evt, fromPeerId)) {
-      _lssModeLog('rx', 'dropin_state', evt.mode, (typeof evt.ago === 'number' ? evt.ago : null), fromPeerId, 'IGNORED - my match outranks');
+    // (v54.33) normalise the packet to a TAG at the door, like the decree: a 54.33 sender spells all three (_lssTagPut),
+    // so a CYBERPUNK CITY / EARTH briefing no longer lands as plain EXHIBITION
+    try { const _t = _lssTagOf(evt); if (_t) evt.mode = _t; } catch (_) {}
+    // ⭐⭐ (v54.33) A LIVE RECEIVER ASKS THE TWO-LIVE RULE, NOT _lssPeerOutranksMe. That `ago` comparison was made here on
+    // each side with each side's own clock - the pair v43.24 retired - so two matches that met could both stay or both
+    // yield, and the yield it let through was the dead picker. _lssLiveOutranks compares numbers both sides share
+    // (`since` + the ids): exactly one of them yields, and that one goes through _lssYieldToLiveMatch.
+    if (_lssLiveMatch()) {
+      const _from = String(evt.host || fromPeerId);
+      const _ago = (typeof evt.ago === 'number' ? evt.ago : null);
+      if (_lssSameWorld(evt.mode, evt.map, evt.seed)) {
+        _lssModeLog('rx', 'dropin_state', evt.mode, _ago, fromPeerId, 'live - same match');
+        return;
+      }
+      if (!_lssLiveOutranks(evt.since, _from, net._liveSince, net.myPeerId)) {
+        _lssModeLog('rx', 'dropin_state', evt.mode, _ago, fromPeerId, 'IGNORED - my live match went live first');
+        return;
+      }
+      _lssYieldToLiveMatch(Object.assign({}, evt, { host: _from }), 'dropin_state');
       return;
     }
-    try { if (typeof evt.ago === 'number' && evt.ago >= 0) { LSS._modeChosen = true; LSS._modeChosenAt = performance.now() - evt.ago; } } catch (_) {}
-    try { net.roomMode = evt.mode || net.roomMode; } catch (_) {}
-    try { if (evt.mode && evt.mode !== LSS.MODE) _lssClearModeSetup(); } catch (_) {}
-    net.openSoloHostId = evt.host || null;
-    net._dropin = evt;
-    if (typeof evt.mst === 'number' && isFinite(evt.mst)) net.matchStartedAt = evt.mst;   // (v38.60) shared match id
-    // (v32.75) Adopt the host's MODE before building the world so a mid-match drop-in
-    // lands in the same mode (race/campaign/classic), not classic.
-    // (v43.24) A DECREE OUTRANKS THIS. open_solo_start and dropin_state each still carry a mode and
-    // each still arbitrates with the old pairwise rule, which is the one that cannot stay
-    // antisymmetric under latency. If the room's decider has already spoken, its answer wins and
-    // this event contributes only its world (map/seed) - never a second opinion on the mode.
-    try { if (net._decreedMode && evt.mode && evt.mode !== net._decreedMode) {
-      _lssModeLog('rx', evt.type, evt.mode, null, fromPeerId, 'mode OVERRIDDEN by decree ' + net._decreedMode);
-      evt.mode = net._decreedMode;
-    } } catch (_) {}
-    try { if (evt.mode) _applyModeClientSetup(evt.mode); } catch (_) {}
-    try { applyWorldSync(evt.map, evt.seed >>> 0); } catch (e) { console.warn('[dropin] world sync failed:', e); }
-    try {
-      const ls = document.getElementById('lobby-status');
-      if (ls) { ls.textContent = 'MATCH IN PROGRESS — PICK A SHIP AND DROP IN'; ls.style.color = '#7dffa8'; }
-    } catch (_) {}
-    // Straight to the hangar: a challenger shouldn't need to find a
-    // second button after following an invite.
-    try { if (typeof enterShipSelect === 'function') enterShipSelect(); } catch (_) {}
+    _lssAdoptDropin(evt);   // (v54.33) the late joiner's adoption, shared with the yield - see there
     return;
   }
   // Authority blinked a monster ; snap the proxy (so interpolation doesn't
@@ -120537,6 +120563,9 @@ function commitLoadout(key) {
 
   player.loadout = loadout;
   player.loadoutKey = key;
+  // (v54.35) ...and WHEN: the launch epoch this commit belongs to. player.loadoutKey outlives every teardown (it is the
+  // last ship flown), so on its own it cannot say "committed for THIS launch" - see checkAllLoadoutsReady.
+  try { game._commitEpoch = _lssLaunchEpochNow(); } catch (_) {}
   // (v36.36) This commit consumes whatever was staged for the round transition —
   // an explicit CONFIRM and the LAUNCH-time auto-apply must never both fire.
   try { _stagedRoundShip = null; } catch (_) {}
@@ -120947,6 +120976,14 @@ function commitLoadout(key) {
     broadcastWorldObjects();
 
     game.state = 'warmup';
+    // (v54.33) THE MOMENT THIS MATCH WENT LIVE - the seniority _lssLiveOutranks settles a merge by. Stamped here, the
+    // round-1 build that every fresh launch passes through, and nowhere between rounds (those warmups do not come this
+    // way). A DROP-IN takes its host's stamp from the briefing, still unconsumed at this point (checkAllLoadoutsReady
+    // takes net._dropin later), so a host and its drop-ins carry one age. Cleared by returnToRootMenu.
+    try {
+      const _ds = net._dropin && net._dropin.since;
+      net._liveSince = (typeof _ds === 'number' && isFinite(_ds) && _ds > 0) ? _ds : Date.now();
+    } catch (_) {}
     // (v35.06) Orientation lock/unlock removed entirely (see
     // _lssLockLandscape). The unlock that used to sit here re-evaluated
     // orientation at warmup — mid-touch — and could rotate the viewport,
@@ -121215,6 +121252,7 @@ function commitLoadout(key) {
   // first session resolves immediately so the loading overlay flashes
   // briefly then hides on subsequent commits.
   try { game._warmupDone = false; } catch (_) {}   // (v42.25) cleared by both promise arms below
+  const _launchEp = _lssLaunchEpochNow();   // (v54.34) both arms below stand down if this match is torn down first
   let _warmupPromise;
   try {
     // ⭐ (v54.13) THE COMMIT'S DEFERRED WARM DRAWS FIRST: its drain links everything the build just queued, without
@@ -121273,6 +121311,9 @@ function commitLoadout(key) {
   _warmupPromise.then(() => {
     try { game._warmupDone = true; } catch (_) {}   // (v42.25)
     if (_questWarmupWatchdog) { clearTimeout(_questWarmupWatchdog); _questWarmupWatchdog = null; }
+    // (v54.34) a merge's loser can be torn down mid-warmup: its own launch must not run checkAllLoadoutsReady below,
+    // whose late-join branch would carry it into the WINNER's match with no world built for it
+    if (_lssLaunchStale(_launchEp)) { console.log('[commitLoadout] warmup finished for a match that was torn down - standing down'); return; }
     if (net.active) _clearLaunchStall();   // (v36.21) MP owns its own handshake
     // Local warmup is done ; mark ourselves ready and notify peers.
     _markLocalWarmupReady();
@@ -121305,6 +121346,7 @@ function commitLoadout(key) {
   }).catch((e) => {
     try { game._warmupDone = true; } catch (_) {}   // (v42.25) failed counts as done - never strand the launch
     if (_questWarmupWatchdog) { clearTimeout(_questWarmupWatchdog); _questWarmupWatchdog = null; }
+    if (_lssLaunchStale(_launchEp)) return;   // (v54.34) as the success arm
     if (net.active) _clearLaunchStall();   // (v36.21) MP owns its own handshake
     // Warmup failed unexpectedly ; don't strand the player on the
     // loading screen. Fall back to launching anyway ; the first
@@ -124237,7 +124279,28 @@ const _CINE_CURTAIN_MAX_MS = 50000;
 // (`_lssArmSyncedCountdown` fires on a shared absolute deadline), and that path lowers the curtain
 // only `if (_cineOn)` - i.e. only if this call actually STARTED a flight. Deferring there would
 // read as "declined", leave the curtain up, and land the cinematic on top of the countdown.
-function _lssRunCinematicThen(andThen, waitCurtain) {
+// ⭐⭐ (v54.34) THE LAUNCH EPOCH: A LAUNCH IN FLIGHT WHEN ITS MATCH IS TORN DOWN MUST NOT LAND. A launch is a chain of
+// deferred steps - the warmup promise's arms in commitLoadout, the settle wait in _markLocalWarmupReady, this
+// cinematic's `after`, _lssArmSyncedCountdown's deadline - and none of them could be called off. returnToRootMenu cleared
+// the countdown ticker and net.launchTimer and that was all. MEASURED on the first two-live merge test: the loser yielded
+// mid-cinematic (its own solo-in-room launch), landed in the drop-in picker, and 5.3 s later its old cinematic ended,
+// ran `after` -> launchCountdown -> finishLaunch, and took the new picker down with _launchCommitted set: the dead
+// picker again, by a different road. Worse was waiting one step back: an old warmup arm resolving after a yield runs
+// checkAllLoadoutsReady, which would take the late-join branch into a world nobody had built.
+// game._launchEpoch is bumped by returnToRootMenu (the one teardown every match end goes through) and each step above
+// carries the epoch it was launched under. On `game` rather than a top-level `let`: readers can sit in callbacks that
+// fire during boot, and a `let` read before its line has run is the v39.02 TDZ boot kill.
+function _lssLaunchEpochNow() { try { return game._launchEpoch | 0; } catch (_) { return 0; } }
+function _lssLaunchStale(ep) { return _lssLaunchEpochNow() !== (ep | 0); }
+function _lssRunCinematicThen(andThen, waitCurtain, _ep) {
+  // (v54.34) the epoch this launch began under - the curtain retry below re-enters with it, never with a fresh one
+  const _launchEp = (typeof _ep === 'number') ? _ep : _lssLaunchEpochNow();
+  if (_lssLaunchStale(_launchEp)) { console.log('[cinematic] the launch this belonged to was torn down - not starting it'); return; }
+  const _andThen = andThen;
+  andThen = () => {
+    if (_lssLaunchStale(_launchEp)) { console.log('[cinematic] the launch this belonged to was torn down - no 3-2-1'); return; }
+    _andThen();
+  };
   // ⭐⭐ (v42.23) IDEMPOTENT. Owner, in VR: "the cinematic starts and then starts again cutting
   // in at 1s into the starting of the first one".
   // THREE things can start the solo cinematic and only ONE of them checked whether it was already
@@ -124282,7 +124345,7 @@ function _lssRunCinematicThen(andThen, waitCurtain) {
     if (_ov && getComputedStyle(_ov).display !== 'none') {
       if (!_cineCurtainT0) _cineCurtainT0 = Date.now();
       if (Date.now() - _cineCurtainT0 < _CINE_CURTAIN_MAX_MS) {
-        setTimeout(() => { try { _lssRunCinematicThen(andThen, waitCurtain); } catch (_) {} }, 50);
+        setTimeout(() => { try { _lssRunCinematicThen(_andThen, waitCurtain, _launchEp); } catch (_) {} }, 50);   // (v54.34) same epoch
         return;
       }
       console.warn('[cinematic] curtain still up after ' +
@@ -135746,6 +135809,17 @@ document.addEventListener('keydown', (e) => {
 // exit-to-main-menu path opts in.
 function returnToRootMenu(opts) {
   const _keepRoom = !!(opts && opts.keepRoom);
+  // ⭐⭐ (v54.34) A MATCH TORN DOWN MID-LAUNCH TAKES ITS LAUNCH WITH IT. Every deferred step of the launch in flight is
+  // now stale (see _lssLaunchStale) - and a running launch cinematic is ended here, without its `after` (that IS the
+  // 3-2-1), while its lineup meshes still exist for it to restore. Left running, it also kept body.lss-cinematic-active,
+  // the class that hides the HUD, onto whatever launched next. Measured on the two-live merge's loser: see the epoch's note.
+  try { game._launchEpoch = (game._launchEpoch | 0) + 1; } catch (_) {}
+  try {
+    if (_cinematic && (_cinematic.active || _cinematic.after)) {
+      _cinematic.after = null;
+      if (_cinematic.active && typeof _lssEndSpectatorCinematic === 'function') _lssEndSpectatorCinematic();
+    }
+  } catch (_) {}
   // (campaign) Tear down the active mode first so leaving a campaign session
   // clears its endless / no-timer flags before any later classic/race match.
   try { activeMode().onTeardown(); } catch (_) {}
@@ -135773,6 +135847,7 @@ function returnToRootMenu(opts) {
   // is the one place the latch may be released - see checkAllLoadoutsReady.
   try { game._launchCommitted = false; } catch (_) {}
   try { game._ssConfirmed = false; } catch (_) {}   // (v45.06) back at the menu, nothing is locked in
+  try { if (typeof net !== 'undefined' && net) net._liveSince = null; } catch (_) {}   // (v54.33) the match's age goes with it
   // (v45.27) fleet picks are MATCH-scoped: back at the menu the room re-derives sides from the peer
   // ids, so a pick that outlived its match would seat someone wrong for the next one.
   try { if (typeof net !== 'undefined' && net) net._teamPick = null; } catch (_) {}
@@ -135799,6 +135874,12 @@ function returnToRootMenu(opts) {
     if (net.launchTimer) {
       try { clearTimeout(net.launchTimer); } catch (_) {}
       net.launchTimer = null;
+    }
+    // (v54.34) ...and the proposer's launch_at re-broadcast. Only the launch timer above ever stopped it, so clearing that
+    // timer mid-launch orphaned the interval: launch_at to the room every 150 ms, for good, at a match that had ended.
+    if (net.launchRebroadcast) {
+      try { clearInterval(net.launchRebroadcast); } catch (_) {}
+      net.launchRebroadcast = null;
     }
     net.launchScheduledAt = null;
     net.startScheduledAt = null;
@@ -145998,8 +146079,10 @@ let _localWarmupReady = false;
 //     client sail past a gate it is telling everyone else to wait at.
 function _markLocalWarmupReady() {
   if (_localWarmupReady) return;                 // idempotent: several paths call this
+  const _launchEp = _lssLaunchEpochNow();        // (v54.34) see _lssLaunchStale
   const _announce = () => {
     if (_localWarmupReady) return;
+    if (_lssLaunchStale(_launchEp)) return;      // (v54.34) settled for a match that no longer exists
     _localWarmupReady = true;
     if (typeof net !== 'undefined' && net.active && net.sendEvent) {
       try { net.sendEvent({ type: 'warmup_ready' }); } catch (_) {}
@@ -146998,6 +147081,158 @@ function _lssModeAgo() {
     return Math.max(0, Math.round(performance.now() - LSS._modeChosenAt));
   } catch (_) { return -1; }
 }
+// ⭐⭐⭐ (v54.32) A LIVE MATCH OUTRANKS A LOBBY - IN THE ELECTION, NOT ONLY IN THE BRIEFING.
+// Owner: "on PC I was in endless with a room name set. I started the game mode. I joined in with the cell phone after
+// the game begun. When I joined, it pulled the PC back into the lobby. On the phone, the lobby game mode was changing
+// rapidly by itself. PC was unable to return into the game."
+// dropin_state has said it since v43.23 - "A live match always beats a lobby choice" - but the decider never heard it.
+// _lssModeDecider is the LOWEST RANDOM ID, so half the time the arriving phone is the one who computes, and it computes
+// at its own onPeerJoin, before the PC's mode_set has landed: a candidate list of one (itself, ELIMINATION) and a decree
+// of its own lobby mode, map AND seed. The PC took it - _lssApplyModeDecree's `live` branch ("ADOPT live mode") does
+// applyWorldSync + enterShipSelect - and that is the pull back to the lobby. The phone's open_solo_start, sent right
+// after, was let through too: the decree had just backdated the PC's `ago` to the phone's, so _lssPeerOutranksMe fell to
+// its id sort and the phone won it, and the PC handed its own match's host seat (openSoloHostId) to the phone.
+// THE STUCK PICKER: enterShipSelect never writes game.state, so the PC sat in the picker at 'playing' - and a picker over
+// a match in progress greys LAUNCH out as "The round starts on its own" (v45.13). Nothing starts on its own here.
+// THE FLICKER: every live adopt re-runs enterShipSelect, and enterShipSelect announces (v43.22). So each decree the PC
+// took went straight back out as a mode_set, which the phone - still the decider - turned into the next decree. Two
+// modes in flight, each reflected off the other end at network speed. MEASURED with two tabs (joiner = the lower id,
+// pressing ELIMINATION into a live ENDLESS room): the joiner's mode changed 207 times in ~12 s, the host's 150, the host
+// stuck at playing / PICKER / LAUNCH disabled.
+// So: mode_set says whether its sender is mid-match, the decider ranks a live match above every lobby (and decrees ITS
+// map and seed - the world that is actually built - never the decider's own), a live client refuses a decree whose
+// winner is a lobby (and re-announces, which is what lets the decider correct itself), and ignores open_solo_start.
+// The v44.92 rule, applied one layer down: you joined someone else's match, you do not get to re-deal it.
+// (!) The same in-play test _lssApplyModeDecree, _lssAdoptRoomMode and dropin_state each spell out inline. 'warmup'
+//     counts: past LAUNCH the world is built, so it cannot be re-moded in place either.
+function _lssLiveMatch() {
+  try {
+    return !!(typeof game !== 'undefined' && game &&
+              (game.state === 'playing' || game.state === 'warmup' || game.state === 'roundEnd'));
+  } catch (_) { return false; }
+}
+// ⭐⭐⭐ (v54.33) TWO LIVE MATCHES MEET: ONE RULE PICKS WHICH ONE THE ROOM KEEPS, AND THE OTHER DROPS IN.
+// Owner, on v54.32's open item: "fix the two-live-matches case too (the loser should land in a launchable drop-in
+// picker)". Two players who type the same code and both launch before signalling finds them (Nostr + WebRTC across two
+// networks takes seconds) arrive as two LIVE matches, and v54.32's "a live match outranks a lobby" does not separate
+// them. Before this, three things went wrong at once:
+//   1. TWO CHANNELS, TWO RULES. A `hostLive` decree took the live branch (applyWorldSync + enterShipSelect), and so did a
+//      dropin_state that won _lssPeerOutranksMe - an `ago` comparison made on each side with its own clock, which is the
+//      pair v43.24 retired from mode arbitration because it is not antisymmetric under latency ("both conclude they
+//      won", or both lose). The decree and the briefing could each pick a different loser: a swap.
+//   2. THE LOSER LANDED IN A DEAD PICKER. enterShipSelect over 'playing', with _launchCommitted and _ssConfirmed still
+//      set from its own launch: LAUNCH greyed "The round starts on its own", and checkAllLoadoutsReady returns at the
+//      latch before its drop-in branch, so even a re-enabled LAUNCH would have committed into nothing.
+//   3. A SEED MISMATCH WAS NOT A MISMATCH. Same mode, same map, different worldSeed (both rolled their own in
+//      _startHostedMode) took "already on it" and only overwrote net.worldSeed - two endless runs in two caverns, one
+//      room, which is the v43.16-era "connected and separated" one layer down.
+// The rule, used on EVERY channel (the election, a decree's receiver, a dropin_state's receiver): the match that went
+// live FIRST stays, by `since` - net._liveSince, the launching client's Date.now() at its fresh launch (the warmup line
+// in _finishCommit; a drop-in takes its host's) - and then the LOWER peer id. Both sides compare the SAME two numbers,
+// so they cannot disagree: clock skew between a phone and a PC can only bend which one counts as older, never split the
+// verdict. That is the property `ago` never had, and why this may be judged pairwise where v43.24 forbade it.
+// (!) Same world (mode tag, map AND seed) = the same match: a drop-in carries its host's world and its host's `since`,
+//     so it is never asked to yield to the match it is already in.
+// (!) net.matchStartedAt is NOT used: the file forbids minting it without broadcasting it (the v38.60 match id), and the
+//     ENDLESS fresh-room path never sets it at all.
+function _lssLiveOutranks(aSince, aId, bSince, bId) {
+  const ok = (v) => typeof v === 'number' && isFinite(v) && v > 0;
+  if (ok(aSince) && ok(bSince) && aSince !== bSince) return aSince < bSince;
+  return String(aId) < String(bId);
+}
+// The world a live client is flying, in the decree's terms. `seed` may be absent on either side (an old build, a solo
+// world): absent never counts as a difference.
+function _lssSameWorld(tag, map, seed) {
+  try {
+    if (tag && _lssRoomTag() !== tag) return false;
+    if (map && game && game.selectedMap !== map) return false;
+    if (seed != null && net.worldSeed != null && ((seed >>> 0) !== (net.worldSeed >>> 0))) return false;
+    return true;
+  } catch (_) { return false; }
+}
+// THE YIELD. The outranked live client leaves its own match the way every match ends - returnToRootMenu, keepRoom - and
+// then takes the room's match exactly as a late joiner does (_lssAdoptDropin), so the picker it lands in is a fresh
+// launch picker: state 'select', _launchCommitted and _ssConfirmed released, net._dropin set, the winner as host.
+// CONFIRM + LAUNCH then take checkAllLoadoutsReady's late-join branch straight into the winner's match.
+// (!) The host seat moves FIRST, so returnToRootMenu's own repaint (_lssRefreshModeUI) no longer finds us the bot
+//     authority and does not announce our hand into a match that is not ours.
+// (!) net.roomJoinedAt survives: returnToRootMenu zeroes it for a trip to the main menu, but we never left the room.
+// (!) No new callout: the picker coming up in their mode is the read (mid-screen callouts are the owner's call, v48.10).
+function _lssYieldToLiveMatch(brief, via) {
+  try {
+    if (!brief || !brief.host || !brief.mode || typeof net === 'undefined' || !net) return false;
+    if (net._yielding) return false;   // a decree and the briefing can arrive together; the first one yields
+    net._yielding = true;
+    try {
+      _lssModeLog('rx', via, brief.mode, (typeof brief.ago === 'number' ? brief.ago : null), brief.host,
+                  'YIELD - their match went live first (' + String(brief.host).slice(0, 6) + ')');
+      const _joinedAt = net.roomJoinedAt;
+      net.openSoloHostId = String(brief.host);
+      returnToRootMenu({ keepRoom: true });
+      net.roomJoinedAt = _joinedAt;
+      _lssAdoptDropin(brief);
+    } finally { net._yielding = false; }
+    return true;
+  } catch (e) { console.warn('[net] yield to the live match failed:', e); return false; }
+}
+// THE LATE JOINER'S ADOPTION, lifted out of the dropin_state receiver unchanged so the yield runs the same lines: the
+// host's standing, its mode setup, its world (map + seed), the host seat and the drop-in brief, then the picker.
+// (v54.33) The mode comparison is in TAG space (_lssRoomTag): dropin_state now carries the tag, and a 'cyberpunk' tag
+// against LSS.MODE 'freeflight' would otherwise read as a change and clear the mode it is about to arm.
+function _lssAdoptDropin(evt) {
+  try { if (typeof evt.ago === 'number' && evt.ago >= 0) { LSS._modeChosen = true; LSS._modeChosenAt = performance.now() - evt.ago; } } catch (_) {}
+  try { net.roomMode = evt.mode || net.roomMode; } catch (_) {}
+  try { if (evt.mode && evt.mode !== _lssRoomTag()) _lssClearModeSetup(); } catch (_) {}
+  net.openSoloHostId = evt.host || null;
+  net._dropin = evt;
+  if (typeof evt.mst === 'number' && isFinite(evt.mst)) net.matchStartedAt = evt.mst;   // (v38.60) shared match id
+  // (v32.75) Adopt the host's MODE before building the world so a mid-match drop-in
+  // lands in the same mode (race/campaign/classic), not classic.
+  // (v43.24) A DECREE OUTRANKS THIS. open_solo_start and dropin_state each still carry a mode and
+  // each still arbitrates with the old pairwise rule, which is the one that cannot stay
+  // antisymmetric under latency. If the room's decider has already spoken, its answer wins and
+  // this event contributes only its world (map/seed) - never a second opinion on the mode.
+  // (v54.32) ...when the decree names a LIVE match. This briefing IS one, and a decree for a lobby must not overrule
+  // it: the usual one here is the joiner's own, ruled at its onPeerJoin before it had heard anybody (see
+  // _lssLiveMatch), which turned this ENDLESS briefing into ELIMINATION on the endless map.
+  try { if (net._decreedMode && net._decreedLive && evt.mode && evt.mode !== net._decreedMode) {
+    _lssModeLog('rx', evt.type || 'dropin', evt.mode, null, evt.host, 'mode OVERRIDDEN by decree ' + net._decreedMode);
+    evt.mode = net._decreedMode;
+  } } catch (_) {}
+  try { if (evt.mode) _applyModeClientSetup(evt.mode); } catch (_) {}
+  try { applyWorldSync(evt.map, evt.seed >>> 0); } catch (e) { console.warn('[dropin] world sync failed:', e); }
+  try {
+    const ls = document.getElementById('lobby-status');
+    if (ls) { ls.textContent = 'MATCH IN PROGRESS — PICK A SHIP AND DROP IN'; ls.style.color = '#7dffa8'; }
+  } catch (_) {}
+  // Straight to the hangar: a challenger shouldn't need to find a
+  // second button after following an invite.
+  try { if (typeof enterShipSelect === 'function') enterShipSelect(); } catch (_) {}
+}
+// (v54.33) A DECREE FOR A LIVE MATCH IS RE-SENT TO A LIVE PEER STILL FLYING ANOTHER WORLD. The decree is one send
+// (v43.91 left it so, and its dedupe key never clears), and a peer that has not yet registered the decider ignores it
+// as "not the decider" - so the loser of a merge could miss its only chance and stay in its own world for good. Its own
+// mode_set says it is live and elsewhere, and that is the trigger: targeted to that peer, once per 1.5 s.
+// (!) Live stragglers only. The lobby's convergence is untouched, which is where v43.91 measured a re-send oscillating.
+function _lssResendDecreeToLiveStragglers() {
+  try {
+    const d = net._lastDecree;
+    if (!d || d.hostLive !== true || !net._peerModes || !net.sendEvent) return;
+    const now = performance.now();
+    net._peerModes.forEach((v, id) => {
+      if (!v || !v.live || String(id) === String(d.host)) return;
+      if (!net.peers || !net.peers.has(id)) return;
+      const same = (v.mode === d.tag) && (!d.map || v.map === d.map) &&
+                   (d.seed == null || v.seed == null || (v.seed >>> 0) === (d.seed >>> 0));
+      if (same) return;
+      if (!net._decreeResendAt) net._decreeResendAt = new Map();
+      if (now - (net._decreeResendAt.get(String(id)) || 0) < 1500) return;
+      net._decreeResendAt.set(String(id), now);
+      _lssModeLog('tx', 'mode_decree', d.tag, d.ago, id, 're-sent - still live in another world');
+      try { net.sendEvent(d, id); } catch (_) {}
+    });
+  } catch (_) {}
+}
 // Sent targeted on peer-join and broadcast on every mode change while in a room.
 function _lssModeAnnounce(targetPeerId) {
   try {
@@ -147012,7 +147247,15 @@ function _lssModeAnnounce(targetPeerId) {
       // The decider needs BOTH to hand the room the host's map instead of its own.
       inRoom: (net.roomJoinedAt ? Math.round(Math.max(0, performance.now() - net.roomJoinedAt)) : 0),
       map: (typeof game !== 'undefined' && game && game.selectedMap) ? game.selectedMap : undefined,
+      // (v54.32) ...and whether I am MID-MATCH, which outranks all of the above - see _lssLiveMatch
+      live: _lssLiveMatch(),
     };
+    // (v54.33) ...and since when: between two live matches the older one stays (_lssLiveOutranks)
+    try { if (msg.live && typeof net._liveSince === 'number') msg.since = net._liveSince; } catch (_) {}
+    // (v54.33) all three spellings of the TAG, as every other mode packet carries them (_lssTagPut). mode_set was the
+    // one that sent `cyber` but never `earth`, so the decider noted an EARTH peer as plain EXHIBITION - and a merge
+    // compares worlds by tag. `mode` and `cyber` come out exactly as before.
+    try { _lssTagPut(msg, _lssRoomTag()); } catch (_) {}
     // The seed travels WITH the mode. Endless is the case that proves why: its cavern is a pure
     // function of net.worldSeed (_lssGenEndlessLevel), so two peers agreeing on 'endless' with
     // different seeds are still in different worlds - connected and separated, one layer down.
@@ -147095,6 +147338,13 @@ function _lssNotePeerMode(peerId, evt) {
       // clients, which then rank as brand-new arrivals; harmless, since `ago` still separates them.
       inRoom: (typeof evt.inRoom === 'number') ? evt.inRoom : 0,
       map: (typeof evt.map === 'string') ? evt.map : null,
+      // (v54.32) mid-match, and the seed of the world it is flying - what the decider hands the room when it wins.
+      // ⚠ `live` is read off a mode_set only, where it describes the SENDER. A decree's flag is `hostLive` and
+      //   describes whoever won the election, so the ignore branch noting a decree here can never mark its sender live.
+      live: evt.live === true,
+      seed: (typeof evt.seed === 'number' && isFinite(evt.seed)) ? (evt.seed >>> 0) : null,
+      // (v54.33) when that live match started (_lssLiveOutranks) - a constant, so it needs no aging like ago / inRoom
+      since: (evt.live === true && typeof evt.since === 'number' && isFinite(evt.since)) ? evt.since : null,
       at: performance.now(),
     });
   } catch (_) {}
@@ -147117,33 +147367,44 @@ function _lssModeDecide() {
     // is no clock to synchronise, and only the DECIDER compares them, so the antisymmetry trap that
     // killed v43.22/23 cannot apply: one client does the comparison, once, for everybody.
     // Layered tie-breaks: longest in the room -> chose first (`ago`) -> lowest id.
+    // (v54.32) ...and above all three, MID-MATCH: a live match outranks every lobby (see _lssLiveMatch).
     const _cands = [];
+    let _host = null;
     try {
       const _myIn = (net.roomJoinedAt ? Math.max(0, performance.now() - net.roomJoinedAt) : 0);
       const _myAgo = _lssModeAgo();
-      if (_myAgo >= 0) _cands.push({ id: String(net.myPeerId), mode: _lssRoomTag(), ago: _myAgo, inRoom: _myIn,   // (v44.11) my TAG
-                                     map: (game && game.selectedMap) || null, mine: true });
+      // (v54.32) a live client stands whether or not it ever pressed for its mode - it is playing it
+      const _myLive = _lssLiveMatch();
+      if (_myAgo >= 0 || _myLive) _cands.push({ id: String(net.myPeerId), mode: _lssRoomTag(), ago: _myAgo, inRoom: _myIn,   // (v44.11) my TAG
+                                     map: (game && game.selectedMap) || null, mine: true,
+                                     live: _myLive, seed: (net.worldSeed != null ? (net.worldSeed >>> 0) : null),
+                                     since: (_myLive && typeof net._liveSince === 'number') ? net._liveSince : null });   // (v54.33)
       if (net._peerModes) {
         net._peerModes.forEach((v, id) => {
-          if (!v || !v.mode || v.ago < 0) return;                 // never chose - cannot decide the room
+          if (!v || !v.mode || (v.ago < 0 && !v.live)) return;    // never chose (and not mid-match) - cannot decide the room
           if (!net.peers || !net.peers.has(id)) return;           // gone
           // Age both stamps forward: they were sampled when the peer SENT them.
           const _age = Math.max(0, performance.now() - v.at);
-          _cands.push({ id: String(id), mode: v.mode, ago: v.ago + _age,
+          _cands.push({ id: String(id), mode: v.mode, ago: (v.ago >= 0 ? v.ago + _age : -1),
                         inRoom: (typeof v.inRoom === 'number' ? v.inRoom + _age : 0),
-                        map: v.map || null, mine: false });
+                        map: v.map || null, mine: false, live: !!v.live, seed: (v.seed != null ? v.seed : null),
+                        since: (v.since != null ? v.since : null) });   // (v54.33)
         });
       }
     } catch (_) {}
     if (_cands.length) {
       _cands.sort((a, b) => {
+        if (!!a.live !== !!b.live) return a.live ? -1 : 1;                       // (v54.32) a live match, before any lobby
+        // (v54.33) two live matches: the receivers' own rule, so a decree can never name a winner they would refuse
+        if (a.live && b.live) return _lssLiveOutranks(a.since, a.id, b.since, b.id) ? -1 : 1;
         if (Math.abs(b.inRoom - a.inRoom) > 1500) return b.inRoom - a.inRoom;   // longest in the room
         if (Math.abs(b.ago - a.ago) > 1200) return b.ago - a.ago;               // else: chose first
         return a.id < b.id ? -1 : (a.id > b.id ? 1 : 0);                        // else: stable
       });
-      const _host = _cands[0];
+      _host = _cands[0];
       bestMode = _host.mode; bestAgo = _host.ago; bestId = _host.id; _bestHostMap = _host.map;
     }
+    const _hostLive = !!(_host && _host.live);
 
     if (!bestMode) return;
     // (v43.28) the room agrees on a MAP too. Only send one when it actually belongs to the mode we
@@ -147160,6 +147421,9 @@ function _lssModeDecide() {
     //   question about the TAG. Every other mode is unaffected: its tag IS its mode string.
     try { if (_bestHostMap && _lssRoomTag() === bestMode) _map = _bestHostMap; } catch (_) {}
     try { if (!_map && _lssRoomTag() === bestMode && game && game.selectedMap) _map = game.selectedMap; } catch (_) {}
+    // (v54.32) a LIVE host's map is the world it is flying, whatever this decider happens to be holding - so it rides even
+    // when we are about to change mode ourselves (the guard above exists for a lobby host's possibly-stale pick)
+    try { if (_hostLive && _bestHostMap) _map = _bestHostMap; } catch (_) {}
     // ⭐ (v53.59) A CAMPAIGN DECREE CARRIES ONLY AN AGREED LEG. Measured with two tabs (the presser on The Crystal Caverns, the
     // decider with no progress): the decider adopted the campaign, _campInitState put IT on The Approach, and its decree
     // carried that - so the presser was moved to The Approach ("ADOPT map=camp_approach") while the decider took the
@@ -147168,23 +147432,40 @@ function _lssModeDecide() {
     try { if (bestMode === 'campaign' && !(net._campRoomMap && net._campRoomMap === _map)) _map = undefined; } catch (_) {}
     let _seed;
     try { if (net.worldSeed != null) _seed = net.worldSeed >>> 0; } catch (_) {}
-    const _key = bestMode + '|' + (_map || '') + '|' + (_seed == null ? '' : _seed);
-    if (net._decreedKey === _key) return;                    // nothing moved
+    // (v54.32) ...and a live host's SEED, never ours. Endless is a pure function of it, and a joiner's own seed is a
+    // roll from its own _startHostedMode: decreed onto the host it changed nothing under the built cavern but every
+    // later briefing (dropin_state carries net.worldSeed) would have sent the next joiner to a different one.
+    try { if (_hostLive && _host.seed != null) _seed = _host.seed >>> 0; } catch (_) {}
+    // `L` keys the winner's liveness too, so the decree that names a live host goes out even where an earlier lobby
+    // decree happened to carry the same mode, map and seed (receivers read hostLive - see dropin_state)
+    const _key = bestMode + '|' + (_map || '') + '|' + (_seed == null ? '' : _seed) + '|' + (_hostLive ? 'L' : '');
+    if (net._decreedKey === _key) {                          // nothing moved
+      // (v54.33) ...for the decree. A live peer still flying another world never took it - see the re-send's note.
+      if (_hostLive) _lssResendDecreeToLiveStragglers();
+      return;
+    }
     if (net._deciding) return;                               // re-entry guard for the re-run below
     net._deciding = true;
     net._decreedKey = _key;
     net._decreedMode = bestMode;
+    net._decreedLive = _hostLive;   // (v54.32)
     net.roomMode = bestMode;
     const decree = {
       by: String(net.myPeerId), ago: bestAgo,
       map: _map, seed: _seed,
+      hostLive: _hostLive,   // (v54.32) the winner is mid-match - see the live guard in _lssApplyModeDecree
+      // (v54.33) WHO won, and since when: a live receiver checks the winner against itself (_lssLiveOutranks) before it
+      // yields, and drops into this host's match
+      host: bestId,
+      since: (_hostLive && _host && _host.since != null) ? _host.since : undefined,
     };
     // (v44.11) bestMode is a TAG. Spelling it with _lssTagPut means an older client reads
     // mode:'freeflight' and lands in plain EXHIBITION - degraded but coherent - instead of writing
     // 'cyberpunk' into its own LSS.MODE, which has no recovery path.
     _lssTagPut(decree, bestMode);
     decree.type = 'mode_decree';
-    _lssModeLog('tx', 'mode_decree', bestMode, bestAgo, bestId, 'I AM DECIDER -> ' + bestMode + (_map ? ' / ' + _map : ''));
+    _lssModeLog('tx', 'mode_decree', bestMode, bestAgo, bestId, 'I AM DECIDER -> ' + bestMode + (_map ? ' / ' + _map : '') + (_hostLive ? ' (live)' : ''));
+    net._lastDecree = decree;   // (v54.33) what _lssResendDecreeToLiveStragglers sends again
     try { net.sendEvent(decree); } catch (_) {}
     // (v43.91) ⚠ A DECREE REPEAT WAS TRIED HERE AND BACKED OUT. The defect it targets is real - this
     // is one unrepeated send on a channel the rest of the file treats as unreliable, and
@@ -147305,8 +147586,48 @@ function _lssApplyModeDecree(evt, mine) {
       try { _lssModeDecide(); } catch (_) {}
       return;
     }
+    // ⭐⭐⭐ (v54.32) A LIVE CLIENT TAKES NOTHING FROM A LOBBY'S DECREE - not the mode, not the map, not the seed, and
+    // not the `ago` backdate below. The owner's report and the measurement are at _lssLiveMatch. A decree whose winner is
+    // a lobby can only reach a live client when the decider did not know we were live - it ruled before our mode_set
+    // landed, or it is a pre-54.32 build - so say so again (mode_set carries `live`) and the decider re-rules with us in
+    // the field. Only a decree for ANOTHER live match (hostLive: two rooms that each launched before they found each
+    // other) is a different question - the v54.33 block right below.
+    // (!) An agreeing decree is dropped too, silently: there is nothing in it for us, and its backdate is exactly what
+    //     let the joiner's open_solo_start outrank the host.
+    // ⭐⭐ (v54.33) ...AND A DECREE FOR ANOTHER LIVE MATCH IS SETTLED HERE TOO, never in the adopt path below, which
+    // used to rebuild a live client in place - applyWorldSync + enterShipSelect over 'playing' - and leave it in a picker
+    // that could not launch. The two-live rule is at _lssLiveOutranks: the decider ranks by it, so a decree names the
+    // winner every receiver would pick itself, and a receiver still checks (the decider may have ruled before it heard
+    // our `since`). The loser yields properly (_lssYieldToLiveMatch); anyone else says so and keeps flying.
+    if (_lssLiveMatch()) {
+      const _same = _lssSameWorld(evt.mode, evt.map, evt.seed);
+      if (evt.hostLive !== true) {
+        _lssModeLog('rx', 'mode_decree', evt.mode, evt.ago, evt.by, _same ? 'live - already on it' : 'IGNORED - my match is live, the decree is a lobby\'s');
+        if (!_same) { try { _lssModeAnnounce(); } catch (_) {} }
+        return;
+      }
+      const _me = String(net.myPeerId);
+      const _win = (evt.host != null) ? String(evt.host) : null;
+      if (_same || _win === _me) {
+        // our own world, or a decree that names us: nothing in it for us (a stale picture of our world is corrected
+        // by the announce)
+        _lssModeLog('rx', 'mode_decree', evt.mode, evt.ago, evt.by, _same ? 'live - already on it' : 'live - it names me');
+        if (!_same) { try { _lssModeAnnounce(); } catch (_) {} }
+        return;
+      }
+      if (_win && _lssLiveOutranks(evt.since, _win, net._liveSince, _me)) {
+        // their briefing (dropin_state) may not have landed yet: a brief from the decree, which the briefing then refines
+        // (round and score) when it arrives, by then at a picker in 'select' where it is an ordinary late joiner's
+        _lssYieldToLiveMatch({ type: 'dropin', host: _win, mode: evt.mode, map: evt.map, seed: evt.seed,
+                               since: evt.since, ago: evt.ago, round: 1, scoreA: 0, scoreB: 0 }, 'mode_decree');
+        return;
+      }
+      _lssModeLog('rx', 'mode_decree', evt.mode, evt.ago, evt.by, 'IGNORED - my live match went live first');
+      try { _lssModeAnnounce(); } catch (_) {}
+      return;
+    }
     net.roomMode = evt.mode;
-    if (!mine) net._decreedMode = evt.mode;
+    if (!mine) { net._decreedMode = evt.mode; net._decreedLive = (evt.hostLive === true); }   // (v54.32) + whether it names a live match
     try { if (typeof evt.ago === 'number' && evt.ago >= 0) { LSS._modeChosen = true; LSS._modeChosenAt = performance.now() - evt.ago; } } catch (_) {}
 
     // (v43.28) ⚠⚠ THE MAP IS PART OF THE ROOM, NOT A PER-CLIENT PREFERENCE. Owner: "i didn't change
@@ -147317,8 +147638,7 @@ function _lssApplyModeDecree(evt, mine) {
     // map was never announced by anybody. (launch_at carries no map either, so the divergence
     // survived all the way into the world build.)
     const modeChanged = (_lssRoomTag() !== evt.mode);   // (v44.11) tag space
-    const live = (typeof game !== 'undefined' && game &&
-                  (game.state === 'playing' || game.state === 'warmup' || game.state === 'roundEnd'));
+    // (v54.33) no `live` here any more: every live client has returned above, so what follows is a lobby adopting
     if (evt.seed != null) { try { net.worldSeed = evt.seed >>> 0; } catch (_) {} }
     if (modeChanged) {
       try { _lssClearModeSetup(); } catch (_) {}
@@ -147379,17 +147699,14 @@ function _lssApplyModeDecree(evt, mine) {
       return;
     }
     _lssModeLog('rx', 'mode_decree', evt.mode, evt.ago, evt.by,
-                (live ? 'ADOPT live' : 'ADOPT') + (modeChanged ? ' mode' : '') + (mapChanged ? ' map=' + evt.map : ''));
-    if (live) {
-      // A running match cannot be re-moded in place - the drop-in machinery is the one path that
-      // rebuilds a world from map+seed and hands us back to ship select.
-      try { if (typeof applyWorldSync === 'function' && evt.map) applyWorldSync(evt.map, (evt.seed != null ? evt.seed : net.worldSeed) >>> 0); } catch (_) {}
-      try { if (typeof enterShipSelect === 'function') enterShipSelect(); } catch (_) {}
-    } else {
-      // (!) buildMapSelector re-snaps game.selectedMap when it is not legal for the mode, so it must
-      //     run AFTER the map is written, not before.
-      try { if (typeof buildMapSelector === 'function') buildMapSelector(); } catch (_) {}
-    }
+                'ADOPT' + (modeChanged ? ' mode' : '') + (mapChanged ? ' map=' + evt.map : ''));
+    // (v54.33) The `live` arm that lived here - "A running match cannot be re-moded in place - the drop-in machinery is
+    // the one path that rebuilds a world from map+seed and hands us back to ship select" - is gone. Its premise was
+    // right and its machinery was half of it: applyWorldSync + enterShipSelect, with game.state left at 'playing' and
+    // both launch latches set, is the dead picker. The whole of that machinery is _lssYieldToLiveMatch, reached above.
+    // (!) buildMapSelector re-snaps game.selectedMap when it is not legal for the mode, so it must
+    //     run AFTER the map is written, not before.
+    try { if (typeof buildMapSelector === 'function') buildMapSelector(); } catch (_) {}
     _lssRefreshModeUI();
     try { _lssSayRoomMode(evt.mode); } catch (_) {}
     // The decider's own map may have just been re-snapped by the mode change; re-run so the room is

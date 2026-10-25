@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "54.31";
+const LSS_BUILD = "54.36";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -3248,12 +3248,14 @@ async function joinRoom() {
 
       if (net.openSolo && game.state !== 'select' && net.sendEvent) {
         try {
-          net.sendEvent({ type: 'dropin_state', ago: _lssModeAgo(), host: net.myPeerId,
+          const _brief = { type: 'dropin_state', ago: _lssModeAgo(), host: net.myPeerId,
             map: game.selectedMap, seed: (net.worldSeed != null ? net.worldSeed : 0) >>> 0,
             mst: (typeof net.matchStartedAt === 'number') ? net.matchStartedAt : undefined,   // (v38.60)
             mode: (typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : 'classic',
-            round: game.currentRound || 1, scoreA: game.scoreA || 0, scoreB: game.scoreB || 0 },
-            peerId);   // (v45.02) to the joiner only
+            round: game.currentRound || 1, scoreA: game.scoreA || 0, scoreB: game.scoreB || 0,
+            since: (typeof net._liveSince === 'number') ? net._liveSince : undefined };
+          try { _lssTagPut(_brief, _lssRoomTag()); } catch (_) {}   // (v54.33) and the TAG, not just LSS.MODE
+          net.sendEvent(_brief, peerId);   // (v45.02) to the joiner only
           if (typeof _botSendRoster === 'function') _botSendRoster(peerId);   // (v45.02) ditto
         } catch (_) {}
       }
@@ -7833,6 +7835,7 @@ function _lssLaunchReady() {
   try {
     if (!_lssConfirmed()) return false;
     if (!net || !net.active) return true;                                  // solo
+    if (net._dropin && net.openSoloHostId && String(net.openSoloHostId) !== String(net.myPeerId)) return true;
     if (typeof nonJudgePeerCount === 'function' && nonJudgePeerCount() === 0) return true;   // alone in the room
     return (typeof allPeersReady === 'function') ? !!allPeersReady() : false;
   } catch (_) { return false; }
@@ -8762,6 +8765,7 @@ function checkAllLoadoutsReady() {
   if (typeof _countdownActive !== 'undefined' && _countdownActive) return;
   if (game._launchCommitted) return;
   if (!player.loadoutKey) return;
+  if ((game._commitEpoch | 0) !== _lssLaunchEpochNow() || game._commitEpoch == null) return;
   if (typeof game !== 'undefined' && game && game.state === 'warmup' && (game.currentRound || 1) > 1) return;
   
   
@@ -8851,7 +8855,9 @@ function _lssCineWindowMs() {
 }
 function _lssArmSyncedCountdown(atMs) {
   const _now = () => ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now());
+  const _launchEp = _lssLaunchEpochNow();   // (v54.34) see _lssLaunchStale
   setTimeout(() => {
+    if (_lssLaunchStale(_launchEp)) return;   // (v54.34) its match was torn down before the shared deadline
     try {
       if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active &&
           typeof _lssCompleteSpectatorCinematic === 'function') _lssCompleteSpectatorCinematic();
@@ -10170,7 +10176,7 @@ function handleNetEvent(evt, fromPeerId) {
     _lssModeLog('rx', 'mode_pick', _t, null, fromPeerId, 'peer picked');
     net._forcedMode = _t;
     net._decreedMode = null;
-    try { if (_lssRoomTag() !== _t) { _lssAdoptRoomMode(_t); _lssModeChosen(_t); } } catch (_) {}
+    try { if (_lssRoomTag() !== _t && !_lssLiveMatch()) { _lssAdoptRoomMode(_t); _lssModeChosen(_t); } } catch (_) {}
     try { _lssModeDecide(); } catch (_) {}
     try { _lssRenderLobbyMode(); } catch (_) {}
     return;
@@ -10222,6 +10228,10 @@ function handleNetEvent(evt, fromPeerId) {
     return;
   }
   if (evt.type === 'open_solo_start') {
+    if (_lssLiveMatch()) {
+      _lssModeLog('rx', 'open_solo_start', evt.mode, (typeof evt.ago === 'number' ? evt.ago : null), fromPeerId, 'IGNORED - my match is live');
+      return;
+    }
     const evtHost = evt.host || fromPeerId;
     if (net.openSolo && net.openSoloHostId && !_lssPeerOutranksMe(evt, fromPeerId)) return;
     try { if (typeof evt.ago === 'number' && evt.ago >= 0) { LSS._modeChosen = true; LSS._modeChosenAt = performance.now() - evt.ago; } } catch (_) {}
@@ -10270,29 +10280,22 @@ function handleNetEvent(evt, fromPeerId) {
     return;
   }
   if (evt.type === 'dropin_state') {
-    const _iAmLive = (typeof game !== 'undefined' && game &&
-                      (game.state === 'playing' || game.state === 'warmup' || game.state === 'roundEnd'));
-    if (_iAmLive && !_lssPeerOutranksMe(evt, fromPeerId)) {
-      _lssModeLog('rx', 'dropin_state', evt.mode, (typeof evt.ago === 'number' ? evt.ago : null), fromPeerId, 'IGNORED - my match outranks');
+    try { const _t = _lssTagOf(evt); if (_t) evt.mode = _t; } catch (_) {}
+    if (_lssLiveMatch()) {
+      const _from = String(evt.host || fromPeerId);
+      const _ago = (typeof evt.ago === 'number' ? evt.ago : null);
+      if (_lssSameWorld(evt.mode, evt.map, evt.seed)) {
+        _lssModeLog('rx', 'dropin_state', evt.mode, _ago, fromPeerId, 'live - same match');
+        return;
+      }
+      if (!_lssLiveOutranks(evt.since, _from, net._liveSince, net.myPeerId)) {
+        _lssModeLog('rx', 'dropin_state', evt.mode, _ago, fromPeerId, 'IGNORED - my live match went live first');
+        return;
+      }
+      _lssYieldToLiveMatch(Object.assign({}, evt, { host: _from }), 'dropin_state');
       return;
     }
-    try { if (typeof evt.ago === 'number' && evt.ago >= 0) { LSS._modeChosen = true; LSS._modeChosenAt = performance.now() - evt.ago; } } catch (_) {}
-    try { net.roomMode = evt.mode || net.roomMode; } catch (_) {}
-    try { if (evt.mode && evt.mode !== LSS.MODE) _lssClearModeSetup(); } catch (_) {}
-    net.openSoloHostId = evt.host || null;
-    net._dropin = evt;
-    if (typeof evt.mst === 'number' && isFinite(evt.mst)) net.matchStartedAt = evt.mst;   // (v38.60) shared match id
-    try { if (net._decreedMode && evt.mode && evt.mode !== net._decreedMode) {
-      _lssModeLog('rx', evt.type, evt.mode, null, fromPeerId, 'mode OVERRIDDEN by decree ' + net._decreedMode);
-      evt.mode = net._decreedMode;
-    } } catch (_) {}
-    try { if (evt.mode) _applyModeClientSetup(evt.mode); } catch (_) {}
-    try { applyWorldSync(evt.map, evt.seed >>> 0); } catch (e) { console.warn('[dropin] world sync failed:', e); }
-    try {
-      const ls = document.getElementById('lobby-status');
-      if (ls) { ls.textContent = 'MATCH IN PROGRESS — PICK A SHIP AND DROP IN'; ls.style.color = '#7dffa8'; }
-    } catch (_) {}
-    try { if (typeof enterShipSelect === 'function') enterShipSelect(); } catch (_) {}
+    _lssAdoptDropin(evt);   // (v54.33) the late joiner's adoption, shared with the yield - see there
     return;
   }
   if (evt.type === 'mon_tp' && typeof evt.i === 'number') {
@@ -78629,6 +78632,7 @@ function commitLoadout(key) {
 
   player.loadout = loadout;
   player.loadoutKey = key;
+  try { game._commitEpoch = _lssLaunchEpochNow(); } catch (_) {}
   try { _stagedRoundShip = null; } catch (_) {}
   if (!midMatch) { try { _xrMenuForceHidden = true; } catch (_) {} }
   updateCockpitFrame();
@@ -78861,6 +78865,10 @@ function commitLoadout(key) {
     broadcastWorldObjects();
 
     game.state = 'warmup';
+    try {
+      const _ds = net._dropin && net._dropin.since;
+      net._liveSince = (typeof _ds === 'number' && isFinite(_ds) && _ds > 0) ? _ds : Date.now();
+    } catch (_) {}
 
     try { if (game._cyber && game._cyber.armed && !game._cyber.started && typeof _cyberCineLightsEnsure === 'function') _cyberCineLightsEnsure(); } catch (_) {}
     if (typeof _pinCombatEffectPrograms === 'function') _pinCombatEffectPrograms();
@@ -78988,6 +78996,7 @@ function commitLoadout(key) {
   }
 
   try { game._warmupDone = false; } catch (_) {}   // (v42.25) cleared by both promise arms below
+  const _launchEp = _lssLaunchEpochNow();   // (v54.34) both arms below stand down if this match is torn down first
   let _warmupPromise;
   try {
     const _cw = _commitWarmTake();
@@ -79012,6 +79021,7 @@ function commitLoadout(key) {
   _warmupPromise.then(() => {
     try { game._warmupDone = true; } catch (_) {}   // (v42.25)
     if (_questWarmupWatchdog) { clearTimeout(_questWarmupWatchdog); _questWarmupWatchdog = null; }
+    if (_lssLaunchStale(_launchEp)) { console.log('[commitLoadout] warmup finished for a match that was torn down - standing down'); return; }
     if (net.active) _clearLaunchStall();   // (v36.21) MP owns its own handshake
     _markLocalWarmupReady();
     if (net.active) {
@@ -79027,6 +79037,7 @@ function commitLoadout(key) {
   }).catch((e) => {
     try { game._warmupDone = true; } catch (_) {}   // (v42.25) failed counts as done - never strand the launch
     if (_questWarmupWatchdog) { clearTimeout(_questWarmupWatchdog); _questWarmupWatchdog = null; }
+    if (_lssLaunchStale(_launchEp)) return;   // (v54.34) as the success arm
     if (net.active) _clearLaunchStall();   // (v36.21) MP owns its own handshake
     console.warn('[commitLoadout] warmup failed, launching anyway:', e);
     _markLocalWarmupReady();
@@ -80685,7 +80696,16 @@ function _cineWhenSettled(fn, capMs) {
 }
 let _cineCurtainT0 = 0;
 const _CINE_CURTAIN_MAX_MS = 50000;
-function _lssRunCinematicThen(andThen, waitCurtain) {
+function _lssLaunchEpochNow() { try { return game._launchEpoch | 0; } catch (_) { return 0; } }
+function _lssLaunchStale(ep) { return _lssLaunchEpochNow() !== (ep | 0); }
+function _lssRunCinematicThen(andThen, waitCurtain, _ep) {
+  const _launchEp = (typeof _ep === 'number') ? _ep : _lssLaunchEpochNow();
+  if (_lssLaunchStale(_launchEp)) { console.log('[cinematic] the launch this belonged to was torn down - not starting it'); return; }
+  const _andThen = andThen;
+  andThen = () => {
+    if (_lssLaunchStale(_launchEp)) { console.log('[cinematic] the launch this belonged to was torn down - no 3-2-1'); return; }
+    _andThen();
+  };
   if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) {
     _cinematic.after = () => {
       try { andThen(); } catch (e) { console.warn('[cinematic] post-tick failed:', e && e.message); }
@@ -80697,7 +80717,7 @@ function _lssRunCinematicThen(andThen, waitCurtain) {
     if (_ov && getComputedStyle(_ov).display !== 'none') {
       if (!_cineCurtainT0) _cineCurtainT0 = Date.now();
       if (Date.now() - _cineCurtainT0 < _CINE_CURTAIN_MAX_MS) {
-        setTimeout(() => { try { _lssRunCinematicThen(andThen, waitCurtain); } catch (_) {} }, 50);
+        setTimeout(() => { try { _lssRunCinematicThen(_andThen, waitCurtain, _launchEp); } catch (_) {} }, 50);   // (v54.34) same epoch
         return;
       }
       console.warn('[cinematic] curtain still up after ' +
@@ -88381,6 +88401,13 @@ document.addEventListener('keydown', (e) => {
 
 function returnToRootMenu(opts) {
   const _keepRoom = !!(opts && opts.keepRoom);
+  try { game._launchEpoch = (game._launchEpoch | 0) + 1; } catch (_) {}
+  try {
+    if (_cinematic && (_cinematic.active || _cinematic.after)) {
+      _cinematic.after = null;
+      if (_cinematic.active && typeof _lssEndSpectatorCinematic === 'function') _lssEndSpectatorCinematic();
+    }
+  } catch (_) {}
   try { activeMode().onTeardown(); } catch (_) {}
   try { if (typeof _raceCircuitTeardown === 'function') _raceCircuitTeardown(); } catch (_) {}   // (v46.82) the lap, its cities, its HUD line
   try { if (typeof _setpDispose === 'function') _setpDispose(); } catch (_) {}   // (51.86) nor a cavern's set piece
@@ -88392,6 +88419,7 @@ function returnToRootMenu(opts) {
   try { if (typeof net !== 'undefined' && net) net._dropin = null; } catch (_) {}
   try { game._launchCommitted = false; } catch (_) {}
   try { game._ssConfirmed = false; } catch (_) {}   // (v45.06) back at the menu, nothing is locked in
+  try { if (typeof net !== 'undefined' && net) net._liveSince = null; } catch (_) {}   // (v54.33) the match's age goes with it
   try { if (typeof net !== 'undefined' && net) net._teamPick = null; } catch (_) {}
   try { game._campPicker = false; } catch (_) {}   
   
@@ -88410,6 +88438,10 @@ function returnToRootMenu(opts) {
     if (net.launchTimer) {
       try { clearTimeout(net.launchTimer); } catch (_) {}
       net.launchTimer = null;
+    }
+    if (net.launchRebroadcast) {
+      try { clearInterval(net.launchRebroadcast); } catch (_) {}
+      net.launchRebroadcast = null;
     }
     net.launchScheduledAt = null;
     net.startScheduledAt = null;
@@ -95163,8 +95195,10 @@ if (typeof window !== 'undefined') window.__kickAssetPreload = _kickAssetPreload
 let _localWarmupReady = false;
 function _markLocalWarmupReady() {
   if (_localWarmupReady) return;                 // idempotent: several paths call this
+  const _launchEp = _lssLaunchEpochNow();        // (v54.34) see _lssLaunchStale
   const _announce = () => {
     if (_localWarmupReady) return;
+    if (_lssLaunchStale(_launchEp)) return;      // (v54.34) settled for a match that no longer exists
     _localWarmupReady = true;
     if (typeof net !== 'undefined' && net.active && net.sendEvent) {
       try { net.sendEvent({ type: 'warmup_ready' }); } catch (_) {}
@@ -95682,6 +95716,80 @@ function _lssModeAgo() {
     return Math.max(0, Math.round(performance.now() - LSS._modeChosenAt));
   } catch (_) { return -1; }
 }
+function _lssLiveMatch() {
+  try {
+    return !!(typeof game !== 'undefined' && game &&
+              (game.state === 'playing' || game.state === 'warmup' || game.state === 'roundEnd'));
+  } catch (_) { return false; }
+}
+function _lssLiveOutranks(aSince, aId, bSince, bId) {
+  const ok = (v) => typeof v === 'number' && isFinite(v) && v > 0;
+  if (ok(aSince) && ok(bSince) && aSince !== bSince) return aSince < bSince;
+  return String(aId) < String(bId);
+}
+function _lssSameWorld(tag, map, seed) {
+  try {
+    if (tag && _lssRoomTag() !== tag) return false;
+    if (map && game && game.selectedMap !== map) return false;
+    if (seed != null && net.worldSeed != null && ((seed >>> 0) !== (net.worldSeed >>> 0))) return false;
+    return true;
+  } catch (_) { return false; }
+}
+function _lssYieldToLiveMatch(brief, via) {
+  try {
+    if (!brief || !brief.host || !brief.mode || typeof net === 'undefined' || !net) return false;
+    if (net._yielding) return false;   // a decree and the briefing can arrive together; the first one yields
+    net._yielding = true;
+    try {
+      _lssModeLog('rx', via, brief.mode, (typeof brief.ago === 'number' ? brief.ago : null), brief.host,
+                  'YIELD - their match went live first (' + String(brief.host).slice(0, 6) + ')');
+      const _joinedAt = net.roomJoinedAt;
+      net.openSoloHostId = String(brief.host);
+      returnToRootMenu({ keepRoom: true });
+      net.roomJoinedAt = _joinedAt;
+      _lssAdoptDropin(brief);
+    } finally { net._yielding = false; }
+    return true;
+  } catch (e) { console.warn('[net] yield to the live match failed:', e); return false; }
+}
+function _lssAdoptDropin(evt) {
+  try { if (typeof evt.ago === 'number' && evt.ago >= 0) { LSS._modeChosen = true; LSS._modeChosenAt = performance.now() - evt.ago; } } catch (_) {}
+  try { net.roomMode = evt.mode || net.roomMode; } catch (_) {}
+  try { if (evt.mode && evt.mode !== _lssRoomTag()) _lssClearModeSetup(); } catch (_) {}
+  net.openSoloHostId = evt.host || null;
+  net._dropin = evt;
+  if (typeof evt.mst === 'number' && isFinite(evt.mst)) net.matchStartedAt = evt.mst;   // (v38.60) shared match id
+  try { if (net._decreedMode && net._decreedLive && evt.mode && evt.mode !== net._decreedMode) {
+    _lssModeLog('rx', evt.type || 'dropin', evt.mode, null, evt.host, 'mode OVERRIDDEN by decree ' + net._decreedMode);
+    evt.mode = net._decreedMode;
+  } } catch (_) {}
+  try { if (evt.mode) _applyModeClientSetup(evt.mode); } catch (_) {}
+  try { applyWorldSync(evt.map, evt.seed >>> 0); } catch (e) { console.warn('[dropin] world sync failed:', e); }
+  try {
+    const ls = document.getElementById('lobby-status');
+    if (ls) { ls.textContent = 'MATCH IN PROGRESS — PICK A SHIP AND DROP IN'; ls.style.color = '#7dffa8'; }
+  } catch (_) {}
+  try { if (typeof enterShipSelect === 'function') enterShipSelect(); } catch (_) {}
+}
+function _lssResendDecreeToLiveStragglers() {
+  try {
+    const d = net._lastDecree;
+    if (!d || d.hostLive !== true || !net._peerModes || !net.sendEvent) return;
+    const now = performance.now();
+    net._peerModes.forEach((v, id) => {
+      if (!v || !v.live || String(id) === String(d.host)) return;
+      if (!net.peers || !net.peers.has(id)) return;
+      const same = (v.mode === d.tag) && (!d.map || v.map === d.map) &&
+                   (d.seed == null || v.seed == null || (v.seed >>> 0) === (d.seed >>> 0));
+      if (same) return;
+      if (!net._decreeResendAt) net._decreeResendAt = new Map();
+      if (now - (net._decreeResendAt.get(String(id)) || 0) < 1500) return;
+      net._decreeResendAt.set(String(id), now);
+      _lssModeLog('tx', 'mode_decree', d.tag, d.ago, id, 're-sent - still live in another world');
+      try { net.sendEvent(d, id); } catch (_) {}
+    });
+  } catch (_) {}
+}
 function _lssModeAnnounce(targetPeerId) {
   try {
     if (typeof net === 'undefined' || !net || !net.active || !net.sendEvent) return;
@@ -95693,7 +95801,10 @@ function _lssModeAnnounce(targetPeerId) {
       cyber: !!(typeof game !== 'undefined' && game && game._cyber && game._cyber.armed),
       inRoom: (net.roomJoinedAt ? Math.round(Math.max(0, performance.now() - net.roomJoinedAt)) : 0),
       map: (typeof game !== 'undefined' && game && game.selectedMap) ? game.selectedMap : undefined,
+      live: _lssLiveMatch(),
     };
+    try { if (msg.live && typeof net._liveSince === 'number') msg.since = net._liveSince; } catch (_) {}
+    try { _lssTagPut(msg, _lssRoomTag()); } catch (_) {}
     try { if (net.worldSeed != null) msg.seed = net.worldSeed >>> 0; } catch (_) {}
     _lssModeLog('tx', 'mode_set', msg.mode, msg.ago, targetPeerId, targetPeerId ? 'targeted' : 'broadcast');
     if (targetPeerId) net.sendEvent(msg, targetPeerId); else net.sendEvent(msg);
@@ -95725,6 +95836,9 @@ function _lssNotePeerMode(peerId, evt) {
       ago: (typeof evt.ago === 'number') ? evt.ago : -1,
       inRoom: (typeof evt.inRoom === 'number') ? evt.inRoom : 0,
       map: (typeof evt.map === 'string') ? evt.map : null,
+      live: evt.live === true,
+      seed: (typeof evt.seed === 'number' && isFinite(evt.seed)) ? (evt.seed >>> 0) : null,
+      since: (evt.live === true && typeof evt.since === 'number' && isFinite(evt.since)) ? evt.since : null,
       at: performance.now(),
     });
   } catch (_) {}
@@ -95736,53 +95850,71 @@ function _lssModeDecide() {
     if (!_lssAmModeDecider()) return;
     let bestMode = null, bestAgo = -1, bestId = null, _bestHostMap = null;
     const _cands = [];
+    let _host = null;
     try {
       const _myIn = (net.roomJoinedAt ? Math.max(0, performance.now() - net.roomJoinedAt) : 0);
       const _myAgo = _lssModeAgo();
-      if (_myAgo >= 0) _cands.push({ id: String(net.myPeerId), mode: _lssRoomTag(), ago: _myAgo, inRoom: _myIn,   // (v44.11) my TAG
-                                     map: (game && game.selectedMap) || null, mine: true });
+      const _myLive = _lssLiveMatch();
+      if (_myAgo >= 0 || _myLive) _cands.push({ id: String(net.myPeerId), mode: _lssRoomTag(), ago: _myAgo, inRoom: _myIn,   // (v44.11) my TAG
+                                     map: (game && game.selectedMap) || null, mine: true,
+                                     live: _myLive, seed: (net.worldSeed != null ? (net.worldSeed >>> 0) : null),
+                                     since: (_myLive && typeof net._liveSince === 'number') ? net._liveSince : null });   // (v54.33)
       if (net._peerModes) {
         net._peerModes.forEach((v, id) => {
-          if (!v || !v.mode || v.ago < 0) return;                 // never chose - cannot decide the room
+          if (!v || !v.mode || (v.ago < 0 && !v.live)) return;    // never chose (and not mid-match) - cannot decide the room
           if (!net.peers || !net.peers.has(id)) return;           // gone
           const _age = Math.max(0, performance.now() - v.at);
-          _cands.push({ id: String(id), mode: v.mode, ago: v.ago + _age,
+          _cands.push({ id: String(id), mode: v.mode, ago: (v.ago >= 0 ? v.ago + _age : -1),
                         inRoom: (typeof v.inRoom === 'number' ? v.inRoom + _age : 0),
-                        map: v.map || null, mine: false });
+                        map: v.map || null, mine: false, live: !!v.live, seed: (v.seed != null ? v.seed : null),
+                        since: (v.since != null ? v.since : null) });   // (v54.33)
         });
       }
     } catch (_) {}
     if (_cands.length) {
       _cands.sort((a, b) => {
+        if (!!a.live !== !!b.live) return a.live ? -1 : 1;                       // (v54.32) a live match, before any lobby
+        if (a.live && b.live) return _lssLiveOutranks(a.since, a.id, b.since, b.id) ? -1 : 1;
         if (Math.abs(b.inRoom - a.inRoom) > 1500) return b.inRoom - a.inRoom;   // longest in the room
         if (Math.abs(b.ago - a.ago) > 1200) return b.ago - a.ago;               // else: chose first
         return a.id < b.id ? -1 : (a.id > b.id ? 1 : 0);                        // else: stable
       });
-      const _host = _cands[0];
+      _host = _cands[0];
       bestMode = _host.mode; bestAgo = _host.ago; bestId = _host.id; _bestHostMap = _host.map;
     }
+    const _hostLive = !!(_host && _host.live);
 
     if (!bestMode) return;
     let _map;
     try { if (_bestHostMap && _lssRoomTag() === bestMode) _map = _bestHostMap; } catch (_) {}
     try { if (!_map && _lssRoomTag() === bestMode && game && game.selectedMap) _map = game.selectedMap; } catch (_) {}
+    try { if (_hostLive && _bestHostMap) _map = _bestHostMap; } catch (_) {}
     try { if (bestMode === 'campaign' && !(net._campRoomMap && net._campRoomMap === _map)) _map = undefined; } catch (_) {}
     let _seed;
     try { if (net.worldSeed != null) _seed = net.worldSeed >>> 0; } catch (_) {}
-    const _key = bestMode + '|' + (_map || '') + '|' + (_seed == null ? '' : _seed);
-    if (net._decreedKey === _key) return;                    // nothing moved
+    try { if (_hostLive && _host.seed != null) _seed = _host.seed >>> 0; } catch (_) {}
+    const _key = bestMode + '|' + (_map || '') + '|' + (_seed == null ? '' : _seed) + '|' + (_hostLive ? 'L' : '');
+    if (net._decreedKey === _key) {                          // nothing moved
+      if (_hostLive) _lssResendDecreeToLiveStragglers();
+      return;
+    }
     if (net._deciding) return;                               // re-entry guard for the re-run below
     net._deciding = true;
     net._decreedKey = _key;
     net._decreedMode = bestMode;
+    net._decreedLive = _hostLive;   // (v54.32)
     net.roomMode = bestMode;
     const decree = {
       by: String(net.myPeerId), ago: bestAgo,
       map: _map, seed: _seed,
+      hostLive: _hostLive,   // (v54.32) the winner is mid-match - see the live guard in _lssApplyModeDecree
+      host: bestId,
+      since: (_hostLive && _host && _host.since != null) ? _host.since : undefined,
     };
     _lssTagPut(decree, bestMode);
     decree.type = 'mode_decree';
-    _lssModeLog('tx', 'mode_decree', bestMode, bestAgo, bestId, 'I AM DECIDER -> ' + bestMode + (_map ? ' / ' + _map : ''));
+    _lssModeLog('tx', 'mode_decree', bestMode, bestAgo, bestId, 'I AM DECIDER -> ' + bestMode + (_map ? ' / ' + _map : '') + (_hostLive ? ' (live)' : ''));
+    net._lastDecree = decree;   // (v54.33) what _lssResendDecreeToLiveStragglers sends again
     try { net.sendEvent(decree); } catch (_) {}
     try { _lssApplyModeDecree(decree, true); } finally { net._deciding = false; }
   } catch (_) {}
@@ -95818,13 +95950,34 @@ function _lssApplyModeDecree(evt, mine) {
       try { _lssModeDecide(); } catch (_) {}
       return;
     }
+    if (_lssLiveMatch()) {
+      const _same = _lssSameWorld(evt.mode, evt.map, evt.seed);
+      if (evt.hostLive !== true) {
+        _lssModeLog('rx', 'mode_decree', evt.mode, evt.ago, evt.by, _same ? 'live - already on it' : 'IGNORED - my match is live, the decree is a lobby\'s');
+        if (!_same) { try { _lssModeAnnounce(); } catch (_) {} }
+        return;
+      }
+      const _me = String(net.myPeerId);
+      const _win = (evt.host != null) ? String(evt.host) : null;
+      if (_same || _win === _me) {
+        _lssModeLog('rx', 'mode_decree', evt.mode, evt.ago, evt.by, _same ? 'live - already on it' : 'live - it names me');
+        if (!_same) { try { _lssModeAnnounce(); } catch (_) {} }
+        return;
+      }
+      if (_win && _lssLiveOutranks(evt.since, _win, net._liveSince, _me)) {
+        _lssYieldToLiveMatch({ type: 'dropin', host: _win, mode: evt.mode, map: evt.map, seed: evt.seed,
+                               since: evt.since, ago: evt.ago, round: 1, scoreA: 0, scoreB: 0 }, 'mode_decree');
+        return;
+      }
+      _lssModeLog('rx', 'mode_decree', evt.mode, evt.ago, evt.by, 'IGNORED - my live match went live first');
+      try { _lssModeAnnounce(); } catch (_) {}
+      return;
+    }
     net.roomMode = evt.mode;
-    if (!mine) net._decreedMode = evt.mode;
+    if (!mine) { net._decreedMode = evt.mode; net._decreedLive = (evt.hostLive === true); }   // (v54.32) + whether it names a live match
     try { if (typeof evt.ago === 'number' && evt.ago >= 0) { LSS._modeChosen = true; LSS._modeChosenAt = performance.now() - evt.ago; } } catch (_) {}
 
     const modeChanged = (_lssRoomTag() !== evt.mode);   // (v44.11) tag space
-    const live = (typeof game !== 'undefined' && game &&
-                  (game.state === 'playing' || game.state === 'warmup' || game.state === 'roundEnd'));
     if (evt.seed != null) { try { net.worldSeed = evt.seed >>> 0; } catch (_) {} }
     if (modeChanged) {
       try { _lssClearModeSetup(); } catch (_) {}
@@ -95859,13 +96012,8 @@ function _lssApplyModeDecree(evt, mine) {
       return;
     }
     _lssModeLog('rx', 'mode_decree', evt.mode, evt.ago, evt.by,
-                (live ? 'ADOPT live' : 'ADOPT') + (modeChanged ? ' mode' : '') + (mapChanged ? ' map=' + evt.map : ''));
-    if (live) {
-      try { if (typeof applyWorldSync === 'function' && evt.map) applyWorldSync(evt.map, (evt.seed != null ? evt.seed : net.worldSeed) >>> 0); } catch (_) {}
-      try { if (typeof enterShipSelect === 'function') enterShipSelect(); } catch (_) {}
-    } else {
-      try { if (typeof buildMapSelector === 'function') buildMapSelector(); } catch (_) {}
-    }
+                'ADOPT' + (modeChanged ? ' mode' : '') + (mapChanged ? ' map=' + evt.map : ''));
+    try { if (typeof buildMapSelector === 'function') buildMapSelector(); } catch (_) {}
     _lssRefreshModeUI();
     try { _lssSayRoomMode(evt.mode); } catch (_) {}
     if (mine) { try { _lssModeDecide(); } catch (_) {} }
