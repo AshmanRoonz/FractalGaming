@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "54.39";
+const LSS_BUILD = "54.42";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -9356,6 +9356,7 @@ class NetworkPlayer {
   }
 
   takeDamage(amount, attacker, hitPoint) {
+    if (attacker === 'bot') return 0;
     if (amount > 0 && net.active && net.sendHitClaim && this.peerId) {
       const hitId = ++net.hitIdCounter;
       const _isBot = !!(attacker && (typeof Bot !== 'undefined') && (attacker instanceof Bot));
@@ -9732,6 +9733,14 @@ function handleHitClaim(claim, fromPeerId) {
     const _botKey = (claim.bot && typeof claim.botKey === 'string' && Object.prototype.hasOwnProperty.call(LOADOUTS, claim.botKey)) ? claim.botKey : null;
     const shooterLoadout = _botKey ? LOADOUTS[_botKey]
       : ((shooterPeer && shooterPeer.loadoutKey) ? LOADOUTS[shooterPeer.loadoutKey] : null);
+    let _fakeTeam;
+    try {
+      if (claim.bot) { const _pb = _botProxyById(claim.botId); if (_pb && _pb.team != null) _fakeTeam = _pb.team; }
+      else if (!claim.ow && shooterPeer) {
+        _fakeTeam = (shooterPeer.networkPlayer && shooterPeer.networkPlayer.team != null) ? shooterPeer.networkPlayer.team
+                  : (shooterPeer.team != null ? shooterPeer.team : undefined);
+      }
+    } catch (_) {}
     const fakeAttacker = (typeof claim.sx === 'number')
       ? {
           position: new THREE.Vector3(claim.sx, claim.sy, claim.sz),
@@ -9739,6 +9748,7 @@ function handleHitClaim(claim, fromPeerId) {
           loadout: claim.ow ? { name: claim.owName || 'CARRIER' } : shooterLoadout,
           botId: claim.bot ? claim.botId : undefined,
           botOwnerId: claim.bot ? claim.shooterId : undefined,
+          team: _fakeTeam,   // (v54.41) see above
         }
       : null;
     let _dmg = claim.damage;
@@ -10130,8 +10140,14 @@ function handleNetEvent(evt, fromPeerId) {
         const b = _botProxyById(r[0]);
         if (!b) continue;
         b._netX = r[1]; b._netY = r[2]; b._netZ = r[3];
+        if (r.length >= 10) { b._netVX = +r[7] || 0; b._netVY = +r[8] || 0; b._netVZ = +r[9] || 0; }
+        else b._netVX = null;
+        if (r.length >= 13) { b._netFX = (+r[10] || 0) / 100; b._netFY = (+r[11] || 0) / 100; b._netFZ = (+r[12] || 0) / 100; }
+        else b._netFX = null;
+        b._netT = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
         b.health = r[4]; b.shield = r[5];
         const aliveNow = !!r[6];
+        if (aliveNow !== !!b.alive) { b._mxCore = null; b._mxCs = 0; }
         if (!aliveNow && b.alive) { try { b.die(null); } catch (_) { b.alive = false; } }
         else if (aliveNow && !b.alive) {
           b.alive = true; b.doomed = false; b.doomTimer = 0; b.shipState = 'flying';
@@ -10213,6 +10229,14 @@ function handleNetEvent(evt, fromPeerId) {
         }
       } catch (_) {}
     }
+    return;
+  }
+  if (evt.type === 'bot_proj' && evt.i != null) {
+    if (!_botAuthority()) _botAbRun(_botProjMirror, evt);
+    return;
+  }
+  if (evt.type === 'bot_ab' && evt.i != null) {
+    if (!_botAuthority()) _botAbRun(_botAbMirror, evt);
     return;
   }
   if (evt.type === 'mode_pick' && typeof evt.mode === 'string' && evt.mode) {
@@ -10748,6 +10772,7 @@ function handleNetEvent(evt, fromPeerId) {
     return;
   }
   if (evt.type === 'mine_hit') {
+    if (evt.owner && evt.owner !== net.myPeerId) return;
     try {
       for (const o of game.worldEffects) {
         if (!_mineLive(o) || !_mineIsMine(o)) continue;
@@ -10757,10 +10782,13 @@ function handleNetEvent(evt, fromPeerId) {
     return;
   }
   if (evt.type === 'mine_blast' && typeof evt.px === 'number') {
-    try { _mineBlastFx(new THREE.Vector3(evt.px, evt.py, evt.pz), (typeof evt.r === 'number') ? evt.r : 220); } catch (_) {}
+    const _mbp = new THREE.Vector3(evt.px, evt.py, evt.pz), _mbr = (typeof evt.r === 'number') ? evt.r : 220;
+    try { _mineBlastFx(_mbp, _mbr); } catch (_) {}
+    if (evt.bot && !_botAuthority()) { try { _mineBotBlastLocal(_mbp, _mbr, evt); } catch (_) {} }
     return;
   }
   if (evt.type === 'effect_spawn' && typeof evt.netId === 'number') {
+    if (evt.bot && _botAuthority()) return;
     if (evt.kind === 'tripwire') {
       const pos = new THREE.Vector3(evt.px, evt.py, evt.pz);
       spawnTripWireOrb(pos, 'peer', evt.team, evt.ownerPeerId, evt.netId, false, evt.groupId);
@@ -10778,7 +10806,9 @@ function handleNetEvent(evt, fromPeerId) {
       const pos = new THREE.Vector3(evt.px, evt.py, evt.pz);
       const dir = new THREE.Vector3(evt.dx, evt.dy, evt.dz);
       spawnFlameChainVisual(pos, dir, evt.length || 800, evt.team, evt.ownerPeerId, evt.netId);
-    } else if (evt.kind === 'vortex_laser_beam') {
+    }
+    if (evt.bot) { try { _botFxMirrorTag(evt); } catch (_) {} return; }   // (v54.40) a bot's - see _botFxMirrorTag
+    if (evt.kind === 'vortex_laser_beam') {
       try {
         const _vlbOrigin = new THREE.Vector3(evt.ox, evt.oy, evt.oz);
         const _vlbDir    = new THREE.Vector3(evt.dx, evt.dy, evt.dz).normalize();
@@ -10825,10 +10855,24 @@ function handleNetEvent(evt, fromPeerId) {
     }
     return;
   }
+  if (evt.type === 'effect_ignite' && typeof evt.netId === 'number') {
+    const _io = evt.o || fromPeerId;
+    for (const eff of game.worldEffects) {
+      if (!eff || eff.type !== 'incendiary_gas' || eff.netId !== evt.netId || eff.ownerPeerId !== _io) continue;
+      if (eff.ignited) { eff.igniteTimer = Math.max(eff.igniteTimer || 0, eff.igniteDuration || 10); break; }
+      if (eff._botNet && evt.team != null && evt.team !== eff.team) eff.owner = 'peer:' + fromPeerId;
+      else if (evt.by === 'bot') eff.owner = 'bot';
+      if (evt.team != null) eff.team = evt.team;
+      try { _gasLight(eff, !eff._botNet); } catch (_) {}   // the authority passes it on; a mirror keeps quiet
+      break;
+    }
+    return;
+  }
   if (evt.type === 'effect_destroy' && typeof evt.netId === 'number') {
+    const _do = evt.o || null;
     for (let i = game.worldEffects.length - 1; i >= 0; i--) {
       const eff = game.worldEffects[i];
-      if (eff.netId === evt.netId) {
+      if (eff.netId === evt.netId && (!_do || eff.ownerPeerId === _do)) {
         eff.timer = 0;
         break;
       }
@@ -13002,7 +13046,7 @@ function _tetherShatter(eff) {
   } catch (_) {}
   try {
     if (typeof net !== 'undefined' && net && net.active && net.sendEvent && eff.netId !== undefined) {
-      net.sendEvent({ type: 'effect_destroy', netId: eff.netId });
+      net.sendEvent({ type: 'effect_destroy', netId: eff.netId, o: eff.ownerPeerId || undefined });
     }
   } catch (_) {}
   try { window.__tetherShotDown = (window.__tetherShotDown | 0) + 1; } catch (_) {}
@@ -13156,7 +13200,22 @@ function _mineBlow(o) {
   if (byPlayer) { try { _tetherHitSphere(pos, R, D); } catch (_) {} }
   if (hits > 0 && byPlayer && player.shipState !== 'dead') { try { showHitMarker(); } catch (_) {} }
   _mineBlastFx(pos, R);
-  try { if (net.active && net.sendEvent) net.sendEvent({ type: 'mine_blast', px: pos.x, py: pos.y, pz: pos.z, r: R }); } catch (_) {}
+  try {
+    if (net.active && net.sendEvent) {
+      const _mb = { type: 'mine_blast', px: pos.x, py: pos.y, pz: pos.z, r: R };
+      if (o.owner === 'bot') { _mb.bot = 1; _mb.d = D; _mb.t = o.team; _mb.fo = K.falloff; }
+      net.sendEvent(_mb);
+    }
+  } catch (_) {}
+}
+function _mineBotBlastLocal(pos, R, evt) {
+  if (typeof player === 'undefined' || !player || player.shipState === 'dead') return;
+  if (evt.t != null && player.team === evt.t) return;
+  const d = player.position.distanceTo(pos);
+  if (!(d < R)) return;
+  const D = Math.max(0, Math.min(5000, +evt.d || 0));
+  const fo = (typeof evt.fo === 'number' && isFinite(evt.fo)) ? Math.max(0, Math.min(1, evt.fo)) : _mineK().falloff;
+  if (D > 0) playerTakeDamage(D * (1 - fo * Math.max(0, Math.min(1, d / R))), null);
 }
 function _mineBlastFx(pos, R) {
   const s = _mineK().fxScale;
@@ -27758,6 +27817,10 @@ if (typeof window !== 'undefined') window.__dbg = {
         team: player ? player.team : null, state: game.state,
         confirmed: !!game._ssConfirmed, botsOn: game.eliminationBots !== false,
         mode: (typeof LSS !== 'undefined') ? LSS.MODE : null,
+        syncRate: (typeof _botNetSync === 'function' && _botNetSync._rate != null) ? Math.round(_botNetSync._rate * 1000) / 1000 : null,
+        syncRateSlow: (typeof _botNetSync === 'function' && _botNetSync._rateSlow != null) ? Math.round(_botNetSync._rateSlow * 1000) / 1000 : null,
+        fxRate: (typeof _botRealRate === 'function') ? _botRealRate() : null,
+        syncMs: (typeof _botStateMs === 'function') ? _botStateMs() : null,
       };
     } catch (e) { return { error: String(e) }; }
   },
@@ -57455,11 +57518,34 @@ class Bot {
 
   _updateProxyBot(dt) {
     if (this._netX != null) {
-      _botProxyTarget.set(this._netX, this._netY, this._netZ);
+      const _K = _botProxyK();
+      const _hasV = (this._netVX != null && this._netT != null);
+      let _age = 0, _fly = false;
+      if (_hasV) {
+        const _nowP = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+        _age = (_nowP - this._netT) / 1000 + (_K.lead || 0);
+        _fly = _age >= 0 && _age < _K.maxAge;
+        _age = Math.max(0, Math.min(_K.maxAge, _age));
+        _botProxyTarget.set(this._netX + this._netVX * _age, this._netY + this._netVY * _age, this._netZ + this._netVZ * _age);
+        if (_fly) {
+          this.position.x += this._netVX * dt;
+          this.position.y += this._netVY * dt;
+          this.position.z += this._netVZ * dt;
+        }
+      } else {
+        _botProxyTarget.set(this._netX, this._netY, this._netZ);
+      }
       const d = this.position.distanceTo(_botProxyTarget);
       if (d > 2500) this.position.copy(_botProxyTarget);
-      else if (d > 0.5) this.position.lerp(_botProxyTarget, Math.min(1, dt * 8));
-      if (d > 3) this.targetDir.copy(_botProxyTarget).sub(this.position).normalize();
+      else if (d > 0.5) this.position.lerp(_botProxyTarget, Math.min(1, dt * (_hasV ? _K.k : 8)));
+      if (this._netFX != null) {
+        _botProxyFace.set(this._netFX, this._netFY, this._netFZ);
+        if (_botProxyFace.lengthSq() > 0.01) {
+          _botProxyFace.normalize();
+          this.targetDir.lerp(_botProxyFace, Math.min(1, dt * _K.turn));
+          if (this.targetDir.lengthSq() > 1e-4) this.targetDir.normalize(); else this.targetDir.copy(_botProxyFace);
+        }
+      } else if (d > 3) this.targetDir.copy(_botProxyTarget).sub(this.position).normalize();
     }
     let _faced = false;
     if (typeof game !== 'undefined' && game && game.state === 'warmup' && this.mesh && this.position) {
@@ -57482,6 +57568,7 @@ class Bot {
         this.mesh.lookAt(_botProxyTarget);
       }
     }
+    if (this._mxCs > 0 || this._mxCore) { try { _botAbProxyTick(this, dt); } catch (_) {} }
     if (this.fireFlashTimer > 0) { this.fireFlashTimer -= dt; if (this.fireFlashTimer <= 0) this.isFiring = false; }
     this.spawnProtection = Math.max(0, (this.spawnProtection || 0) - dt);
   }
@@ -57988,7 +58075,10 @@ class Bot {
     this._chargeShotTick(dt);    // BLASTER's 1 s Charge Shot spool
     this._botLockTick(dt);       // TRACKER lock marks aging out, bot-vs-bot
     this._railTick(dt);          // PUNCTURE's railgun charge bleed-off + its glow tell
-    if (this._aiAssistT > 0) this._aiAssistT -= dt;
+    if (this._aiAssistT > 0) {
+      this._aiAssistT -= dt;
+      if (this.alive && _gunCoreLights(this.loadoutKey)) { try { _gunCoreGlow(this, dt); } catch (_) {} }
+    }
     if (this.coreMeter >= 100 && this._coreT <= 0 && _ctAlive && this._mayFight() &&
         game.state === 'playing' && !game.testMode &&
         this.position.distanceTo(_ct.position) < 1800 && Math.random() < dt * 0.5) {
@@ -58059,6 +58149,7 @@ class Bot {
         spawnTracer(this.position, beamEnd, 0xff2200, 1.6);
         spawnTracer(this.position, beamEnd, 0xffaa44, 1.4);
       }
+      _botAbNet(this, 'laser', { ex: Math.round(beamEnd.x), ey: Math.round(beamEnd.y), ez: Math.round(beamEnd.z) });
       if (dist > 0 && dist < range) {
         const closest = this._tempVec3d.copy(this.position).addScaledVector(aim, dist);
         if (closest.distanceTo(tgt.position) < _tgtHullR) {
@@ -58080,6 +58171,7 @@ class Bot {
       proj.ownerTeam = this.team; proj.ownerRef = this;
       proj.removeHaze();
       game.projectiles.push(proj);
+      _botProjNet(this, proj);   // (v54.41) the other screens fly a copy - see _botProjNet
     } else if (ability.name === 'Stun Bolt') {
       const _sbHalf = 2000 * 0.5;
       const vel = this._tempVec3b.copy(aim).multiplyScalar(800);
@@ -58090,11 +58182,13 @@ class Bot {
         proj.isArcWave = true;
         proj.ownerTeam = this.team; proj.ownerRef = this;
         game.projectiles.push(proj);
+        _botProjNet(this, proj);   // (v54.41)
       }
     } else if (ability.name === 'Charge Shot') {
       this._csT = 1.0;
       this._csAim = this._csAim || new THREE.Vector3();
       this._csAim.copy(aim);
+      _botAbNet(this, 'cs0', { t: _botRealSec(1.0) });   // (v54.41) the spool's tell, on the proxy's barrels too
       try {
         if (typeof playSpatialSound === 'function' && typeof player !== 'undefined' && player &&
             player.position && player.position.distanceToSquared(this.position) < 2200 * 2200 &&
@@ -58123,6 +58217,7 @@ class Bot {
         this._consumeLock(_lt);
       }
       this._botSalvoStart(_trQueue, 0.035, 'rockets');   // (v49.93) TRACKER's wing tubes
+      _botAbNet(this, 'snd', { s: 'tracker_rockets' });   // (v54.41) the launch cue; the rockets go one by one (_botSalvoTick)
       try {
         if (typeof playSpatialSound === 'function' && typeof player !== 'undefined' && player &&
             player.position && player.position.distanceToSquared(this.position) < 3000 * 3000 &&
@@ -58143,6 +58238,7 @@ class Bot {
         });
       }
       this._botSalvoStart(_rsQueue, 0.035, 'rockets');   // (v49.93) SYPHON's chin tube
+      _botAbNet(this, 'snd', { s: 'rocket_salvo' });   // (v54.41)
       try {
         if (typeof playSpatialSound === 'function' && typeof player !== 'undefined' && player &&
             player.position && player.position.distanceToSquared(this.position) < 3000 * 3000 &&
@@ -58168,13 +58264,17 @@ class Bot {
       const myEffId = ++net.effectIdCounter;
       if (typeof spawnFlameChainVisual === 'function') {
         spawnFlameChainVisual(wallStart, aim, 800, this.team, null, myEffId);
+        const _fcVis = _weLast(myEffId, 'firewall');
+        if (_fcVis) _fcVis._botFx = true;
       }
       _pyroChainReleaseFX(this.mesh, wallStart);   // (v50.56) out of PYRO's chain tube (gun3)
-      game.worldEffects.push({
+      const _fcEff = {
         type: 'firewall', position: wallStart, direction: aim.clone(),
         length: 800, timer: 5, dmgPerSec: 400, owner: 'bot', team: this.team,
-        fxTimer: 0, meshes: [], netId: myEffId,
-      });
+        fxTimer: 0, meshes: [], netId: myEffId, _botFx: true,
+      };
+      game.worldEffects.push(_fcEff);
+      _botFxNet(_fcEff, { length: 800, dps: 400 });
     } else {
       used = false;
     }
@@ -58198,7 +58298,9 @@ class Bot {
     if (ability.name === 'Explosive Gas') {
       const dropPos = this.position.clone().addScaledVector(aim, 160);
       if (typeof spawnIncendiaryGas === 'function') {
-        spawnIncendiaryGas(dropPos, 'bot', this.team, null, ++net.effectIdCounter, false);
+        const _gid = ++net.effectIdCounter;
+        spawnIncendiaryGas(dropPos, 'bot', this.team, null, _gid, false);
+        _botFxNet(_weLast(_gid, 'incendiary_gas'));   // (v54.40) the other screens get the cloud too
         _pyroGasReleaseFX(this.mesh, dropPos);   // (v49.93) out of PYRO's gas tube (gun2)
       }
     } else if (ability.name === 'Plasma Mines') {
@@ -58216,12 +58318,18 @@ class Bot {
     } else if (ability.name === 'Plasma Shield') {
       const wallPos = this.position.clone().addScaledVector(aim, 140);
       if (typeof spawnParticleWall === 'function') {
-        spawnParticleWall(wallPos, aim.clone(), 'bot', this.team, null, ++net.effectIdCounter, false);
+        const _wid = ++net.effectIdCounter;
+        spawnParticleWall(wallPos, aim.clone(), 'bot', this.team, null, _wid, false);
+        _botFxNet(_weLast(_wid, 'particle_wall'));   // (v54.40)
       }
     } else if (ability.name === 'Stasis Trap') {
       const trapPos = this.position.clone().addScaledVector(aim, 200);
       if (typeof spawnTetherTrap === 'function') {
-        try { spawnTetherTrap(trapPos, 'bot', this.team, null, ++net.effectIdCounter, false); } catch (_) { used = false; }
+        try {
+          const _tid = ++net.effectIdCounter;
+          spawnTetherTrap(trapPos, 'bot', this.team, null, _tid, false);
+          _botFxNet(_weLast(_tid, 'tether'));   // (v54.40) a remote pilot's own screen is the one that roots them
+        } catch (_) { used = false; }
       } else used = false;
     } else if (ability.name === 'Teleport') {
       if (this._underFireT > 0) { this.abilityCooldowns[2] = 0.4; return; }
@@ -58251,13 +58359,16 @@ class Bot {
         spawnExplosion(this.position, 10);
         if (typeof spawnDynamicLight === 'function') spawnDynamicLight(this.position, LSS.CLASS_COLORS.SLAYER, 3.0, 600, 0.3);
       } catch (_) {}
+      _botAbNet(this, 'tele', { tx: Math.round(this.position.x), ty: Math.round(this.position.y), tz: Math.round(this.position.z) });
     } else if (ability.name === 'Range Mode') {
       this._rangeModeT = 8;
       try { if (typeof spawnDynamicLight === 'function') spawnDynamicLight(this.position, LSS.CLASS_COLORS.BLASTER, 2.0, 400, 0.25); } catch (_) {}
+      _botAbNet(this, 'range');   // (v54.41) its light on the other screens
     } else if (ability.name === 'Inner Spark') {
       this.abilityCooldowns[0] = 0;
       this.abilityCooldowns[1] = Math.min(this.abilityCooldowns[1], 2);
       try { if (typeof spawnDynamicLight === 'function') spawnDynamicLight(this.position, LSS.CLASS_COLORS.SYPHON, 2.5, 450, 0.3); } catch (_) {}
+      _botAbNet(this, 'spark');   // (v54.41)
     } else if (ability.name === 'Sonar Pulse') {
       const vel = this._tempVec3b.copy(aim).multiplyScalar(2400);
       let _bspO = this.position;
@@ -58268,6 +58379,7 @@ class Bot {
       proj.sizeMult = 0.5;
       proj.ownerTeam = this.team; proj.ownerRef = this;
       game.projectiles.push(proj);
+      _botProjNet(this, proj);   // (v54.41) the beacon, and the pulse it bursts into, on the other screens
     } else {
       used = false;
     }
@@ -58292,11 +58404,13 @@ class Bot {
         if (typeof spawnShieldHit === 'function') spawnShieldHit(this.position, this.chassis.hullLength * 0.8, c, this.mesh);
         if (typeof spawnDynamicLight === 'function') spawnDynamicLight(this.position, c, 2.5, 500, 0.25);
       } catch (_) {}
+      _botAbNet(this, 'shield');   // (v54.41) the ripple on the other screens (the shield VALUE rides bot_state)
     } else if (n === 'Afterburner') {
       this._surgeSpd = Math.max(600, this.chassis.flightSpeed * 1.6);
       this._surgeT = (ability.duration || 3);
       this.velocity.addScaledVector(this.targetDir, this.chassis.flightSpeed * 1.6);
       try { if (typeof spawnDashBoosters === 'function') spawnDashBoosters(this.mesh, this.targetDir, 0xffaa33); } catch (_) {}
+      _botAbNet(this, 'burn');   // (v54.41) the boosters on the other screens (the surge itself rides bot_state)
     } else if (n === 'Energy Syphon') {
       const t = this.combatTarget;
       const _bsw = (t && t.position && this.position.distanceTo(t.position) < 1500)
@@ -58304,12 +58418,14 @@ class Bot {
       if (_bsw) {
         this.shield = Math.min(this.maxShield, this.shield + _bsw.drained);
         try { if (typeof spawnLightningBolt === 'function') spawnLightningBolt(new THREE.Vector3(_bsw.x, _bsw.y, _bsw.z), shipRoleWorld(this.mesh, 'syphon') || this.position, 0x66ddaa, 0.3, 2, 1.6); } catch (_) {}   // (v49.93) into the chin tube
+        _botAbNet(this, 'syph', { w: 1, fx: Math.round(_bsw.x), fy: Math.round(_bsw.y), fz: Math.round(_bsw.z) });   // (v54.41)
       } else if (t && t.position && this.position.distanceTo(t.position) < 1500) {
         const steal = 600;
         if (t === player) player.shield = Math.max(0, player.shield - steal);
         else if (typeof t.shield === 'number') t.shield = Math.max(0, t.shield - steal);
         this.shield = Math.min(this.maxShield, this.shield + steal);
         try { if (typeof spawnLightningBolt === 'function') spawnLightningBolt(t.position, shipRoleWorld(this.mesh, 'syphon') || this.position, 0x66ddaa, 0.3, 2, 1.6); } catch (_) {}   // (v49.93) into the chin tube
+        _botAbNet(this, 'syph', Object.assign({ d: steal, fx: Math.round(t.position.x), fy: Math.round(t.position.y), fz: Math.round(t.position.z) }, _botTgtRef(t)));
       } else used = false;
     } else if (n === 'Plasma Shield') {
       const _thr = this.combatTarget;
@@ -58318,7 +58434,11 @@ class Bot {
         : this._tempVec3a.copy(this.targetDir);
       const wallPos = this.position.clone().addScaledVector(_aim, 140);
       if (typeof spawnParticleWall === 'function') {
-        try { spawnParticleWall(wallPos, _aim.clone(), 'bot', this.team, null, ++net.effectIdCounter, false); }
+        try {
+          const _wid = ++net.effectIdCounter;
+          spawnParticleWall(wallPos, _aim.clone(), 'bot', this.team, null, _wid, false);
+          _botFxNet(_weLast(_wid, 'particle_wall'));   // (v54.40)
+        }
         catch (_) { used = false; }
       } else used = false;
     } else {
@@ -58377,6 +58497,7 @@ class Bot {
     if (tracking) { proj.tracking = true; proj.trackTarget = trackTarget; }
     if (cfg.removeHaze) { try { proj.removeHaze(); } catch (_) {} }
     game.projectiles.push(proj);
+    _botProjNet(this, proj);   // (v54.41) every rocket of every volley (Tracker, Salvo, Mega Tracker) - see _botProjNet
   }
 
   _addLock(target) {
@@ -58478,6 +58599,7 @@ class Bot {
       try { if (typeof spawnWallRipple === 'function') spawnWallRipple(_csEnd, LSS.CLASS_COLORS.BLASTER); } catch (_) {}
       try { if (typeof spawnHitFire === 'function') spawnHitFire(_csEnd, LSS.CLASS_COLORS.BLASTER, null, 1.3); } catch (_) {}
     }
+    _botAbNet(this, 'cs1', { ex: Math.round(_csEnd.x), ey: Math.round(_csEnd.y), ez: Math.round(_csEnd.z), w: (_csWall < _csRange) ? 1 : 0 });
     const _csDmg = 3200 * 0.6;
     const _csPerp = (p) => {
       const dx = p.x - this.position.x, dy = p.y - this.position.y, dz = p.z - this.position.z;
@@ -58568,6 +58690,7 @@ class Bot {
       this.position);
     if (aim.lengthSq() < 1e-6) aim.copy(this.targetDir);
     aim.normalize();
+    const _aimX = aim.x, _aimZ = aim.z;   // (v54.41) for the event below - `aim` is a shared scratch
     const col = (typeof chassisFlashColor === 'function') ? chassisFlashColor(this.loadout.name) : 0xffdd44;
     const _cue = (snd) => {
       try {
@@ -58599,6 +58722,7 @@ class Bot {
           const start = this.position.clone().addScaledVector(dir, 60);
           const id = ++net.effectIdCounter;
           if (typeof spawnFlameChainVisual === 'function') spawnFlameChainVisual(start, dir, 700, this.team, null, id);
+          const _mfv = _weLast(id, 'firewall'); if (_mfv) _mfv._botFx = true;
         }
         spawnExplosion(this.position, 80);
       } catch (_) {}
@@ -58647,6 +58771,13 @@ class Bot {
     } else {
       this._coreT = 0; this._coreName = null;
     }
+    if (coreName) {
+      const _cx = { n: coreName, d: _botRealSec((coreName === 'AI Assist') ? (this._aiAssistT || dur) : dur) };
+      if (coreName === 'Mega Flame Chain') { _cx.sx = Math.round(_aimX * 100); _cx.sz = Math.round(_aimZ * 100); }
+      const _ctr = _botTgtRef(this._coreTarget);
+      if (_ctr) Object.assign(_cx, _ctr);
+      _botAbNet(this, 'core', _cx);
+    }
   }
 
   _coreTick(dt) {
@@ -58656,7 +58787,11 @@ class Bot {
     const done = this._coreT <= 0;
     let tgt = this._coreTarget;
     const tgtAlive = tgt && (tgt === player ? (player.shipState !== 'dead') : !!tgt.alive);
-    if (!tgtAlive) { tgt = this.combatTarget; this._coreTarget = tgt; }
+    if (!tgtAlive) {
+      const _was = this._coreTarget;
+      tgt = this.combatTarget; this._coreTarget = tgt;
+      if (tgt !== _was && this._coreName === 'Mega Laser') _botAbNet(this, 'ctgt', _botTgtRef(tgt) || {});
+    }
     const name = this._coreName;
 
     if (name === 'Mega Laser') {
@@ -58707,6 +58842,7 @@ class Bot {
         proj.ownerTeam = this.team; proj.ownerRef = this;
         try { proj.removeHaze(); } catch (_) {}
         game.projectiles.push(proj);
+        _botProjNet(this, proj);   // (v54.41)
       }
       this.velocity.addScaledVector(this.targetDir, this.chassis.acceleration * dt * 0.6);
     } else if (name === 'Mega Stun Bolt') {
@@ -58733,6 +58869,7 @@ class Bot {
         proj.isArcWave = true;
         proj.ownerTeam = this.team; proj.ownerRef = this;
         game.projectiles.push(proj);
+        _botProjNet(this, proj);   // (v54.41)
       }
     } else if (name === 'Mega Tracker Rockets') {
       if (Math.random() < dt * 10 && tgt && !this._botSalvo) {
@@ -59584,6 +59721,7 @@ const isChaingunBot = (weapon.fireRate <= 0.10);
       try { amount = _endlessAegisDmgOut(amount); } catch (_) {}
     }
     if (this.isProxy) {
+      if (attacker === 'bot') return 0;
       if (typeof net !== 'undefined' && net && net.active && net.sendEvent) {
         try { net.sendEvent({ type: 'bot_dmg', i: this.id, d: Math.round(amount) }); } catch (_) {}
       }
@@ -60630,7 +60768,8 @@ class Projectile {
     if (!this.isSonar && typeof _wallBlockSegment === 'function') {
       const _pjTeam = (this.owner === 'player')
         ? ((typeof player !== 'undefined' && player) ? player.team : undefined)
-        : ((this.ownerRef && this.ownerRef.team != null) ? this.ownerRef.team : undefined);
+        : ((this.ownerRef && this.ownerRef.team != null) ? this.ownerRef.team
+          : ((this.isNetwork && this.ownerTeam != null) ? this.ownerTeam : undefined));
       const _pjHit = _wallBlockSegment(prevPos, this.position, _pjTeam);
       if (_pjHit && _pjHit.eff) {
         const eff = _pjHit.eff;
@@ -60918,11 +61057,14 @@ class Projectile {
     const dmgPerSec = this.clusterDmg || 80;
     const duration = this.clusterDuration || 3;
     const _clTeam = (this.ownerTeam != null) ? this.ownerTeam : (player ? player.team : 0);
-    game.worldEffects.push({
+    const _clZone = {
       type: 'cluster', position: this.position.clone(),
       timer: duration, dmgPerSec: dmgPerSec, radius: 250,
-      owner: this.owner, team: _clTeam, fxTimer: 0,
-    });
+      owner: this._botMirror ? 'bot' : this.owner, team: _clTeam, fxTimer: 0,
+    };
+    if (this._botNet) _clZone._botNet = true;
+    if (this._botMirror) _clZone._botMirror = true;
+    game.worldEffects.push(_clZone);
     spawnExplosion(this.position, 25, undefined, this.velocity);   // (v44.22)
     if (typeof spawnFireworksBurst === 'function') {
       spawnFireworksBurst(this.position, 280);
@@ -60933,7 +61075,7 @@ class Projectile {
     try { if (typeof _setpSplash === 'function') _setpSplash(this.position, this.splash, this.damage * 0.75); } catch (_) {}   // (51.86) the set piece's chunks in range
     const _splTeam = (this.owner === 'player') ? player.team
                    : (this.ownerTeam != null ? this.ownerTeam : player.team);
-    for (const bot of game.entities) {
+    if (!this._botMirror) for (const bot of game.entities) {
       if (!bot.alive || bot.team === _splTeam || bot === this.ownerRef) continue;
       const dist = _bodyDist(this.position, bot);
       const distSq = dist * dist;
@@ -61022,7 +61164,7 @@ class Projectile {
         }
       }
     }
-    igniteNearbyGas(this.position, this.splash, this.owner,
+    igniteNearbyGas(this.position, this.splash, this._botMirror ? 'bot' : this.owner,
       this.owner === 'player' ? player.team : this.ownerTeam);
   }
 
@@ -61295,52 +61437,73 @@ function igniteNearbyGas(pos, radius, igniter, igniterTeam) {
         eff.owner = igniter;
         if (igniterTeam != null) eff.team = igniterTeam;
       }
-      eff.ignited = true;
-      if (eff.owner === 'player') { try { _pyroGasIgniteBlast(eff.position); } catch (_) {} }
-      eff.igniteTimer = eff.igniteDuration;
-      eff.timer = Math.max(eff.timer, eff.igniteDuration);
-      if (eff.mesh && eff.mesh.material) {
-        if (eff.mesh.material.uniforms && eff.mesh.material.uniforms.uC0) {
-          const _gu = eff.mesh.material.uniforms;
-          const _gr = _fireRamp(eff.team);
-          _gu.uC0.value.setHex(_gr.c0); _gu.uC1.value.setHex(_gr.c1); _gu.uC2.value.setHex(_gr.c2); _gu.uC3.value.setHex(_gr.c3);
-          if (_gu.uBaseAlpha) _gu.uBaseAlpha.value = 0.8;
-          if (_gu.uRise) _gu.uRise.value = 1.3;
-          eff.mesh.material.blending = THREE.AdditiveBlending; eff.mesh.material.needsUpdate = true;
-        } else if (eff.mesh.material.uniforms && eff.mesh.material.uniforms.uColor) {
-          eff.mesh.material.uniforms.uColor.value.setHex(0xff5520);
-          if (eff.mesh.material.uniforms.uBaseAlpha) {
-            eff.mesh.material.uniforms.uBaseAlpha.value = 0.95;
-          }
-        } else if (eff.mesh.material.color) {
-          eff.mesh.material.color.setHex(0xff4400);
-          eff.mesh.material.opacity = 0.18;
-        }
-      }
-      if (eff.coreMesh && eff.coreMesh.material) {
-        const cm = eff.coreMesh.material;
-        if (cm.uniforms && cm.uniforms.uBaseColor) {
-          cm.uniforms.uBaseColor.value.setHex(0xff7722);
-        } else if (cm.color && cm.color.setHex) {
-          cm.color.setHex(0xff6600);
-          cm.opacity = 0.36;
-        }
-      }
-      if (eff.puffMeshes) {
-        for (const p of eff.puffMeshes) {
-          if (p.material && p.material.color) {
-            const r = Math.random();
-            const hot = r < 0.33 ? 0xff4520 : (r < 0.66 ? 0xff7530 : 0xffa540);
-            p.material.color.setHex(hot);
-          }
-        }
-      }
-      spawnExplosion(eff.position, 30);
-      spawnDynamicLight(eff.position, 0xff4400, 3.0, 500, 0.5);
+      _gasLight(eff);
+      if (igniter === 'bot' && !eff._botNet && !eff._botMirror) _gasBotLitNet(eff);
     } else {
       eff.igniteTimer = Math.max(eff.igniteTimer, eff.igniteDuration);
     }
   }
+}
+function _gasLight(eff, quiet) {
+  eff.ignited = true;
+  if (eff.owner === 'player') { try { _pyroGasIgniteBlast(eff.position); } catch (_) {} }
+  eff.igniteTimer = eff.igniteDuration;
+  eff.timer = Math.max(eff.timer, eff.igniteDuration);
+  if (eff.mesh && eff.mesh.material) {
+    if (eff.mesh.material.uniforms && eff.mesh.material.uniforms.uC0) {
+      const _gu = eff.mesh.material.uniforms;
+      const _gr = _fireRamp(eff.team);
+      _gu.uC0.value.setHex(_gr.c0); _gu.uC1.value.setHex(_gr.c1); _gu.uC2.value.setHex(_gr.c2); _gu.uC3.value.setHex(_gr.c3);
+      if (_gu.uBaseAlpha) _gu.uBaseAlpha.value = 0.8;
+      if (_gu.uRise) _gu.uRise.value = 1.3;
+      eff.mesh.material.blending = THREE.AdditiveBlending; eff.mesh.material.needsUpdate = true;
+    } else if (eff.mesh.material.uniforms && eff.mesh.material.uniforms.uColor) {
+      eff.mesh.material.uniforms.uColor.value.setHex(0xff5520);
+      if (eff.mesh.material.uniforms.uBaseAlpha) {
+        eff.mesh.material.uniforms.uBaseAlpha.value = 0.95;
+      }
+    } else if (eff.mesh.material.color) {
+      eff.mesh.material.color.setHex(0xff4400);
+      eff.mesh.material.opacity = 0.18;
+    }
+  }
+  if (eff.coreMesh && eff.coreMesh.material) {
+    const cm = eff.coreMesh.material;
+    if (cm.uniforms && cm.uniforms.uBaseColor) {
+      cm.uniforms.uBaseColor.value.setHex(0xff7722);
+    } else if (cm.color && cm.color.setHex) {
+      cm.color.setHex(0xff6600);
+      cm.opacity = 0.36;
+    }
+  }
+  if (eff.puffMeshes) {
+    for (const p of eff.puffMeshes) {
+      if (p.material && p.material.color) {
+        const r = Math.random();
+        const hot = r < 0.33 ? 0xff4520 : (r < 0.66 ? 0xff7530 : 0xffa540);
+        p.material.color.setHex(hot);
+      }
+    }
+  }
+  spawnExplosion(eff.position, 30);
+  spawnDynamicLight(eff.position, 0xff4400, 3.0, 500, 0.5);
+  _gasIgniteNet(eff, quiet);   // (v54.40) a bot's cloud tells the other screens
+}
+function _gasIgniteNet(eff, quiet) {
+  if (!eff || quiet || !(eff._botNet || eff._botMirror)) return;
+  try {
+    if (typeof net !== 'undefined' && net && net.active && net.sendEvent) {
+      net.sendEvent({ type: 'effect_ignite', netId: eff.netId, o: eff.ownerPeerId, team: eff.team });
+    }
+  } catch (_) {}
+}
+function _gasBotLitNet(eff) {
+  try {
+    if (!eff || eff.netId == null || !eff.ownerPeerId) return;   // not a cloud anyone else holds
+    if (typeof net !== 'undefined' && net && net.active && net.sendEvent) {
+      net.sendEvent({ type: 'effect_ignite', netId: eff.netId, o: eff.ownerPeerId, team: eff.team, by: 'bot' });
+    }
+  } catch (_) {}
 }
 
 
@@ -79124,26 +79287,319 @@ function commitLoadout(key) {
 }
 
 const _botProxyTarget = new THREE.Vector3();
+const _botProxyFace = new THREE.Vector3();   // (v54.40) the authority's facing, for _updateProxyBot
+const _BOT_PROXY_K = { k: 6, maxAge: 0.5, turn: 10, lead: 0 };
+function _botProxyK() {
+  try { const o = window.__botProxy; if (o && typeof o === 'object') return Object.assign({}, _BOT_PROXY_K, o); } catch (_) {}
+  return _BOT_PROXY_K;
+}
 const _bfA = new THREE.Vector3();
 const _bfB = new THREE.Vector3();
 const _bfD = new THREE.Vector3();
+const _bxA = new THREE.Vector3();   // (v54.41) scratch for _botAbMirror / _botAbProxyTick (never handed to anything that keeps it)
+const _bxB = new THREE.Vector3();
 
 function _botNetSync(dt) {
   if (!net || !net.active || !net.sendEvent) return;
   if (!_botAuthority()) return;   // (v38.63) one gate — see _botAuthority
-  _botNetSync._rosterT = (_botNetSync._rosterT || 0) - dt;
-  if (_botNetSync._rosterT <= 0) { _botNetSync._rosterT = 2.0; try { _botSendRoster(); } catch (_) {} }
-  _botNetSync._t = (_botNetSync._t || 0) - dt;
-  if (_botNetSync._t > 0) return;
-  _botNetSync._t = 0.12;
+  const _now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+  const _prevF = _botNetSync._frameAt;
+  _botNetSync._frameAt = _now;
+  if (_prevF != null) {
+    const _real = (_now - _prevF) / 1000;
+    if (_real > 0.001 && _real < 1) {
+      const _r = Math.max(0, Math.min(1.5, (dt || 0) / _real));
+      _botNetSync._rate = (_botNetSync._rate == null) ? _r : _botNetSync._rate + (_r - _botNetSync._rate) * 0.25;
+      _botNetSync._rateSlow = (_botNetSync._rateSlow == null) ? _r
+        : _botNetSync._rateSlow + (_r - _botNetSync._rateSlow) * Math.min(1, _real / 1.5);
+    }
+  }
+  const _rate = (_botNetSync._rate == null) ? 1 : _botNetSync._rate;
+  if (!(_now - (_botNetSync._rosterAt || 0) < 2000)) { _botNetSync._rosterAt = _now; try { _botSendRoster(); } catch (_) {} }
+  if (_now - (_botNetSync._at || 0) < _botStateMs()) return;
+  _botNetSync._at = _now;
   const rows = [];
   for (const b of game.entities) {
     if (!(b instanceof Bot) || b.isProxy) continue;
+    const _v = b.velocity, _f = b.targetDir;
     rows.push([b.id,
       Math.round(b.position.x), Math.round(b.position.y), Math.round(b.position.z),
-      Math.round(b.health), Math.round(b.shield), b.alive ? 1 : 0]);
+      Math.round(b.health), Math.round(b.shield), b.alive ? 1 : 0,
+      _v ? Math.round(_v.x * _rate) : 0, _v ? Math.round(_v.y * _rate) : 0, _v ? Math.round(_v.z * _rate) : 0,
+      _f ? Math.round(_f.x * 100) : 0, _f ? Math.round(_f.y * 100) : 0, _f ? Math.round(_f.z * 100) : 0]);
   }
   if (rows.length) { try { net.sendEvent({ type: 'bot_state', m: rows }); } catch (_) {} }
+}
+function _botStateMs() {
+  try { const v = window.__botStateMs; if (typeof v === 'number' && v >= 33 && v <= 1000) return v; } catch (_) {}
+  return 100;
+}
+
+function _botFxOwner() {
+  try {
+    if (typeof net === 'undefined' || !net || !net.active || !net.sendEvent || !net.myPeerId) return null;
+    return _botAuthority() ? net.myPeerId : null;
+  } catch (_) { return null; }
+}
+function _botFxNet(eff, extra) {
+  if (!eff || !eff.position) return;
+  const own = _botFxOwner();
+  if (!own) return;
+  eff._botNet = true;
+  eff.ownerPeerId = own;
+  const evt = { type: 'effect_spawn', kind: eff.type, netId: eff.netId, ownerPeerId: own, team: eff.team, bot: 1,
+                px: eff.position.x, py: eff.position.y, pz: eff.position.z };
+  if (eff.direction) { evt.dx = eff.direction.x; evt.dy = eff.direction.y; evt.dz = eff.direction.z; }
+  if (extra) { for (const k in extra) evt[k] = extra[k]; }
+  try { net.sendEvent(evt); } catch (_) {}
+}
+function _weLast(netId, type) {
+  const W = (typeof game !== 'undefined' && game) ? game.worldEffects : null;
+  if (!W) return null;
+  for (let i = W.length - 1; i >= 0; i--) { const o = W[i]; if (o && o.netId === netId && o.type === type) return o; }
+  return null;
+}
+function _botFxMirrorTag(evt) {
+  const o = _weLast(evt.netId, evt.kind);
+  if (!o || o.ownerPeerId !== evt.ownerPeerId) return;
+  o._botMirror = true;
+  o.owner = 'bot';
+  if (o.type === 'firewall') o.dmgPerSec = (typeof evt.dps === 'number' && isFinite(evt.dps)) ? Math.max(0, evt.dps) : 400;
+}
+
+function _botRealRate() {
+  const r = (typeof _botNetSync === 'function' && typeof _botNetSync._rateSlow === 'number') ? _botNetSync._rateSlow : 1;
+  return (Math.abs(r - 1) < 0.05) ? 1 : Math.max(0.1, Math.min(1.5, r));
+}
+function _botRealSec(s) { return Math.round((s / _botRealRate()) * 100) / 100; }
+function _botTgtRef(t) {
+  try {
+    if (!t) return null;
+    if (typeof player !== 'undefined' && t === player) return net.myPeerId ? { tp: net.myPeerId } : null;
+    if (t.peerId) return { tp: t.peerId };
+    if (game.monsters && game.monsters.indexOf(t) >= 0) return (t.id != null) ? { tm: t.id } : null;
+    if (t.id != null) return { tb: t.id };
+  } catch (_) {}
+  return null;
+}
+function _botTgtLocal(o) {
+  try {
+    if (!o) return null;
+    if (o.tp != null) {
+      if (o.tp === net.myPeerId) return player;
+      const pr = net.peers && net.peers.get(o.tp);
+      return (pr && pr.networkPlayer) || null;
+    }
+    if (o.tb != null) return _botProxyById(o.tb);
+    if (o.tm != null && game.monsters) { for (const m of game.monsters) { if (m && m.id === o.tm) return m; } }
+  } catch (_) {}
+  return null;
+}
+function _botAbNet(bot, k, extra) {
+  if (!bot || bot.isProxy || !_botFxOwner()) return;
+  const evt = { type: 'bot_ab', i: bot.id, k: k };
+  if (extra) { for (const key in extra) evt[key] = extra[key]; }
+  try { net.sendEvent(evt); } catch (_) {}
+}
+function _botProjNet(bot, proj) {
+  if (!bot || !proj || bot.isProxy || !_botFxOwner()) return;
+  proj._botNet = true;   // its cluster field leaves remote pilots to their own screen's copy (spawnClusterChildren)
+  const p = proj.position, v = proj.velocity, b = bot.position, r = _botRealRate();
+  const evt = { type: 'bot_proj', i: bot.id,
+    mx: Math.round((p.x - b.x) * 10) / 10, my: Math.round((p.y - b.y) * 10) / 10, mz: Math.round((p.z - b.z) * 10) / 10,
+    vx: Math.round(v.x * r), vy: Math.round(v.y * r), vz: Math.round(v.z * r),
+    c: proj.trailColor, sp: proj.splash || 0,
+    lt: Math.round((proj.lifetime / r) * 100) / 100 };
+  const f = (proj.isCluster ? 1 : 0) | (proj.isArcWave ? 2 : 0) | (proj.isSonar ? 4 : 0) | (proj.tracking ? 8 : 0) |
+            (proj.smokeTrail ? 16 : 0) | (proj.hazeMesh ? 0 : 32) | (proj.fadeInDist === 0 ? 64 : 0);
+  if (f) evt.f = f;
+  if (proj.sizeMult !== 1) evt.sz = proj.sizeMult;
+  if (proj.isCluster) { evt.cd = proj.clusterDmg || 0; evt.cl = proj.clusterDuration || 0; }
+  if (proj.tracking && proj.trackTarget) { const tr = _botTgtRef(proj.trackTarget); if (tr) Object.assign(evt, tr); }
+  try { net.sendEvent(evt); } catch (_) {}
+}
+function _botAbRun(fn, evt) {
+  let ok = false, err = null;
+  try { ok = !!fn(evt); } catch (e) { err = String((e && e.message) || e); }
+  try {
+    const L = window.__botAbLog;
+    if (Array.isArray(L) && L.length < 2000) L.push({ t: Math.round(performance.now()), k: evt.k || 'proj', i: evt.i, ok: ok, err: err });
+  } catch (_) {}
+}
+function _botProjMirror(evt) {
+  const b = _botProxyById(evt.i);
+  if (!b || !b.alive) return false;
+  const o = new THREE.Vector3(b.position.x + (+evt.mx || 0), b.position.y + (+evt.my || 0), b.position.z + (+evt.mz || 0));
+  const v = new THREE.Vector3(+evt.vx || 0, +evt.vy || 0, +evt.vz || 0);
+  const proj = new Projectile(o, v, 0, Math.max(0, +evt.sp || 0), 'network', (typeof evt.c === 'number') ? evt.c : 0xffaa00);
+  proj.isNetwork = true;
+  proj._botMirror = true;
+  proj.ownerTeam = b.team;
+  const f = evt.f | 0;
+  if (f & 1) {
+    proj.isCluster = true;
+    proj.clusterDmg = Math.max(0, Math.min(2000, +evt.cd || 0)) || 500;
+    proj.clusterDuration = Math.max(0, Math.min(10, +evt.cl || 0)) || 5;
+  }
+  if (f & 2) proj.isArcWave = true;
+  if (f & 4) proj.isSonar = true;
+  if (f & 8) { proj.tracking = true; proj.trackTarget = _botTgtLocal(evt); }
+  if (f & 16) proj.smokeTrail = true;
+  if (f & 32) proj.removeHaze();
+  if (f & 64) proj.fadeInDist = 0;
+  if (typeof evt.sz === 'number' && evt.sz > 0 && evt.sz < 10) proj.sizeMult = evt.sz;
+  if (typeof evt.lt === 'number' && evt.lt > 0 && evt.lt < 60) proj.lifetime = evt.lt;
+  game.projectiles.push(proj);
+  return true;
+}
+function _botAbMirror(evt) {
+  const b = _botProxyById(evt.i);
+  if (!b || !b.alive || !b.mesh) return false;
+  const k = evt.k;
+  const mn = (b.mesh.userData && b.mesh.userData.muzzleNodes) || null;
+  const _near = (r) => {
+    try {
+      return (typeof window === 'undefined' || window.__enemyFireSfx !== false) && typeof playSpatialSound === 'function' &&
+        !!(typeof player !== 'undefined' && player && player.position && player.position.distanceToSquared(b.position) < r * r);
+    } catch (_) { return false; }
+  };
+  const _end = () => new THREE.Vector3(+evt.ex || 0, +evt.ey || 0, +evt.ez || 0);
+  if (k === 'laser') {
+    const end = _end();
+    if (mn && mn.length) {
+      for (let g = 0; g < mn.length; g++) {
+        const lo = mn[g].getWorldPosition(_bxA);
+        spawnTracer(lo, end, 0xff2200, 1.6, mn[g]);
+        spawnTracer(lo, end, 0xffaa44, 1.4, mn[g]);
+      }
+    } else { spawnTracer(b.position, end, 0xff2200, 1.6); spawnTracer(b.position, end, 0xffaa44, 1.4); }
+  } else if (k === 'cs0') {
+    b._mxCs = b._mxCsLen = (typeof evt.t === 'number' && evt.t > 0 && evt.t < 10) ? evt.t : 1.0;
+    b._mxCsFx = 0;
+    if (_near(2200)) playSpatialSound('powershot_charge', b.position, { refDistance: 200, maxDistance: 2200, rolloffFactor: 1.0 });
+  } else if (k === 'cs1') {
+    b._mxCs = 0;
+    const end = _end();
+    const guns = (mn && mn.length) ? mn.length : 1;
+    for (let g = 0; g < guns; g++) {
+      const o = (mn && mn.length) ? mn[g].getWorldPosition(new THREE.Vector3()) : b.position.clone();
+      spawnTracer(o, end.clone(), LSS.CLASS_COLORS.BLASTER);
+      if (g === 0) {
+        spawnTracer(o.clone().add(new THREE.Vector3(0, 2, 0)), end.clone().add(new THREE.Vector3(0, 2, 0)), 0xaaeeff);
+        if (typeof spawnDynamicLight === 'function') spawnDynamicLight(o, LSS.CLASS_COLORS.BLASTER, 4.0, 600, 0.18);
+      }
+    }
+    if (evt.w) {
+      if (typeof spawnWallRipple === 'function') spawnWallRipple(end, LSS.CLASS_COLORS.BLASTER);
+      if (typeof spawnHitFire === 'function') spawnHitFire(end, LSS.CLASS_COLORS.BLASTER, null, 1.3);
+    }
+  } else if (k === 'syph') {
+    const t = evt.w ? null : _botTgtLocal(evt);
+    const from = (t && t.position) ? t.position : new THREE.Vector3(+evt.fx || 0, +evt.fy || 0, +evt.fz || 0);
+    if (typeof spawnLightningBolt === 'function') spawnLightningBolt(from, shipRoleWorld(b.mesh, 'syphon') || b.position, 0x66ddaa, 0.3, 2, 1.6);
+    if (t && t === player && player.shipState !== 'dead') {
+      const d = Math.max(0, Math.min(5000, +evt.d || 0));
+      if (d > 0) player.shield = Math.max(0, (player.shield || 0) - d);
+    }
+  } else if (k === 'tele') {
+    const tx = +evt.tx, ty = +evt.ty, tz = +evt.tz;
+    if (!isFinite(tx) || !isFinite(ty) || !isFinite(tz)) return false;
+    if (typeof _hoardTeleportSmoke === 'function') _hoardTeleportSmoke(b.position.x, b.position.y, b.position.z, tx, ty, tz, 10, 28);
+    b.position.set(tx, ty, tz);
+    b._netX = tx; b._netY = ty; b._netZ = tz;
+    b._netT = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    b.mesh.position.copy(b.position);
+    spawnExplosion(b.position, 10);
+    if (typeof spawnDynamicLight === 'function') spawnDynamicLight(b.position, LSS.CLASS_COLORS.SLAYER, 3.0, 600, 0.3);
+  } else if (k === 'shield') {
+    const c = _shipShieldColor(b.loadoutKey);
+    if (typeof spawnShieldHit === 'function') spawnShieldHit(b.position, b.chassis.hullLength * 0.8, c, b.mesh);
+    if (typeof spawnDynamicLight === 'function') spawnDynamicLight(b.position, c, 2.5, 500, 0.25);
+  } else if (k === 'burn') {
+    if (typeof spawnDashBoosters === 'function') spawnDashBoosters(b.mesh, b.targetDir, 0xffaa33);
+  } else if (k === 'range') {
+    if (typeof spawnDynamicLight === 'function') spawnDynamicLight(b.position, LSS.CLASS_COLORS.BLASTER, 2.0, 400, 0.25);
+  } else if (k === 'spark') {
+    if (typeof spawnDynamicLight === 'function') spawnDynamicLight(b.position, LSS.CLASS_COLORS.SYPHON, 2.5, 450, 0.3);
+  } else if (k === 'snd') {
+    const s = (evt.s === 'tracker_rockets' || evt.s === 'rocket_salvo') ? evt.s : null;
+    if (s && _near(3000)) playSpatialSound(s, b.position, { refDistance: 300, maxDistance: 3000, rolloffFactor: 1.0 });
+  } else if (k === 'core') {
+    const SND = { 'Mega Flame Chain': 'flame_core_blast', 'Mega Barrage': 'barrage_core_thrust', 'Mega Stun Bolt': 'stun_core_zap',
+                  'Mega Laser': 'laser_core_beam', 'Mega Tracker Rockets': 'salvo_core_burst', 'AI Assist': 'upgrade_core', 'AI Nanobots': 'upgrade_core' };
+    const n = evt.n;
+    if (!SND[n]) return false;
+    const col = (typeof chassisFlashColor === 'function') ? chassisFlashColor(b.loadout.name) : 0xffdd44;
+    if (typeof spawnDynamicLight === 'function') spawnDynamicLight(b.position, col, 4.0, 900, 0.4);
+    if (_near(4000)) playSpatialSound(SND[n], b.position, { refDistance: 300, maxDistance: 4000, rolloffFactor: 0.9 });
+    if (n === 'Mega Flame Chain') {
+      try { igniteNearbyGas(b.position, 1200, 'bot', b.team); } catch (_) {}
+      const spine = new THREE.Vector3(+evt.sx || 0, 0, +evt.sz || 0);
+      if (spine.lengthSq() < 0.001) spine.set(0, 0, -1);
+      spine.normalize();
+      const yAx = new THREE.Vector3(0, 1, 0);
+      for (const ang of [0, (2 * Math.PI) / 3, -(2 * Math.PI) / 3]) {
+        const dir = spine.clone().applyAxisAngle(yAx, ang);
+        const id = ++net.effectIdCounter;   // ownerPeerId null below: a local visual, never announced (see the sweep)
+        if (typeof spawnFlameChainVisual === 'function') spawnFlameChainVisual(b.position.clone().addScaledVector(dir, 60), dir, 700, b.team, null, id);
+        const _v = _weLast(id, 'firewall'); if (_v) _v._botFx = true;
+      }
+      spawnExplosion(b.position, 80);
+      return true;
+    }
+    if (n === 'Mega Stun Bolt' && typeof _spawnSlayerCoreStormFX === 'function') _spawnSlayerCoreStormFX(b.position, null, true);
+    const d = (typeof evt.d === 'number' && evt.d > 0 && evt.d < 60) ? evt.d : 0;
+    if (d > 0 && n !== 'AI Nanobots') b._mxCore = { n: n, t: d, fx: 0, side: 0, tp: evt.tp, tb: evt.tb, tm: evt.tm };
+  } else if (k === 'ctgt') {
+    if (b._mxCore) { b._mxCore.tp = evt.tp; b._mxCore.tb = evt.tb; b._mxCore.tm = evt.tm; }
+  } else return false;
+  return true;
+}
+function _botAbProxyTick(b, dt) {
+  if (b._mxCs > 0) {
+    b._mxCs -= dt;
+    b._mxCsFx = (b._mxCsFx || 0) - dt;
+    if (b._mxCsFx <= 0 && typeof spawnDynamicLight === 'function') {
+      b._mxCsFx = 0.08;
+      const k = 1 - Math.max(0, b._mxCs) / (b._mxCsLen || 1);   // the spool's ramp, 0 -> 1
+      const mn = b.mesh && b.mesh.userData && b.mesh.userData.muzzleNodes;
+      const at = (mn && mn.length) ? mn[(b._mxCsSide = ((b._mxCsSide | 0) + 1)) % mn.length].getWorldPosition(_bxA) : b.position;
+      spawnDynamicLight(at, LSS.CLASS_COLORS.BLASTER, 1.0 + k * 2.5, 260 + k * 240, 0.12);
+    }
+  }
+  const c = b._mxCore;
+  if (!c) return;
+  c.t -= dt;
+  if (c.t <= 0) { b._mxCore = null; return; }
+  if (_gunCoreLights(b.loadoutKey)) { try { _gunCoreGlow(b, dt); } catch (_) {} }
+  if (c.n === 'Mega Laser') {
+    const tgt = _botTgtLocal(c);
+    if (!tgt || !tgt.position || tgt.alive === false || tgt.shipState === 'dead') return;
+    const aim = _bxB.subVectors(tgt.position, b.position);
+    const d = aim.length();
+    if (!(d > 1 && d < 3000)) return;
+    c.fx -= dt;
+    if (c.fx > 0) return;
+    c.fx = 0.05;
+    aim.multiplyScalar(1 / d);
+    let los = d;
+    try { los = raycastLevel(b.position, aim, d + 10, true); } catch (_) {}
+    const mn = b.mesh && b.mesh.userData && b.mesh.userData.muzzleNodes;
+    const gn = (mn && mn.length) ? mn[(c.side = ((c.side | 0) + 1)) % mn.length] : null;
+    const end = new THREE.Vector3().copy(b.position).addScaledVector(aim, Math.min(los, 3000));   // a real vector: kept by reference
+    const from = gn ? gn.getWorldPosition(_bxA) : b.position;
+    spawnTracer(from, end, LSS.CLASS_COLORS.VORTEX, 2.2, gn, true);
+    spawnTracer(from, end, 0xffffff, 1.0, gn, true);
+  } else if (c.n === 'Mega Stun Bolt') {
+    c.fx -= dt;
+    if (c.fx > 0) return;
+    c.fx = 0.06;
+    if (typeof spawnLightningBolt === 'function') {
+      const ang = Math.random() * Math.PI * 2, r = 200 + Math.random() * 300;
+      const end = _bxB.set(b.position.x + Math.cos(ang) * r, b.position.y + (Math.random() - 0.5) * 220, b.position.z + Math.sin(ang) * r);
+      spawnLightningBolt(_bxA.copy(b.position), end, LSS.CLASS_COLORS.SLAYER, 0.45, 3, 4);
+    }
+  }
 }
 
 function _botAuthority() {
@@ -79534,8 +79990,8 @@ function playerDie(attacker) {
   for (let we = game.worldEffects.length - 1; we >= 0; we--) {
     const eff = game.worldEffects[we];
     if (!eff || eff.type !== 'firewall') continue;
-    const mine = (eff.owner === 'player') || (eff.dmgPerSec === 0) ||
-                 (net.active && eff.ownerPeerId === net.myPeerId);
+    const mine = !eff._botFx && ((eff.owner === 'player') || (eff.dmgPerSec === 0) ||
+                 (net.active && eff.ownerPeerId === net.myPeerId));
     if (!mine) continue;
     try {
       if (eff.mesh && eff.mesh.parent) {
@@ -86180,6 +86636,7 @@ function updateWorldEffects(dt) {
       const isMyEff = !net.active || !eff.ownerPeerId || eff.ownerPeerId === net.myPeerId;
       if (isMyEff) for (const bot of game.entities) {
         if (!bot.alive || bot.team === eff.team) continue;
+        if (eff._botNet && bot.peerId) continue;
         const _tx = bot.position.x - eff.position.x;
         const _ty = bot.position.y - eff.position.y;
         const _tz = bot.position.z - eff.position.z;
@@ -86427,6 +86884,7 @@ function updateWorldEffects(dt) {
                   }
                 }
                 spawnDynamicLight(eff.position, 0xff4400, 3.0, 500, 0.5);
+                _gasIgniteNet(eff);   // (v54.40) the second ignition path tells the mirrors too
                 break;
               }
             }
@@ -86477,8 +86935,9 @@ function updateWorldEffects(dt) {
       if (eff.ignited) {
         _tickSoundLoop(eff, '_burnTimer', dt, 0.95, 'fire_burn', () => _effSoundAt(eff), { refDistance: 300, maxDistance: 6000 });   // (v51.37) in 3D
         eff.igniteTimer -= dt;
-        for (const bot of game.entities) {
+        if (!eff._botMirror) for (const bot of game.entities) {
           if (!bot.alive || bot.team === eff.team) continue;
+          if (eff._botNet && bot.peerId) continue;
           if (_bodyDist(eff.position, bot) < eff.radius) {
             const dealt = _dotHit(bot, eff.igniteDmgPerSec * dt, eff.owner);   // (v47.59) sustained
             if (dealt > 0 && eff.owner === 'player') { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); }
@@ -86778,14 +87237,15 @@ function updateWorldEffects(dt) {
           _bodyDist(eff.position, player) < eff.radius) {
         playerTakeDamage(eff.dmgPerSec * dt, eff.owner, null);
       }
-      for (const bot of game.entities) {
+      if (!eff._botMirror) for (const bot of game.entities) {
         if (!bot.alive || bot.team === eff.team) continue;
+        if (eff._botNet && bot.peerId) continue;
         if (_bodyDist(eff.position, bot) < eff.radius) {
           const dealt = _dotHit(bot, eff.dmgPerSec * dt, eff.owner);   // (v47.59) sustained
           if (dealt > 0 && eff.owner === 'player') { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); }
         }
       }
-      if (game.dynamicObjects && game.dynamicObjects.length) {
+      if (!eff._botMirror && game.dynamicObjects && game.dynamicObjects.length) {
         for (const obst of game.dynamicObjects) {
           if (!obst.alive) continue;
           if (obst.position.distanceTo(eff.position) < eff.radius) {
@@ -86794,7 +87254,7 @@ function updateWorldEffects(dt) {
           }
         }
       }
-      if (game.monsters && (typeof _monAuthority !== 'function' || _monAuthority())) {
+      if (!eff._botMirror && game.monsters && (typeof _monAuthority !== 'function' || _monAuthority())) {   // (v54.41) _botMirror: see above
         for (const mon of game.monsters) {
           if (!mon.alive || !mon.position) continue;
           if (mon.position.distanceTo(eff.position) < eff.radius + (mon.collisionRadius || 0)) {
@@ -86957,7 +87417,7 @@ function updateWorldEffects(dt) {
       }
       if (net.active && net.sendEvent && eff.netId !== undefined &&
           eff.ownerPeerId === net.myPeerId) {
-        net.sendEvent({ type: 'effect_destroy', netId: eff.netId });
+        net.sendEvent({ type: 'effect_destroy', netId: eff.netId, o: eff.ownerPeerId });   // (v54.40) o: see the receiver
       }
       const _lastW = game.worldEffects.length - 1;
       if (e !== _lastW) game.worldEffects[e] = game.worldEffects[_lastW];
