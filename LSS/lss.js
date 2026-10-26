@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "54.42";
+const LSS_BUILD = "54.45";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -10232,7 +10232,7 @@ function handleNetEvent(evt, fromPeerId) {
     return;
   }
   if (evt.type === 'bot_proj' && evt.i != null) {
-    if (!_botAuthority()) _botAbRun(_botProjMirror, evt);
+    if (!_botAuthority()) _botAbRun(_botProjMirror, evt, fromPeerId);   // (v54.45) the sender names a cluster copy
     return;
   }
   if (evt.type === 'bot_ab' && evt.i != null) {
@@ -10686,22 +10686,7 @@ function handleNetEvent(evt, fromPeerId) {
     return;
   }
   if (evt.type === 'proj_detonate') {
-    if (typeof game !== 'undefined' && game.projectiles && evt.pid != null) {
-      for (let i = game.projectiles.length - 1; i >= 0; i--) {
-        const p = game.projectiles[i];
-        if (!p || !p.alive || p.netProjId !== evt.pid) continue;
-        if (typeof evt.px === 'number') {
-          p.position.set(evt.px, evt.py, evt.pz);       // snap: our copy has dead-reckoned away
-          if (p.mesh) p.mesh.position.copy(p.position);
-        }
-        try {
-          if (typeof p.spawnClusterChildren === 'function') p.spawnClusterChildren();
-          if (typeof p.spawnImpactExplosion === 'function') p.spawnImpactExplosion(p.position);
-          p.destroy();                                   // no splashDamage: mirrors carry damage 0
-        } catch (_) {}
-        break;
-      }
-    }
+    try { _clusterBurstRecv(evt, fromPeerId); } catch (_) {}
     return;
   }
   if (evt.type === 'inner_spark') {
@@ -14250,6 +14235,7 @@ function triggerSympatheticDetonation(epicenter) {
 
 function spawnNetworkProjectile(data, fromPeerId) {
   if (!data || !data.ox) return;
+  if (data.isCluster && data.pid != null && _clusterZoneOf(fromPeerId, data.pid)) return;
   const origin = new THREE.Vector3(data.ox, data.oy, data.oz);
   {
     const _npPeer = net.peers.get(fromPeerId);
@@ -14281,6 +14267,8 @@ function spawnNetworkProjectile(data, fromPeerId) {
   if (data.isArcWave) proj.isArcWave = true;
   if (data.isCluster) {
     proj.isCluster = true;
+    proj.clusterDmg = Math.max(0, Math.min(2000, +data.cd || 0)) || 500;
+    proj.clusterDuration = Math.max(0, Math.min(10, +data.cl || 0)) || 5;
     if (proj._baseOpacityCore   !== undefined) proj._baseOpacityCore   = 1.0;
     if (proj._baseOpacityGlow   !== undefined) proj._baseOpacityGlow   = 0.95;
     if (proj._baseOpacityHaze   !== undefined) proj._baseOpacityHaze   = 0.45;
@@ -14340,12 +14328,6 @@ function _punctureDetonateClusters() {
     if (!p || !p.alive || p.owner !== 'player' || !p.isCluster) continue;
     const _pos = p.position.clone();
     try {
-      if (net.active && net.sendEvent) {
-        net.sendEvent({ type: 'proj_detonate', pid: (p.netProjId != null ? p.netProjId : -1),
-                        px: _pos.x, py: _pos.y, pz: _pos.z });
-      }
-    } catch (_) {}
-    try {
       if (typeof p.spawnClusterChildren === 'function') p.spawnClusterChildren();
       if (typeof p.spawnImpactExplosion === 'function') p.spawnImpactExplosion(_pos);
       if (p.splash > 0 && typeof p.splashDamage === 'function') p.splashDamage();
@@ -14356,10 +14338,83 @@ function _punctureDetonateClusters() {
   return n;
 }
 
+function _clusterBurstNet(proj, zone) {
+  try {
+    if (!(typeof net !== 'undefined' && net && net.active && net.sendEvent)) return;
+    const evt = { type: 'proj_detonate', pid: (proj.netProjId != null ? proj.netProjId : -1),
+                  px: zone.position.x, py: zone.position.y, pz: zone.position.z,
+                  cd: zone.dmgPerSec, cl: zone.timer, t: zone.team };
+    if (proj._botNet) evt.bot = 1;
+    net.sendEvent(evt);
+  } catch (_) {}
+}
+function _clusterZoneOf(peerId, pid) {
+  const W = (typeof game !== 'undefined' && game) ? game.worldEffects : null;
+  if (!W || pid == null) return null;
+  for (let i = 0; i < W.length; i++) {
+    const e = W[i];
+    if (e && e.type === 'cluster' && (e._pilotMirror || e._botMirror) && e._pid === pid && e.ownerPeerId === peerId) return e;
+  }
+  return null;
+}
+function _clusterBurstRecv(evt, fromPeerId) {
+  if (typeof game === 'undefined' || !game || evt.pid == null) return;
+  if (evt.bot && typeof _botAuthority === 'function' && _botAuthority()) return;
+  const _at = (typeof evt.px === 'number');
+  if (game.projectiles) {
+    for (let i = game.projectiles.length - 1; i >= 0; i--) {
+      const p = game.projectiles[i];
+      if (!p || !p.alive || p.netProjId !== evt.pid) continue;
+      if (p.ownerPeerId != null && p.ownerPeerId !== fromPeerId) continue;   // (v54.44) another shooter's id
+      if (_at) {
+        p.position.set(evt.px, evt.py, evt.pz);       // snap: our copy has dead-reckoned away
+        if (p.mesh) p.mesh.position.copy(p.position);
+      }
+      try {
+        if (typeof p.spawnClusterChildren === 'function') p.spawnClusterChildren();
+        if (typeof p.spawnImpactExplosion === 'function') p.spawnImpactExplosion(p.position);
+        p.destroy();                                   // no splashDamage: mirrors carry damage 0
+      } catch (_) {}
+      return;
+    }
+  }
+  if (!_at) return;
+  const z = _clusterZoneOf(fromPeerId, evt.pid);
+  if (z) {
+    const _far = z.position.distanceToSquared(new THREE.Vector3(evt.px, evt.py, evt.pz)) > z.radius * z.radius;
+    z.position.set(evt.px, evt.py, evt.pz);
+    if (_far) {
+      try { spawnExplosion(z.position, 25); } catch (_) {}
+      try { if (typeof spawnFireworksBurst === 'function') spawnFireworksBurst(z.position, 280); } catch (_) {}
+    }
+    return;
+  }
+  const _d = +evt.cd, _l = +evt.cl;
+  if (!(_d > 0) || !(_l > 0)) return;   // an airburst from before v54.44 carries no numbers
+  const _bot = !!evt.bot;
+  let _team = (typeof evt.t === 'number' && isFinite(evt.t)) ? evt.t : null;
+  if (!_bot) try {
+    const _pr = net.peers && net.peers.get(fromPeerId);
+    if (_pr && _pr.networkPlayer && _pr.networkPlayer.team != null) _team = _pr.networkPlayer.team;
+    else if (_pr && _pr.team != null) _team = _pr.team;
+  } catch (_) {}
+  if (_team == null) return;
+  const _pos = new THREE.Vector3(evt.px, evt.py, evt.pz);
+  const _z = {
+    type: 'cluster', position: _pos, timer: Math.min(10, _l), dmgPerSec: Math.min(2000, _d), radius: 250,
+    owner: _bot ? 'bot' : 'network', team: _team, fxTimer: 0, ownerPeerId: fromPeerId, _pid: evt.pid,
+  };
+  if (_bot) _z._botMirror = true; else _z._pilotMirror = true;
+  game.worldEffects.push(_z);
+  try { if (typeof playSpatialSound === 'function') playSpatialSound('cluster_split', _pos.clone()); } catch (_) {}
+  try { spawnExplosion(_pos, 25); } catch (_) {}
+  try { if (typeof spawnFireworksBurst === 'function') spawnFireworksBurst(_pos, 280); } catch (_) {}
+}
+
 function broadcastAbilityProjectile(proj) {
   if (!net.active || !net.sendProjectile || !proj) return;
   if (proj.netProjId == null) proj.netProjId = ++net.effectIdCounter;
-  net.sendProjectile({
+  const _pd = {
     pid: proj.netProjId,
     ox: proj.position.x, oy: proj.position.y, oz: proj.position.z,
     vx: proj.velocity.x, vy: proj.velocity.y, vz: proj.velocity.z,
@@ -14374,7 +14429,9 @@ function broadcastAbilityProjectile(proj) {
     salvoGuided:    !!proj.salvoGuided,
     isPyroThermite: !!proj.isPyroThermite,
     isSonar:        !!proj.isSonar,
-  });
+  };
+  if (proj.isCluster) { _pd.cd = proj.clusterDmg || 0; _pd.cl = proj.clusterDuration || 0; }
+  net.sendProjectile(_pd);
 }
 
 
@@ -61064,7 +61121,17 @@ class Projectile {
     };
     if (this._botNet) _clZone._botNet = true;
     if (this._botMirror) _clZone._botMirror = true;
+    if (this.isNetwork && !this._botMirror) {
+      _clZone._pilotMirror = true;
+      _clZone.ownerPeerId = this.ownerPeerId;
+      if (this.netProjId != null) _clZone._pid = this.netProjId;
+    }
+    if (this._botMirror && this.netProjId != null) {
+      _clZone.ownerPeerId = this.ownerPeerId;
+      _clZone._pid = this.netProjId;
+    }
     game.worldEffects.push(_clZone);
+    if (this.owner === 'player' || this._botNet) _clusterBurstNet(this, _clZone);   // (v54.45) a bot's real round too
     spawnExplosion(this.position, 25, undefined, this.velocity);   // (v44.22)
     if (typeof spawnFireworksBurst === 'function') {
       spawnFireworksBurst(this.position, 280);
@@ -61504,6 +61571,21 @@ function _gasBotLitNet(eff) {
       net.sendEvent({ type: 'effect_ignite', netId: eff.netId, o: eff.ownerPeerId, team: eff.team, by: 'bot' });
     }
   } catch (_) {}
+}
+function _gasAttacker(eff) {
+  if (!eff || !(eff.owner === 'peer' || eff._pilotMirror) || !eff.ownerPeerId) return eff ? eff.owner : null;
+  if (!eff._atk) {
+    let lk = null;
+    try { const pr = net.peers && net.peers.get(eff.ownerPeerId); lk = pr && (pr.loadoutKey || (pr.networkPlayer && pr.networkPlayer.loadoutKey)); } catch (_) {}
+    eff._atk = { peerId: eff.ownerPeerId, loadout: (lk && LOADOUTS[lk]) || null };
+  }
+  return eff._atk;
+}
+function _gasCreditPilot(amt) {
+  if (!(amt > 0) || typeof player === 'undefined' || !player) return;
+  player.damageDealt = (player.damageDealt || 0) + amt;
+  player.coreMeter = Math.min(100, (player.coreMeter || 0) + amt / 100);
+  try { _dotHit({ takeDamage: (a, att) => { _hitMarkFor(att, a); return a; } }, amt, 'player'); } catch (_) {}
 }
 
 
@@ -79414,32 +79496,38 @@ function _botProjNet(bot, proj) {
             (proj.smokeTrail ? 16 : 0) | (proj.hazeMesh ? 0 : 32) | (proj.fadeInDist === 0 ? 64 : 0);
   if (f) evt.f = f;
   if (proj.sizeMult !== 1) evt.sz = proj.sizeMult;
-  if (proj.isCluster) { evt.cd = proj.clusterDmg || 0; evt.cl = proj.clusterDuration || 0; }
+  if (proj.isCluster) {
+    evt.cd = proj.clusterDmg || 0; evt.cl = proj.clusterDuration || 0;
+    if (proj.netProjId == null) proj.netProjId = ++net.effectIdCounter;
+    evt.pid = proj.netProjId;
+  }
   if (proj.tracking && proj.trackTarget) { const tr = _botTgtRef(proj.trackTarget); if (tr) Object.assign(evt, tr); }
   try { net.sendEvent(evt); } catch (_) {}
 }
-function _botAbRun(fn, evt) {
+function _botAbRun(fn, evt, from) {
   let ok = false, err = null;
-  try { ok = !!fn(evt); } catch (e) { err = String((e && e.message) || e); }
+  try { ok = !!fn(evt, from); } catch (e) { err = String((e && e.message) || e); }
   try {
     const L = window.__botAbLog;
     if (Array.isArray(L) && L.length < 2000) L.push({ t: Math.round(performance.now()), k: evt.k || 'proj', i: evt.i, ok: ok, err: err });
   } catch (_) {}
 }
-function _botProjMirror(evt) {
+function _botProjMirror(evt, from) {
   const b = _botProxyById(evt.i);
   if (!b || !b.alive) return false;
+  const f = evt.f | 0;
+  if ((f & 1) && evt.pid != null && from && _clusterZoneOf(from, evt.pid)) return false;
   const o = new THREE.Vector3(b.position.x + (+evt.mx || 0), b.position.y + (+evt.my || 0), b.position.z + (+evt.mz || 0));
   const v = new THREE.Vector3(+evt.vx || 0, +evt.vy || 0, +evt.vz || 0);
   const proj = new Projectile(o, v, 0, Math.max(0, +evt.sp || 0), 'network', (typeof evt.c === 'number') ? evt.c : 0xffaa00);
   proj.isNetwork = true;
   proj._botMirror = true;
   proj.ownerTeam = b.team;
-  const f = evt.f | 0;
   if (f & 1) {
     proj.isCluster = true;
     proj.clusterDmg = Math.max(0, Math.min(2000, +evt.cd || 0)) || 500;
     proj.clusterDuration = Math.max(0, Math.min(10, +evt.cl || 0)) || 5;
+    if (typeof evt.pid === 'number' && from) { proj.netProjId = evt.pid; proj.ownerPeerId = from; }
   }
   if (f & 2) proj.isArcWave = true;
   if (f & 4) proj.isSonar = true;
@@ -86935,9 +87023,15 @@ function updateWorldEffects(dt) {
       if (eff.ignited) {
         _tickSoundLoop(eff, '_burnTimer', dt, 0.95, 'fire_burn', () => _effSoundAt(eff), { refDistance: 300, maxDistance: 6000 });   // (v51.37) in 3D
         eff.igniteTimer -= dt;
+        const _gasMine = !net.active || !eff.ownerPeerId || eff.ownerPeerId === net.myPeerId;
+        const _gasBurnsBots = (eff.owner === 'bot') ? _botAuthority() : _gasMine;
         if (!eff._botMirror) for (const bot of game.entities) {
           if (!bot.alive || bot.team === eff.team) continue;
-          if (eff._botNet && bot.peerId) continue;
+          if (bot.peerId) {
+            if (_gasMine && eff.owner === 'player' && _bodyDist(eff.position, bot) < eff.radius) _gasCreditPilot(eff.igniteDmgPerSec * dt);
+            continue;
+          }
+          if (!_gasBurnsBots) continue;
           if (_bodyDist(eff.position, bot) < eff.radius) {
             const dealt = _dotHit(bot, eff.igniteDmgPerSec * dt, eff.owner);   // (v47.59) sustained
             if (dealt > 0 && eff.owner === 'player') { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); }
@@ -86960,7 +87054,7 @@ function updateWorldEffects(dt) {
           }
         if (eff.team !== player.team && player.shipState !== 'dead') {
           if (player.position.distanceTo(eff.position) < eff.radius) {
-            playerTakeDamage(eff.igniteDmgPerSec * dt, eff.owner, null);
+            playerTakeDamage(eff.igniteDmgPerSec * dt, _gasAttacker(eff), null);
             player.velocity.multiplyScalar(1 - eff.slowFactor * dt);
           }
         }
@@ -87235,11 +87329,14 @@ function updateWorldEffects(dt) {
     else if (eff.type === 'cluster') {
       if (eff.team !== player.team && player.shipState !== 'dead' && eff.owner !== 'player' &&
           _bodyDist(eff.position, player) < eff.radius) {
-        playerTakeDamage(eff.dmgPerSec * dt, eff.owner, null);
+        playerTakeDamage(eff.dmgPerSec * dt, _gasAttacker(eff), null);
       }
-      if (!eff._botMirror) for (const bot of game.entities) {
+      if (!eff._botMirror && !eff._pilotMirror) for (const bot of game.entities) {
         if (!bot.alive || bot.team === eff.team) continue;
-        if (eff._botNet && bot.peerId) continue;
+        if (bot.peerId) {
+          if (eff.owner === 'player' && _bodyDist(eff.position, bot) < eff.radius) _gasCreditPilot(eff.dmgPerSec * dt);
+          continue;
+        }
         if (_bodyDist(eff.position, bot) < eff.radius) {
           const dealt = _dotHit(bot, eff.dmgPerSec * dt, eff.owner);   // (v47.59) sustained
           if (dealt > 0 && eff.owner === 'player') { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); }
