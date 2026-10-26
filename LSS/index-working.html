@@ -8707,7 +8707,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "54.46";
+const LSS_BUILD = "54.49";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -41239,6 +41239,34 @@ function _swLegLiftApply() {
   return lf;
 }
 if (typeof window !== 'undefined') window.__legLift = Object.assign(window.__legLift || {}, { apply: () => _swLegLiftApply() });
+// (v54.47) live knob for the Broken Simulation's circuit boards (the uGlitch + uSimB branch of the terrain shader):
+// window.__simBoards({ on, tile, base, glow, floor, wall, ceil, sharp, lo, hi, show }) - tile = world units per board,
+// base = the plates' own glow, glow = the traces', floor / wall / ceil = atlas layers 0-9 (_AI_CITY's boards: 0 cyan
+// traces, 1 the die, 2 cyan buses, 3 dots, 4 plates, 5 rings, 6 diagonal grid, 7 copper, 8 obsidian flows, 9 white
+// tiles), sharp = the triplanar pow (4 blends the projections, 16+ all but switches). (v54.48) lo / hi = the lit
+// brightness that counts as black (at or under lo the board shows fully, from hi up not at all), show = 1 paints that
+// mask magenta. No argument reads the current values back.
+if (typeof window !== 'undefined') window.__simBoards = function (o) {
+  const A = _swU.uSimB.value, B = _swU.uSimB2.value, K = _swU.uSimK.value;
+  if (o && typeof o === 'object') {
+    if ('on' in o) A.x = o.on ? 1 : 0; if ('tile' in o) A.y = +o.tile; if ('base' in o) A.z = +o.base; if ('glow' in o) A.w = +o.glow;
+    if ('floor' in o) B.x = +o.floor; if ('wall' in o) B.y = +o.wall; if ('ceil' in o) B.z = +o.ceil; if ('sharp' in o) B.w = +o.sharp;
+    if ('lo' in o) K.x = +o.lo; if ('hi' in o) K.y = +o.hi; if ('show' in o) K.z = o.show ? 1 : 0;
+  }
+  return { on: A.x, tile: A.y, base: A.z, glow: A.w, floor: B.x, wall: B.y, ceil: B.z, sharp: B.w, lo: K.x, hi: K.y, show: K.z,
+           boards: (typeof _AI_CITY !== 'undefined' && _AI_CITY.u.uAiN.value) || 0 };
+};
+// (v54.49) live knob for the Broken Simulation's lower-mountain lift (_swSyncFX): window.__simFloor(k) re-lights the
+// floor's ground tones at k x the theme's (2.4 shipped; it holds for the session's next brokensim map too). No argument
+// reads k back.
+if (typeof window !== 'undefined') window.__simFloor = function (k) {
+  const B = game._simFloorBase;
+  if (B && typeof k === 'number') {
+    game._simFloorK = k;
+    _swU.uColGrass.value.copy(B.g).multiplyScalar(k); _swU.uColRock.value.copy(B.r).multiplyScalar(k); _swU.uColMoss.value.copy(B.m).multiplyScalar(k);
+  }
+  return (typeof game._simFloorK === 'number') ? game._simFloorK : 2.4;
+};
 
 // ---- STARFIELD ----
 
@@ -43051,6 +43079,12 @@ const _swU = { uTime:{value:0}, uYMid:{value:0}, uAMP:{value:1}, uSnow:{value:0.
                uColGrass:{value:new THREE.Color(0x5fae4e)}, uColRock:{value:new THREE.Color(0x6b6f74)},
                uColSnow:{value:new THREE.Color(0xeef2f5)}, uColMoss:{value:new THREE.Color(0x3f5e26)},
                uSlopeGrass:{value:0.82}, uSlopeRock:{value:0.50}, uRocky:{value:0}, uGlitch:{value:0}, uGold:{value:0}, uCrystal:{value:0}, uMossy:{value:0},
+               // (v54.47) the Broken Simulation's circuit boards (window.__simBoards). (v54.48) re-laid when they moved from the whole
+               // surface into its black: uSimB = .x on, .y world units per board, .z the plates' own glow, .w the traces'; uSimB2 = the
+               // atlas layer on the floor, on the walls, on the ceiling, .w the triplanar pow; uSimK = the LIT brightness that counts
+               // as black (.x and under: the board shows fully, .y and over: not at all - linear, before tone mapping), .z = 1 paints it
+               // magenta
+               uSimB:{value:new THREE.Vector4(1, 1200, 1.0, 1.0)}, uSimB2:{value:new THREE.Vector4(6, 0, 8, 4)}, uSimK:{value:new THREE.Vector4(0.004, 0.02, 0, 0)},
                uAerial:{value:0.0}, uAerialStart:{value:1200}, uAerialFar:{value:6500}, uAerialColor:{value:new THREE.Color(0xb4c8da)},
                // (v34.66) zero-cost visual pass: strata band strength (0.14 = the
                // pre-pass ground-rock constant, kept for the hub) + fresnel rim.
@@ -43300,7 +43334,9 @@ function _swSyncFX() {
   } catch (_) {}
   _swU.uLava.value = (T.biome === 'volcanic') ? 1 : 0;
   _swU.uRocky.value = (T.biome === 'rocky') ? 1 : 0;
-  _swU.uGlitch.value = (T.biome === 'brokensim') ? 1 : 0;   
+  _swU.uGlitch.value = (T.biome === 'brokensim') ? 1 : 0;
+  // (v54.47) its black wears the AI city's circuit boards (v54.48: only the black) - fetched once per session, shared with every city
+  if (T.biome === 'brokensim') { try { _aiCityTexLoad(); } catch (_) {} }
   _swU.uGold.value = (T.biome === 'goldmine') ? ((_SW_BIOME_LOOK.goldmine && _SW_BIOME_LOOK.goldmine.veins) || 1) : 0;      
   _swU.uCrystal.value = (T.biome === 'crystalcave') ? ((_SW_BIOME_LOOK.crystalcave && _SW_BIOME_LOOK.crystalcave.veins) || 1) : 0; 
   _swU.uMossy.value = (T.biome === 'mossy') ? 1 : 0;          
@@ -43366,6 +43402,18 @@ function _swSyncFX() {
   _swU.uColRock.value.set(_P.tRock !== undefined ? _P.tRock : 0x6b6f74);
   _swU.uColSnow.value.set(_P.tSnow !== undefined ? _P.tSnow : 0xeef2f5);
   _swU.uColMoss.value.set(_P.tMoss !== undefined ? _P.tMoss : 0x3f5e26);
+  // ⭐ (v54.49) THE LOWER MOUNTAINS, LIT. Owner, on v54.48 (the boards only in the black): "it's still hard to see the
+  // lower mountains, they are very dark still". Raising the boards' black threshold to reach them (uSimK.y 0.02 -> 0.06,
+  // tried live) caught ALL the terrain - the whole cave is that dark in linear light - and was v54.47's mess again. So the
+  // floor's ground tones are lifted instead (2.4 x in linear, tuned live in the pane: the floor reads as faceted blue-grey
+  // rock, and it stays out of the boards' black). Here, for a Broken Simulation CAVERN only: the palette stays, because the
+  // hub's brokensim SECTOR blends the same tGrass / tRock / tMoss (_hzLooks). Set from the palette just above, so a
+  // re-sync never compounds it. Live: window.__simFloor(k).
+  if (T.biome === 'brokensim') {
+    game._simFloorBase = { g: _swU.uColGrass.value.clone(), r: _swU.uColRock.value.clone(), m: _swU.uColMoss.value.clone() };
+    const _fk = (typeof game._simFloorK === 'number') ? game._simFloorK : 2.4;
+    _swU.uColGrass.value.multiplyScalar(_fk); _swU.uColRock.value.multiplyScalar(_fk); _swU.uColMoss.value.multiplyScalar(_fk);
+  }
   _swU.uSnowRough.value = (typeof game.sandwichShine === 'number') ? game.sandwichShine : 0.22;
   _swU.uLavaGlow.value = (typeof game.sandwichLavaGlow === 'number') ? game.sandwichLavaGlow : 1.0;
   // Grass fades out smoothly well before the loaded edge so there's no hard ring.
@@ -43614,6 +43662,8 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
     sh.uniforms.uSlopeGrass=_swU.uSlopeGrass; sh.uniforms.uSlopeRock=_swU.uSlopeRock; sh.uniforms.uRocky=_swU.uRocky;
     sh.uniforms.uCeil={value:isCeil?1:0};
     sh.uniforms.uGlitch=_swU.uGlitch;
+    sh.uniforms.uSimB=_swU.uSimB; sh.uniforms.uSimB2=_swU.uSimB2; sh.uniforms.uSimK=_swU.uSimK;   // (v54.47) the Broken Simulation's circuit boards (v54.48: + uSimK, its black)
+    try { sh.uniforms.uAiTex=_AI_CITY.u.uAiTex; sh.uniforms.uAiN=_AI_CITY.u.uAiN; } catch (_) { sh.uniforms.uAiTex={value:null}; sh.uniforms.uAiN={value:0}; }
     sh.uniforms.uGold=_swU.uGold;
     sh.uniforms.uCrystal=_swU.uCrystal;
     sh.uniforms.uMossy=_swU.uMossy;
@@ -43773,6 +43823,20 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
       +'float _thsh(vec2 p){return fract(sin(p.x*127.1+p.y*311.7)*43758.5453);}\n'
       +'float _tvn(vec2 p){vec2 i=floor(p),f=fract(p);vec2 u=f*f*(3.0-2.0*f);float a=_thsh(i),b=_thsh(i+vec2(1.0,0.0)),c=_thsh(i+vec2(0.0,1.0)),d=_thsh(i+vec2(1.0,1.0));return mix(mix(a,b,u.x),mix(c,d,u.x),u.y)*2.0-1.0;}\n'
       +'float _tpatch(vec2 p){float n=_tvn(p*0.0016+vec2(5.1,-2.3))*0.62+_tvn(p*0.0041+vec2(11.0,7.0))*0.38;return clamp((n+1.0)*0.5,0.0,1.0);}\n'
+      // ⭐ (v54.47) THE BROKEN SIMULATION WEARS THE CITY'S CIRCUIT BOARDS (the uGlitch + uSimB branch at opaque_fragment):
+      // the AI city's board atlas (_AI_CITY.u.uAiTex, the towers' and the deck's), triplanar in world space - offset planes
+      // like _tTri, the pow on the normal a knob (uSimB2.w) - one board on the floor, one on the walls, one on the ceiling,
+      // sampled with textureGrad off the continuous coordinate so fract() leaves no mip seam.
+      // ⭐ (v54.48) ...AND ONLY IN ITS BLACK. v54.47 laid them over the WHOLE surface - they replaced the albedo and lit
+      // themselves (the plates at 1.5, which a whole surface needed: their dark grey decodes to ~0.03 linear) - and the
+      // owner, flying it: "oh god, that looks awful" / "i was trying to show you how messy it looks" / "the 'grid' or texture
+      // was only supposed to be applied to the BLACK spots, not the whole damn thing". So the cave keeps its own look (the
+      // violet scanlines, the glitch zones, the sky through the holes, every face the light reaches) and the boards glow only
+      // where that look renders black: they are ADDED after the lighting, weighted by how black the LIT colour is
+      // (outgoingLight's brightness against uSimK - linear, before tone mapping and fog), so the test is the black the eye
+      // sees - the dark palette, a face turned from the light, a deep corner - not a guess from the albedo
+      +'uniform highp sampler2DArray uAiTex; uniform float uAiN; uniform vec4 uSimB,uSimB2,uSimK;\n'
+      +'vec3 _simBoard(vec3 wp, vec3 n, vec3 gx, vec3 gy, float lH, float lV){ vec3 w=pow(abs(n),vec3(max(uSimB2.w,1.0))); w/=max(w.x+w.y+w.z,1e-4); float s=1.0/max(uSimB.y,1.0); vec3 c=vec3(0.0); if(w.x>0.03) c+=w.x*textureGrad(uAiTex,vec3(fract(wp.zy*s+vec2(0.37,0.11)),lV),gx.zy*s,gy.zy*s).rgb; if(w.z>0.03) c+=w.z*textureGrad(uAiTex,vec3(fract(wp.xy*s+vec2(0.71,0.53)),lV),gx.xy*s,gy.xy*s).rgb; if(w.y>0.03) c+=w.y*textureGrad(uAiTex,vec3(fract(wp.xz*s),lH),gx.xz*s,gy.xz*s).rgb; return c; }\n'
       +'float _detN(vec2 p){return _tvn(p*0.035)*0.55+_tvn(p*0.09+vec2(11.0,5.0))*0.30+_tvn(p*0.22+vec2(3.0,9.0))*0.15;}float _snowWander(vec2 p){return _tvn(p*0.00085)*0.62+_tvn(p*0.0031+vec2(19.0,7.0))*0.26+_tvn(p*0.0092+vec2(4.0,13.0))*0.12;}\n'
       +sh.fragmentShader;
     // ⭐ (v48.44) (review O2.7) _snowWander(vWPos.xz) is evaluated ONCE, at the head of main(), and both the
@@ -43804,6 +43868,16 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
     // lava: glowing icing on the peaks + drips running down (volcanic biome, ground only)
     sh.fragmentShader=sh.fragmentShader.replace('#include <emissivemap_fragment>',
       '#include <emissivemap_fragment>\n if(uLava>0.02 && uCeil<0.5){\n float _h=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float capStart=0.66;\n float cap=smoothstep(capStart,capStart+0.12,_h);\n float c1=_tvn(vWPos.xz*0.020);\n float c2=_tvn(vWPos.xz*0.055+vec2(13.0,5.0));\n float colId=clamp(0.5+0.5*(c1*0.6+c2*0.4),0.0,1.0);\n float dripCols=smoothstep(0.50,0.74,colId);\n float dripLen=0.14+0.32*colId;\n float dripBot=capStart-dripLen;\n float wob=0.03*_tvn(vWPos.xz*0.12);\n float band=smoothstep(dripBot+wob,dripBot+wob+0.05,_h)*(1.0-smoothstep(capStart-0.02,capStart+0.04,_h));\n float tip=smoothstep(dripBot+wob,dripBot+wob+0.025,_h)*(1.0-smoothstep(dripBot+wob+0.025,dripBot+wob+0.09,_h));\n float drips=(band+tip*0.8)*dripCols;\n float pool=(1.0-smoothstep(0.04,0.17,_h)); float poolN=_tvn(vWPos.xz*0.012)*0.6+_tvn(vWPos.xz*0.03+vec2(9.0,4.0))*0.4; float poolMask=smoothstep(0.12,0.5,0.5+0.5*poolN); float poolGlow=pool*poolMask;\n float _pulse=0.72+0.28*sin(uTime*1.6+vWY*0.02);\n float glow=clamp(cap+drips+poolGlow*1.15,0.0,1.7)*_pulse;\n vec3 lavaCol=mix(vec3(1.2,0.08,0.0),vec3(1.7,0.5,0.08),smoothstep(0.0,0.08,_h)); float emInt=glow*mix(0.78,1.0,smoothstep(0.0,0.08,_h)); totalEmissiveRadiance+=lavaCol*emInt*uLavaGlow*clamp(uLava,0.0,1.0);\n }\n if(uRocky>0.02 && uCeil<0.5){ vec3 ffn = uSmooth>0.5 ? normalize(vSN) : normalize(cross(dFdx(vWPos),dFdy(vWPos))); float ffl=clamp((abs(ffn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0); float fA=_tvn(vWPos.xz*0.02)*0.55+_tvn(vWPos.xz*0.05+vec2(19.0,7.0))*0.30+_tvn(vWPos.xz*0.11+vec2(3.0,11.0))*0.15; float fung=smoothstep(0.60,0.78,0.5+0.5*fA); float spore=smoothstep(0.82,0.97,0.5+0.5*_tvn(vWPos.xz*0.6)); float breathe=0.6+0.4*sin(uTime*0.7+fA*6.0+vWPos.x*0.012); vec3 glowCol=mix(vec3(0.16,0.95,0.55),vec3(0.20,0.70,1.0),0.5+0.5*_tvn(vWPos.xz*0.03)); float fglow=fung*(0.18+spore*1.2)*breathe*(1.0-ffl); totalEmissiveRadiance+=glowCol*fglow*clamp(uRocky,0.0,1.0); }if(uGold>0.02){vec3 gfn = uSmooth>0.5 ? normalize(vSN) : normalize(cross(dFdx(vWPos),dFdy(vWPos)));float gfl=clamp((abs(gfn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0);float gA=_tvn(vWPos.xz*0.016+vec2(vWPos.y*0.05,3.0))*0.55+_tvn(vWPos.xz*0.044+vec2(17.0,9.0))*0.30+_tvn(vWPos.xz*0.11+vec2(5.0,13.0))*0.15;float vein=smoothstep(0.56,0.72,0.5+0.5*gA);float glint=smoothstep(0.86,0.985,0.5+0.5*_tvn(vWPos.xz*0.9+vec2(vWPos.y*0.2,0.0)));float shimmer=0.82+0.18*sin(uTime*1.1+gA*7.0+vWPos.y*0.03);vec3 goldCol=mix(vec3(1.0,0.72,0.18),vec3(1.5,1.18,0.6),0.4+0.6*glint);float gglow=(vein*0.30+glint*1.2*vein)*shimmer*(1.0-gfl*0.7);totalEmissiveRadiance+=goldCol*gglow*uGold;}if(uCrystal>0.02){vec3 cfn = uSmooth>0.5 ? normalize(vSN) : normalize(cross(dFdx(vWPos),dFdy(vWPos)));float cfl=clamp((abs(cfn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0);float cA=_tvn(vWPos.xz*0.02+vec2(vWPos.y*0.06,4.0))*0.5+_tvn(vWPos.xz*0.05+vec2(13.0,17.0))*0.3+_tvn(vWPos.xz*0.12+vec2(5.0,9.0))*0.2;float cryst=smoothstep(0.62,0.82,0.5+0.5*cA);float facet=smoothstep(0.80,0.97,0.5+0.5*_tvn(vWPos.xz*0.7+vec2(vWPos.y*0.15,0.0)));float twinkle=0.6+0.4*sin(uTime*1.6+cA*9.0+vWPos.y*0.04);vec3 crysCol=mix(vec3(0.25,0.85,1.2),vec3(0.7,0.4,1.3),0.5+0.5*sin(uTime*0.5+cA*4.0+vWPos.x*0.01));float cglow=(cryst*0.30+facet*1.3*cryst)*twinkle*(1.0-cfl*0.6);totalEmissiveRadiance+=crysCol*cglow*uCrystal;}\n if(uGlitch>0.5 && uCeil>0.5){ float gz=_tpatch(vWPos.xz+vec2(uTime*2.5,0.0)); float scan=step(0.92,fract(vWPos.y*0.04+uTime*1.5)); totalEmissiveRadiance+=vec3(0.45,0.12,0.85)*scan*step(0.45,gz)*0.7; }\n if(uVolcN>0.5 && uCeil<0.5){ float vm=0.0,vr=2.0,vu=0.0,va=0.0; for(int i=0;i<4;i++){ if(float(i)>=uVolcN) break; vec4 V=uVolc[i];   float d=length(vWPos.xz-V.xy)/max(V.z,1.0);   float mm=1.0-smoothstep(0.62,1.20,d);   if(mm>vm){ vm=mm; vr=d; vu=clamp((vWY-V.w)/max(uVolcH[i],1.0),0.0,1.0); va=atan(vWPos.z-V.y,vWPos.x-V.x); } } if(vm>0.004){   float basalt=vm*smoothstep(1.05,0.55,vr);   diffuseColor.rgb=mix(diffuseColor.rgb,diffuseColor.rgb*vec3(0.32,0.27,0.26)+vec3(0.012,0.008,0.008),basalt*0.88);   float crat=1.0-smoothstep(0.045,0.145,vr);   float chN=_tvn(vWPos.xz*0.0007);   float ch=0.5+0.5*sin(va*(9.0+7.0*chN)+chN*6.0);   ch=smoothstep(0.70,0.97,ch)*smoothstep(0.05,0.19,vr)*(1.0-smoothstep(0.42,0.86,vr))*smoothstep(0.26,0.72,vu);   float pulse=0.74+0.26*sin(uTime*1.25+vr*8.0);   float glow=(crat*2.3+ch*1.15)*pulse*vm;   vec3 lc=mix(vec3(1.9,0.26,0.02),vec3(2.3,1.00,0.22),crat);   totalEmissiveRadiance+=lc*glow*uLavaGlow; } }');
+    // ⭐ (v54.48) THE BOARDS FILL ONLY THE BLACK (the v54.48 note on _simBoard above): after the lighting, so the test is the
+    // black the eye sees. _sK = 1 at or under uSimK.x, 0 from uSimK.y up, and the board is fetched only where it will show
+    // (the derivatives are taken first, in the uniform branch; textureGrad carries them into the per-pixel one). uSimK.z
+    // paints the mask magenta instead - the quickest way to see what counts as black.
+    sh.fragmentShader=sh.fragmentShader.replace('#include <opaque_fragment>',
+      ' if(uSimB.x>0.5 && uGlitch>0.5 && uAiN>0.5){ vec3 _sgx=dFdx(vWPos),_sgy=dFdy(vWPos); float _sK=1.0-smoothstep(uSimK.x,max(uSimK.y,uSimK.x+1e-4),dot(outgoingLight,vec3(0.2126,0.7152,0.0722)));\n'
+      +'  if(_sK>0.002){ vec3 _simC=_simBoard(vWPos,normalize(cross(_sgx,_sgy)),_sgx,_sgy,uCeil>0.5?uSimB2.z:uSimB2.x,uSimB2.y); float _smx=max(_simC.r,max(_simC.g,_simC.b)),_smn=min(_simC.r,min(_simC.g,_simC.b));\n'
+      +'   float _simNe=smoothstep(0.06,0.22,_smx-_smn)*smoothstep(0.04,0.2,_smx); float _spl=0.72+0.28*sin(uTime*1.3+dot(vWPos,vec3(0.0021,0.0013,0.0017))*6.2832);\n'
+      +'   outgoingLight+=_simC*(uSimB.z+_simNe*uSimB.w*_spl)*_sK; }\n'
+      +'  if(uSimK.z>0.5) outgoingLight=mix(outgoingLight,vec3(1.0,0.0,0.6),_sK*0.85); }\n#include <opaque_fragment>');
     sh.fragmentShader=sh.fragmentShader.replace('#include <normal_fragment_begin>','#include <normal_fragment_begin>\n if(uCeil<0.5 && uSmooth>0.5){ vec3 _bn=normalize(vSN); float _dC=length(uCam.xz-vWPos.xz); float _ds=uDetail*(1.0-smoothstep(900.0,2600.0,_dC)); float _flN=clamp((abs(_bn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0); _ds*=mix(1.0,_flN,clamp(uTexK2.x,0.0,1.0)*uTexBio.y); if(_ds>0.001){ float _e=2.5; float _d0=_detN(vWPos.xz); float _gx=_detN(vWPos.xz+vec2(_e,0.0))-_d0; float _gz=_detN(vWPos.xz+vec2(0.0,_e))-_d0; _bn=normalize(_bn - vec3(_gx,0.0,_gz)*(_ds*3.0/_e)); if(uRelief>0.001){ float _fw=(1.0-smoothstep(260.0,900.0,_dC))*uRelief; if(_fw>0.001){ float _fe=0.7; float _f0=_tvn(vWPos.xz*0.55); float _fx=_tvn((vWPos.xz+vec2(_fe,0.0))*0.55)-_f0; float _fz=_tvn((vWPos.xz+vec2(0.0,_fe))*0.55)-_f0; _bn=normalize(_bn - vec3(_fx,0.0,_fz)*(_fw*0.9/_fe)); } }\n if(uGrassD>0.001){ float _gw=(1.0-smoothstep(120.0,520.0,_dC))*uGrassD; if(_gw>0.001){ float _ge=1.1; float _g0=_tvn(vWPos.xz*0.42); float _gx=_tvn((vWPos.xz+vec2(_ge,0.0))*0.42)-_g0; float _gz=_tvn((vWPos.xz+vec2(0.0,_ge))*0.42)-_g0; _bn=normalize(_bn - vec3(_gx,0.0,_gz)*(_gw*0.85/_ge)); } } } normal = normalize((viewMatrix * vec4(_bn,0.0)).xyz); }');
   };
   return m;
@@ -161154,7 +161228,10 @@ function _lssGenEndlessLevel(base) {
   const gen = { rand, cos, x: 0, y: 0, z: 0, heading: rand() * Math.PI * 2, sinceHall: 0, nextGid: 0 };
   // (v39.57) the deep's biome roulette, drawn from the COSMETIC stream so the route bytes are untouched
   const _ENDLESS_BIOMES = ['rocky', 'crystalcave', 'volcanic', 'snow', 'goldmine', 'grassy', 'brokensim'];
-  const _endlessBiome = _ENDLESS_BIOMES[Math.floor(cos() * _ENDLESS_BIOMES.length) % _ENDLESS_BIOMES.length];
+  let _endlessBiome = _ENDLESS_BIOMES[Math.floor(cos() * _ENDLESS_BIOMES.length) % _ENDLESS_BIOMES.length];
+  // (v54.47) test knob: window.__endlessBiome = 'brokensim' (any name above) picks the deep's biome for the next run. The
+  // roll above is still drawn, so the cosmetic stream - and everything else it feeds - is unchanged.
+  try { const _eb = (typeof window !== 'undefined') && window.__endlessBiome; if (_eb && _ENDLESS_BIOMES.indexOf(_eb) >= 0) _endlessBiome = _eb; } catch (_) {}
   // (v36.96) BENT SANDWICH mode rides the MAP key (endless_bend.bend) —
   // co-op peers derive the identical draw sequence from the shared map.
   const bend = !!(base && base.bend);
