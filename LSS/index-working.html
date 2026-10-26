@@ -8707,7 +8707,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "54.45";
+const LSS_BUILD = "54.46";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -27752,7 +27752,12 @@ function _mineBlow(o) {
     if (game.monsters) for (const m of game.monsters) {
       if (!m || !m.alive || !m.mesh) continue;
       const d = m.position.distanceTo(pos); if (!(d < R)) continue;
-      if (credit(m.takeDamage(fall(d), 'player', pos)) > 0) hits++;
+      // ⚠ (v54.46) THE MINE'S OWNER, as the ship loop above passes it. This said 'player' for every mine, so a BOT's
+      // mine (a monster in range trips it - see the tripwire arm) flashed YOUR hit marker through the leviathan's
+      // takeDamage and made you its last attacker, so a kill by it counted as yours (monKills). Owner: "on endless,
+      // sometimes when leviathans spawn in i get hit markers for no apparent reason" - one of the two causes; the other
+      // is the monster ram pass in resolveShipShipCollisions.
+      if (credit(m.takeDamage(fall(d), o.owner, pos)) > 0) hits++;
     }
   } catch (_) {}
   try {
@@ -82192,10 +82197,28 @@ function resolveShipShipCollisions(dt) {
       for (const mon of game.monsters) {
         if (!mon.alive || !mon.position) continue;
         const _rr = (mon.collisionRadius || 0) + _shipR;
-        if (player.position.distanceToSquared(mon.position) < _rr * _rr) {
+        const _d2 = player.position.distanceToSquared(mon.position);
+        if (_d2 < _rr * _rr) {
+          // ⭐⭐ (v54.46) A RAM IS YOUR SHIP DRIVING INTO IT. Owner: "on endless, sometimes when leviathans spawn in i get
+          // hit markers for no apparent reason". A summoned leviathan chases you, and the whole pack crowds in (six
+          // measured at ~405 u round an idle ship); their contact shocks shove you at 380 u/s (_contactShock), and their
+          // bodies drift into you. This counted ANY speed over 80 while overlapping, in any direction, so an idle pilot
+          // was credited with ramming them: MEASURED, idle in god mode, 6 hit markers in 12 s, every one from this pass,
+          // two of them while the ship flew AWAY from the leviathan at 340 u/s. Now, like the ship-on-ship ram above
+          // (the normal component of the impact, not the whole speed):
+          //   the ship's own speed TOWARD the monster is what rams, and what scales the damage (a glancing pass does less);
+          //   and a ship flung into one leviathan by ANOTHER's contact shock is not your ram (`_monShoveBy`, 0.4 s) -
+          //   a deliberate ram on the one that just shocked you still lands, which is the order a real ram goes in (the
+          //   shock reaches out to radius + 90, the ram needs radius + hull * 0.45).
+          const _d = Math.sqrt(_d2) || 1;
+          const _close = ((mon.position.x - player.position.x) * player.velocity.x +
+                          (mon.position.y - player.position.y) * player.velocity.y +
+                          (mon.position.z - player.position.z) * player.velocity.z) / _d;
+          if (!(_close > 80)) continue;
+          if (player._monShoveBy && player._monShoveBy !== mon && (_now - (player._monShoveT || -1e9)) < 0.4) continue;
           if (!mon._ramT || (_now - mon._ramT) > 0.25) {
             mon._ramT = _now;
-            let _ramDmg = _sp * RAM_DAMAGE_MULT;
+            let _ramDmg = _close * RAM_DAMAGE_MULT;
             if (player.dashActive) _ramDmg *= DASH_RAM_DAMAGE_BONUS;
             const _dealt = mon.takeDamage(_ramDmg, 'player', mon.position);
             if (_dealt > 0) { player.damageDealt += _dealt; player.coreMeter = Math.min(100, player.coreMeter + _dealt / 100); showHitMarker(); }
@@ -106068,6 +106091,9 @@ class OutskirtsMonster {
         const shove = _monScratchA.subVectors(player.position, this.position);
         const sl = shove.length();
         if (sl > 0.001 && player.velocity) player.velocity.addScaledVector(shove.multiplyScalar(1 / sl), 380);
+        // (v54.46) who flung you, and when: the ram pass (resolveShipShipCollisions) will not count you being thrown
+        // into ANOTHER leviathan as your ram
+        player._monShoveBy = this; player._monShoveT = (typeof game !== 'undefined' && game && game.time) || 0;
         return;
       }
     }
@@ -185557,6 +185583,17 @@ function showHitMarker() {
   const _t = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
   if (_t - (showHitMarker._t || -1e9) < 25) return;
   showHitMarker._t = _t;
+  // (v54.46) `window.__hmTraceAll = true` records EVERY flash that gets past the throttle, with its callers, in
+  // `window.__hitMarksAll` (last 60). _hitMarkFor's `__hmTrace` only sees markers that come through a takeDamage, and the
+  // direct calls (rocks, beams, the ram passes) flash without it - an unexplained marker can come from either.
+  try {
+    if (typeof window !== 'undefined' && window.__hmTraceAll) {
+      if (!window.__hitMarksAll) window.__hitMarksAll = [];
+      const _st = (new Error()).stack || '';
+      window.__hitMarksAll.push({ t: Math.round(_t), from: _st.split(String.fromCharCode(10)).slice(2, 7).join(' | ') });
+      if (window.__hitMarksAll.length > 60) window.__hitMarksAll.shift();
+    }
+  } catch (_) {}
   const el = showHitMarker._el || (showHitMarker._el = document.getElementById('hit-marker'));
   if (!el) return;
   _markerFlash(el, _HIT_FLASH_KEYS, 250);

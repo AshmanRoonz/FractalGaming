@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "54.45";
+const LSS_BUILD = "54.46";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -13172,7 +13172,7 @@ function _mineBlow(o) {
     if (game.monsters) for (const m of game.monsters) {
       if (!m || !m.alive || !m.mesh) continue;
       const d = m.position.distanceTo(pos); if (!(d < R)) continue;
-      if (credit(m.takeDamage(fall(d), 'player', pos)) > 0) hits++;
+      if (credit(m.takeDamage(fall(d), o.owner, pos)) > 0) hits++;
     }
   } catch (_) {}
   try {
@@ -51509,10 +51509,17 @@ function resolveShipShipCollisions(dt) {
       for (const mon of game.monsters) {
         if (!mon.alive || !mon.position) continue;
         const _rr = (mon.collisionRadius || 0) + _shipR;
-        if (player.position.distanceToSquared(mon.position) < _rr * _rr) {
+        const _d2 = player.position.distanceToSquared(mon.position);
+        if (_d2 < _rr * _rr) {
+          const _d = Math.sqrt(_d2) || 1;
+          const _close = ((mon.position.x - player.position.x) * player.velocity.x +
+                          (mon.position.y - player.position.y) * player.velocity.y +
+                          (mon.position.z - player.position.z) * player.velocity.z) / _d;
+          if (!(_close > 80)) continue;
+          if (player._monShoveBy && player._monShoveBy !== mon && (_now - (player._monShoveT || -1e9)) < 0.4) continue;
           if (!mon._ramT || (_now - mon._ramT) > 0.25) {
             mon._ramT = _now;
-            let _ramDmg = _sp * RAM_DAMAGE_MULT;
+            let _ramDmg = _close * RAM_DAMAGE_MULT;
             if (player.dashActive) _ramDmg *= DASH_RAM_DAMAGE_BONUS;
             const _dealt = mon.takeDamage(_ramDmg, 'player', mon.position);
             if (_dealt > 0) { player.damageDealt += _dealt; player.coreMeter = Math.min(100, player.coreMeter + _dealt / 100); showHitMarker(); }
@@ -68588,6 +68595,7 @@ class OutskirtsMonster {
         const shove = _monScratchA.subVectors(player.position, this.position);
         const sl = shove.length();
         if (sl > 0.001 && player.velocity) player.velocity.addScaledVector(shove.multiplyScalar(1 / sl), 380);
+        player._monShoveBy = this; player._monShoveT = (typeof game !== 'undefined' && game && game.time) || 0;
         return;
       }
     }
@@ -126126,6 +126134,14 @@ function showHitMarker() {
   const _t = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
   if (_t - (showHitMarker._t || -1e9) < 25) return;
   showHitMarker._t = _t;
+  try {
+    if (typeof window !== 'undefined' && window.__hmTraceAll) {
+      if (!window.__hitMarksAll) window.__hitMarksAll = [];
+      const _st = (new Error()).stack || '';
+      window.__hitMarksAll.push({ t: Math.round(_t), from: _st.split(String.fromCharCode(10)).slice(2, 7).join(' | ') });
+      if (window.__hitMarksAll.length > 60) window.__hitMarksAll.shift();
+    }
+  } catch (_) {}
   const el = showHitMarker._el || (showHitMarker._el = document.getElementById('hit-marker'));
   if (!el) return;
   _markerFlash(el, _HIT_FLASH_KEYS, 250);
