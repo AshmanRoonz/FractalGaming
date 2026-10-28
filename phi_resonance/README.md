@@ -2,7 +2,7 @@
 
 Created: 2026-09-29
 Last updated: 2026-10-28
-Version: 2.11
+Version: 2.12
 
 The φ-Entrainment Composer from fractalreality.ca, packaged as a paid app for Google Play and the Apple App Store with [Capacitor 8](https://capacitorjs.com/). It has the full sound lab (eight engines, layers, texture, tuning, presets, saved settings, breath guide, visual beat) plus the Composer, which grows music from the field: Fibonacci form, tempo locked to the beat, a golden-section peak. The whole app runs on the device: it makes no network requests, collects nothing, and works offline.
 
@@ -136,7 +136,11 @@ The debug APK lands in `android/app/build/outputs/apk/debug/app-debug.apk`. For 
 - Saving settings to a file writes the JSON to the app cache and opens the share sheet; the Composer's audio download rendered a 1:16 piece (12.7 MB WAV) and did the same.
 - Every request the page made stayed inside the app's own files: no Google Fonts or anything else from the internet. Orbitron and Rajdhani load from `www/fonts/`.
 
-**Version 1.0.2 (2026-10-28; not yet built or checked on a phone):** the page is rebuilt from the Composer page v1.8 (Fractal_Reality `6d69e9ff`, whose two pages are now made by `tools/phi_resonance_build/build.py` there). The owner found that Ashman1 "sounded completely different" after playing with other sliders and tabs, because a preset only set its own values. Now a preset is a whole sound: every setting, the Composer's too, starts from the starting sound, and the preset then sets its own; the volume and the session timer stay. The File tab gains Reset all settings, which keeps saved settings. The page builds with 25 `[PHI-APP]` marks, its script passes `node --check`, and every element id it uses exists; the fix was tested in a desktop browser. Release builds from here are version 1.0.2 (code 3).
+**Version 1.0.2, Android build v1.10 (2026-10-28, debug, on the owner's PC, installed on the owner's Pixel 9 over USB):** the page is rebuilt from the Composer page v1.8 (Fractal_Reality `6d69e9ff`, whose two pages are now made by `tools/phi_resonance_build/build.py` there). The owner found that Ashman1 "sounded completely different" after playing with other sliders and tabs, because a preset only set its own values. Now a preset is a whole sound: every setting, the Composer's too, starts from the starting sound, and the preset then sets its own; the volume and the session timer stay. The File tab gains Reset all settings, which keeps saved settings. The page builds with 25 `[PHI-APP]` marks, its script passes `node --check`, and every element id it uses exists. Checked on the phone, with the app's storage backed up first and put back after:
+- Over DevTools, 37 controls were changed (every sound slider and menu, the mode, a layer, the Composer switch), then Ashman1 was tapped: its saved settings matched the starting ones except the volume, which stays as set. The same held with a session playing, which kept playing, and no errors were thrown.
+- Reset all settings asks first ("Reset all settings?"), and OK reloads the app on Ashman1 at 25% with the breath lane on: the other settings are cleared, and the saved settings and the safety notice stay.
+
+Release builds from here are version 1.0.2 (code 3).
 
 **Android build v1.9 (2026-10-21, on the owner's PC, installed on the owner's Pixel 9 over USB):** `app-bridge.js` v1.2. Recording Play's foreground-service video showed that no build so far had a playback notification or lock-screen entry: the bridge looked its native plugins up with `Capacitor.registerPlugin`, which belongs to `@capacitor/core` and does not exist in this plain page, so `PlaybackService`, `Filesystem` and `Share` were never reached (the harness's pretend Capacitor had offered `registerPlugin` and hidden it). The bridge now takes them from `Capacitor.Plugins`, where the native bridge puts them. Checked on the phone:
 - BEGIN SESSION starts `PlaybackService` in the foreground (media playback type) and posts its notification: "Phi Resonance", the session line (for example "Ambient Field · 126.0 BPM") and a Stop button, public on the lock screen.
@@ -238,6 +242,7 @@ The finished Google Play kit is in `store-listing/`: the listing text, framed sc
 
 ## Revision history
 
+- 2026-10-28 v2.12: 1.0.2 checked on the owner's phone (debug build v1.10): a preset brings its whole sound back, playing or not, and Reset all settings works through its confirmation
 - 2026-10-28 v2.11: the page rebuilt from the Composer page v1.8 (Fractal_Reality 6d69e9ff): a preset is a whole sound, and the File tab gains Reset all settings; version 1.0.2 (code 3)
 - 2026-10-21 v2.10: app-bridge.js v1.2 finds native plugins in Capacitor.Plugins (registerPlugin never existed in the app, so the playback notification, lock-screen entry and file saving had never worked on a phone); the harness's pretend Capacitor now matches the native bridge; APK v1.9 checked on the owner's phone; version 1.0.1 (code 2)
 - 2026-10-19 v2.9: build script v1.4, at the owner's wish: the footer is one link to fractalreality.ca, and the About tab keeps the site's links and Privacy; APK v1.8 checked on the owner's phone; the Presets store screenshot retaken; the change table gains the row for the flashes' full-screen mode (build script v1.3)
