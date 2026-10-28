@@ -1,8 +1,8 @@
 # Phi Resonance on Google Play: the listing kit
 
 Created: 2026-10-19
-Last updated: 2026-10-21
-Version: 1.2
+Last updated: 2026-10-28
+Version: 1.3
 
 Everything to paste or upload in Play Console, in the order Play asks for it. The screenshots are real captures from the owner's Pixel 9, taken over USB on 2026-10-19 with build v1.7; the Presets one was retaken with build v1.8, whose footer is one link to fractalreality.ca. The wording follows "Positioning" in `../README.md`: a sound tool for relaxation, focus and exploration, never a treatment.
 
@@ -48,7 +48,7 @@ Policy and programs, App content:
 
 1. **Build the bundle.** In PowerShell, run `..\scripts\build_release.ps1`.
    - The first run makes the upload key (keytool asks for a new password twice). It keeps the key at `%USERPROFILE%\phi-resonance-keys\phi-resonance-upload.jks`, outside the repo. Back up that file and its password: every future update must be signed with it.
-   - Every run asks for the password and builds `android\app\build\outputs\bundle\release\phi-resonance-<versionName>-<versionCode>.aab` (`phi-resonance-1.0.1-2.aab` since 2026-10-21; the 1.0 bundle, code 1, had no playback notification).
+   - Every run asks for the password and builds `android\app\build\outputs\bundle\release\phi-resonance-<versionName>-<versionCode>.aab` (`phi-resonance-1.0.2-3.aab` since 2026-10-28; the 1.0 bundle, code 1, had no playback notification, and in 1.0.1, code 2, a preset could sound different after other changes).
    - Google Play re-signs the app for phones with its own key (Play App Signing), which it offers on the first upload.
 2. **Closed test.**
    - Testing, Closed testing: create a track and choose the countries.
@@ -57,7 +57,8 @@ Policy and programs, App content:
 3. **Tester page.** Copy the opt-in link and the Google Group's address. The two buttons on `fractalreality.ca/phi_resonance_testers.html` are waiting for them.
 4. **Fourteen days.** At least 12 testers stay opted in for 14 days in a row. Testers of a paid app on a closed track buy it; only internal testing installs a paid app free, and it does not count.
 5. **Production.** Dashboard, Apply for production access, then publish.
-6. **Every later upload:** raise `versionCode` in `android/app/build.gradle` first (and `versionName` when users should see a new number).
+6. **Every later upload:** raise `versionCode` in `android/app/build.gradle` first (and `versionName` when users should see a new number), build, then in Closed testing create a new release with the new `.aab` and its release notes (500 characters at most). For 1.0.2 (code 3):
+   > Presets now always sound the same: choosing one first returns every other setting, the Composer's too, to the starting sound, then applies the preset. Your volume and session timer stay. New in the File tab: Reset all settings, which starts everything over and keeps your saved settings.
 
 ## Remaking the graphics
 
@@ -65,6 +66,7 @@ Policy and programs, App content:
 
 ## Revision history
 
-- 2026-10-19 v1.0: initial
+- 2026-10-28 v1.3: the 1.0.2 bundle name and its release notes
 - 2026-10-21 v1.2: the foreground-service video (recorded with build v1.9) and the 1.0.1 bundle name
 - 2026-10-19 v1.1: the Presets screenshot retaken with the app's one-link footer (build v1.8)
+- 2026-10-19 v1.0: initial
