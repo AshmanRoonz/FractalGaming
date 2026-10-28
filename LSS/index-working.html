@@ -8707,7 +8707,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "54.49";
+const LSS_BUILD = "54.51";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -10661,6 +10661,32 @@ const _lobbyState = {
 
 const LOBBY_P2P_ROOM_ID = 'LSS_LOBBY_GLOBAL_v1';
 const LOBBY_P2P_APP_ID  = 'last-ship-sailing';
+// (v54.50) THE INTRODUCTION RELAYS, PINNED - passed as `relayUrls` by BOTH Trystero rooms, this lobby
+// (_p2pInit) and the match room (joinRoom). ⚠ The two must carry the SAME list: Trystero 0.22 opens its
+// relay sockets ONCE per page, from whichever joinRoom runs first (its strategy init sits behind a flag),
+// and every later room rides those sockets, so a different list on the second room is silently ignored.
+// Signed in at load, the lobby joins first; otherwise the match room does.
+// Left to itself, Trystero 0.22 hands each app id a fixed 5 of its 18 built-in nostr relays (shuffled by
+// a seed from the app id), and by 2026-10-27 most of the 18 were dead to us: offline, demanding NIP-42
+// sign-in, refusing the event kind, or rate-limiting (two probes that day found 5, then 4, still
+// forwarding). A signed-out page (match room first) was down to ONE live relay (nostr.sathoarder.com)
+// and a signed-in one (lobby first) to two (+ nostr.data.haus), so a single operator's outage meant
+// nobody met anybody. These 8, run by eight different operators, forwarded a fresh Trystero event in
+// every probe that day, and none answered "rate limited" to a signed-in page's steady load (lobby + match
+// each announcing every 5.3 s) over 90 s or more. (v54.51) nostr.oxtr.dev forwards too, but at that load
+// it began refusing after 38 s and turned away about half from then on, so relay.nostr.dev.br (no
+// refusals in 128 s; also in Trystero 0.26's own default list, which drops oxtr) took its slot.
+// They KEEP both app ids' surviving defaults on purpose: a cached 54.49-or-older client, still on the
+// defaults, meets an updated one through sathoarder. Measured: an old signed-out page met two updated tabs
+// within a second through sathoarder alone, and an old signed-in one met them in the lobby and the match
+// room alike. Peers need only one relay in common to be introduced; the play itself is direct WebRTC
+// either way. To re-check a relay: socket A sends `trystero.subscribe(id, topic)`; about a second after
+// both are open, socket B sends a FRESH `await trystero.createEvent(topic, 'x')` (one made any earlier
+// falls before the REQ's `since` and is filtered out). A relay that never delivers it to A goes. An
+// upgrade past 0.22 must carry this list over: later Trystero moves the option to `relayConfig.urls`.
+const LSS_NOSTR_RELAYS = ['relay.mostro.network', 'relay.primal.net', 'nostr.sathoarder.com', 'nos.lol',
+                          'relay.nostr.dev.br', 'nostr.mom', 'nostr.data.haus', 'relay.snort.social']
+  .map(h => 'wss://' + h);
 const LOBBY_PRESENCE_BROADCAST_MS = 30_000;
 const LOBBY_INVITE_TTL_MS         = 90_000;
 const LOBBY_COOLDOWN_LADDER_SEC   = [60, 90, 150, 240];
@@ -10807,7 +10833,7 @@ async function _p2pInit() {
   _lobbySetStatus('connecting to lobby...');
   try {
     const trystero = await import('https://esm.sh/trystero@0.22.0/nostr');
-    _lobbyP2P.room = trystero.joinRoom({ appId: LOBBY_P2P_APP_ID }, LOBBY_P2P_ROOM_ID);
+    _lobbyP2P.room = trystero.joinRoom({ appId: LOBBY_P2P_APP_ID, relayUrls: LSS_NOSTR_RELAYS }, LOBBY_P2P_ROOM_ID);
     const room = _lobbyP2P.room;
     // Action names are 6-char tags Trystero hashes for efficient routing.
     const [sendPresence, receivePresence] = room.makeAction('pres');
@@ -13073,7 +13099,8 @@ async function joinRoom() {
     // Pull TURN credentials (Cloudflare Worker) so peers behind cell /
     // symmetric NAT can connect. Falls back to STUN-only (LAN) if unavailable.
     const _iceServers = await _lssFetchIceServers();
-    const _joinCfg = { appId: 'last-ship-sailing-v1' };
+    // (v54.50) relayUrls: the pinned introduction relays (LSS_NOSTR_RELAYS, by the lobby constants).
+    const _joinCfg = { appId: 'last-ship-sailing-v1', relayUrls: LSS_NOSTR_RELAYS };
     if (_iceServers) {
       _joinCfg.rtcConfig = { iceServers: _iceServers };
       console.log('[turn] using', _iceServers.length, 'ICE server entr(y/ies) from Worker');

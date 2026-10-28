@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "54.49";
+const LSS_BUILD = "54.51";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -1185,6 +1185,9 @@ const _lobbyState = {
 
 const LOBBY_P2P_ROOM_ID = 'LSS_LOBBY_GLOBAL_v1';
 const LOBBY_P2P_APP_ID  = 'last-ship-sailing';
+const LSS_NOSTR_RELAYS = ['relay.mostro.network', 'relay.primal.net', 'nostr.sathoarder.com', 'nos.lol',
+                          'relay.nostr.dev.br', 'nostr.mom', 'nostr.data.haus', 'relay.snort.social']
+  .map(h => 'wss://' + h);
 const LOBBY_PRESENCE_BROADCAST_MS = 30_000;
 const LOBBY_INVITE_TTL_MS         = 90_000;
 const LOBBY_COOLDOWN_LADDER_SEC   = [60, 90, 150, 240];
@@ -1314,7 +1317,7 @@ async function _p2pInit() {
   _lobbySetStatus('connecting to lobby...');
   try {
     const trystero = await import('https://esm.sh/trystero@0.22.0/nostr');
-    _lobbyP2P.room = trystero.joinRoom({ appId: LOBBY_P2P_APP_ID }, LOBBY_P2P_ROOM_ID);
+    _lobbyP2P.room = trystero.joinRoom({ appId: LOBBY_P2P_APP_ID, relayUrls: LSS_NOSTR_RELAYS }, LOBBY_P2P_ROOM_ID);
     const room = _lobbyP2P.room;
     const [sendPresence, receivePresence] = room.makeAction('pres');
     const [sendPresReq,  receivePresReq]  = room.makeAction('pres_q');
@@ -3065,7 +3068,7 @@ async function joinRoom() {
     net.solo = false;
 
     const _iceServers = await _lssFetchIceServers();
-    const _joinCfg = { appId: 'last-ship-sailing-v1' };
+    const _joinCfg = { appId: 'last-ship-sailing-v1', relayUrls: LSS_NOSTR_RELAYS };
     if (_iceServers) {
       _joinCfg.rtcConfig = { iceServers: _iceServers };
       console.log('[turn] using', _iceServers.length, 'ICE server entr(y/ies) from Worker');
