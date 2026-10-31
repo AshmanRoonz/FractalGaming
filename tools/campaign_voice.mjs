@@ -109,6 +109,12 @@ const STYLE_TAGS = { whisper: '[whispers]', angry: '[angry]', think: '[quietly]'
 // Whole-line performance overrides, where the plain text would be read out rather than performed.
 const SAY = {
   op_groan: '[groaning] Arrgh... Ughhhhh...',
+  // (2026-10-31, v54.55) Owner: 'we need to redo xorzo's line "we're actual, bitch" it needs more of a pause... "we're
+  // actual....... bitch!"'. A first try kept the old take and spliced silence into its pause: "the 'bitch' doesn't sound
+  // right" - that take said it as a quick tail on "Actual...", which a long beat exposes. A new take, then: the owner's
+  // punctuation for the beat, and [smugly] so the word lands as the comeback it is. Owner, on those takes: 'the bitch part
+  // sounds good now' / 'exclaim "we're actual..."' - so the first half is exclaimed.
+  xz_actual: "[exclaiming] We're Actual!....... [smugly] bitch!",
 };
 // Pronunciation, per speaker: word -> what is SENT (eleven_v4 also takes IPA between slashes). "Xorzo" needs none: the
 // owner checked it in two voices before the bake - "they all sound right". (2026-10-08) Cybertronic read "AIs" as

@@ -703,7 +703,7 @@ The Summoners found their contestant! That's you, pilot! You're the chosen one! 
 
 **THE SUMMONERS:** Stay away from that! I can give you anything you want in the physical world. We can rule this virtual world together, and create the most genius and deadly Artificial Intelligences the planet has ever seen! ★
 
-**XORZO:** We're Actual... bitch! ★
+**XORZO:** We're Actual....... bitch! ★
 
 *These four are still my drafts, as gameplay cues for the dock:*
 

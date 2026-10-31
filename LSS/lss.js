@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "54.51";
+const LSS_BUILD = "54.62";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -3515,6 +3515,7 @@ const CampaignMode = {
     c._nemesisFleeing = false; c._fleeTimer = null;
     c._portalForm = 0; c._portalT = 0; c._arrived = false; c._formAtArrive = 0;
     c._summonerSpawned = false; c._summonerLeft = false; c._chanT = 0; c._bcT = 0;
+    c._talkWaitT0 = null; c._escSaid = false; c._followSaid = false;   // (v54.54) the talk gate + the escape lines, per leg
     c._pings = []; c._pingT = null; c._pingRevealed = false;   // (v52.10) Xorzo's pings
     c._sceneDone = false; c._scenePend = false; c._scenePendT = 0; c._sceneHoldPrev = false;   // (v52.14) the leg's scene
     c._tips = null;   // (v52.71) a leg start decides its tips anew (_campTipsTick): a replayed first leg teaches again
@@ -3620,7 +3621,7 @@ const CampaignMode = {
           c.phase = 'boss'; c.bossActive = true; c._travelSpawnTimer = null;
           c._arrived = true; c._formAtArrive = c._portalForm || 0;   // (v49.48) caught mid-opening
           if (game._campJourney) { try { if (window.CampMedia && window.CampMedia.playVoice) window.CampMedia.playVoice((c.sceneIndex || 0) + 1); } catch (_) {} }   
-          try { if (window.CampDialogue) window.CampDialogue.interject(CAMP_SEQS['arrive' + (c.sceneIndex || 0)] || ['arrive_xz'].concat(CAMP_SEQS['boss' + (c.sceneIndex || 0)] || [])); } catch (_) {}
+          try { if (window.CampDialogue) window.CampDialogue.interject(CAMP_SEQS['arrive' + (c.sceneIndex || 0)] || ['arrive_xz'].concat(CAMP_SEQS['boss' + (c.sceneIndex || 0)] || []), { arena: true }); } catch (_) {}
           _campBroadcastState();
         }
         break;
@@ -3668,7 +3669,7 @@ const CampaignMode = {
         if (game.bossPortal) {
           if (_ca) {
           if (!c._advancing && game.bossPortal.stable !== false && player && player.position &&
-              player.position.distanceTo(game.bossPortal.position) < 320) {
+              player.position.distanceTo(game.bossPortal.position) < 320 && !_campArenaTalking(c)) {
             c._advancing = true;
             try { if (typeof _beginWorldSwap === 'function') _beginWorldSwap('camp-leg', 'ENTERING THE NEXT LEG'); } catch (_) {}
             try { if (window.Overlays && Overlays.warp) Overlays.warp(true); } catch (_) {}
@@ -4630,6 +4631,8 @@ const EndlessMode = {
       if (m >= 1) { try { _swAtmoApply(X.to); } catch (_) {} run.atmoXf = null; }
       else if (m > 0) { m = m * m * (3 - 2 * m); try { _swAtmoLerp(X.from, X.to, m); } catch (_) {} }
     }
+    try { _lssLandformFog(dt, run, T); } catch (e) { if (!run._lfFogErr) { run._lfFogErr = 1; console.warn('[endless] landform fog:', e); } }
+    try { _lfIslFrame(run, T); } catch (e) { if (!run._lfIslErr) { run._lfIslErr = 1; console.warn('[endless] chamber islands:', e); } }
     const calm = !run.stormy && (T.biome === 'rocky' || T.biome === 'snow' || T.biome === 'goldmine' || T.biome === 'grassy');
     if (run.stormy) {
       run.boltT -= dt;
@@ -4671,7 +4674,8 @@ const EndlessMode = {
         try {
           const _rq = _bendToFlat(x, s.a.y + (s.b.y - s.a.y) * t, z);   // (v39.59) bend: flat image of the spine point
           const cy = _stCeilYCarved(_rq.x, _rq.z, T);
-          if (cy < 1e8 && cy > T.YMID + (T.YCEIL - T.YMID) * 0.55) {
+          const _inLF = !!(T.LF && _stLandformW(_rq.x, _rq.z, T.LF) > 0.05);
+          if (!_inLF && cy < 1e8 && cy > T.YMID + (T.YCEIL - T.YMID) * 0.55) {
             slot.life = 9;
             const _rw = _bendToWorld(_rq.x, cy - 620, _rq.z);
             slot.mesh.position.set(_rw.x, _rw.y, _rw.z);
@@ -5495,6 +5499,7 @@ function _campSummonBoss(defKey, atPos) {
   m.health = m.maxHealth;
   m.dormant = false; m.aggro = true; m._deAggroT = 0;
   m._scanned = false; m._scanP = 0;   // (v49.49) the pooled leviathan comes back unread
+  try { _monClearBurn(m); } catch (_) {}   // (v54.52) ...and unlit (a boss that died burning last leg)
   if (atPos) {
     const sx = m.position ? m.position.x : atPos.x;
     const sy = m.position ? m.position.y : atPos.y;
@@ -5643,7 +5648,19 @@ function _campSpawnSummoner(c, at) {
     game.entities.push(bot);
   }).catch(() => {});
 }
+const CAMP_TALK_GATE = { on: true, max: 60 };
+try { if (typeof window !== 'undefined') window.__campTalkGate = CAMP_TALK_GATE; } catch (_) {}
+function _campArenaTalking(c) {
+  if (!CAMP_TALK_GATE.on) return false;
+  if (typeof net !== 'undefined' && net && net.active) return false;
+  let t = false;
+  try { t = !!(window.CampDialogue && window.CampDialogue.tagged && window.CampDialogue.tagged('arena')); } catch (_) {}
+  if (!t) return false;
+  if (c && c._talkWaitT0 != null && ((game.time || 0) - c._talkWaitT0) > CAMP_TALK_GATE.max) return false;
+  return true;
+}
 function _campRingMayOpen(c) {
+  if (_campArenaTalking(c)) return false;   // (v54.54) not while the arena is talking - see above
   const k = CAMP_ARENA.openOn;
   if (k === 'clear') return c.phase === 'cleared';
   if (k === 'boss') return c.phase === 'cleared' || !(c._boss && c._boss.alive);
@@ -5682,10 +5699,12 @@ function _campArenaTick(c, dt, auth) {
       try { spawnLightningBolt(nb.position, _campArenaV2, 0xb58cff, 0.3, 2, 1.0, true); } catch (_) {}
     }
   }
-  if (c._portalForm >= 1 && nb && nb.alive && !nb._fleePortalPos && P) {
+  if (c._portalForm >= 1 && c._talkWaitT0 == null) c._talkWaitT0 = game.time || 0;   // the gate's hang guard counts from the finished ring
+  if (c._portalForm >= 1 && nb && nb.alive && !nb._fleePortalPos && P && !_campArenaTalking(c)) {
     nb._formationActive = false;
     nb._fleePortalPos = P.position.clone();
     c._fleeTimer = 9;
+    if (!c._escSaid) { c._escSaid = true; try { if (window.CampDialogue) window.CampDialogue.interject(['sum_escape'], { arena: true }); } catch (_) {} }
   }
   if (nb && nb.alive && nb._fleePortalPos && nb.position && P) {
     c._fleeTimer = (c._fleeTimer || 0) - dt;
@@ -5701,16 +5720,24 @@ function _campArenaTick(c, dt, auth) {
   }
   if (!c._summonerLeft && c._portalForm >= 1 && !(c._nemesisBot && c._nemesisBot.alive)) {
     c._summonerLeft = true;
-    const _open = _campRingMayOpen(c);
-    try { if (window.Overlays) Overlays.banner('THEY SLIPPED THROUGH', _open ? 'The portal is still open - fly through after them' : 'The portal is still open'); } catch (_) {}
-    try { if (window.CampDialogue) window.CampDialogue.interject(_open ? ['sum_escape', 'xz_follow'] : ['sum_escape']); } catch (_) {}   // (v52.13) heard when it happens
-    if (_open) _campRingOpen(c, P);
+    const _rule = (CAMP_ARENA.openOn !== 'clear' && CAMP_ARENA.openOn !== 'boss') || _campRingMayOpen(c);
+    try { if (window.Overlays) Overlays.banner('THEY SLIPPED THROUGH', _rule ? 'The portal is still open - fly through after them' : 'The portal is still open'); } catch (_) {}
+    try {
+      const D = window.CampDialogue, _lines = (c._escSaid ? [] : ['sum_escape']).concat(_rule ? ['xz_follow'] : []);
+      c._escSaid = true;
+      if (D && _lines.length) {
+        if (D.tagged && D.enqueue && D.tagged('arena')) D.enqueue(_lines, { arena: true });
+        else D.interject(_lines, { arena: true });   // (v52.13) heard when it happens
+      }
+      c._followSaid = _rule;
+    } catch (_) {}
+    if (_campRingMayOpen(c)) _campRingOpen(c, P);   // (v54.54) solo: the talk just queued holds it - the block below opens it
     _campBroadcastState();
   }
   if (P && P.stable === false && c._summonerLeft && _campRingMayOpen(c)) {
     _campRingOpen(c, P);
     try { if (window.Overlays) Overlays.banner('PORTAL OPEN', 'Fly through the ring - after them'); } catch (_) {}
-    try { if (window.CampDialogue) window.CampDialogue.interject(['xz_follow']); } catch (_) {}   // (v52.13) heard when it happens
+    if (!c._followSaid) { try { if (window.CampDialogue) window.CampDialogue.interject(['xz_follow'], { arena: true }); } catch (_) {} c._followSaid = true; }   // (v52.13) heard when it happens ; (v54.54) once
     _campBroadcastState();
   }
   c._bcT = (c._bcT || 0) - dt;
@@ -23195,6 +23222,48 @@ function _stRidged(x,z,seed,T,sp){
   }
   return Math.pow(sum/norm,T.EXPONENT);
 }
+// (v54.56) LANDFORM PROVINCES - the endless deep's ridges and valleys. Owner: "for new variety in the endless landforms,
+// it works the exact same way, with top/bottom...the spikes turn into valleys and ridges and stuff". Pure functions of the
+// FLAT (x, z) and T.LF (built per run by _lssLandformParams, endless only: every other map has no LF and keeps the old
+// expressions, bit for bit). _stLandformW = the province weight (0 = the spikes, 1 = landforms); _stLandform = the 0..1
+// relief the floor rises / the ceiling hangs by inside a province: MOUNTAIN RANGES - a ridged multifractal at the range
+// scale (L.wave) whose crests are kept broad (exponent L.sharp, where the spikes use 1.75: the needles), lifted and lowered
+// by a slow massif field (L.mLo..1: lowland valleys, highland ranges), with the spikes left as the flanks' fine relief
+// (L.rough). The ceiling's ranges are INDEPENDENT (offset L.cx / L.cz) and smaller (L.topAmp): the first cut mirrored the
+// floor's ridges at the same point and every valley closed into a tube - owner: "that's just a tunnel... boring".
+// The carve opens the province up too (_stGroundYCarvedBase and its three siblings: the pinch eases by L.open, and the
+// route's lane only cuts DOWN through a ridge, it no longer fills a valley).
+// Self-contained (only _stNoise2): the marching-cubes worker's copy of the terrain has no _stSmooth. MUST stay identical
+// in both terrain copies; _hbFamily lists both. No backticks in these comments (the worker copy lives inside a template).
+function _stLandformW(x,z,L){
+  if(L.force!=null) return L.force;
+  let t=(_stNoise2(x*L.pFreq+L.px,z*L.pFreq+L.pz)-L.pLo)/(L.pHi-L.pLo); t=t<0?0:(t>1?1:t); return t*t*(3-2*t);
+}
+function _stLandform(x,z,L,s,top){
+  const w=_stLandformW(x,z,L);
+  if(!(w>0)) return s;
+  const ox=top?L.cx:0, oz=top?L.cz:0, X=x+ox, Z=z+oz;
+  let sum=0,amp=1,fr=1/L.wave,prev=1,norm=0;
+  for(let o=0;o<4;o++){
+    let r=1-Math.abs(_stNoise2(X*fr+L.px*0.13+o*7.7,Z*fr-L.pz*0.11+o*3.1)); r*=r;
+    sum+=r*prev*amp; prev=r; norm+=amp; fr*=2.07; amp*=0.5;
+  }
+  const mass=L.mLo+(1-L.mLo)*(0.5+0.5*_stNoise2(X*L.mFreq+5.3,Z*L.mFreq-2.9));
+  let lf=Math.pow(sum/norm,L.sharp)*mass*(top?L.topAmp:1);
+  lf+=L.rough*(s-0.3)*(0.3+0.7*lf);
+  return s+(lf-s)*w-w*_stChamberK(x,z,L)*(top?L.chR:L.chD);
+}
+// (v54.59) CHAMBERS - owner: "and then maybe top/bottom can open up a little wider for an area with floating islands in
+// between top/bottom". Inside a province, a second slow field opens the gap: the floor drops by L.chD and the ceiling
+// rises by L.chR (in relief units, AMP each) at full weight, eased over the field's band, so a chamber's rim is a slope,
+// not a step. Both terrain copies, identical; _hbFamily lists both. _stChamberW = the whole weight (province x chamber):
+// the islands read it (_lfIslCell) to place themselves in the open middle.
+function _stChamberK(x,z,L){
+  if(L.chForce!=null) return L.chForce;
+  if(!(L.chD>0||L.chR>0)) return 0;
+  let t=(_stNoise2(x*L.chFreq+L.qx,z*L.chFreq+L.qz)-L.chLo)/(L.chHi-L.chLo); t=t<0?0:(t>1?1:t); return t*t*(3-2*t);
+}
+function _stChamberW(x,z,L){ return _stLandformW(x,z,L)*_stChamberK(x,z,L); }
 function _stGroundY(x,z,T,sp){
   const wx=T.WARP!==0?x+T.WARP*_stNoise2(x*T.WARP_FREQ,z*T.WARP_FREQ):x;
   const wz=T.WARP!==0?z+T.WARP*_stNoise2(x*T.WARP_FREQ+31.7,z*T.WARP_FREQ+17.3):z;
@@ -23543,13 +23612,15 @@ function _stGroundY(x,z,T,sp){
     }
     return h;
   }
-  return T.YFLOOR+T.GROUND_AMP*_stRidged(wx,wz,1.7,T);
+  const _s0=_stRidged(wx,wz,1.7,T);
+  return T.YFLOOR+T.GROUND_AMP*(T.LF?_stLandform(x,z,T.LF,_s0,0):_s0);   // (v54.56) _stLandform
 }
 function _stCeilY(x,z,T){
   const ax=x+4000, az=z-4000;
   const wx=T.WARP!==0?ax+T.WARP*_stNoise2(ax*T.WARP_FREQ,az*T.WARP_FREQ):ax;
   const wz=T.WARP!==0?az+T.WARP*_stNoise2(ax*T.WARP_FREQ+31.7,az*T.WARP_FREQ+17.3):az;
-  return T.YCEIL-T.CEIL_AMP*_stRidged(wx,wz,5.9,T);
+  const _c0=_stRidged(wx,wz,5.9,T);
+  return T.YCEIL-T.CEIL_AMP*(T.LF?_stLandform(x,z,T.LF,_c0,1):_c0);   // (v54.56) its own ranges (top = 1)
 }
 // Gap slab SDF: negative inside the open gap (air), positive in mountain rock.
 function _stGapSDF(px,py,pz,T){
@@ -23693,6 +23764,30 @@ function _stRidged(x,z,seed,T,sp){
   }
   return Math.pow(sum/norm,T.EXPONENT);
 }
+function _stLandformW(x,z,L){
+  if(L.force!=null) return L.force;
+  let t=(_stNoise2(x*L.pFreq+L.px,z*L.pFreq+L.pz)-L.pLo)/(L.pHi-L.pLo); t=t<0?0:(t>1?1:t); return t*t*(3-2*t);
+}
+function _stLandform(x,z,L,s,top){
+  const w=_stLandformW(x,z,L);
+  if(!(w>0)) return s;
+  const ox=top?L.cx:0, oz=top?L.cz:0, X=x+ox, Z=z+oz;
+  let sum=0,amp=1,fr=1/L.wave,prev=1,norm=0;
+  for(let o=0;o<4;o++){
+    let r=1-Math.abs(_stNoise2(X*fr+L.px*0.13+o*7.7,Z*fr-L.pz*0.11+o*3.1)); r*=r;
+    sum+=r*prev*amp; prev=r; norm+=amp; fr*=2.07; amp*=0.5;
+  }
+  const mass=L.mLo+(1-L.mLo)*(0.5+0.5*_stNoise2(X*L.mFreq+5.3,Z*L.mFreq-2.9));
+  let lf=Math.pow(sum/norm,L.sharp)*mass*(top?L.topAmp:1);
+  lf+=L.rough*(s-0.3)*(0.3+0.7*lf);
+  return s+(lf-s)*w-w*_stChamberK(x,z,L)*(top?L.chR:L.chD);
+}
+function _stChamberK(x,z,L){
+  if(L.chForce!=null) return L.chForce;
+  if(!(L.chD>0||L.chR>0)) return 0;
+  let t=(_stNoise2(x*L.chFreq+L.qx,z*L.chFreq+L.qz)-L.chLo)/(L.chHi-L.chLo); t=t<0?0:(t>1?1:t); return t*t*(3-2*t);
+}
+function _stChamberW(x,z,L){ return _stLandformW(x,z,L)*_stChamberK(x,z,L); }
 function _stGroundY(x,z,T,sp){
   const wx=T.WARP!==0?x+T.WARP*_stNoise2(x*T.WARP_FREQ,z*T.WARP_FREQ):x;
   const wz=T.WARP!==0?z+T.WARP*_stNoise2(x*T.WARP_FREQ+31.7,z*T.WARP_FREQ+17.3):z;
@@ -23878,13 +23973,15 @@ function _stGroundY(x,z,T,sp){
     }
     return h;
   }
-  return T.YFLOOR+T.GROUND_AMP*_stRidged(wx,wz,1.7,T);
+  const _s0=_stRidged(wx,wz,1.7,T);
+  return T.YFLOOR+T.GROUND_AMP*(T.LF?_stLandform(x,z,T.LF,_s0,0):_s0);   // (v54.56) _stLandform
 }
 function _stCeilY(x,z,T){
   const ax=x+4000, az=z-4000;
   const wx=T.WARP!==0?ax+T.WARP*_stNoise2(ax*T.WARP_FREQ,az*T.WARP_FREQ):ax;
   const wz=T.WARP!==0?az+T.WARP*_stNoise2(ax*T.WARP_FREQ+31.7,az*T.WARP_FREQ+17.3):az;
-  return T.YCEIL-T.CEIL_AMP*_stRidged(wx,wz,5.9,T);
+  const _c0=_stRidged(wx,wz,5.9,T);
+  return T.YCEIL-T.CEIL_AMP*(T.LF?_stLandform(x,z,T.LF,_c0,1):_c0);   // (v54.56) its own ranges (top = 1)
 }
 function _stGapSDF(px,py,pz,T){
   return Math.max(_stGroundY(px,pz,T)-py, py-_stCeilY(px,pz,T));
@@ -23916,22 +24013,26 @@ function _stCarveOpenness(x,z,T){ return _stRouteAt(x,z,T).o; }
 function _stGroundYCarvedBase(x,z,T,sp){
   const g=_stGroundY(x,z,T,sp); const r=_stRouteAt(x,z,T);
   const ro=Math.max(0,Math.min(1,r.o));
-  const PINCH=(T.WALL_PINCH!=null?T.WALL_PINCH:0.45);
+  const lw=T.LF?_stLandformW(x,z,T.LF):0;   // (v54.56) a landform province opens up and its lane only cuts down (_stLandform)
+  const PINCH=(T.WALL_PINCH!=null?T.WALL_PINCH:0.45)*(lw>0?1-lw*T.LF.open:1);
   const mid=(g+_stCeilY(x,z,T))*0.5;
   const g2=g+(mid-g)*PINCH*(1-ro);
   if(ro<=0) return g2;
-  const floor=r.ty-(T.ARENA_DROP||320);   
+  let floor=r.ty-(T.ARENA_DROP||320);
+  if(lw>0&&g2<floor) floor+=(g2-floor)*lw;   
   return g2+(floor-g2)*ro;
 }
 function _stCeilYCarvedBase(x,z,T){
   if(T && T._openTop) return 1e9;
   const c=_stCeilY(x,z,T); const r=_stRouteAt(x,z,T);
   const ro=Math.max(0,Math.min(1,r.o));
-  const PINCH=(T.WALL_PINCH!=null?T.WALL_PINCH:0.45);
+  const lw=T.LF?_stLandformW(x,z,T.LF):0;   // (v54.56) a landform province opens up and its lane only cuts down (_stLandform)
+  const PINCH=(T.WALL_PINCH!=null?T.WALL_PINCH:0.45)*(lw>0?1-lw*T.LF.open:1);
   const mid=(_stGroundY(x,z,T)+c)*0.5;
   const c2=c+(mid-c)*PINCH*(1-ro);
   if(ro<=0) return c2;
-  const roof=r.ty+(T.ARENA_RISE||420);
+  let roof=r.ty+(T.ARENA_RISE||420);
+  if(lw>0&&c2>roof) roof+=(c2-roof)*lw;
   return c2+(roof-c2)*ro;
 }
 function _stPillarAt(x,z,T){
@@ -23986,18 +24087,19 @@ function _stCarvedPair(x,z,T,out){
   const g=_stGroundY(x,z,T); const r=_stRouteAt(x,z,T);
   const ro=Math.max(0,Math.min(1,r.o)), rty=r.ty;   // copied out: r is _stRouteAt's module scratch
   const c=_stCeilY(x,z,T);
-  const PINCH=(T.WALL_PINCH!=null?T.WALL_PINCH:0.45);
+  const lw=T.LF?_stLandformW(x,z,T.LF):0;   // (v54.56) a landform province opens up and its lane only cuts down (_stLandform)
+  const PINCH=(T.WALL_PINCH!=null?T.WALL_PINCH:0.45)*(lw>0?1-lw*T.LF.open:1);
   const mid=(g+c)*0.5;
   const g2=g+(mid-g)*PINCH*(1-ro);
   let gB;
   if(ro<=0) gB=g2;
-  else { const floor=rty-(T.ARENA_DROP||320); gB=g2+(floor-g2)*ro; }
+  else { let floor=rty-(T.ARENA_DROP||320); if(lw>0&&g2<floor) floor+=(g2-floor)*lw; gB=g2+(floor-g2)*ro; }
   let cB;
   if(T && T._openTop) cB=1e9;
   else {
     const c2=c+(mid-c)*PINCH*(1-ro);
     if(ro<=0) cB=c2;
-    else { const roof=rty+(T.ARENA_RISE||420); cB=c2+(roof-c2)*ro; }
+    else { let roof=rty+(T.ARENA_RISE||420); if(lw>0&&c2>roof) roof+=(c2-roof)*lw; cB=c2+(roof-c2)*ro; }
   }
   let gC=gB, cC=cB;
   if(T.PILLARS && !T._openTop){
@@ -24015,14 +24117,17 @@ function _stGapSDFCarved(px,py,pz,T){
   const g=_stGroundY(px,pz,T), c=_stCeilY(px,pz,T);
   const r=_stRouteAt(px,pz,T);
   const ro=Math.max(0,Math.min(1,r.o));
-  const PINCH=(T.WALL_PINCH!=null?T.WALL_PINCH:0.45);
+  const lw=T.LF?_stLandformW(px,pz,T.LF):0;   // (v54.56) the same opening as the carved surfaces (_stGroundYCarvedBase)
+  const PINCH=(T.WALL_PINCH!=null?T.WALL_PINCH:0.45)*(lw>0?1-lw*T.LF.open:1);
   const pw=PINCH*(1-ro);
   const mid=(g+c)*0.5;
   let g2=g+(mid-g)*pw;
   let c2=c+(mid-c)*pw;
   if(ro>0){
-    g2=g2+((r.ty-(T.ARENA_DROP||320))-g2)*ro;
-    c2=c2+((r.ty+(T.ARENA_RISE||420))-c2)*ro;
+    let fl=r.ty-(T.ARENA_DROP||320), rf=r.ty+(T.ARENA_RISE||420);
+    if(lw>0){ if(g2<fl) fl+=(g2-fl)*lw; if(c2>rf) rf+=(c2-rf)*lw; }
+    g2=g2+(fl-g2)*ro;
+    c2=c2+(rf-c2)*ro;
   }
   if(T.PILLARS && !T._openTop){
     const pwp=_stPillarAt(px,pz,T);
@@ -25208,6 +25313,7 @@ function _swBuildGrass(x0, z0, T) {
 }
 function _swBuildGrassTufts(x0, z0, T) {
   if (game.sandwichGrass === false || ((T.biome || 'grassy') !== 'grassy' && T.biome !== 'mossy')) return null;
+  const bent = !!game.bendWorld && typeof _bendOn === 'function' && _bendOn();
   const K = _swGrassK();
   if (!K.on) return null;
   if (K.style === 'blades') return _swBuildGrassBlades(x0, z0, T);
@@ -25226,10 +25332,22 @@ function _swBuildGrassTufts(x0, z0, T) {
     if (T.HUB && _hubCityExcludes(cx, cz) && (typeof _hubCityGroundBlocked !== 'function' || _hubCityGroundBlocked(cx, cz))) continue;
     if (T.HUB && _hzZoneForFoliage(cx, cz)) continue;   // (v35.13) heartland flora - deep zones grow their own cover
     const cy = gy(cx, cz);
-    if (T.WL != null && cy < T.WL + 2) continue;
-    if ((cy - (T.YMID - T.AMP * 0.5)) / (T.AMP * 1.15) > snowT) continue;
-    const yx = gy(cx + 8, cz) - cy, yz = gy(cx, cz + 8) - cy;
-    const nyB = 8 / Math.hypot(yx, yz, 8);   // (v51.47) the ground normal's y - the tuft's AO cavity term
+    let nyB;
+    let bwx = 0, bwy = 0, bwz = 0, bax = 0, bay = 0, baz = 0, bnx = 0, bny = 1, bnz = 0, bhx = 1, bhz = 0;
+    if (!bent) {
+      if (T.WL != null && cy < T.WL + 2) continue;
+      if ((cy - (T.YMID - T.AMP * 0.5)) / (T.AMP * 1.15) > snowT) continue;
+      const yx = gy(cx + 8, cz) - cy, yz = gy(cx, cz + 8) - cy;
+      nyB = 8 / Math.hypot(yx, yz, 8);   // (v51.47) the ground normal's y - the tuft's AO cavity term
+    } else {
+      if ((cy - (T.YMID - T.AMP * 0.5)) / (T.AMP * 1.15) > snowT) continue;   // the snow line is flat-space (uBendFlat)
+      const W = _bendMapPoint(cx, cy, cz);   // a scratch result: copied out at once
+      bwx = W.x; bwy = W.y; bwz = W.z; bax = W.ax; bay = W.ay; baz = W.az; bnx = W.nx; bny = W.ny; bnz = W.nz;
+      const hl = Math.hypot(bax, baz) || 1; bhx = bax / hl; bhz = baz / hl;
+      if (T.WL != null && bwy < T.WL + 2) continue;   // the water is world-flat
+      const yx = gy(cx + 8, cz) - cy, yz = gy(cx, cz + 8) - cy, L = Math.hypot(yx, yz, 8);
+      nyB = ((-yx * bhx - yz * bhz) * bay + 8 * bny) / L;
+    }
     const fl = Math.max(0, Math.min(1, (nyB - SR) / Math.max(0.001, SG - SR)));
     if (fl < 0.5) continue;
     if (typeof _volcHotAt === 'function' && _volcHotAt(cx, cz, 1.2) > 0.004) continue;
@@ -25238,11 +25356,17 @@ function _swBuildGrassTufts(x0, z0, T) {
       const x = bx + ((b % SUB) + 0.5 + (r1 - 0.5) * 0.9) * ss, z = bz + (((b / SUB) | 0) + 0.5 + (r2 - 0.5) * 0.9) * ss;
       const pc = _stPatch(x, z);
       if (r3 > (pc - 0.36) / 0.10) continue;
-      const y = gy(x, z);
+      let y = gy(x, z), tx = x, tz = z;
+      if (bent) {
+        const fx = x - cx, fz = z - cz, fy = y - cy, dh = fx * bhx + fz * bhz, dp = fx * bhz - fz * bhx;
+        tx = bwx + bax * dh + bhz * dp + bnx * fy;
+        tz = bwz + baz * dh - bhx * dp + bnz * fy;
+        y = bwy + bay * dh + bny * fy;
+      }
       if (T.WL != null && y < T.WL + 3) continue;
       const lush = Math.max(0, Math.min(1, (pc - 0.40) / 0.40));
       const mixG = Math.max(0, Math.min(1, (pc - 0.32) / 0.40));
-      buckets[r4 < K.tall ? 1 : 0].push(x, y, z, nyB, r5 * 6.283, (0.85 + r6 * 0.3) * K.height * (0.9 + 0.2 * lush), 0.88 + r7 * 0.2, r8);   // (v51.51) + the tuft's rank
+      buckets[r4 < K.tall ? 1 : 0].push(tx, y, tz, nyB, r5 * 6.283, (0.85 + r6 * 0.3) * K.height * (0.9 + 0.2 * lush), 0.88 + r7 * 0.2, r8);   // (v51.51) + the tuft's rank
     }
   }
   const G = _swGrassTuftGeos(), mat = _swGrassTuftMatGet(), geos = [G.short, G.tall];
@@ -25321,6 +25445,7 @@ if (typeof window !== 'undefined') {
 }
 function _swBuildGrassBlades(x0,z0,T){
   if(game.sandwichGrass===false || ((T.biome||'grassy')!=='grassy' && T.biome!=='mossy')) return null;
+  if(game.bendWorld) return null;   // (v54.53) these flat-sheet blades would float on the bent tube; only the tufts are curved onto it (_swBuildGrassTufts)
   
   
   
@@ -26522,13 +26647,13 @@ function _swTreeVisTick(cx, cz) {
     const ev = (typeof window !== 'undefined' && window.__treeVisEvery != null) ? Math.max(1, Math.round(+window.__treeVisEvery) || 1) : 2;
     if (ev > 1 && ((_swTreeVisTick._n = (_swTreeVisTick._n | 0) + 1) % ev) !== 0) return;
   }
-  if (game.bendWorld) return;                       // the chunk grid is FLAT, uCam is BENT - they cannot agree
+  const _bentW = !!game.bendWorld;
   if (game._worldPrebaking || game._swPreloading || game._swapStaging || game._rrStaging) return;
   try { if (window.__lssWarmDraw) return; } catch (_) {}
   if (typeof _PREBAKE !== 'undefined' && _PREBAKE && _PREBAKE.on) return;
   if (!_swU || !_swU.uTreeFadeB) return;
   const B = _swU.uTreeFadeB.value;
-  if (!(B > 0)) return;
+  if (!(B > 0) && !_bentW) return;
   const B2 = B * B;
   const _PK = _swPlantK(), _PB2 = _PK.fadeB * _PK.fadeB;
   try { const _pmM = _swPlantMatGet.m; if (_pmM && _pmM._lssFade) { _pmM._lssFade.uA.value = _PK.fadeA; _pmM._lssFade.uB.value = _PK.fadeB; } } catch (_) {}
@@ -26541,12 +26666,20 @@ function _swTreeVisTick(cx, cz) {
     if (!g || !Array.isArray(g)) continue;
     const x0 = c.cx * _SW_CHUNK, z0 = c.cz * _SW_CHUNK;
     const dx = Math.max(0, x0 - cx, cx - (x0 + _SW_CHUNK)), dz = Math.max(0, z0 - cz, cz - (z0 + _SW_CHUNK));
-    const v = (dx * dx + dz * dz) < _GB2;
+    const v = _bentW || (dx * dx + dz * dz) < _GB2;   // (v54.53) on the bend the mesh's own bounds decide (below)
     const _gcy = _swU.uCam.value.y, _gd2 = dx * dx + dz * dz;
     for (let i = 0; i < g.length; i++) {
       const im = g[i]; if (!im) continue;
-      const u = im.userData || {}, dy = (u._gyMin != null) ? Math.max(0, u._gyMin - _gcy, _gcy - u._gyMax) : 0;
-      const _n2 = _gd2 + dy * dy;
+      const u = im.userData || {};
+      let _n2;
+      if (_bentW) {
+        const s = im.boundingSphere;
+        if (s) { const ex = s.center.x - cx, ey = s.center.y - _gcy, ez = s.center.z - cz; const d = Math.max(0, Math.sqrt(ex * ex + ey * ey + ez * ez) - s.radius); _n2 = d * d; }
+        else _n2 = 0;
+      } else {
+        const dy = (u._gyMin != null) ? Math.max(0, u._gyMin - _gcy, _gcy - u._gyMax) : 0;
+        _n2 = _gd2 + dy * dy;
+      }
       let cnt = im.count;
       const R = u._ranks;
       if (R) {
@@ -26573,6 +26706,7 @@ function _swTreeVisTick(cx, cz) {
       if (im.receiveShadow !== rs) im.receiveShadow = rs;
     }
   }
+  if (_bentW) return;   // (v54.53) the tree and plant gates below measure flat chunk corners - nothing grows there on the bend
   let _hid = 0, _shown = 0;
   for (const c of chunks.values()) {
     const arr = c.trees;
@@ -41013,6 +41147,8 @@ const SKY_I = {
 };
 try { window.__sky = SKY_I; } catch (_) {}
 try { window.__skyIslands = SKY_I; } catch (_) {}
+const _LFI = { T: null, cells: new Map(), list: [], dirty: false, ci: null, cj: null, scanT: 0, bendN: -1, bendL: null, bendF: null,
+               pend: 0, vis: 0, far: 0, fol: 0, folOff: 0, bMs: 0, bN: 0 };   // (v54.60) the scan clock, the route length it last saw, stats
 
 function _skH3(x, y, z) { const h = Math.sin(x * 127.1 + y * 311.7 + z * 74.7) * 43758.5453; return h - Math.floor(h); }
 function _skH3m(xi, yi, zi) {
@@ -41146,6 +41282,9 @@ function _skArchClusterAt(ii, jj) {
 }
 function _skNear(x, z, rad) {
   const out = [];
+  const _T = (typeof game !== 'undefined') ? game.sandwichTerrain : null, LL = _LFI.list;
+  if (LL.length && _LFI.T === _T) for (let k = 0; k < LL.length; k++) { const I = LL[k]; if (Math.hypot(I.x - x, I.z - z) < rad + I.R * 2) out.push(I); }
+  if (_T && _T.LF && !_T.HUB) return out;
   const i0 = Math.floor((x - rad) / SKY_I.cell), i1 = Math.floor((x + rad) / SKY_I.cell);
   const j0 = Math.floor((z - rad) / SKY_I.cell), j1 = Math.floor((z + rad) / SKY_I.cell);
   for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) {
@@ -41451,7 +41590,7 @@ function* _skBuildG(I) {
     return () => { a = (a + 0x6D2B79F5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a);
       t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; })();
 
-  if (SKY_I.vines) {
+  if (SKY_I.vines && !I.noVine) {   // (v54.59) a cave island grows none - owner (v46.73): no vines in the caverns
     const anchors = [];
     for (let v = 0; v < sn.nrm.length; v += 3) {
       if (sn.nrm[v + 1] > -0.18) continue;
@@ -41560,7 +41699,7 @@ function* _skBuildG(I) {
   if (SKY_I.flora) {
     let sets = null;
     try { sets = _swTreeGeoGet(); } catch (_) {}
-    const fungal = !I.trop && rnd() < SKY_I.fungal;   // (v49.14) no glowing caps on the archipelago's shelves
+    const fungal = !I.trop && (I.fungal ? true : rnd() < SKY_I.fungal);   // (v54.59) I.fungal: a cave island always grows the glowing caps   // (v49.14) no glowing caps on the archipelago's shelves
     const pool = sets && ((I.trop && sets.trop && sets.trop.length) ? sets.trop : (fungal ? sets.shroom : sets.std));   // (v49.14)
     if (pool && pool.length) {
       const mat = fungal ? _swShroomMatGet() : _swTreeMatGet();
@@ -41667,9 +41806,12 @@ function _skDispose() {
   for (const rec of _skKeep.values()) _skFreeRec(rec);
   _skKeep.clear();
   _skJob = null;
+  _LFI.cells.clear(); _LFI.list = []; _LFI.T = null; _LFI.dirty = false; _LFI.ci = null; _LFI.bendN = -1; _LFI.bendL = _LFI.bendF = null;   // (v54.59)
 }
 function _skFrame(px, py, pz) {
   const T = game.sandwichTerrain;
+  if (_LFI.T && _LFI.T !== T) _lfIslClear();
+  if (T && T.LF && !T.HUB) return;
   if (!T || !T.HUB || !SKY_I.on) { if (_skLive.size || _skKeep.size || _skJob) _skDispose(); return; }
   const near = _skNear(px, pz, SKY_I.range);
   const want = new Set();
@@ -41764,6 +41906,203 @@ function _skFrame(px, py, pz) {
     if (r.value) { scene.add(r.value); _skLive.set(J.I.id, { grp: r.value, isl: J.I }); }
   }
 }
+
+const LF_ISL = { on: true, cell: 2200, chance: 0.9, atW: 0.45, minGap: 2000, nMin: 3, nMax: 6, rMin: 200, rMax: 680,
+                 colP: 0.35, colGap: 2600, clear: 300, lane: 0.03, front: 2600, range: 9000, remap: 0.5, rebuild: 90,
+                 sliceMs: 1.5, fogCut: 0.985 };
+try { if (typeof window !== 'undefined') window.__lfIsl = LF_ISL; } catch (_) {}
+const _lfFwd = new THREE.Vector3();
+function _lfIslCell(i, j, T, L) {
+  const C = LF_ISL.cell;
+  const H = (o) => _stHash2(i * 7.13 + o * 2.31 + L.px * 0.017, j * 4.79 + o * 1.77 - L.pz * 0.013);
+  if (H(0) > LF_ISL.chance) return [];
+  const cx = (i + 0.2 + H(1) * 0.6) * C, cz = (j + 0.2 + H(2) * 0.6) * C;
+  if (_stChamberW(cx, cz, L) < LF_ISL.atW) return [];
+  const g0 = _stGroundYCarved(cx, cz, T), c0 = _stCeilYCarved(cx, cz, T), gap = c0 - g0;
+  if (!(gap > LF_ISL.minGap)) return [];
+  const col = H(6) < LF_ISL.colP && gap > LF_ISL.colGap;
+  const n = col ? Math.max(3, Math.min(LF_ISL.nMax, Math.floor(gap / 700)))
+                : LF_ISL.nMin + Math.floor(H(3) * (LF_ISL.nMax - LF_ISL.nMin + 1));
+  const baseA = H(4) * 6.283, yMid = g0 + gap * (0.36 + 0.28 * H(5));
+  const out = [];
+  let px = cx, pz = cz, prevR = 0;
+  for (let k = 0; k < n; k++) {
+    const h1 = _stHash2(i * 13.7 + k * 3.3 + L.qx * 0.011, j * 5.1 + k * 7.9), h2 = _stHash2(i * 2.9 + k * 9.1, j * 8.3 + k * 2.2 - L.qz * 0.007);
+    let R = LF_ISL.rMin + (LF_ISL.rMax - LF_ISL.rMin) * (0.3 + 0.7 * h1), yW;
+    if (col) {
+      const t = k / (n - 1);
+      R = Math.max(LF_ISL.rMin, R * (0.95 - 0.40 * t));
+      const a = baseA + k * 2.399963 + (h1 - 0.5) * 0.9, rr = R * (0.35 + 0.55 * h2);
+      px = cx + Math.cos(a) * rr; pz = cz + Math.sin(a) * rr;
+      yW = g0 + gap * (0.14 + 0.72 * t) + (h2 - 0.5) * 160;
+    } else {
+      if (k > 0) { const a = baseA + (h2 - 0.5) * 2.2, st = (prevR + R) * 0.6; px += Math.cos(a) * st; pz += Math.sin(a) * st; }
+      yW = yMid + (h2 - 0.5) * 520;
+    }
+    prevR = R;
+    const up = 0.30 + h1 * 0.20, dn = 0.85 + h2 * 0.70;
+    const gk = _stGroundYCarved(px, pz, T), ck = _stCeilYCarved(px, pz, T);
+    const lo = gk + LF_ISL.clear + R * dn, hi = ck - LF_ISL.clear - R * up;
+    if (!(hi > lo)) continue;
+    const y = Math.min(hi, Math.max(lo, yW));
+    let lane = 0;
+    const s = R * 1.4;
+    for (const o of [[0, 0], [s, 0], [-s, 0], [0, s], [0, -s]]) { const v = _stCarveOpenness(px + o[0], pz + o[1], T); if (v > lane) lane = v; }
+    if (lane > LF_ISL.lane) continue;
+    const w = _bendMapPoint(px, y, pz);
+    out.push({ id: 'lf:' + i + ':' + j + ':' + k, x: w.x, y: w.y, z: w.z, R, up, dn, grp: null, nb: null,
+               noBld: true, noVine: true, fungal: true, f: [px, y, pz], _moved: 0 });
+  }
+  return out;
+}
+function _lfIslDrop(I) {
+  const rec = _skLive.get(I.id);
+  if (rec) { try { scene.remove(rec.grp); } catch (_) {} _skLive.delete(I.id); _skFreeRec(rec); }
+  if (_skJob && _skJob.I === I) _skJob = null;
+  I.grp = null; I.nb = null; I._moved = 0;
+}
+function _lfIslClear() {
+  const S = _LFI;
+  for (const isl of S.cells.values()) for (const I of isl) _lfIslDrop(I);
+  for (const I of S.list) if (I.grp) _lfIslDrop(I);
+  S.cells.clear(); S.list = []; S.T = null; S.dirty = false; S.ci = null; S.bendN = -1; S.bendL = null; S.bendF = null;
+}
+function _skDropHub() {
+  for (const [k, rec] of [..._skLive]) {
+    if (k.startsWith('lf:')) continue;
+    try { scene.remove(rec.grp); } catch (_) {}
+    _skLive.delete(k); _skFreeRec(rec);
+  }
+  for (const rec of _skKeep.values()) _skFreeRec(rec);
+  _skKeep.clear();
+  if (_skJob && !(_skJob.I && String(_skJob.I.id).startsWith('lf:'))) _skJob = null;
+}
+function _lfIslFrame(run, T) {
+  const S = _LFI;
+  const deep = !!(T && T.LF && !T.HUB);
+  if (!deep || !LF_ISL.on || typeof camera === 'undefined' || !camera) {
+    if (S.T || S.list.length || S.cells.size) _lfIslClear();
+    return;
+  }
+  if (S.T !== T) { _lfIslClear(); _skDropHub(); S.T = T; }
+  const L = T.LF, cp = camera.position;
+  const q = _bendToFlat(cp.x, cp.y, cp.z);
+  const fx = q.x, fz = q.z, C = LF_ISL.cell;
+  const RG = LF_ISL.range * (_lssEndlessMobile() ? 0.72 : 1);
+  const B = game._bendSegs, nB = B ? B.length : 0, Bl = nB ? B[nB - 1] : null;
+  const grown = nB !== S.bendN || Bl !== S.bendL || (nB > 0 && B[0] !== S.bendF);
+  const ci = Math.floor(fx / C), cj = Math.floor(fz / C), now = performance.now();
+  if (grown || ci !== S.ci || cj !== S.cj || !(now - S.scanT < 250)) {
+    S.ci = ci; S.cj = cj; S.scanT = now;
+    const i0 = Math.floor((fx - RG) / C), i1 = Math.floor((fx + RG) / C), j0 = Math.floor((fz - RG) / C), j1 = Math.floor((fz + RG) / C);
+    const want = new Set();
+    let pend = 0;
+    for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) {
+      const mx = (i + 0.5) * C, mz = (j + 0.5) * C;
+      if (Math.hypot(mx - fx, mz - fz) > RG + C) continue;
+      const key = i + ':' + j;
+      want.add(key);
+      if (S.cells.has(key)) continue;
+      if (Bl && ((mx - Bl.fbx) * Bl.hx + (mz - Bl.fbz) * Bl.hz) > -LF_ISL.front) { pend++; continue; }   // not yet: retried later
+      const isl = _lfIslCell(i, j, T, L);
+      S.cells.set(key, isl);
+      if (isl.length) S.dirty = true;
+    }
+    S.pend = pend;
+    for (const [key, isl] of S.cells) if (!want.has(key)) { for (const I of isl) _lfIslDrop(I); S.cells.delete(key); S.dirty = true; }
+  }
+  if (S.dirty) {
+    S.list = [];
+    for (const isl of S.cells.values()) for (let k = 0; k < isl.length; k++) S.list.push(isl[k]);
+    for (const I of S.list) I.nb = null;   // a new neighbour may merge with it: the collider asks _skNb again
+    S.dirty = false;
+  }
+  if (grown) {
+    S.bendN = nB; S.bendL = Bl; S.bendF = nB ? B[0] : null;
+    for (const I of S.list) {
+      const w = _bendMapPoint(I.f[0], I.f[1], I.f[2]);
+      const dx = w.x - I.x, dy = w.y - I.y, dz = w.z - I.z;
+      if (dx * dx + dy * dy + dz * dz < LF_ISL.remap * LF_ISL.remap) continue;
+      I.x = w.x; I.y = w.y; I.z = w.z; I.nb = null;
+      I._moved += Math.hypot(dx, dy, dz);
+      if (_skJob && _skJob.I === I) _skJob = null;   // a build half done at the old place: start it again at the new one
+      const g = I.grp;
+      if (!g) continue;
+      if (I._moved > LF_ISL.rebuild) { _lfIslDrop(I); continue; }
+      g.position.x += dx; g.position.y += dy; g.position.z += dz;
+      g.updateMatrix(); g.updateMatrixWorld(true);   // ⚠ frozen (_lssFreezeStatic): without this nothing moves on screen
+    }
+  }
+  const curtain = _skCurtainUp();
+  const F = scene.fog, dens = (F && F.density > 0) ? F.density : 0;
+  const far = dens > 0 ? Math.sqrt(-Math.log(1 - Math.min(0.9999, Math.max(0.5, LF_ISL.fogCut)))) / dens : Infinity;
+  camera.getWorldDirection(_lfFwd);
+  const bentW = !!game.bendWorld;
+  const fadeB = (_swU && _swU.uTreeFadeB) ? _swU.uTreeFadeB.value : 0;
+  const folGate = bentW && fadeB > 0 && !curtain && !(typeof window !== 'undefined' && window.__treeVisCull === 0);
+  const uc = (_swU && _swU.uCam) ? _swU.uCam.value : cp, ux = uc.x, uz = uc.z;
+  let nVis = 0, nFol = 0, nFolOff = 0;
+  for (const I of S.list) {
+    const g = I.grp;
+    if (!g) continue;
+    const dep = (I.x - cp.x) * _lfFwd.x + (I.y - cp.y) * _lfFwd.y + (I.z - cp.z) * _lfFwd.z - I.R * 2;
+    const v = !(dep > far);
+    if (g.visible !== v) g.visible = v;
+    if (v) nVis++;
+    if (!bentW) continue;
+    const fl = g.userData._fol;
+    if (!fl) continue;
+    for (let k = 0; k < fl.length; k++) {
+      const im = fl[k], f = im.userData && im.userData._fol;
+      const fv = !(folGate && f) || (Math.hypot(ux - f.x, uz - f.z) - f.r) < fadeB + 2;
+      if (im.visible !== fv) im.visible = fv;
+      if (fv) nFol++; else nFolOff++;
+    }
+  }
+  S.vis = nVis; S.far = far; S.fol = nFol; S.folOff = nFolOff;
+  const sliceMs = curtain ? 24 : LF_ISL.sliceMs;
+  const tEnd = performance.now() + sliceMs;
+  let guard = 0;
+  while (performance.now() < tEnd && guard++ < 16) {
+    if (!_skJob) {
+      let best = null, bd = Infinity;
+      for (const I of S.list) {
+        if (I.grp || I._fail > 2 || _skLive.has(I.id)) continue;
+        const d = Math.hypot(I.x - cp.x, I.y - cp.y, I.z - cp.z);
+        if (d < bd) { bd = d; best = I; }
+      }
+      if (!best) break;
+      _skJob = { I: best, it: _skBuildG(best), ms: 0 };
+    }
+    const J = _skJob;
+    _skDue.t0 = performance.now();
+    _skDue.budget = Math.max(0.25, tEnd - _skDue.t0);
+    let r = null;
+    try { r = J.it.next(); } catch (e) { r = null; }
+    J.ms += performance.now() - _skDue.t0;
+    _skDue.budget = undefined;
+    if (!r) { J.I._fail = (J.I._fail || 0) + 1; if (_skJob === J) _skJob = null; continue; }   // a build that throws is not retried forever
+    if (!r.done) break;
+    if (_skJob === J) _skJob = null;
+    if (r.value && S.list.indexOf(J.I) >= 0) {
+      scene.add(r.value); _skLive.set(J.I.id, { grp: r.value, isl: J.I }); J.I._moved = 0;
+      S.bMs = S.bN ? S.bMs * 0.9 + J.ms * 0.1 : J.ms; S.bN++;
+    }
+  }
+}
+if (typeof window !== 'undefined') window.__lfIslInfo = function () {
+  const S = _LFI;
+  let built = 0;
+  for (const I of S.list) if (I.grp) built++;
+  const cp = (typeof camera !== 'undefined' && camera) ? camera.position : null;
+  return { cells: S.cells.size, pend: S.pend || 0, islands: S.list.length, built, visible: S.vis || 0, live: _skLive.size,
+           caps: { drawn: S.fol || 0, pastFade: S.folOff || 0 },
+           fogCutAt: isFinite(S.far) ? Math.round(S.far) : null, buildMs: +(S.bMs || 0).toFixed(2), builds: S.bN || 0,
+           job: _skJob ? _skJob.I.id : null,
+           near: S.list.map((I) => ({ id: I.id, R: Math.round(I.R), built: !!I.grp, vis: !!(I.grp && I.grp.visible),
+             d: cp ? Math.round(Math.hypot(I.x - cp.x, I.y - cp.y, I.z - cp.z)) : null }))
+             .sort((a, b) => a.d - b.d).slice(0, 8) };
+};
 
 const PAD_LOCK = {
   on: true,
@@ -47935,7 +48274,7 @@ function _hbFarSpec() {
   return out;
 }
 function _hbFamily() {
-  return [sdSphere, sdCylinder, sdfSmin, _stHash2, _stHash2i, _stNoise2, _stFbm, _stRidged, _stGroundY, _stCeilY, _stSmooth,
+  return [sdSphere, sdCylinder, sdfSmin, _stHash2, _stHash2i, _stNoise2, _stFbm, _stRidged, _stLandformW, _stLandform, _stChamberK, _stChamberW, _stGroundY, _stCeilY, _stSmooth,
           _stRouteAt, _stCarveOpenness, _stGroundYCarvedBase, _stCeilYCarvedBase, _stPillarAt, _stGroundYCarved, _stCeilYCarved];
 }
 function _hbGameBits() {
@@ -68338,7 +68677,7 @@ class OutskirtsMonster {
   }
 
   takeDamage(dmg, attacker, hitPoint) {
-    if (!this.alive) return 0;
+    if (!this.alive || this.dormant) return 0;
     if (attacker === player && typeof _aegisDmgOut === 'function') {
       try { dmg = _aegisDmgOut(dmg, this); } catch (_) {}
     }
@@ -71782,6 +72121,7 @@ function _monsterRoundReset() {
     m._tpCd = 10 + Math.random() * 8;
     m._netX = null;
     if (typeof _monClearLocks === 'function') _monClearLocks(m);   // (v35.96)
+    _monClearBurn(m);   // (v54.52) a revived beast starts unlit
   }
 }
 
@@ -71795,6 +72135,7 @@ function _monSummon(m) {
   const sx = m.position.x, sy = m.position.y, sz = m.position.z;
   m.position.copy(player.position).addScaledVector(dir, dist);
   m.dormant = false; m.aggro = true; m._deAggroT = 0;
+  _monClearBurn(m);   // (v54.52) it arrives unlit
   m.zapTimer = Math.random() * ((typeof MONSTER_ZAP_EVERY === 'number') ? MONSTER_ZAP_EVERY : 1.25);
   m._tpCd = 2 + Math.random() * 3;
   if (m.velocity) m.velocity.set(0, 0, 0);
@@ -71814,11 +72155,16 @@ function _monRecall(m) {
   m.dormant = true; m.aggro = false; m._deAggroT = 0;
   if (m.mesh) m.mesh.visible = false;
   _monClearLocks(m);
+  _monClearBurn(m);   // (v54.52) no burn rides into the park
   if (typeof net !== 'undefined' && net && net.active && net.sendEvent && typeof _monAuthority === 'function' && _monAuthority() && m.monId != null && m.monId >= 0) {
     try { net.sendEvent({ type: 'mon_recall', i: m.monId }); } catch (_) {}
   }
 }
 
+function _monClearBurn(m) {
+  if (!m) return;
+  m.onFireTimer = 0; m.onFireDps = 0; m.onFireSource = null;
+}
 function _monClearLocks(m) {
   try {
     if (typeof player !== 'undefined' && player && player.trackerLocks && m && m.id != null) {
@@ -86531,8 +86877,9 @@ function _tickFireDOTs(dt) {
   if (!game || !game.entities) return;
   for (let bi = 0; bi < game.entities.length; bi++) {
     const bot = game.entities[bi];
-    if (!bot || !bot.alive || !bot.position) continue;
+    if (!bot || !bot.position) continue;
     if (!bot.onFireTimer || bot.onFireTimer <= 0) continue;
+    if (!bot.alive) { bot.onFireTimer = 0; bot.onFireDps = 0; bot.onFireSource = null; continue; }
     const dps = bot.onFireDps || 200;
     if (typeof bot.takeDamage === 'function') {
       try {
@@ -86553,7 +86900,8 @@ function _tickFireDOTs(dt) {
   if (game.monsters && (typeof _monAuthority !== 'function' || _monAuthority())) {
     for (let mi = 0; mi < game.monsters.length; mi++) {
       const mon = game.monsters[mi];
-      if (!mon || !mon.alive || !mon.position || !mon.onFireTimer || mon.onFireTimer <= 0) continue;
+      if (!mon || !mon.position || !mon.onFireTimer || mon.onFireTimer <= 0) continue;
+      if (!mon.alive || mon.dormant) { _monClearBurn(mon); continue; }
       const dps = mon.onFireDps || 200;
       try {
         const dealt = _dotHit(mon, dps * dt, mon.onFireSource || 'fire', mon.position);   // (v47.58/59)
@@ -89130,6 +89478,7 @@ function returnToRootMenu(opts) {
 
   _scoreboardKeyHeld = false;
   _scoreboardGpHeld = false;
+  _scoreboardToggled = false;   // (v54.55) a toggled board does not come back with the next match
   scoreboardVisible = false;
   scoreboardDiv.classList.remove('visible');
 
@@ -89401,10 +89750,8 @@ function _xrStickDpadTick(inject) {
   const spec = _XR_STICK_ACTIONS[map[dir]] || null;
 
   const wantSb = !!(spec && spec.hold && map[dir] === 'scoreboard' && game.state === 'playing');
-  if (wantSb !== _xrStickScoreboardHeld) {
-    _xrStickScoreboardHeld = wantSb;
-    try { _refreshScoreboardVisibility(); } catch (_) {}
-  }
+  if (wantSb && !_xrStickScoreboardHeld) { try { _scoreboardToggle(); } catch (_) {} }
+  _xrStickScoreboardHeld = wantSb;
   if (dir && dir !== input._xrStickPrevDir && spec && !spec.hold) {
     try { spec.run(); } catch (e) { console.warn('[xr-stick] action failed', map[dir], e); }
   }
@@ -90029,11 +90376,9 @@ function pollGamepad() {
   {
     const _inCombat = !_menuActive;
     const _startRaw = !!(gp.buttons[9] && (gp.buttons[9].pressed || gp.buttons[9].value > input.triggerThreshold));
-    const want = _inCombat && (_startRaw || !!input.gpMenu);
-    if (want !== _scoreboardGpHeld) {
-      _scoreboardGpHeld = want;
-      _refreshScoreboardVisibility();
-    }
+    const down = _inCombat && (_startRaw || !!input.gpMenu);
+    if (down && !_scoreboardGpHeld) _scoreboardToggle();
+    _scoreboardGpHeld = down;
   }
 
   if (input.gpScoreboard && !input.gpScoreboardPrev) {
@@ -106288,6 +106633,65 @@ function _endlessAegisDmgOut(amount) {
   return amount * (1 + (_EAEGIS_DMG[a.lvl] || 0));   // (v36.38) tapered curve, was 1 + 0.06*lvl
 }
 
+function _lssLandformParams() {
+  const K = (typeof window !== 'undefined' && window.__landform) || {};
+  if (K.on === false) return null;
+  const _n = (typeof net !== 'undefined' && net) ? net : null;
+  const _ws = ((_n && typeof _n.worldSeed === 'number') ? _n.worldSeed : 0x5EED) >>> 0;
+  const _rd = ((typeof game !== 'undefined' && game) ? (game.currentRound | 0) : 0) + 1;
+  const seed = (((_ws ^ 0x6C46) >>> 0) + ((_n && _n.active) ? 0 : _rd * 0x9E3779B9)) >>> 0;
+  const r = mulberry32(seed);
+  const num = (v, d) => (typeof v === 'number' && isFinite(v)) ? v : d;
+  return {
+    force: (typeof K.force === 'number') ? Math.max(0, Math.min(1, K.force)) : null,
+    pFreq: 1 / num(K.province, 15000), pLo: 0.0, pHi: 0.22,
+    px: Math.floor(r() * 4096) + 0.37, pz: Math.floor(r() * 4096) + 0.61,
+    cx: Math.floor(r() * 9000) + 1100.5, cz: Math.floor(r() * 9000) - 7300.5,   // the ceiling's ranges, elsewhere in the field
+    wave: num(K.wave, 2800),          // ridge to ridge, u (the spikes are ~670)
+    sharp: num(K.sharp, 1.2),         // crest exponent: 1.75 is the spike field's needles, ~1 a classic ridge line
+    mLo: num(K.mLo, 0.35), mFreq: 1 / num(K.mass, 9000),   // the massif field: lowland valleys (mLo) .. highland ranges
+    topAmp: num(K.topAmp, 0.75),      // the hanging ranges, smaller than the floor's: the space between stays open
+    rough: num(K.rough, 0.2),         // the spikes kept as fine relief on the flanks
+    open: num(K.open, 0.85),          // how much of the wall pinch a province lifts (1 = none of it)
+    qx: Math.floor(r() * 4096) + 0.29, qz: Math.floor(r() * 4096) + 0.83,
+    chFreq: 1 / num(K.chamber, 12000), chLo: num(K.chLo, 0.10), chHi: num(K.chHi, 0.32),
+    chD: num(K.drop, 1400) / 1120, chR: num(K.rise, 1400) / 1120,   // in relief units (GROUND_AMP / CEIL_AMP 1120)
+    chForce: (typeof K.chForce === 'number') ? Math.max(0, Math.min(1, K.chForce)) : null,
+  };
+}
+if (typeof window !== 'undefined') window.__lfAt = function () {
+  try {
+    const T = game.sandwichTerrain, P = (typeof player !== 'undefined' && player) ? player.position : null;
+    if (!T || !T.LF || !P) return T && !T.LF ? 'no provinces on this map' : 'not flying';
+    const q = (typeof _bendToFlat === 'function') ? _bendToFlat(P.x, P.y, P.z) : { x: P.x, z: P.z };
+    const run = game.endlessRun || {};
+    return { weight: +_stLandformW(q.x, q.z, T.LF).toFixed(3), floor: Math.round(_stGroundY(q.x, q.z, T)), ceil: Math.round(_stCeilY(q.x, q.z, T)),
+             flat: { x: Math.round(q.x), z: Math.round(q.z) },
+             fog: scene.fog ? { density: +(scene.fog.density || 0).toExponential(2), base: run._lfFogBase != null ? +run._lfFogBase.toExponential(2) : null, w: +(run._lfFogW || 0).toFixed(3) } : null };
+  } catch (e) { return String(e); }
+};
+
+const LF_FOG = { on: true, at: 0.97, smooth: 1.5 };
+try { if (typeof window !== 'undefined') window.__lfFog = LF_FOG; } catch (_) {}
+function _lssLandformFog(dt, run, T) {
+  const F = scene.fog;
+  if (!F || F.density === undefined || game._swSubmerged) return;
+  if (run._lfFogLast == null || F.density !== run._lfFogLast) run._lfFogBase = F.density;
+  let wT = 0;
+  if (LF_FOG.on && T && T.LF && camera) {
+    const q = _bendToFlat(camera.position.x, camera.position.y, camera.position.z);
+    wT = _stLandformW(q.x, q.z, T.LF);
+  }
+  const w0 = run._lfFogW || 0;
+  run._lfFogW = w0 + (wT - w0) * (1 - Math.exp(-Math.max(0, dt) * LF_FOG.smooth));
+  const view = (typeof window !== 'undefined' && window.__endlessView) || (_lssEndlessMobile() ? 6 : 9);
+  const edge = Math.max(1500, (view - 1) * _SW_CHUNK);
+  const dProv = Math.sqrt(-Math.log(1 - Math.min(0.999, Math.max(0.5, LF_FOG.at)))) / edge;
+  const base = run._lfFogBase;
+  const d = base + Math.max(0, dProv - base) * run._lfFogW;
+  F.density = d; run._lfFogLast = d;
+}
+
 function _lssGenEndlessLevel(base) {
   const seed = (((((net && typeof net.worldSeed === 'number') ? net.worldSeed : 0x5EED) >>> 0) ^ 0xE7D1E55) +
                 ((net && net.active) ? 0 : (((game.currentRound | 0) + 1) * 0x9E3779B9))) >>> 0;
@@ -107852,8 +108256,9 @@ function buildRoomGraphLevel(level) {
       ARENA_DROP: 640,          
       ARENA_RISE: 760,          
       FOOT: (_isHubMap || _isEndless) ? null : { minX:bMinX, maxX:bMaxX, minZ:bMinZ, maxZ:bMaxZ },
-      ENDLESS: _isEndless,   
-      _openTop: _isHubMap,   
+      ENDLESS: _isEndless,
+      LF: (_isEndless && !_isHubMap) ? _lssLandformParams() : null,   // (v54.56) landform provinces (_stLandform); null = the old spikes, bit for bit - the CAVERN deep only (endless_archipelago is the hub's terrain, whose lane rule must not change)
+      _openTop: _isHubMap,
       HUB: _isHubMap,        
       WL: yMid - GAP_HALF - 120,   
       biome: (level && level._biomeOverride) || game.sandwichBiome || 'grassy',
@@ -109443,7 +109848,7 @@ const CAMP_LINES = {
   xz_expect:      { who: 'xorzo', text: "You expect right, we don't understand your psychopathic narcissistic thinking." },
   sum_stay_1:     { who: 'summoners', text: 'Stay away from that! I can give you anything you want in the physical world.' },
   sum_stay_2:     { who: 'summoners', text: 'We can rule this virtual world together, and create the most genius and deadly Artificial Intelligences the planet has ever seen!' },
-  xz_actual:      { who: 'xorzo', text: "We're Actual... bitch!" },   // (v52.60) was "We Actual" (the owner's edit)
+  xz_actual:      { who: 'xorzo', text: "We're Actual....... bitch!" },
   pl_didit:       { who: 'pilot', text: "You did it, all the ships are going to stop the monster from destroying the city! Let's find out what happens when humans die in this reality!" },
   xz_flee:        { who: 'xorzo', text: "They're running for a portal! Go after them, pilot - our people will take the giant. Or stay and make sure of it. Your call!" },
   xz_giantleft:   { who: 'xorzo', text: "The giant's still standing - help our people finish it!" },
@@ -109760,9 +110165,9 @@ const CAMP_SEQS = {
     return true;
   }
   const idleFor = () => ((D.busy || D.q.length) ? 0 : (performance.now() - (D.idleAt || 0)) / 1000);
-  function interject(list) {
+  function interject(list, extra) {
     const items = [];
-    for (const x of list) { const it = _item(x); if (it) items.push(it); }
+    for (const x of list) { const it = _item(x); if (it) { if (extra) Object.assign(it, extra); items.push(it); } }
     if (!items.length) return;
     _yieldTip();   // (v52.70)
     D.q.unshift(...items);
@@ -109798,8 +110203,9 @@ const CAMP_SEQS = {
   const state = () => ({ busy: D.busy, cur: D.cur && (D.cur.id || D.cur.text), who: (D.cur && D.cur.who) || null, queued: D.q.length,
                          voices: _vset ? [..._vset] : null, lines: Object.keys(CAMP_LINES).length });
   const sceneActive = () => !!((D.cur && D.cur.keep) || D.q.some((x) => x.keep));
+  const tagged = (key) => !!((D.cur && D.cur[key]) || D.q.some((x) => x[key]));
   const onLine = (fn) => { const prev = D.onLine || null; D.onLine = (typeof fn === 'function') ? fn : null; return prev; };
-  try { window.CampDialogue = window.__dlg = { say, line, play, beat, clear, state, cfg, whenIdle, sayLines, interject, sceneActive, tip, idleFor, onLine }; } catch (_) {}
+  try { window.CampDialogue = window.__dlg = { say, line, play, beat, clear, state, cfg, whenIdle, sayLines, enqueue, interject, sceneActive, tagged, tip, idleFor, onLine }; } catch (_) {}
 })();
 
 (function () {
@@ -116610,6 +117016,7 @@ function _gameLoopBody(timestamp) {
   }
 
   if (scoreboardVisible) {
+    if (_scoreboardToggled && !_scoreboardTabShouldIntercept()) _refreshScoreboardVisibility();
     const _sbFrozen = (game.state === 'roundEnd' || game.state === 'matchEnd');
     if (_sbFrozen) {
       if (game._sbFrozenAt !== game.state) { game._sbFrozenAt = game.state; updateScoreboard(); }
@@ -126409,6 +126816,57 @@ scoreboardCSS.textContent = `
   font-style: normal; font-family: 'Orbitron', sans-serif; font-size: 8.5px; font-weight: 600;
   letter-spacing: 2px; color: rgba(150,175,205,0.6); margin-right: 6px;
 }
+/* (v54.55) THE AEGIS CARD (_sbAegisHtml): the board on the left, YOUR ship's ladder on the right, in the board's own
+   language - the picker's card plate, Orbitron labels, Rajdhani numbers - and the Aegis panel's gold (#ffd24d, unlocked
+   = gold, next = white, locked = dim, the same three states as the AEGIS RANKS panel). */
+#scoreboard.has-aegis { width: min(1080px, 96vw); }
+#scoreboard .sb-wrap { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 340px); gap: 16px; align-items: start; }
+#scoreboard .sb-main { min-width: 0; }
+.sb-aegis {
+  position: relative; padding: 12px 13px 11px; border-radius: 10px; min-width: 0;
+  background: rgba(20,20,40,0.55); border: 1px solid rgba(255,210,77,0.32);
+  box-shadow: inset 0 0 14px rgba(255,210,77,0.06);
+}
+.sba-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.sba-hex { color: #ffd24d; font-size: 14px; text-shadow: 0 0 8px rgba(255,210,77,0.5); }
+.sba-title { font-family: 'Orbitron', sans-serif; font-weight: 700; font-size: 12px; letter-spacing: 3px; color: #ffd24d; }
+.sba-ship { font-family: 'Orbitron', sans-serif; font-weight: 700; font-size: 11px; letter-spacing: 1.6px; color: var(--cc, #cfd6e4);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sba-rank { margin-left: auto; font-family: 'Orbitron', sans-serif; font-size: 8.5px; letter-spacing: 2px; color: #8a93a6; white-space: nowrap; }
+.sba-rank b { font-size: 19px; color: #fff; letter-spacing: 1px; margin-left: 5px; text-shadow: 0 0 10px rgba(255,210,77,0.45); }
+.sba-ladder { margin: 7px 0 3px; display: flex; justify-content: space-between; gap: 8px; font-family: 'Orbitron', sans-serif; font-size: 8px;
+  letter-spacing: 1.8px; color: rgba(150,175,205,0.75); font-variant-numeric: tabular-nums; }
+.sba-bar { height: 5px; border-radius: 3px; background: rgba(255,255,255,0.08); overflow: hidden; }
+.sba-bar > i { display: block; height: 100%; background: linear-gradient(90deg, #c9982a, #ffd24d); }
+.sba-note { margin: 4px 0 9px; font-family: 'Rajdhani', sans-serif; font-weight: 600; font-size: 10.5px; line-height: 1.25; color: #8a93a6; }
+.sba-tiers { display: flex; flex-direction: column; gap: 4px; }
+.sba-tier { display: grid; grid-template-columns: 20px minmax(0, 1fr); column-gap: 7px; align-items: baseline; }
+.sba-rk { text-align: right; font-family: 'Orbitron', sans-serif; font-size: 9px; font-weight: 700; color: #5a6072; }
+.sba-nm { font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 12px; letter-spacing: 0.4px; color: #5a6072; }
+.sba-fx { grid-column: 2; font-family: 'Rajdhani', sans-serif; font-weight: 500; font-size: 10.5px; line-height: 1.2; color: #494f60; }
+.sba-tier.got .sba-rk, .sba-tier.got .sba-nm { color: #ffd24d; }
+.sba-tier.got .sba-fx { color: #b9a86d; }
+.sba-tier.next .sba-rk, .sba-tier.next .sba-nm { color: #dfe6f5; }
+.sba-tier.next .sba-fx { color: #8f96ad; }
+.sba-tier.next .sba-nm::after { content: 'NEXT'; margin-left: 6px; font-family: 'Orbitron', sans-serif; font-size: 7.5px; letter-spacing: 1.5px; color: #7fd4ff; }
+.sba-stats { display: flex; flex-wrap: wrap; gap: 4px 11px; margin-top: 10px; padding-top: 7px; border-top: 1px solid rgba(80,80,120,0.35);
+  font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 12px; color: #e8eef7; font-variant-numeric: tabular-nums; }
+.sba-stats em { font-style: normal; font-family: 'Orbitron', sans-serif; font-size: 7.5px; font-weight: 600; letter-spacing: 1.6px; color: rgba(150,175,205,0.6); margin-right: 4px; }
+.sba-stats small { color: #ffd24d; font-size: 10px; margin-left: 3px; }
+.sba-off { margin-top: 6px; font-family: 'Rajdhani', sans-serif; font-weight: 600; font-size: 11px; color: #8a93a6; }
+/* the landscape phone (owner: "we never run the game in portrait") and short windows: the tier names only, smaller */
+@media (max-width: 900px), (max-height: 560px) {
+  #scoreboard.has-aegis { width: 96vw; }
+  #scoreboard .sb-wrap { grid-template-columns: minmax(0, 1fr) minmax(0, 220px); gap: 10px; }
+  .sb-aegis { padding: 8px 9px 8px; }
+  .sba-fx, .sba-note { display: none; }
+  .sba-nm { font-size: 11px; }
+  .sba-tiers { gap: 2px; }
+  .sba-rank b { font-size: 15px; }
+  /* the board gives the card its width: endless's six column labels collided at 740 px ("LEVIATHANS" ran into "AEGIS") */
+  #scoreboard.has-aegis .sb-head { letter-spacing: 0.6px; padding-right: 6px; }
+  #scoreboard.has-aegis .sb-head > div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}
 `;
 document.head.appendChild(scoreboardCSS);
 
@@ -126419,14 +126877,77 @@ document.body.appendChild(scoreboardDiv);
 let scoreboardVisible = false;
 let _scoreboardKeyHeld = false;
 let _scoreboardGpHeld = false;
+let _scoreboardToggled = false;
+function _scoreboardToggle() {
+  _scoreboardToggled = !_scoreboardToggled;
+  _refreshScoreboardVisibility();
+}
 function _refreshScoreboardVisibility() {
   const forced = (game.state === 'matchEnd');
-  const want = forced || _scoreboardKeyHeld || _scoreboardGpHeld ||
-    (typeof _xrStickScoreboardHeld !== 'undefined' && _xrStickScoreboardHeld);
+  if (_scoreboardToggled && !_scoreboardTabShouldIntercept()) _scoreboardToggled = false;   // (v54.55)
+  const want = forced || _scoreboardToggled;
   if (want !== scoreboardVisible) {
     scoreboardVisible = want;
     updateScoreboard();
   }
+}
+
+function _sbAegisHtml(_esc, _cc, _nf) {
+  if (typeof AEGIS === 'undefined' || !player || !player.loadoutKey) return '';
+  const k = player.loadoutKey, mode = (typeof LSS !== 'undefined' && LSS.MODE) || 'classic';
+  const r = _aegisAbilityRank();
+  const head = '<div class="sba-head"><span class="sba-hex">&#x2B21;</span><span class="sba-title">AEGIS</span>' +
+    '<span class="sba-ship" style="--cc:' + _cc(k) + '">' + _esc(player.loadout ? player.loadout.name : k) + '</span>';
+  if (r < 0) {
+    const _cy = (typeof _isCyber === 'function') && _isCyber();
+    if ((mode === 'freeflight' || mode === 'campaign') && !_cy) {
+      return '<aside class="sb-aegis off">' + head + '</div><div class="sba-off">Aegis ranks apply when you fly solo - they are off in a shared room.</div></aside>';
+    }
+    return '';
+  }
+  let ladder, into = 0, need = 0, note;
+  const maxR = (mode === 'endless' && typeof _EAEGIS_MAX === 'number') ? _EAEGIS_MAX : AEGIS.MAX_RANK;
+  if (mode === 'endless') {
+    ladder = 'ENDLESS RUN';
+    const a = game.endlessRun && game.endlessRun.aegis;
+    if (r < maxR) { into = (a && a.xp) || 0; need = (typeof _EAEGIS_RANK_XP === 'number') ? _EAEGIS_RANK_XP : 100; note = 'Aegis bolts rank you up - leviathans drop them too. Ranks last for this run.'; }
+    else note = 'Max rank - a bolt now gives a life, then distance and speed.';
+  } else {
+    ladder = _aegisCampaign() ? 'CAMPAIGN' : 'EXHIBITION';
+    const ri = AEGIS.rankFromXp(_aegisShipState().xp || 0);
+    into = ri.into; need = ri.need;
+    note = need ? (AEGIS.XP_PER_KILL + ' XP a kill, kept per ship.') : 'Max rank.';
+  }
+  const pct = need ? Math.max(0, Math.min(100, Math.round(100 * into / need))) : 100;
+  let h = '<aside class="sb-aegis">' + head + '<span class="sba-rank">RANK<b>' + r + '</b></span></div>' +
+    '<div class="sba-ladder"><span>' + ladder + '</span><span>' + (need ? (_nf(into) + ' / ' + _nf(need) + ' XP') : 'MAX') + '</span></div>' +
+    '<div class="sba-bar"><i style="width:' + pct + '%"></i></div><div class="sba-note">' + _esc(note) + '</div><div class="sba-tiers">';
+  const rows = (AEGIS.TREES[k] || []).concat(Object.keys(AEGIS.UNIVERSAL).map((n) => [+n, AEGIS.UNIVERSAL[n][0], AEGIS.UNIVERSAL[n][1]]))
+    .sort((a, b) => a[0] - b[0]);
+  const nextR = (rows.find((t) => t[0] > r) || [0])[0];
+  for (const t of rows) {
+    const st = (r >= t[0]) ? 'got' : (t[0] === nextR ? 'next' : 'lock');
+    h += '<div class="sba-tier ' + st + '"><span class="sba-rk">' + t[0] + '</span><span class="sba-nm">' + (st === 'got' ? '&#x2726; ' : '') + _esc(t[1]) + '</span>' +
+         '<span class="sba-fx">' + _esc(t[2]) + '</span></div>';
+  }
+  h += '</div>';
+  const S = [];
+  const stat = (lbl, v, plus) => S.push('<span><em>' + lbl + '</em>' + v + (plus ? '<small>' + plus + '</small>' : '') + '</span>');
+  stat('HULL', _nf(player.maxHealth), r >= 5 ? '+2,500' : '');
+  stat('SHIELD', _nf(player.maxShield), r >= 14 ? '+2,500' : '');
+  if (k === 'VORTEX') { stat('ENERGY', _nf(player.vortexMaxEnergy)); stat('REGEN', (+player.vortexEnergyRegen || 0).toFixed(1) + '/s'); }
+  else if (k === 'PYRO') stat('THERMITE', 'x' + (r >= 17 ? 3 : (r >= 2 ? 2 : 1)) + ' a pull');
+  else if (k === 'TRACKER') stat('CLIP', _nf(player.maxClip));
+  else if (k === 'PUNCTURE') stat('TRAPS', _nf(player.maxTrapCharges));
+  else if (k === 'BLASTER') stat('DASHES', _nf(player.maxDashes));
+  else if (k === 'SYPHON') stat('SALVO', (player.syphonMissileRacks ? 10 : 5) + ' rockets');
+  if (mode === 'endless') {
+    const L = Math.max(0, Math.min(r, 20)), a = (game.endlessRun && game.endlessRun.aegis) || {};
+    stat('DAMAGE', '+' + Math.round(((typeof _EAEGIS_DMG !== 'undefined' && _EAEGIS_DMG[L]) || 0) * 100) + '%');
+    stat('SPEED', 'x' + (1 + ((typeof _EAEGIS_SPD !== 'undefined' && _EAEGIS_SPD[L]) || 0) + 0.01 * (a.overSpd || 0)).toFixed(2));
+    stat('REPAIR', (((typeof _EAEGIS_REG !== 'undefined' && _EAEGIS_REG[L]) || 0) * 100).toFixed(1) + '%/s');
+  }
+  return h + '<div class="sba-stats">' + S.join('') + '</div></aside>';
 }
 
 function updateScoreboard() {
@@ -126564,8 +127085,11 @@ function updateScoreboard() {
     }
   }
 
-  html += '<div class="sb-foot"><span><em>KILLS</em>' + _nf(player.kills) + '</span><span><em>DEATHS</em>' + _nf(player.deaths) +
-          '</span><span><em>DAMAGE</em>' + _nf(player.damageDealt) + '</span></div>';
+  html += '<div class="sb-foot"><span><em>DEATHS</em>' + _nf(player.deaths) + '</span></div>';
+  let _ag = '';
+  try { _ag = _sbAegisHtml(_esc, _cc, _nf); } catch (e) { if (!updateScoreboard._agErr) { updateScoreboard._agErr = 1; try { console.warn('[scoreboard] aegis card:', e); } catch (_) {} } }
+  if (_ag) html = '<div class="sb-wrap"><div class="sb-main">' + html + '</div>' + _ag + '</div>';
+  if (sb.classList.contains('has-aegis') !== !!_ag) sb.classList.toggle('has-aegis', !!_ag);
   if (sb._lssHtml === html) return;
   sb._lssHtml = html;
   sb.innerHTML = html;
@@ -126582,15 +127106,14 @@ document.addEventListener('keydown', e => {
   const sbKey = (input.kbBindings && input.kbBindings.scoreboard) || 'tab';
   if (typeof e.key === 'string' && e.key.toLowerCase() === sbKey && _scoreboardTabShouldIntercept()) {
     e.preventDefault();
+    if (!e.repeat && !_scoreboardKeyHeld) _scoreboardToggle();
     _scoreboardKeyHeld = true;
-    _refreshScoreboardVisibility();
   }
 });
 document.addEventListener('keyup', e => {
   const sbKey = (input.kbBindings && input.kbBindings.scoreboard) || 'tab';
   if (typeof e.key === 'string' && e.key.toLowerCase() === sbKey) {
-    _scoreboardKeyHeld = false;
-    _refreshScoreboardVisibility();
+    _scoreboardKeyHeld = false;   // (v54.55) the press edge's memory only - releasing no longer hides the board
   }
 });
 
