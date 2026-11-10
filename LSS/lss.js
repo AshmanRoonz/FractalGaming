@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "54.66";
+const LSS_BUILD = "54.67";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -98927,8 +98927,8 @@ function _howtoBindLabel(scheme, action) {
   }
   if (scheme === 'touch') {
     const t = {
-      fire: 'RT', altFire: 'LT', dash: 'STICK RIM', reload: 'R',
-      ability0: 'LB', ability1: 'RB', ability2: 'F', core: 'CORE',
+      fire: 'WEAPON', altFire: 'ZOOM', dash: 'STICK RIM', reload: 'RELOAD',
+      ability0: 'ABILITY 1', ability1: 'ABILITY 2', ability2: 'ABILITY 3', core: 'CORE',
       moveUp: 'VTOL STICK', moveDown: 'VTOL STICK', view: '◳', shipPrev: '⇄', shipNext: '⇄', menu: '⚙',   // (v43.99)
     };
     return t[action] || '';
@@ -99442,42 +99442,66 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     '#touch-controls.tc-on { visibility: visible; opacity: 1; }',
     '#touch-controls .tc { position: absolute; pointer-events: auto; touch-action: none;',
     '  display: flex; align-items: center; justify-content: center;',
-    '  background: rgba(80, 200, 255, 0.18); border: 1.5px solid rgba(140, 230, 255, 0.65);',
-    '  color: rgba(215, 245, 255, 0.95); font-size: 2.2vmin; font-weight: 600; letter-spacing: 0.08em;',
-    '  text-shadow: 0 1px 3px rgba(0,0,0,0.9);',
+    '  background: rgba(120, 215, 255, calc(0.05 * var(--tc-a, 1))); border: 1px solid rgba(175, 236, 255, calc(0.5 * var(--tc-a, 1)));',
+    '  color: rgba(225, 246, 255, 0.92); font-size: 1.9vmin; font-weight: 500; letter-spacing: 0.06em;',
+    '  text-shadow: 0 1px 2px rgba(0,0,0,0.85);',
     '  text-transform: uppercase; }',
-    '#touch-controls .tc.tc-pressed { background: rgba(120, 220, 255, 0.22); border-color: rgba(170, 240, 255, 0.7); }',
-    '.tc-rect { width: 24vmin; height: 15vmin; border-radius: 1.2vmin; }',
-    '#touch-controls .tc-named { flex-direction: column; gap: 0.5vmin; }',
-    '#touch-controls .tc-named > span:first-child { font-size: 1.7vmin; opacity: 0.55; letter-spacing: 0.18em; }',
-    '#touch-controls .tc-name { font-size: 2.5vmin; line-height: 1.12; padding: 0 1.2vmin; text-align: center; }',
+    '#touch-controls .tc.tc-pressed { background: rgba(150, 228, 255, 0.30); border-color: rgba(220, 250, 255, 0.95); }',
+    '.tc-rect { width: 14vmin; height: 14vmin; border-radius: 50%; }',
+    '#touch-controls .tc-named { flex-direction: column; gap: 0; }',
+    '#touch-controls .tc-named > span:first-child { display: none; }',
+    '#touch-controls .tc-name { font-size: 1.7vmin; line-height: 1.1; padding: 0 0.8vmin; text-align: center; opacity: 0.88; }',
+    '#touch-controls #tc-core .tc-name { letter-spacing: 0.16em; }',
     '#tc-move, #tc-look { border-radius: 50%; }',
-    '#tc-move-knob { position: absolute; left: 50%; top: 50%; width: 38%; height: 38%;',
-    '  margin: -19% 0 0 -19%; border-radius: 50%; background: rgba(120, 220, 255, 0.18);',
-    '  border: 1px solid rgba(170, 240, 255, 0.55); pointer-events: none; }',
+    '#touch-controls #tc-move, #touch-controls #tc-look { background: none; border-color: rgba(175, 236, 255, calc(0.3 * var(--tc-a, 1))); }',
+    '#touch-controls #tc-look > span { display: none; }',
+    '#touch-controls #tc-look.tc-pressed { background: none; border-color: rgba(220, 250, 255, 0.6); }',
+    '#tc-move-knob { position: absolute; left: 50%; top: 50%; width: 26%; height: 26%;',
+    '  margin: -13% 0 0 -13%; border-radius: 50%; background: rgba(150, 228, 255, calc(0.14 * var(--tc-a, 1)));',
+    '  border: 1px solid rgba(190, 242, 255, calc(0.6 * var(--tc-a, 1))); pointer-events: none; }',
     '#tc-vt::before, #tc-vt::after { position: absolute; left: 0; right: 0; text-align: center;',
-    '  font-size: 2.2vmin; line-height: 1; opacity: 0.4; pointer-events: none; }',
+    '  font-size: 1.8vmin; line-height: 1; opacity: 0.35; pointer-events: none; }',
     '#tc-vt::before { content: "▲"; top: 0.9vmin; }',
     '#tc-vt::after  { content: "▼"; bottom: 0.9vmin; }',
-    '#tc-vt-knob { position: absolute; left: 14%; right: 14%; top: 50%; height: 24%;',
+    '#tc-vt-knob { position: absolute; left: 20%; right: 20%; top: 50%; height: 18%;',
     '  transform: translateY(-50%); border-radius: 2.4vmin;',
-    '  background: rgba(120, 220, 255, 0.26); border: 1px solid rgba(170, 240, 255, 0.6);',
+    '  background: rgba(150, 228, 255, calc(0.16 * var(--tc-a, 1))); border: 1px solid rgba(190, 242, 255, calc(0.6 * var(--tc-a, 1)));',
     '  pointer-events: none; }',
-    '.tc-top { font-size: 3vmin; }',
+    '.tc-top { font-size: 3.2vmin; }',
+    '#touch-controls .tc-top { background: none; border: none; }',   // (v54.67) bare glyphs
     '#touch-controls #tc-move-zone, #touch-controls #tc-look-zone { background: none; border: none; }',
+    '#touch-controls.tc-edit { z-index: 2147480000; }',
+    '#touch-controls.tc-edit .tc { display: flex !important; }',
+    '#touch-controls.tc-edit #tc-move-zone, #touch-controls.tc-edit #tc-look-zone { border: 1px dashed rgba(255, 214, 110, 0.6); background: rgba(255, 214, 110, 0.05); border-radius: 1.2vmin; }',
+    '#touch-controls.tc-edit #tc-move-zone::after, #touch-controls.tc-edit #tc-look-zone::after { position: absolute; left: 1.2vmin; bottom: 0.9vmin;',
+    '  font-size: 1.6vmin; letter-spacing: 0.14em; color: rgba(255, 224, 150, 0.85); }',
+    '#touch-controls.tc-edit #tc-move-zone::after { content: "MOVE AREA"; }',
+    '#touch-controls.tc-edit #tc-look-zone::after { content: "LOOK AREA"; }',
+    '#touch-controls.tc-edit .tc.tc-sel { border: 1px solid rgba(255, 214, 110, 1); background: rgba(255, 214, 110, 0.16); }',
+    '#tc-edit-dim { position: absolute; left: 0; top: 0; width: 100%; height: 100%; background: rgba(3, 8, 16, 0.72); pointer-events: none; }',
+    '#tc-edit-top { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: auto; touch-action: none; }',
+    '#tc-edit-bar { position: absolute; left: 50%; top: 46%; transform: translate(-50%, -50%); display: flex; flex-direction: column;',
+    '  align-items: center; gap: 1.4vmin; pointer-events: none; }',
+    '#tc-edit-bar .tb-row { display: flex; gap: 1.4vmin; pointer-events: auto; }',
+    '#tc-edit-bar button { font-family: inherit; font-size: 2.3vmin; font-weight: 600; letter-spacing: 0.12em; color: #e6f6ff;',
+    '  background: rgba(8, 20, 34, 0.88); border: 1px solid rgba(175, 236, 255, 0.6); border-radius: 0.8vmin;',
+    '  padding: 1.1vmin 2.2vmin; min-width: 8vmin; touch-action: manipulation; }',
+    '#tc-edit-bar button.tb-go { border-color: rgba(255, 214, 110, 0.95); color: #ffe6a8; }',
+    '#tc-edit-bar .tb-hint { font-size: 1.7vmin; letter-spacing: 0.1em; color: rgba(225, 246, 255, 0.8); text-shadow: 0 1px 2px #000;',
+    '  text-align: center; text-transform: uppercase; }',
   ].join('\n');
 
   const _TC_LAYOUT = {
     'tc-move':      { ax:'left',   x:31.2, ay:'bottom', y:14.7, w:30,   h:30,   shape:'circle' },
     'tc-look':      { ax:'right',  x:30.1, ay:'bottom', y:14.1, w:30,   h:30,   shape:'circle' },
-    'tc-lt':        { ax:'right',  x:55,   ay:'top',    y:2.3,  w:22.3, h:15.1, shape:'rect' },
-    'tc-rt':        { ax:'right',  x:1.3,  ay:'top',    y:2.7,  w:24,   h:15,   shape:'rect' },
-    'tc-rb':        { ax:'right',  x:1.8,  ay:'top',    y:20.5, w:24,   h:15,   shape:'rect' },
-    'tc-lb':        { ax:'right',  x:29.7, ay:'top',    y:20.3, w:24,   h:15,   shape:'rect' },
-    'tc-fd':        { ax:'right',  x:28.6, ay:'top',    y:2.5,  w:24,   h:15,   shape:'rect' },
-    'tc-rd':        { ax:'right',  x:55.1, ay:'top',    y:20,   w:22.4, h:14.4, shape:'rect' },
-    'tc-core':      { ax:'center', x:-2.7, ay:'top',    y:12,   w:24,   h:9,    shape:'rect' },
-    'tc-vt':        { ax:'left',   x:0.7,  ay:'top',    y:9,    w:11,   h:26,   shape:'rect' },
+    'tc-lt':        { ax:'right',  x:59.2, ay:'top',    y:2.9,  w:14,   h:14,   shape:'circle' },
+    'tc-rt':        { ax:'right',  x:5.3,  ay:'top',    y:2.2,  w:16,   h:16,   shape:'circle' },
+    'tc-rb':        { ax:'right',  x:6.8,  ay:'top',    y:21,   w:14,   h:14,   shape:'circle' },
+    'tc-lb':        { ax:'right',  x:34.7, ay:'top',    y:20.8, w:14,   h:14,   shape:'circle' },
+    'tc-fd':        { ax:'right',  x:33.6, ay:'top',    y:3,    w:14,   h:14,   shape:'circle' },
+    'tc-rd':        { ax:'right',  x:60.3, ay:'top',    y:21.2, w:12,   h:12,   shape:'circle' },
+    'tc-core':      { ax:'center', x:-2.7, ay:'top',    y:13,   w:20,   h:7,    shape:'pill' },
+    'tc-vt':        { ax:'left',   x:2.2,  ay:'top',    y:9,    w:8,    h:26,   shape:'pill' },
     'tc-set':       { ax:'left',   x:0.7,  ay:'top',    y:0,    w:7,    h:7,    shape:'rect' },
     'tc-fs':        { ax:'left',   x:8.7,  ay:'top',    y:0,    w:7,    h:7,    shape:'rect' },
     'tc-view':      { ax:'left',   x:17.5, ay:'top',    y:0.1,  w:7,    h:7,    shape:'rect' },
@@ -99486,6 +99510,48 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     'tc-look-zone': { ax:'right',  x:0,    ay:'bottom', y:0.1,  w:53.4, h:61,   shape:'rect', pct:true },
   };
 
+  const _TC_DEFAULT = JSON.parse(JSON.stringify(_TC_LAYOUT));
+  let _tcA = 1;
+  const _edit = { on: false, sel: null, drag: null, dim: null, top: null, reopen: false };
+  function _tcApplyAlpha() {
+    try { document.documentElement.style.setProperty('--tc-a', String(_tcA)); } catch (_) {}
+  }
+  function _tcSave() {
+    try {
+      const c = {};
+      for (const id in _TC_LAYOUT) {
+        const p = _TC_LAYOUT[id];
+        if (p.custom) c[id] = { ax: p.ax, x: p.x, ay: p.ay, y: p.y, w: p.w, h: p.h };
+      }
+      localStorage.setItem('lss_touch_layout', JSON.stringify({ v: 1, a: _tcA, c }));
+    } catch (_) {}
+  }
+  function _tcLoad() {
+    try {
+      const raw = localStorage.getItem('lss_touch_layout');
+      if (!raw) return;
+      const d = JSON.parse(raw);
+      if (!d || typeof d !== 'object') return;
+      if (typeof d.a === 'number' && d.a >= 0.2 && d.a <= 3) _tcA = d.a;
+      const num = (v) => typeof v === 'number' && isFinite(v);
+      for (const id in (d.c || {})) {
+        const p = _TC_LAYOUT[id], q = d.c[id], def = _TC_DEFAULT[id];
+        if (!p || !q || !def) continue;
+        if (!(q.ax === 'left' || q.ax === 'right' || q.ax === 'center') || !(q.ay === 'top' || q.ay === 'bottom')) continue;
+        if (!num(q.x) || !num(q.y) || !num(q.w) || !num(q.h)) continue;
+        p.ax = q.ax; p.ay = q.ay;
+        p.x = Math.max(q.ax === 'center' ? -200 : 0, Math.min(200, q.x));
+        p.y = Math.max(0, Math.min(200, q.y));
+        p.w = Math.max(def.w * 0.5, Math.min(def.w * 2.5, q.w));
+        p.h = Math.max(def.h * 0.5, Math.min(def.h * 2.5, q.h));
+        p.custom = true;
+      }
+    } catch (_) {}
+  }
+  _tcLoad();
+  _tcApplyAlpha();
+
+  function _tcRadius(p) { return (p.shape === 'circle') ? '50%' : ((p.shape === 'pill') ? '999px' : '1.2vmin'); }
   function _tcStyle(id, extra) {
     const p = _TC_LAYOUT[id];
     if (!p) return extra || null;
@@ -99500,7 +99566,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     s[p.ay] = p.y + u;
     s.width = p.w + u;
     s.height = p.h + u;
-    s.borderRadius = (p.shape === 'circle') ? '50%' : '1.2vmin';
+    s.borderRadius = _tcRadius(p);
     if (extra) for (const k in extra) s[k] = extra[k];
     return s;
   }
@@ -99616,21 +99682,32 @@ document.addEventListener('contextmenu', e => e.preventDefault());
         if (!p) return;
         const ux = p.pct ? W / 100 : vm, uy = p.pct ? H / 100 : vm;
         const w = p.w * ux, h = p.h * uy;
-        const x = (p.ax === 'left')  ? p.x * ux
+        let x = (p.ax === 'left')  ? p.x * ux
                 : (p.ax === 'right') ? W - p.x * ux - w
                                      : W / 2 + p.x * vm - w / 2;
-        const y = (p.ay === 'top') ? p.y * uy : H - p.y * uy - h;
+        let y = (p.ay === 'top') ? p.y * uy : H - p.y * uy - h;
+        x = Math.max(0, Math.min(Math.max(0, W - w), x));
+        y = Math.max(0, Math.min(Math.max(0, H - h), y));
         place(id, x, y, w, h);
+        const _pe = document.getElementById(id);
+        if (_pe) _pe.style.borderRadius = _tcRadius(p);
       };
-      if (!_moveDragging) pin('tc-move');
-      pin('tc-look');
-      pin('tc-vt');
-      pin('tc-move-zone');
-      pin('tc-look-zone');
-      pin('tc-core');
+      for (const _pid in _TC_LAYOUT) {
+        if (_pid === 'tc-move' || _pid === 'tc-look' || _pid === 'tc-vt' || _pid === 'tc-move-zone' || _pid === 'tc-look-zone' || _pid === 'tc-core') continue;
+        if (_edit.drag && _edit.drag.id === _pid) continue;
+        pin(_pid);
+      }
+      const _dragId = _edit.drag ? _edit.drag.id : null;
+      if (!_moveDragging && _dragId !== 'tc-move') pin('tc-move');
+      if (_dragId !== 'tc-look') pin('tc-look');
+      if (_dragId !== 'tc-vt') pin('tc-vt');
+      if (_dragId !== 'tc-move-zone') pin('tc-move-zone');
+      if (_dragId !== 'tc-look-zone') pin('tc-look-zone');
+      if (_dragId !== 'tc-core') pin('tc-core');
       const _coreEl = document.getElementById('tc-core');
-      if (_coreEl) {
-        _coreEl.style.transform = 'none';
+      const _coreFree = !!(_TC_LAYOUT['tc-core'] && _TC_LAYOUT['tc-core'].custom) || _edit.on;
+      if (_coreEl) _coreEl.style.transform = 'none';
+      if (_coreEl && !_coreFree) {
         const _bot = (el) => {
           if (!el) return 0;
           const r = el.getBoundingClientRect();
@@ -99725,7 +99802,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
 
     const coreEl = _el('tc-core', '', 'CORE', _tcStyle('tc-core'), 'CORE');
 
-    const vtEl = _el('tc-vt', '', '', _tcStyle('tc-vt', { borderRadius: '5.5vmin' }));
+    const vtEl = _el('tc-vt', '', '', _tcStyle('tc-vt'));   // (v54.67) the table knows a pill now
     const vtKnob = document.createElement('div');
     vtKnob.id = 'tc-vt-knob';
     vtEl.appendChild(vtKnob);
@@ -99921,8 +99998,134 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     input.touchFire = false; input.touchAltFire = false;
   }
 
+  function _tcSelect(el) {
+    if (_edit.sel && _edit.sel !== el) _edit.sel.classList.remove('tc-sel');
+    _edit.sel = el || null;
+    if (el) el.classList.add('tc-sel');
+  }
+  function _tcCommit(id, x, y, w, h) {
+    const p = _TC_LAYOUT[id];
+    if (!p || !root) return;
+    const W = _lsBox.w || root.clientWidth || 1, H = _lsBox.h || root.clientHeight || 1, vm = Math.min(W, H) / 100;
+    const ux = p.pct ? W / 100 : vm, uy = p.pct ? H / 100 : vm;
+    p.ax = (x + w / 2 < W / 2) ? 'left' : 'right';
+    p.x = +(((p.ax === 'left') ? x : W - x - w) / ux).toFixed(2);
+    p.ay = (y + h / 2 < H / 2) ? 'top' : 'bottom';
+    p.y = +(((p.ay === 'top') ? y : H - y - h) / uy).toFixed(2);
+    p.custom = true;
+    _tcSave();
+    _layoutSticks();
+  }
+  function _tcResize(k) {
+    const el = _edit.sel, p = el && _TC_LAYOUT[el.id], d = el && _TC_DEFAULT[el.id];
+    if (!p || !d) return;
+    const nw = Math.max(d.w * 0.5, Math.min(d.w * 2.5, p.w * k)), nh = Math.max(d.h * 0.5, Math.min(d.h * 2.5, p.h * k));
+    if (p.ax !== 'center') p.x = Math.max(0, +(p.x - (nw - p.w) / 2).toFixed(2));
+    p.y = Math.max(0, +(p.y - (nh - p.h) / 2).toFixed(2));
+    p.w = +nw.toFixed(2); p.h = +nh.toFixed(2);
+    p.custom = true;
+    _tcSave();
+    _layoutSticks();
+  }
+  function _tcReset() {
+    for (const id in _TC_DEFAULT) _TC_LAYOUT[id] = JSON.parse(JSON.stringify(_TC_DEFAULT[id]));
+    try { localStorage.setItem('lss_touch_layout', JSON.stringify({ v: 1, a: _tcA, c: {} })); } catch (_) {}
+    _tcSelect(null);
+    _layoutSticks();
+  }
+  function _tcEditClose() {
+    if (!_edit.on) return;
+    _edit.on = false; _edit.drag = null;
+    _tcSelect(null);
+    try { if (_edit.dim && _edit.dim.parentNode) _edit.dim.parentNode.removeChild(_edit.dim); } catch (_) {}
+    try { if (_edit.top && _edit.top.parentNode) _edit.top.parentNode.removeChild(_edit.top); } catch (_) {}
+    _edit.dim = _edit.top = null;
+    if (root) root.classList.remove('tc-edit');
+    _tcSave();
+    _layoutSticks();
+    try { _clockPause('tcedit', false); } catch (_) {}
+    if (_edit.reopen) { _edit.reopen = false; try { buildSettingsPage(); openSettings(); } catch (_) {} }
+  }
+  function _tcEditOpen() {
+    _build();
+    if (!root || _edit.on) return;
+    _edit.reopen = false;
+    try { if (typeof settingsOpen !== 'undefined' && settingsOpen) { _edit.reopen = true; closeSettings(); } } catch (_) {}
+    _edit.on = true; _edit.drag = null; _edit.sel = null;
+    input.touchActive = false;
+    _zeroTouchInputs();
+    if (_dragReset) { try { _dragReset(); } catch (_) {} }
+    try { _clockPause('tcedit', true); } catch (_) {}
+    root.classList.add('tc-edit');
+    root.classList.add('tc-on');
+    const dim = document.createElement('div'); dim.id = 'tc-edit-dim';
+    root.insertBefore(dim, root.firstChild);
+    const top = document.createElement('div'); top.id = 'tc-edit-top';
+    const bar = document.createElement('div'); bar.id = 'tc-edit-bar';
+    const row = document.createElement('div'); row.className = 'tb-row';
+    const mkBtn = (txt, cls, fn) => {
+      const b = document.createElement('button');
+      b.type = 'button'; b.textContent = txt; if (cls) b.className = cls;
+      b.addEventListener('pointerdown', (ev) => { ev.stopPropagation(); });
+      b.addEventListener('click', (ev) => { ev.preventDefault(); ev.stopPropagation(); try { fn(); } catch (_) {} });
+      row.appendChild(b);
+    };
+    mkBtn('−', '', () => _tcResize(1 / 1.08));
+    mkBtn('+', '', () => _tcResize(1.08));
+    mkBtn('RESET', '', () => _tcReset());
+    mkBtn('DONE', 'tb-go', () => _tcEditClose());
+    const hint = document.createElement('div'); hint.className = 'tb-hint';
+    hint.textContent = 'Drag to move · tap one, then − / + to resize';
+    bar.appendChild(row); bar.appendChild(hint);
+    top.appendChild(bar);
+    root.appendChild(top);
+    _edit.dim = dim; _edit.top = top;
+    _layoutSticks();
+    const hit = (cx, cy) => {
+      const kids = root.children;
+      for (let i = kids.length - 1; i >= 0; i--) {
+        const k = kids[i];
+        if (!k.classList || !k.classList.contains('tc') || !_TC_LAYOUT[k.id]) continue;
+        const r = k.getBoundingClientRect();
+        if (r.width > 0 && cx >= r.left - 6 && cx <= r.right + 6 && cy >= r.top - 6 && cy <= r.bottom + 6) return k;
+      }
+      return null;
+    };
+    top.addEventListener('pointerdown', (ev) => {
+      ev.preventDefault();
+      const el = hit(ev.clientX, ev.clientY);
+      _tcSelect(el);
+      if (!el) return;
+      const r = el.getBoundingClientRect(), rr = root.getBoundingClientRect();
+      _edit.drag = { id: el.id, el, pid: ev.pointerId, ox: ev.clientX - r.left, oy: ev.clientY - r.top,
+                     w: r.width, h: r.height, x: r.left - rr.left, y: r.top - rr.top, moved: false };
+      try { top.setPointerCapture(ev.pointerId); } catch (_) {}
+    });
+    top.addEventListener('pointermove', (ev) => {
+      const D = _edit.drag;
+      if (!D || ev.pointerId !== D.pid) return;
+      const rr = root.getBoundingClientRect();
+      const x = Math.max(0, Math.min(rr.width - D.w, ev.clientX - rr.left - D.ox));
+      const y = Math.max(0, Math.min(rr.height - D.h, ev.clientY - rr.top - D.oy));
+      if (!D.moved && Math.abs(x - D.x) < 3 && Math.abs(y - D.y) < 3) return;   // a tap is a select, not a 1 px move
+      D.x = x; D.y = y; D.moved = true;
+      D.el.style.left = Math.round(x) + 'px'; D.el.style.top = Math.round(y) + 'px';
+      D.el.style.right = 'auto'; D.el.style.bottom = 'auto';
+    });
+    const end = (ev) => {
+      const D = _edit.drag;
+      if (!D || ev.pointerId !== D.pid) return;
+      _edit.drag = null;
+      try { top.releasePointerCapture(ev.pointerId); } catch (_) {}
+      if (D.moved) _tcCommit(D.id, D.x, D.y, D.w, D.h);
+    };
+    top.addEventListener('pointerup', end);
+    top.addEventListener('pointercancel', end);
+  }
+
   setInterval(() => {
     if (!_enabled) {
+      if (_edit.on) return;   // (v54.67) the layout editor holds the overlay up even where the pads are switched off
       if (root && root.classList.contains('tc-on')) { root.classList.remove('tc-on'); input.touchActive = false; _zeroTouchInputs(); }   // (v40.94)
       return;
     }
@@ -99934,7 +100137,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
       (game.state === 'playing' || game.state === 'warmup' || game.state === 'roundEnd' || game.state === 'matchEnd');
     const blocked = (typeof settingsOpen !== 'undefined' && settingsOpen) || selectActive ||
       (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active);
-    const show = inMatch && !blocked && !input.gpConnected;
+    const show = (inMatch && !blocked && !input.gpConnected) || _edit.on;
     if (root.classList.contains('tc-on') && !_lssOff('flush')) { try { void root.offsetHeight; } catch (_) {} }   // (v40.98) `?off=flush`
     const cur = root.classList.contains('tc-on');   // (v40.94) the layer is never torn down now
     if (show !== cur) {
@@ -99943,6 +100146,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
       if (!show) { _zeroTouchInputs(); if (_dragReset) { try { _dragReset(); } catch (_) {} } }
       if (show) _layoutSticksSoon();
     }
+    input.touchActive = show && !_edit.on;
     if (show) _refreshTouchLabels();
     const _md = (typeof LSS !== 'undefined') ? LSS.MODE : '';
     const _shipOk = show && (_md === 'freeflight' || (_md === 'campaign' && !!(game && game.campaign) &&
@@ -99964,6 +100168,13 @@ document.addEventListener('contextmenu', e => e.preventDefault());
       try { localStorage.setItem('lss_touch_enabled', _enabled ? '1' : '0'); } catch (_) {}
     },
     get enabled() { return _enabled; },
+    edit() { _tcEditOpen(); },
+    editClose() { _tcEditClose(); },
+    get editing() { return _edit.on; },
+    resetLayout() { _tcReset(); },
+    get layout() { return JSON.parse(JSON.stringify(_TC_LAYOUT)); },
+    set alpha(v) { v = +v; if (v >= 0.2 && v <= 3) { _tcA = v; _tcApplyAlpha(); _tcSave(); } },
+    get alpha() { return _tcA; },
     set lookScale(v) { if (v > 0) input.touchLookScale = v; },
     get lookScale() { return input.touchLookScale; },
     set vertDead(v) { v = +v; if (v >= 0 && v <= 0.4) _vtDead = v; },
@@ -100322,6 +100533,23 @@ function buildSettingsPage() {
     </div>
 
     <div class="settings-tab-panel" data-tab-panel="controls" data-active="1">
+    ${(typeof window !== 'undefined' && window.LSS_TOUCH) ? `
+    <div class="settings-section">
+      <h3>Touch Screen</h3>
+      <div class="setting-row">
+        <label style="flex:1;">Move or resize any on-screen button, the sticks and the move / look areas. The layout is saved on this device.</label>
+      </div>
+      <div class="setting-row">
+        <button id="tc-edit-open">Edit Touch Layout</button>
+        <button id="tc-edit-reset">Reset Touch Layout</button>
+      </div>
+      <div class="setting-row">
+        <label>Button Brightness</label>
+        <input type="range" id="set-tc-alpha" min="0.4" max="2.5" step="0.1" value="${window.LSS_TOUCH.alpha}">
+        <div class="value-display" id="val-tc-alpha">${(+window.LSS_TOUCH.alpha).toFixed(1)}</div>
+      </div>
+    </div>
+    ` : ''}
     <div class="settings-section">
       <h3>Mouse</h3>
       <div class="setting-row">
@@ -100891,6 +101119,18 @@ function buildSettingsPage() {
       }
     }
   };
+  const tcEditBtn = overlay.querySelector('#tc-edit-open');
+  if (tcEditBtn) tcEditBtn.addEventListener('click', () => { try { window.LSS_TOUCH.edit(); } catch (_) {} });
+  const tcResetBtn = overlay.querySelector('#tc-edit-reset');
+  if (tcResetBtn) tcResetBtn.addEventListener('click', () => { try { window.LSS_TOUCH.resetLayout(); } catch (_) {} });
+  const tcAlpha = overlay.querySelector('#set-tc-alpha');
+  if (tcAlpha) tcAlpha.addEventListener('input', () => {
+    try {
+      window.LSS_TOUCH.alpha = +tcAlpha.value;
+      const _tv = overlay.querySelector('#val-tc-alpha');
+      if (_tv) _tv.textContent = (+tcAlpha.value).toFixed(1);
+    } catch (_) {}
+  });
   const kbResetBtn = overlay.querySelector('#kb-reset-defaults');
   if (kbResetBtn) {
     kbResetBtn.addEventListener('click', () => {
