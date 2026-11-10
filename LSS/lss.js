@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "54.69";
+const LSS_BUILD = "54.70";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -59511,7 +59511,7 @@ class Bot {
       this.velocity.addScaledVector(this.targetDir, 600);
     } else if (coreName === 'Mega Stun Bolt') {
       _cue('stun_core_zap');
-      try { if (typeof _spawnSlayerCoreStormFX === 'function') _spawnSlayerCoreStormFX(this.position, null, true); } catch (_) {}
+      try { if (typeof _spawnSlayerCoreStormFX === 'function') _spawnSlayerCoreStormFX(this.position, null, true, this); } catch (_) {}   // (v54.70) + its own hull
     } else if (coreName === 'Mega Laser') {
       _cue('laser_core_beam');
     } else if (coreName === 'Mega Tracker Rockets') {
@@ -59640,7 +59640,8 @@ class Bot {
       if (this._coreFxT <= 0) {
         this._coreFxT = 0.06;
         try {
-          if (typeof spawnLightningBolt === 'function') {
+          if (typeof _slayerStormBolt === 'function' && _slayerStormBolt(this, this.position, (this._stormK = (this._stormK | 0) + 1))) { /* fired */ }
+          else if (typeof spawnLightningBolt === 'function') {
             const ang = Math.random() * Math.PI * 2;
             const r = 200 + Math.random() * 300;
             const end = this._tempVec3c.set(
@@ -77744,9 +77745,169 @@ function updateEffects(dt) {
   }
 }
 
-function _spawnSlayerCoreStormFX(pos, ownerPeerId, burstOnly) {
+const SLAYER_FIELD = { on: 1, shell: 0.18, flash: 1, flashCol: 0x40e070, rad: 0.38, dwell: 0.13, light: 1, lightR: 220, crawl: 1, nodes: 36, scale: 1.07 };
+try { if (typeof window !== 'undefined') window.__slayerField = SLAYER_FIELD; } catch (_) {}
+const _STORM_FIELDS = new Set();
+const _sfV = new THREE.Vector3(), _sfD = new THREE.Vector3(), _sfE = new THREE.Vector3();
+const _sfM = new THREE.Matrix4(), _sfS = new THREE.Matrix4();
+function _stormNodes(root) {
+  const ud = root.userData || (root.userData = {});
+  if (ud._stormNodes) return ud._stormNodes.length ? ud._stormNodes : null;
+  const cand = [];
+  try {
+    root.updateWorldMatrix(true, true);
+    _sfM.copy(root.matrixWorld).invert();
+    const v = new THREE.Vector3();
+    const walk = (o) => {
+      if (!o) return;
+      const u = o.userData;
+      if (u && (u.shieldClone || u.isPlume || u._stormField)) return;
+      if (o.isLight || o.isSprite || o.isLine || o.isLineSegments || o.isPoints || o.name === 'shield') return;
+      const pa = o.isMesh && o.geometry && o.geometry.attributes && o.geometry.attributes.position;
+      if (pa && pa.count) {
+        const st = Math.max(1, Math.floor(pa.count / 48));
+        for (let i = 0; i < pa.count; i += st) { v.fromBufferAttribute(pa, i).applyMatrix4(o.matrixWorld).applyMatrix4(_sfM); cand.push(v.x, v.y, v.z); }
+      }
+      for (let i = 0; i < o.children.length; i++) walk(o.children[i]);
+    };
+    walk(root);
+  } catch (_) {}
+  const n = (cand.length / 3) | 0, K = Math.max(8, Math.min(64, SLAYER_FIELD.nodes | 0));
+  if (n < 12) { ud._stormNodes = new Float32Array(0); return null; }
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 0; i < n; i++) { cx += cand[i * 3]; cy += cand[i * 3 + 1]; cz += cand[i * 3 + 2]; }
+  cx /= n; cy /= n; cz /= n;
+  const best = new Float32Array(n).fill(Infinity), out = new Float32Array(Math.min(K, n) * 3);
+  let pick = 0, far = -1;
+  for (let i = 0; i < n; i++) { const dx = cand[i * 3] - cx, dy = cand[i * 3 + 1] - cy, dz = cand[i * 3 + 2] - cz, d = dx * dx + dy * dy + dz * dz; if (d > far) { far = d; pick = i; } }
+  for (let k = 0; k < out.length / 3; k++) {
+    const px = cand[pick * 3], py = cand[pick * 3 + 1], pz = cand[pick * 3 + 2];
+    out[k * 3] = px; out[k * 3 + 1] = py; out[k * 3 + 2] = pz;
+    let fd = -1, fi = 0;
+    for (let i = 0; i < n; i++) {
+      const dx = cand[i * 3] - px, dy = cand[i * 3 + 1] - py, dz = cand[i * 3 + 2] - pz, d = dx * dx + dy * dy + dz * dz;
+      if (d < best[i]) best[i] = d;
+      if (best[i] > fd) { fd = best[i]; fi = i; }
+    }
+    pick = fi;
+  }
+  ud._stormNodes = out;
+  return out;
+}
+function _stormFieldKill(F) {
+  if (!F) return;
+  _STORM_FIELDS.delete(F);
+  try { if (F.root && F.root.parent) F.root.parent.remove(F.root); } catch (_) {}
+  try { if (F.mat) { if (typeof _lssRetainMat === 'function') _lssRetainMat(F.mat); else F.mat.dispose(); } } catch (_) {}
+  if (F.ship && F.ship._stormField === F) F.ship._stormField = null;
+  F.root = null; F.mat = null;
+}
+function _stormFieldEnsure(ship) {
+  let F = ship._stormField || null;
+  if (F && (F.host !== ship.mesh || !F.root)) { _stormFieldKill(F); F = null; }
+  if (!F) {
+    if (typeof _makeFXMaterial !== 'function' || typeof _mirrorMeshTree !== 'function' || typeof scene === 'undefined' || !scene) return null;
+    const mat = _makeFXMaterial('plasma_green');
+    if (!mat) return null;
+    const c = ship.chassis || {};
+    const dim = Math.max(c.hullWidth || 80, c.hullHeight || 30, c.hullLength || 100);
+    const u = mat.uniforms || {}, k = Math.max(0, +SLAYER_FIELD.shell);
+    if (u.uPosScale) u.uPosScale.value = 1.0 / Math.max(1, dim * 0.5);
+    if (u.uBrightness) u.uBrightness.value *= Math.min(1, 0.4 + k);
+    if (u.uFresnel) u.uFresnel.value *= k;
+    if (u.uLayerAlpha && u.uLayerAlpha.value) for (let i = 0; i < u.uLayerAlpha.value.length; i++) u.uLayerAlpha.value[i] *= k;
+    if (u.uIntensity) u.uIntensity.value = 2.2;
+    mat.transparent = true; mat.depthWrite = false; mat.blending = THREE.AdditiveBlending; mat.side = THREE.DoubleSide;
+    const root = new THREE.Group();
+    for (let i = 0; i < ship.mesh.children.length; i++) {
+      const ch = ship.mesh.children[i];
+      if (ch.userData && (ch.userData.shieldClone || ch.userData._stormField)) continue;   // not a shield's shell too
+      const cc = _mirrorMeshTree(ch, mat);
+      if (cc) root.add(cc);
+    }
+    root.matrixAutoUpdate = false;
+    root.userData = { _stormField: true };
+    scene.add(root);
+    F = ship._stormField = { root, mat, host: ship.mesh, ship, dim, t: 0 };
+    _STORM_FIELDS.add(F);
+    _stormFieldPose(F);
+  }
+  F.t = performance.now();
+  return F;
+}
+function _stormFieldPose(F) {
+  const h = F.host, s = +SLAYER_FIELD.scale || 1.07;
+  h.updateWorldMatrix(true, false);
+  F.root.matrix.copy(h.matrixWorld).multiply(_sfS.makeScale(s, s, s));
+  F.root.matrixWorldNeedsUpdate = true;
+  F.root.visible = h.visible !== false;
+}
+function _stormFieldFrame() {
+  if (!_STORM_FIELDS.size) return;
+  const now = performance.now();
+  for (const F of _STORM_FIELDS) {
+    const s = F.ship, h = F.host;
+    if (now - F.t > 320 || !s || !h || s.mesh !== h || !h.parent || s.alive === false || s.shipState === 'dead') { _stormFieldKill(F); continue; }
+    try { _stormFieldPose(F); } catch (_) { _stormFieldKill(F); }
+  }
+}
+function _slayerStormBolt(ship, centre, slot, burst) {
+  const K = SLAYER_FIELD;
+  if (!K.on || !ship || !ship.mesh || !centre || typeof spawnLightningBolt !== 'function' || !game || !game.effects) return false;
+  const root = ship.mesh, nodes = _stormNodes(root);
+  if (!nodes) return false;
+  let F = null;
+  try { F = _stormFieldEnsure(ship); } catch (_) { F = null; }
+  root.updateWorldMatrix(true, false);
+  const st = ship._stormSt || (ship._stormSt = { n: [0, 0], t: [0, 0], crawlT: 0 });
+  const now = performance.now() / 1000, cnt = (nodes.length / 3) | 0;
+  slot = slot & 1;
+  let fresh = false;
+  if (burst || now >= st.t[slot]) {
+    st.n[slot] = (Math.random() * cnt) | 0;
+    st.t[slot] = now + Math.max(0.02, +K.dwell) * (0.6 + Math.random() * 0.8);
+    fresh = true;
+  }
+  const i = st.n[slot] * 3;
+  _sfV.set(nodes[i], nodes[i + 1], nodes[i + 2]).applyMatrix4(root.matrixWorld);
+  _sfD.subVectors(_sfV, centre);
+  const dl = _sfD.length();
+  if (dl > 1e-3) _sfD.multiplyScalar(1 / dl); else _sfD.set(0, 1, 0);
+  const ang = Math.random() * Math.PI * 2;
+  _sfD.set(_sfD.x * 0.8 + Math.cos(ang) * 0.6, _sfD.y * 0.8 + (Math.random() - 0.5) * 0.45, _sfD.z * 0.8 + Math.sin(ang) * 0.6).normalize();
+  _sfE.copy(centre).addScaledVector(_sfD, 200 + Math.random() * 300);
+  const col = LSS.CLASS_COLORS.SLAYER;
+  const n0 = game.effects.length;
+  spawnLightningBolt(_sfV, _sfE, col, 0.45, burst ? 2 : 3, burst ? 3 : 4);
+  try { _lightningRide(n0, ship); } catch (_) {}
+  if (fresh) {
+    if (F && F.mat && K.flash > 0 && typeof flashFXMaterialHit === 'function') flashFXMaterialHit(F.mat, _sfV, (K.flashCol != null) ? K.flashCol : 0x40e070, F.dim * Math.max(0.05, +K.rad));
+    if (K.light > 0 && typeof spawnDynamicLight === 'function') { try { spawnDynamicLight(_sfV, 0x66ffa0, 2.4 * K.light, Math.max(40, +K.lightR || 220), 0.16); } catch (_) {} }
+  }
+  if (K.crawl > 0 && !burst && now >= st.crawlT) {
+    st.crawlT = now + (0.1 + Math.random() * 0.08) / Math.max(0.2, +K.crawl);
+    const j = st.n[slot ^ 1] * 3;
+    if (j !== i) {
+      _sfE.set(nodes[j], nodes[j + 1], nodes[j + 2]).applyMatrix4(root.matrixWorld);
+      const n1 = game.effects.length;
+      spawnLightningBolt(_sfV, _sfE, col, 0.12, 1, 1.5);
+      try { _lightningRide(n1, ship); } catch (_) {}
+    }
+  }
+  return true;
+}
+function _spawnSlayerCoreStormFX(pos, ownerPeerId, burstOnly, ship) {
   const SLAYER_GREEN = LSS.CLASS_COLORS.SLAYER;
+  if (!ship) {
+    try {
+      if (ownerPeerId && typeof net !== 'undefined' && net && ownerPeerId !== net.myPeerId) {
+        const _pr = (net.peers && typeof net.peers.get === 'function') ? net.peers.get(ownerPeerId) : null;
+        ship = (_pr && _pr.networkPlayer) || null;
+      } else if (!burstOnly && typeof player !== 'undefined' && player) ship = player;
+    } catch (_) { ship = null; }
+  }
   for (let i = 0; i < 6; i++) {
+    if (ship && _slayerStormBolt(ship, ship.position || pos, i, true)) continue;
     const ang = (i / 6) * Math.PI * 2 + Math.random() * 0.5;
     const r = 280 + Math.random() * 220;
     const endPos = new THREE.Vector3(
@@ -80609,7 +80770,7 @@ function _botAbMirror(evt) {
       spawnExplosion(b.position, 80);
       return true;
     }
-    if (n === 'Mega Stun Bolt' && typeof _spawnSlayerCoreStormFX === 'function') _spawnSlayerCoreStormFX(b.position, null, true);
+    if (n === 'Mega Stun Bolt' && typeof _spawnSlayerCoreStormFX === 'function') _spawnSlayerCoreStormFX(b.position, null, true, b);   // (v54.70) + its own hull
     const d = (typeof evt.d === 'number' && evt.d > 0 && evt.d < 60) ? evt.d : 0;
     if (d > 0 && n !== 'AI Nanobots') b._mxCore = { n: n, t: d, fx: 0, side: 0, tp: evt.tp, tb: evt.tb, tm: evt.tm };
   } else if (k === 'ctgt') {
@@ -80656,7 +80817,8 @@ function _botAbProxyTick(b, dt) {
     c.fx -= dt;
     if (c.fx > 0) return;
     c.fx = 0.06;
-    if (typeof spawnLightningBolt === 'function') {
+    if (typeof _slayerStormBolt === 'function' && _slayerStormBolt(b, b.position, (b._stormK = (b._stormK | 0) + 1))) { /* fired */ }
+    else if (typeof spawnLightningBolt === 'function') {
       const ang = Math.random() * Math.PI * 2, r = 200 + Math.random() * 300;
       const end = _bxB.set(b.position.x + Math.cos(ang) * r, b.position.y + (Math.random() - 0.5) * 220, b.position.z + Math.sin(ang) * r);
       spawnLightningBolt(_bxA.copy(b.position), end, LSS.CLASS_COLORS.SLAYER, 0.45, 3, 4);
@@ -87686,6 +87848,7 @@ function _innerSparkTick(dt) {
 
 function updateWorldEffects(dt) {
   try { _innerSparkTick(dt); } catch (_) {}
+  try { _stormFieldFrame(); } catch (_) {}   // (v54.70) SLAYER's storm fields follow their hulls, and the unfed ones retire
   try {
     if (typeof player !== 'undefined' && player && typeof _hideThermalShieldFlameSpheres === 'function') {
       const _pyroShieldUp = (player.loadoutKey === 'PYRO' && player.shipState !== 'dead' &&
@@ -88410,16 +88573,17 @@ function updateWorldEffects(dt) {
     }
     else if (eff.type === 'slayer_core_damage_fx') {
       let casterPos = eff.position;
+      let _stormShip = null;   // (v54.70) the hull the bolts leave from - see _slayerStormBolt
       if (eff.ownerPeerId) {
         if (eff.ownerPeerId === net.myPeerId && player && player.position) {
-          casterPos = player.position;
+          casterPos = player.position; _stormShip = player;
         } else if (net.peers && typeof net.peers.get === 'function') {
           const peer = net.peers.get(eff.ownerPeerId);
           const np = peer && peer.networkPlayer;
-          if (np && np.position) casterPos = np.position;
+          if (np && np.position) { casterPos = np.position; _stormShip = np; }
         }
       } else if (player && player.position) {
-        casterPos = player.position;
+        casterPos = player.position; _stormShip = player;
       }
       eff.position.copy(casterPos);
       const SLAYER_GREEN = LSS.CLASS_COLORS.SLAYER;
@@ -88427,6 +88591,7 @@ function updateWorldEffects(dt) {
       if (eff._arcT <= 0) {
         eff._arcT = 0.038;
         for (let k = 0; k < 2; k++) {
+          if (_stormShip && _slayerStormBolt(_stormShip, casterPos, k)) continue;
           const ang = Math.random() * Math.PI * 2;
           const r = 200 + Math.random() * 300;
           _emitArcA.set(
