@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "54.72";
+const LSS_BUILD = "54.73";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -81989,6 +81989,67 @@ function _lssEnsureCinematicStyles() {
   document.head.appendChild(style);
 }
 
+const CINE_ROW = { rows: 3, perSide: 4, rowBack: 0.85 };
+if (typeof window !== 'undefined') window.__cineRow = CINE_ROW;
+function _cineSeatClear(x, y, z) {
+  try { if (_spawnClearanceScore(x, y, z).score < 0) return false; } catch (_) {}
+  try { return _spawnWorldScore(x, y, z) >= 0; } catch (_) { return true; }
+}
+function _cineSeatReach(a, b) {
+  if (!SPAWN_CLEAR.on || typeof worldSDF !== 'function') return true;
+  try {
+    for (let k = 1; k <= 3; k++) {
+      const t = k / 4;
+      if (-worldSDF(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t) < 10) return false;
+    }
+  } catch (_) {}
+  return true;
+}
+function _cineRowSeats(ax, ay, az, sx, sz, bx, bz, spacing, n, reserved) {
+  const out = [];
+  let resv = reserved | 0;
+  const CN = (typeof window !== 'undefined' && window.__cine) || null;
+  if (CN && CN.fit === 0) {
+    for (let i = 0; i < n; i++) {
+      const si = i + resv;
+      const k = (si === 0) ? 0 : ((si % 2 === 1) ? Math.ceil(si / 2) : -Math.ceil(si / 2));
+      const x = ax + sx * k * spacing, z = az + sz * k * spacing;
+      let ok = true;
+      try { ok = _spawnClearanceScore(x, ay, z).score >= 0; } catch (_) {}
+      out.push(ok ? { x: x, y: ay, z: z, row: 0, k: k } : null);
+    }
+    return out;
+  }
+  let prevC = null;
+  for (let row = 0; row < CINE_ROW.rows && out.length < n; row++) {
+    const back = spacing * CINE_ROW.rowBack * row;
+    const c = { x: ax + bx * back, y: ay, z: az + bz * back };
+    if (prevC && !_cineSeatReach(prevC, c)) break;          // rock behind the row in front: no further rows
+    const odd = row & 1;                                    // a back row sits in the gaps of the one in front
+    const last = { p: c, n: c }, next = { p: odd ? 0 : 1, n: odd ? 0 : 1 }, open = { p: true, n: true };
+    if (!odd) {
+      if (resv > 0) resv--;
+      else if (_cineSeatClear(c.x, c.y, c.z)) out.push({ x: c.x, y: c.y, z: c.z, row: row, k: 0 });
+    }
+    let turn = 'p';
+    while (out.length < n && (open.p || open.n)) {
+      const sd = open[turn] ? turn : (turn === 'p' ? 'n' : 'p');
+      turn = (turn === 'p') ? 'n' : 'p';
+      const j = next[sd];
+      if (j > CINE_ROW.perSide) { open[sd] = false; continue; }
+      next[sd] = j + 1;
+      const k = (sd === 'p' ? 1 : -1) * (odd ? j + 0.5 : j);
+      const s = { x: c.x + sx * k * spacing, y: ay, z: c.z + sz * k * spacing, row: row, k: k };
+      if (resv > 0) { resv--; last[sd] = s; continue; }
+      if (_cineSeatClear(s.x, s.y, s.z) && _cineSeatReach(last[sd], s)) { out.push(s); last[sd] = s; }
+      else open[sd] = false;
+    }
+    prevC = c;
+  }
+  while (out.length < n) out.push(null);
+  return out;
+}
+
 function _lssStartSpectatorCinematic() {
   if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return true;
   if (typeof game !== 'undefined' && game && game._campPrologue) {
@@ -82126,18 +82187,26 @@ function _lssStartSpectatorCinematic() {
     });
   }
 
+  const _pilotIn = !!(myShips[0] && myShips[0].isPlayer);
+  const _seats = _cineRowSeats(lineCenterX, lineY, lineCenterZ, sideX, sideZ, -fwdX, -fwdZ, SPACING,
+                               _pilotIn ? NS - 1 : NS, _pilotIn ? 1 : 0);
+  let _rowLo = 0, _rowHi = 0, _noSeat = 0;
   for (let i = 0; i < NS; i++) {
-    let sideIdx;
-    if (i === 0) sideIdx = 0;
-    else sideIdx = (i % 2 === 1) ? Math.ceil(i / 2) : -Math.ceil(i / 2);
-    const off = sideIdx * SPACING;
-    _pushShip(myShips[i],
-      lineCenterX + sideX * off,
-      lineY,
-      lineCenterZ + sideZ * off,
-      _qFaceForward
-    );
+    if (_pilotIn && i === 0) { _pushShip(myShips[0], lineCenterX, lineY, lineCenterZ, _qFaceForward); continue; }
+    const st = _seats[_pilotIn ? i - 1 : i];
+    if (st) {
+      _pushShip(myShips[i], st.x, st.y, st.z, _qFaceForward);
+      if (st.row === 0) { if (st.k < _rowLo) _rowLo = st.k; if (st.k > _rowHi) _rowHi = st.k; }
+    } else {
+      const p = (myShips[i].ent && myShips[i].ent.position) || myShips[i].mesh.position;
+      _pushShip(myShips[i], p.x, p.y, p.z, _qFaceForward);
+      _noSeat++;
+    }
   }
+  try {
+    console.log('[cinematic] row seats:', _seats.map(s => s ? (s.row ? 'r' + s.row + ':' : '') + s.k : 'none').join(' '),
+                '| no seat:', _noSeat);
+  } catch (_) {}
   let _cmtOk = 0, _cmtSkip = 0;
   for (let i = 0; i < _cinematic.ships.length; i++) {
     const s = _cinematic.ships[i];
@@ -82205,14 +82274,11 @@ function _lssStartSpectatorCinematic() {
           _fh = (otherTeam === LSS.TEAM_FLEET_A) ? _hc2.A : _hc2.B;
         } catch (_) {}
         let _placedN = 0;
+        const _fSeats = _cineRowSeats(fx, fy, fz, fsX, fsZ, -bx, -bz, SPACING, _foe.length, _fh);
         for (let i = 0; i < _foe.length; i++) {
-          const _si = i + _fh;                       // skip the seats the humans are standing in
-          const side = (_si === 0) ? 0 : ((_si % 2 === 1) ? Math.ceil(_si / 2) : -Math.ceil(_si / 2));
-          const off = side * SPACING;
-          const px = fx + fsX * off, py = fy, pz = fz + fsZ * off;
-          let ok = true;
-          try { if (typeof _spawnClearanceScore === 'function') ok = _spawnClearanceScore(px, py, pz).score >= 0; } catch (_) {}
-          if (!ok) continue;                       // blocked slot: leave that one where it spawned
+          const _fst = _fSeats[i];
+          if (!_fst) continue;                     // no seat a hull fits in: leave that one where it spawned
+          const px = _fst.x, py = _fst.y, pz = _fst.z;
           _foe[i].position.set(px, py, pz);
           if (_foe[i].velocity) _foe[i].velocity.set(0, 0, 0);
           if (_foe[i].mesh) _foe[i].mesh.position.set(px, py, pz);
@@ -82250,7 +82316,9 @@ function _lssStartSpectatorCinematic() {
     }
     _fleetN = NS + _extra;
   } catch (_) {}
-  const _lineHalf = (_fleetN > 1) ? (SPACING * (_fleetN - 1) * 0.5) : 0;
+  const _rowMid = (_CN.recentre === 0) ? 0 : (_rowLo + _rowHi) * 0.5 * SPACING;
+  const _camCX = lineCenterX + sideX * _rowMid, _camCZ = lineCenterZ + sideZ * _rowMid;
+  const _lineHalf = Math.max((_fleetN > 1) ? (SPACING * (_fleetN - 1) * 0.5) : 0, (_rowHi - _rowLo) * 0.5 * SPACING);
   const camAhead = Math.max((_CN.min != null) ? _CN.min : 150,
                    Math.min((_CN.max != null) ? _CN.max : 420,
                             _lineHalf * ((_CN.spread != null) ? _CN.spread : 0.70) + ((_CN.pad != null) ? _CN.pad : 130)));
@@ -82258,18 +82326,18 @@ function _lssStartSpectatorCinematic() {
   const lookHeight = lineY + 10;
   _cinematic.orbitR = camAhead;
   _cinematic.orbitY = camHeight;
-  _cinematic.orbitCX = lineCenterX;
-  _cinematic.orbitCZ = lineCenterZ;
+  _cinematic.orbitCX = _camCX;
+  _cinematic.orbitCZ = _camCZ;
   _cinematic.orbitA0 = Math.atan2(fwdZ, fwdX);
   _cinematic.orbitArc = (_CN.arc != null) ? _CN.arc : Math.PI * 0.5;
   _cinematic.fovCine = (_CN.fov != null) ? _CN.fov : 65;
   _cinematic.fov0 = (typeof camera !== 'undefined' && camera) ? camera.fov : 75;
   _cinematic.camPos.set(
-    lineCenterX + fwdX * camAhead,
+    _camCX + fwdX * camAhead,
     camHeight,
-    lineCenterZ + fwdZ * camAhead
+    _camCZ + fwdZ * camAhead
   );
-  _cinematic.camTarget.set(lineCenterX, lookHeight, lineCenterZ);
+  _cinematic.camTarget.set(_camCX, lookHeight, _camCZ);
   _cinematic.baseY = _cinematic.camPos.y;
   _cinematic.swayX = sideX;
   _cinematic.swayZ = sideZ;
@@ -82303,6 +82371,7 @@ function _lssShipEngineFX(mesh) {
   return out;
 }
 
+const _aflSeats = { key: null, seats: [] };   // (v54.73) the far fleet's seats, kept while its anchor holds still
 function _lssAuthorityFleetLine() {
   try {
     if (typeof _botAuthority === 'function' && !_botAuthority()) return 0;
@@ -82324,11 +82393,16 @@ function _lssAuthorityFleetLine() {
     let _fh = 0;   // seats that fleet's own humans stand in; the bots begin after them
     try { const h = _lssHumanCounts(); _fh = (otherTeam === LSS.TEAM_FLEET_A) ? (h.A | 0) : (h.B | 0); } catch (_) {}
     let _placed = 0, _moved = 0;
+    const _flKey = Math.round(fx) + ',' + Math.round(fy) + ',' + Math.round(fz) + '|' + bx.toFixed(3) + ',' + bz.toFixed(3) +
+                   '|' + _foe.length + '|' + _fh + '|' + ((game.currentRound | 0)) + '|' + game.selectedMap;
+    if (_aflSeats.key !== _flKey) {
+      _aflSeats.key = _flKey;
+      _aflSeats.seats = _cineRowSeats(fx, fy, fz, fsX, fsZ, -bx, -bz, SPACING, _foe.length, _fh);
+    }
     for (let i = 0; i < _foe.length; i++) {
-      const _si = i + _fh;
-      const side = (_si === 0) ? 0 : ((_si % 2 === 1) ? Math.ceil(_si / 2) : -Math.ceil(_si / 2));
-      const off = side * SPACING;
-      const px = fx + fsX * off, py = fy, pz = fz + fsZ * off;
+      const _fst = _aflSeats.seats[i];
+      if (!_fst) continue;
+      const px = _fst.x, py = _fst.y, pz = _fst.z;
       const _d = Math.hypot(_foe[i].position.x - px, _foe[i].position.y - py, _foe[i].position.z - pz);
       if (_d < 1) continue;                  // already on its slot: no write, nothing to re-aim
       if (_d > 50) _moved++;                 // only a real correction is worth a log line
@@ -109576,6 +109650,29 @@ function _spawnClearanceScore(x, y, z) {
   return { score, worst, worstR };
 }
 
+const SPAWN_CLEAR = { on: 1, need: 60, tap: 100, tapY: 50, tapMin: 10 };
+if (typeof window !== 'undefined') window.__spawnClear = SPAWN_CLEAR;
+const _SPAWN_TAPS = [[1, 0], [0.7071, 0.7071], [0, 1], [-0.7071, 0.7071], [-1, 0], [-0.7071, -0.7071], [0, -1], [0.7071, -0.7071]];
+function _spawnWorldScore(x, y, z) {
+  const K = SPAWN_CLEAR;
+  if (!K.on || typeof worldSDF !== 'function') return Infinity;
+  let s;
+  try { s = -worldSDF(x, y, z); } catch (_) { return Infinity; }
+  if (!(s < 5000)) return Infinity;            // no field to ask (a real-world level)
+  s -= K.need;
+  if (s < 0) return s;
+  try {
+    for (let i = 0; i < 10; i++) {
+      let t;
+      if (i < 8) t = -worldSDF(x + _SPAWN_TAPS[i][0] * K.tap, y, z + _SPAWN_TAPS[i][1] * K.tap);
+      else t = -worldSDF(x, y + (i === 8 ? K.tapY : -K.tapY), z);
+      t -= K.tapMin;
+      if (t < s) { s = t; if (s < 0) return s; }
+    }
+  } catch (_) {}
+  return s;
+}
+
 let _spawnPick = null;
 function _spawnPickSet(v) { try { _spawnPick = v ? v.clone() : null; } catch (_) { _spawnPick = null; } return v; }
 function _spawnPickTake() { const v = _spawnPick; _spawnPick = null; return v; }
@@ -109598,6 +109695,7 @@ function getValidSpawnPoint(team, spread) {
     if (pool.length === 0) pool = pts.slice(Math.floor(pts.length * 0.75));
   }
 
+  const _wallsToo = (team === 'A' || team === 'B') && !(game.bendWorld && game._bendSegs && game._bendSegs.length);
   let bestX = 0, bestY = 0, bestZ = 0, bestScore = -Infinity;
   for (let attempt = 0; attempt < 40; attempt++) {
     const base = pool[Math.floor(Math.random() * pool.length)];
@@ -109605,8 +109703,10 @@ function getValidSpawnPoint(team, spread) {
     const y = base.y + (Math.random() - 0.5) * spread;
     const z = base.z + (Math.random() - 0.5) * spread;
     const r = _spawnClearanceScore(x, y, z);
-    if (r.score >= 0) return new THREE.Vector3(x, y, z);
-    if (r.score > bestScore) { bestScore = r.score; bestX = x; bestY = y; bestZ = z; }
+    let sc = r.score;
+    if (sc >= 0 && _wallsToo) { const w = _spawnWorldScore(x, y, z); if (w < sc) sc = w; }
+    if (sc >= 0) return new THREE.Vector3(x, y, z);
+    if (sc > bestScore) { bestScore = sc; bestX = x; bestY = y; bestZ = z; }
   }
   const fin = _spawnClearanceScore(bestX, bestY, bestZ);
   if (fin.worst && fin.score < 0) {
@@ -109624,7 +109724,56 @@ function getValidSpawnPoint(team, spread) {
       }
     }
   }
+  if (_wallsToo && fin.score >= 0) {
+    try {
+      const rm = Array.isArray(game.sdfRoomData) ? game.sdfRoomData.find(q => q && q.team === team) : null;
+      if (rm) for (let k = 1; k <= 8; k++) {
+        const t = k / 8, px = bestX + (rm.x - bestX) * t, py = bestY + (rm.y - bestY) * t, pz = bestZ + (rm.z - bestZ) * t;
+        if (_spawnWorldScore(px, py, pz) >= 0 && _spawnClearanceScore(px, py, pz).score >= 0) return new THREE.Vector3(px, py, pz);
+      }
+    } catch (_) {}
+  }
   return new THREE.Vector3(bestX, bestY, bestZ);
+}
+
+if (typeof window !== 'undefined') window.__spawnAudit = function (n) {
+  n = n || 500;
+  const rooms = Array.isArray(game.sdfRoomData) ? game.sdfRoomData : [];
+  const open = (x, y, z) => -worldSDF(x, y, z);
+  const out = { map: game.selectedMap, n: n };
+  for (const tc of ['A', 'B']) {
+    const rm = rooms.find(r => r && r.team === tc), foe = rooms.find(r => r && r.team && r.team !== tc);
+    if (!rm) { out[tc] = 'no team room'; continue; }
+    let fx = 1, fz = 0;
+    if (foe) { fx = foe.x - rm.x; fz = foe.z - rm.z; const l = Math.hypot(fx, fz); if (l > 1) { fx /= l; fz /= l; } else { fx = 1; fz = 0; } }
+    const sp = Math.min(220, Math.max(80, ((rm.r || 300) * 1.4) / 3));
+    const r = { pickInRock: 0, pickTight: 0, wingmenSeated: [0, 0, 0], seatRows: [0, 0, 0], oldRowInRock: 0 };
+    for (let i = 0; i < n; i++) {
+      const p = getValidSpawnPoint(tc);
+      if (open(p.x, p.y, p.z) < 0) r.pickInRock++;
+      if (_spawnWorldScore(p.x, p.y, p.z) < 0) r.pickTight++;
+      const S = _cineRowSeats(p.x, p.y, p.z, -fz, fx, -fx, -fz, sp, 2, 1);
+      let k = 0; for (const s of S) if (s) { k++; r.seatRows[s.row]++; }
+      r.wingmenSeated[k]++;
+      if (open(p.x - fz * sp, p.y, p.z + fx * sp) < 0 || open(p.x + fz * sp, p.y, p.z - fx * sp) < 0) r.oldRowInRock++;
+    }
+    out[tc] = r;
+  }
+  return out;
+};
+if (typeof window !== 'undefined') {
+  window.__spawnAt = (x, y, z) => ({ open: Math.round(-worldSDF(x, y, z)), fit: Math.round(_spawnWorldScore(x, y, z)) });
+  window.__spawnShips = () => {
+    const out = [];
+    const add = (k, e) => {
+      const p = e && e.position; if (!p) return;
+      out.push({ ship: k, team: e.team, open: Math.round(-worldSDF(p.x, p.y, p.z)), fit: Math.round(_spawnWorldScore(p.x, p.y, p.z)),
+                 at: [Math.round(p.x), Math.round(p.y), Math.round(p.z)] });
+    };
+    try { add('pilot', player); } catch (_) {}
+    for (const e of (game.entities || [])) if (e && e.alive && e.loadoutKey) add(e.loadoutKey, e);
+    return out;
+  };
 }
 
 
