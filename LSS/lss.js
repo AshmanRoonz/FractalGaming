@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "54.70";
+const LSS_BUILD = "54.72";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -69709,6 +69709,11 @@ function _preloadChampionShellModel() {
   return _champShellPromise;
 }
 
+function _champShellRetireMats(root) {
+  if (!root) return;
+  if (typeof _lssRetainMat !== 'function') { _disposeMeshTreeDeep(root, false); return; }
+  try { root.traverse((node) => { if (node.isMesh && node.material) { try { _lssRetainMat(node.material); } catch (_) {} } }); } catch (_) {}
+}
 function _champSelfIlluminate(obj3d) {
   obj3d.traverse(node => {
     if (!node.isMesh || !node.material) return;
@@ -69849,7 +69854,7 @@ class ChampionShell {
     } catch (_) {}
     if (this.mesh) {
       try { scene.remove(this.mesh); } catch (_) {}
-      _disposeMeshTreeDeep(this.mesh, false);
+      _champShellRetireMats(this.mesh);
       this.mesh = null;
     }
     if (broadcast && typeof net !== 'undefined' && net && net.active && net.sendEvent) {
@@ -69882,7 +69887,7 @@ function _clearChampionShell() {
   s.alive = false;
   if (s.mesh) {
     try { scene.remove(s.mesh); } catch (_) {}
-    _disposeMeshTreeDeep(s.mesh, false);  
+    _champShellRetireMats(s.mesh);   // (v54.71) retained - see the helper
     s.mesh = null;
   }
   if (game.monsters) {
@@ -73620,15 +73625,27 @@ function _ghostPinWarmAsync() {
     if (typeof _ghostHullApply !== 'function' || typeof _ghostHullRestore !== 'function') return;
     if (typeof player === 'undefined' || !player || !player.mesh) return;
     if (typeof renderer === 'undefined' || !renderer || typeof renderer.compileAsync !== 'function') return;
-    const _was = !!(player.mesh.userData && player.mesh.userData._ghostOn);
-    if (!_was) _ghostHullApply(player.mesh);
-    const _hid = [];   // (v39.82) the cockpit interior is hidden in third person - see _ghostPinWarm
-    try { player.mesh.traverse((o) => { if (o.visible === false) { o.visible = true; _hid.push(o); } }); } catch (_) {}
-    const _restore = () => {
-      for (let i = 0; i < _hid.length; i++) { try { _hid[i].visible = false; } catch (_) {} }
-      try { if (!_was) _ghostHullRestore(player.mesh); } catch (_) {}
-    };
-    renderer.compileAsync(player.mesh, camera, scene).then(_restore).catch(_restore);
+    if (typeof scene === 'undefined' || !scene || typeof camera === 'undefined' || !camera) return;
+    const mesh = player.mesh;
+    const _was = !!(mesh.userData && mesh.userData._ghostOn);
+    const _rt0 = renderer.getRenderTarget();
+    let _rtS = null;
+    try { _rtS = (typeof postFX !== 'undefined' && postFX && postFX.rtScene) ? postFX.rtScene : null; } catch (_) { _rtS = null; }
+    const _kick = () => { try { const p = renderer.compileAsync(mesh, camera, scene); if (p && p.catch) p.catch(() => {}); } catch (_) {} };
+    try {
+      if (_rtS) renderer.setRenderTarget(_rtS);
+      if (!mesh.userData._ghostOn) _ghostHullApply(mesh);
+      _kick();                                            // the seat shell
+      if (mesh.userData._ghostOn) _ghostHullRestore(mesh);
+      _kick();                                            // the painted hull
+    } finally {
+      try {
+        if (_was && !mesh.userData._ghostOn) _ghostHullApply(mesh);
+        else if (!_was && mesh.userData._ghostOn) _ghostHullRestore(mesh);
+      } catch (_) {}
+      try { renderer.setRenderTarget(_rt0); } catch (_) {}
+    }
+    try { window.__ghostWarmAsync = (window.__ghostWarmAsync | 0) + 1; } catch (_) {}
   } catch (_) {}
 }
 
@@ -73727,7 +73744,10 @@ function _pinCombatEffectPrograms(opts) {
     if (_cq && !(opts && opts.now)) { if (_cq.indexOf(_pinJob) < 0) _cq.push(_pinJob); return; } }
   try {
     if (typeof _fxSmallDevice === 'function' && _fxSmallDevice() &&
-        !(typeof window !== 'undefined' && window.__pinShaders)) return;
+        !(typeof window !== 'undefined' && window.__pinShaders)) {
+      try { _ghostPinWarmAsync(); } catch (_) {}
+      return;
+    }
   } catch (_) {}
   try {
     if (typeof renderer === 'undefined' || !renderer ||
@@ -74671,6 +74691,71 @@ function _xrCoverFrameRender() {
   }
 }
 
+const _FXS = { sig: null, fire: null, hex: null };
+async function _fxWarmSmall(rep) {
+  let small = false;
+  try { small = (typeof _fxSmallDevice === 'function') && _fxSmallDevice(); } catch (_) {}
+  if (!small) return 0;
+  try { if (typeof window !== 'undefined' && window.__phoneFxWarm === 0) return 0; } catch (_) {}
+  if (typeof renderer === 'undefined' || !renderer || typeof renderer.compileAsync !== 'function') return 0;
+  if (typeof scene === 'undefined' || !scene || typeof camera === 'undefined' || !camera) return 0;
+  if (renderer.xr && renderer.xr.isPresenting) return 0;
+  let rtS = null;
+  try { rtS = (typeof postFX !== 'undefined' && postFX && postFX.rtScene) ? postFX.rtScene : null; } catch (_) { rtS = null; }
+  if (!rtS) return 0;
+  let sig = null;
+  try { sig = (typeof _programEnvSig === 'function') ? _programEnvSig() : null; } catch (_) { sig = null; }
+  if (sig && _FXS.sig === sig) return 0;
+  const t0 = _pbNow();
+  const grp = new THREE.Group();
+  grp.position.set(0, -100000, 0);   // parked far under the map, like every other warm prototype
+  const add = (geo, mat) => { if (!geo || !mat) return; const m = new THREE.Mesh(geo, mat); m.frustumCulled = false; grp.add(m); };
+  try {
+    if (!window._fireCloudGeo) window._fireCloudGeo = new THREE.SphereGeometry(1, 16, 12);
+    add(window._fireCloudGeo, _FXS.fire || (_FXS.fire = _makeFireCloudMaterial({ radius: 48, alpha: 0.6, oct: 5 })));
+  } catch (_) {}
+  try { add(_wallLensGeometry(), _FXS.hex || (_FXS.hex = _makeHexHologramMaterial(0x44aaff))); } catch (_) {}
+  try { add(_vortexGlowGeometry(), _vortexGlowMaterial()); } catch (_) {}
+  let shell = null;
+  try {
+    if (_champShellProto) {
+      shell = _champShellProto.clone(true);
+      _champSelfIlluminate(shell);
+      shell.traverse((o) => { if (o.isMesh) o.frustumCulled = false; });
+      grp.add(shell);
+    }
+  } catch (_) { shell = null; }
+  const kids = grp.children.slice();
+  if (!kids.length) return 0;
+  let n = 0;
+  try {
+    scene.add(grp);
+    grp.updateMatrixWorld(true);
+    for (const k of kids) {
+      const rt0 = renderer.getRenderTarget();
+      try {
+        renderer.setRenderTarget(rtS);
+        const p = renderer.compileAsync(k, camera, scene);
+        if (p && p.catch) p.catch(() => {});
+      } catch (_) {}
+      finally { try { renderer.setRenderTarget(rt0); } catch (_) {} }
+      n++;
+      await _warmupYield();
+    }
+    try { await _drainProgramLinks(6000, rep, 'fxSmall'); } catch (_) {}
+    for (const k of kids) {
+      for (const o of kids) o.visible = (o === k);
+      try { _warmDrawRoot(k, rtS, false); } catch (_) {}
+      await _warmupYield();
+    }
+  } finally {
+    try { if (grp.parent) grp.parent.remove(grp); } catch (_) {}
+    try { if (shell) _champShellRetireMats(shell); } catch (_) {}
+  }
+  _FXS.sig = sig;
+  try { window.__phoneFxWarmInfo = { n, ms: Math.round(_pbNow() - t0), shell: !!shell, at: +(performance.now() / 1000).toFixed(1) }; } catch (_) {}
+  return n;
+}
 async function _prebakeWorldForLaunch() {
   if (_PREBAKE.on) return _PREBAKE.last;
   try { if (typeof _cyberPrePlace === 'function') _cyberPrePlace(); } catch (_) {}
@@ -74749,6 +74834,11 @@ async function _prebakeWorldForLaunch() {
     _pbSub('waking the leviathans');
     try { rep.mon = await _primeMonsterModels(_bt0, _MON_PRIME_MAX_MS * _pbCapMul); } catch (_) {}   // (v49.46) x4 on desktop
     rep.ms.mon = Math.round(_pbNow() - _tM);
+
+    const _tFs = _pbNow();
+    _pbSub('compiling effects');
+    try { rep.fxSmall = await _fxWarmSmall(rep); } catch (_) {}
+    rep.ms.fxSmall = Math.round(_pbNow() - _tFs);
 
     let _carWarmGroup = null;
     const _tK = _pbNow();
@@ -75711,6 +75801,7 @@ async function _rrStagedSwap(pending, ph) {
 
     t = _pbNow();
     try { if (typeof _warmRealCombatFX === 'function') _warmRealCombatFX(); } catch (_) {}
+    try { rep.fxSmall = await _fxWarmSmall(rep); } catch (_) {}
     rep.ms.fx = Math.round(_pbNow() - t);
     await _warmupYield();
 

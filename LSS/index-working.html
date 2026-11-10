@@ -8714,7 +8714,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "54.70";
+const LSS_BUILD = "54.72";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -107769,6 +107769,17 @@ function _preloadChampionShellModel() {
   return _champShellPromise;
 }
 
+// ⭐ (v54.71) THE SHELL'S PROGRAM STAYS RESIDENT. Found by the mode sweep (assault and elimination, the phone budget): a
+// `MeshBasicMaterial` program was linked the moment a round's shell first drew and freed the moment the shell broke -
+// "Mesh10 < Scene < Group" in the program log, 5-25 s apart, every round. The shell's flat materials are clones made per
+// shell (_champSelfIlluminate) and nothing else wears that program on a phone (no pin there), so disposing them freed
+// it and the next round's shell linked it again on its first frame - which is the frame the round goes live.
+// _lssRetainMat keeps one per program key and disposes the duplicates; their maps belong to the cached prototype.
+function _champShellRetireMats(root) {
+  if (!root) return;
+  if (typeof _lssRetainMat !== 'function') { _disposeMeshTreeDeep(root, false); return; }
+  try { root.traverse((node) => { if (node.isMesh && node.material) { try { _lssRetainMat(node.material); } catch (_) {} } }); } catch (_) {}
+}
 function _champSelfIlluminate(obj3d) {
   // Same full-bright conversion as the monsters: MeshBasicMaterial(map)
   // replaces the GLB's PBR materials. NOTE: these are CLONE materials
@@ -107933,7 +107944,8 @@ class ChampionShell {
       try { scene.remove(this.mesh); } catch (_) {}
       // Materials-only dispose: the shell clones share geometry/textures
       // with the cached Sphere.glb prototype (next round reuses them).
-      _disposeMeshTreeDeep(this.mesh, false);
+      // (v54.71) ...and the materials are RETAINED, not disposed - see _champShellRetireMats
+      _champShellRetireMats(this.mesh);
       this.mesh = null;
     }
     // Sync: peers gate capture on THEIR shell instance ; mirror the kill
@@ -107970,7 +107982,7 @@ function _clearChampionShell() {
   s.alive = false;
   if (s.mesh) {
     try { scene.remove(s.mesh); } catch (_) {}
-    _disposeMeshTreeDeep(s.mesh, false);  
+    _champShellRetireMats(s.mesh);   // (v54.71) retained - see the helper
     s.mesh = null;
   }
   if (game.monsters) {
@@ -112845,20 +112857,54 @@ let _pinBuildOnly = false;   // (v36.27) see _pinCombatEffectProgramsStaged
 // pane: 6 programs linked, 40 ms and 56 ms frames). compileAsync links them in parallel without ever
 // blocking the GPU, so the phone gets the warm without the burst. Skipped entirely if the browser
 // has no compileAsync - a one-off hitch is better than a stall on a device that already crashes.
+// ⭐⭐⭐ (v54.71) IT WARMED THE WRONG VARIANT, AND ONLY HALF THE HULL. Owner: "do you see anything that could make this game
+// run smoother, as a whole?" - the first mode of the sweep answered. MEASURED in the pane on the phone budget (assault,
+// third person, a ride-along camera): ONE 1360 ms FRAME in play, `renderFrame` 1352 ms, EIGHT programs linking in it -
+// the player's own hull, canopy frame and two consoles, two side variants each - on the frame the hull first changed
+// between its painted materials and its seat shell (the chase boom meets a wall, the third-person zoom, taking the
+// seat). A phone pays more than the dev machine's 1.4 s, and it lands in a fight.
+// Two faults in the stand-in below:
+//   1. It called compileAsync with whatever render target was current - the CANVAS. A program's key carries the output
+//      colour space and the tone mapping, and three takes both from the render target: canvas = `srgb` + the renderer's
+//      tone mapping, the gameplay frame's target (postFX.rtScene) = `srgb-linear` + none. Read off the live hull: four
+//      ghost programs, two `srgb / 4` that nothing has ever drawn with and two `srgb-linear / 0` in use. `__coldSeen`
+//      said it in its own words - "[FORK: outputColorSpace toneMapping]". _ghostPinWarm (the desktop pin) has compiled
+//      against rtScene since v38.27, for exactly this reason; this copy never did.
+//   2. It only compiled the hull WEARING the shell. The painted flavour of the same meshes - the one a third-person
+//      pilot flies in - was left to whichever frame drew it first (v39.93 fixed that on the desktop path only).
+// Now: the scene target, the shell, then the painted hull - two compileAsync calls, both kicked inside this call (the
+// programs are created synchronously inside compile(); only the LINK is asynchronous), and the hull is back as it was
+// before this returns, so no frame ever draws the swap. No un-hiding: compile() walks every descendant, visible or not
+// (it was _warmDrawRoot's draw that needed them shown). r165's compile() builds both single-sided programs of a
+// transparent DoubleSide material itself (prepareMaterial).
+// ...and it is called from the small-device arm of _pinCombatEffectPrograms too: that pin is what re-warms the hull on
+// the desktop at every round start and every environment change, and on a phone it returned before reaching it.
 function _ghostPinWarmAsync() {
   try {
     if (typeof _ghostHullApply !== 'function' || typeof _ghostHullRestore !== 'function') return;
     if (typeof player === 'undefined' || !player || !player.mesh) return;
     if (typeof renderer === 'undefined' || !renderer || typeof renderer.compileAsync !== 'function') return;
-    const _was = !!(player.mesh.userData && player.mesh.userData._ghostOn);
-    if (!_was) _ghostHullApply(player.mesh);
-    const _hid = [];   // (v39.82) the cockpit interior is hidden in third person - see _ghostPinWarm
-    try { player.mesh.traverse((o) => { if (o.visible === false) { o.visible = true; _hid.push(o); } }); } catch (_) {}
-    const _restore = () => {
-      for (let i = 0; i < _hid.length; i++) { try { _hid[i].visible = false; } catch (_) {} }
-      try { if (!_was) _ghostHullRestore(player.mesh); } catch (_) {}
-    };
-    renderer.compileAsync(player.mesh, camera, scene).then(_restore).catch(_restore);
+    if (typeof scene === 'undefined' || !scene || typeof camera === 'undefined' || !camera) return;
+    const mesh = player.mesh;
+    const _was = !!(mesh.userData && mesh.userData._ghostOn);
+    const _rt0 = renderer.getRenderTarget();
+    let _rtS = null;
+    try { _rtS = (typeof postFX !== 'undefined' && postFX && postFX.rtScene) ? postFX.rtScene : null; } catch (_) { _rtS = null; }
+    const _kick = () => { try { const p = renderer.compileAsync(mesh, camera, scene); if (p && p.catch) p.catch(() => {}); } catch (_) {} };
+    try {
+      if (_rtS) renderer.setRenderTarget(_rtS);
+      if (!mesh.userData._ghostOn) _ghostHullApply(mesh);
+      _kick();                                            // the seat shell
+      if (mesh.userData._ghostOn) _ghostHullRestore(mesh);
+      _kick();                                            // the painted hull
+    } finally {
+      try {
+        if (_was && !mesh.userData._ghostOn) _ghostHullApply(mesh);
+        else if (!_was && mesh.userData._ghostOn) _ghostHullRestore(mesh);
+      } catch (_) {}
+      try { renderer.setRenderTarget(_rt0); } catch (_) {}
+    }
+    try { window.__ghostWarmAsync = (window.__ghostWarmAsync | 0) + 1; } catch (_) {}
   } catch (_) {}
 }
 
@@ -113020,7 +113066,12 @@ function _pinCombatEffectPrograms(opts) {
   // seen, which is strictly better than losing the context. window.__pinShaders = true forces it.
   try {
     if (typeof _fxSmallDevice === 'function' && _fxSmallDevice() &&
-        !(typeof window !== 'undefined' && window.__pinShaders)) return;
+        !(typeof window !== 'undefined' && window.__pinShaders)) {
+      // (v54.71) ...but the pilot's own hull still gets its warm: two non-blocking compiles of one ship, where the
+      // desktop re-pins it at every round start and environment change (see _ghostPinWarmAsync)
+      try { _ghostPinWarmAsync(); } catch (_) {}
+      return;
+    }
   } catch (_) {}
   try {
     if (typeof renderer === 'undefined' || !renderer ||
@@ -114805,6 +114856,98 @@ function _xrCoverFrameRender() {
   }
 }
 
+// ⭐⭐⭐ (v54.72) A PHONE'S COMBAT EFFECTS ARE WARMED ON THE LOADING SCREEN, ONE A FRAME. Owner, when I proposed warming
+// them during the countdown: "why not load it during the loading screen? the countdown isn't for loading anything".
+// He is right, and it is his standing rule ("we should always try to utilize the loading screen to prepare the game for
+// play"; "i don't mind how long the loading screen is on, as long as the game runs smooth").
+// WHAT: since v39.05 a small device runs neither the pin nor _warmRealCombatFX - their synchronous whole-scene compile
+// bursts (~170 programs, several passes) were seconds of blocked GPU and Android killed the context. The price was
+// accepted there in so many words: "a one-time hitch the first time an effect is seen". The v54.71 mode sweep counted
+// that price on the phone budget: in EVERY mode the same few programs link in play, once a session each - the fire
+// cloud at the first explosion (12-19 ms on the dev machine), `vortex_core_glow` at the pilot's first laser (11-17 ms),
+// the hex shell at the first Plasma Shield (8-12 ms), the champion shell's flat material at first sight (14 ms). A
+// phone compiles each of those in the middle of a fight.
+// HOW, and why it is not v39.05 again: the burst was the problem, not the warm. This is ONE program per frame, behind
+// the cover, three steps:
+//   1. compileAsync on one prototype, with postFX.rtScene bound - three takes a program's output colour space and tone
+//      mapping from the CURRENT render target, so a compile against the canvas builds a variant the gameplay frame
+//      never uses (the fault v54.71 found in _ghostPinWarmAsync). The program is created here; the link runs off-thread
+//      where the driver can.
+//   2. _drainProgramLinks: where KHR_parallel_shader_compile exists, wait for the links by polling, never by joining.
+//   3. _warmDrawRoot on each, one a frame: the first USE (three's uniform fetch, the driver's own first-draw work) is
+//      paid here too. On a phone without the extension this step is where the link is joined - one program, one frame.
+// The prototypes wear the REAL geometry (the fire cloud's sphere, the wall's lens, the glow's card, a clone of the
+// shell's model) and the real materials' own factories; the fire and hex materials are kept for the session (they are
+// the programs' holders - no pin on a phone), the glow is its own singleton, the shell's go to _lssRetainMat.
+// Keyed on _programEnvSig(), like the pin: a new world (fog, light counts) is a new set of variants, so the world-swap
+// stage runs it as well; the same world twice is a no-op. window.__phoneFxWarm = 0 turns it off;
+// window.__phoneFxWarmInfo says what the last run did. ADD A PROTOTYPE when a sweep shows another program linking in
+// play on the phone budget - the list is what was MEASURED, not everything the desktop pin holds.
+const _FXS = { sig: null, fire: null, hex: null };
+async function _fxWarmSmall(rep) {
+  let small = false;
+  try { small = (typeof _fxSmallDevice === 'function') && _fxSmallDevice(); } catch (_) {}
+  if (!small) return 0;
+  try { if (typeof window !== 'undefined' && window.__phoneFxWarm === 0) return 0; } catch (_) {}
+  if (typeof renderer === 'undefined' || !renderer || typeof renderer.compileAsync !== 'function') return 0;
+  if (typeof scene === 'undefined' || !scene || typeof camera === 'undefined' || !camera) return 0;
+  if (renderer.xr && renderer.xr.isPresenting) return 0;
+  let rtS = null;
+  try { rtS = (typeof postFX !== 'undefined' && postFX && postFX.rtScene) ? postFX.rtScene : null; } catch (_) { rtS = null; }
+  if (!rtS) return 0;
+  let sig = null;
+  try { sig = (typeof _programEnvSig === 'function') ? _programEnvSig() : null; } catch (_) { sig = null; }
+  if (sig && _FXS.sig === sig) return 0;
+  const t0 = _pbNow();
+  const grp = new THREE.Group();
+  grp.position.set(0, -100000, 0);   // parked far under the map, like every other warm prototype
+  const add = (geo, mat) => { if (!geo || !mat) return; const m = new THREE.Mesh(geo, mat); m.frustumCulled = false; grp.add(m); };
+  try {
+    if (!window._fireCloudGeo) window._fireCloudGeo = new THREE.SphereGeometry(1, 16, 12);
+    add(window._fireCloudGeo, _FXS.fire || (_FXS.fire = _makeFireCloudMaterial({ radius: 48, alpha: 0.6, oct: 5 })));
+  } catch (_) {}
+  try { add(_wallLensGeometry(), _FXS.hex || (_FXS.hex = _makeHexHologramMaterial(0x44aaff))); } catch (_) {}
+  try { add(_vortexGlowGeometry(), _vortexGlowMaterial()); } catch (_) {}
+  let shell = null;
+  try {
+    if (_champShellProto) {
+      shell = _champShellProto.clone(true);
+      _champSelfIlluminate(shell);
+      shell.traverse((o) => { if (o.isMesh) o.frustumCulled = false; });
+      grp.add(shell);
+    }
+  } catch (_) { shell = null; }
+  const kids = grp.children.slice();
+  if (!kids.length) return 0;
+  let n = 0;
+  try {
+    scene.add(grp);
+    grp.updateMatrixWorld(true);
+    for (const k of kids) {
+      const rt0 = renderer.getRenderTarget();
+      try {
+        renderer.setRenderTarget(rtS);
+        const p = renderer.compileAsync(k, camera, scene);
+        if (p && p.catch) p.catch(() => {});
+      } catch (_) {}
+      finally { try { renderer.setRenderTarget(rt0); } catch (_) {} }
+      n++;
+      await _warmupYield();
+    }
+    try { await _drainProgramLinks(6000, rep, 'fxSmall'); } catch (_) {}
+    for (const k of kids) {
+      for (const o of kids) o.visible = (o === k);
+      try { _warmDrawRoot(k, rtS, false); } catch (_) {}
+      await _warmupYield();
+    }
+  } finally {
+    try { if (grp.parent) grp.parent.remove(grp); } catch (_) {}
+    try { if (shell) _champShellRetireMats(shell); } catch (_) {}
+  }
+  _FXS.sig = sig;
+  try { window.__phoneFxWarmInfo = { n, ms: Math.round(_pbNow() - t0), shell: !!shell, at: +(performance.now() / 1000).toFixed(1) }; } catch (_) {}
+  return n;
+}
 async function _prebakeWorldForLaunch() {
   if (_PREBAKE.on) return _PREBAKE.last;
   // (v37.94) CYBERPUNK CITY stands the player where the match actually is FIRST, so everything
@@ -114922,6 +115065,12 @@ async function _prebakeWorldForLaunch() {
     _pbSub('waking the leviathans');
     try { rep.mon = await _primeMonsterModels(_bt0, _MON_PRIME_MAX_MS * _pbCapMul); } catch (_) {}   // (v49.46) x4 on desktop
     rep.ms.mon = Math.round(_pbNow() - _tM);
+
+    // ---- C4. (v54.72) A PHONE'S COMBAT EFFECTS, one a frame. After C3 so the champion shell's model is in. ----
+    const _tFs = _pbNow();
+    _pbSub('compiling effects');
+    try { rep.fxSmall = await _fxWarmSmall(rep); } catch (_) {}
+    rep.ms.fxSmall = Math.round(_pbNow() - _tFs);
 
     // ---- C3. (v39.49) HUB CARRIER PRIME ----
     // The overworld carrier GLB was loaded lazily on the first city you approached and drawn for
@@ -116609,6 +116758,8 @@ async function _rrStagedSwap(pending, ph) {
 
     t = _pbNow();
     try { if (typeof _warmRealCombatFX === 'function') _warmRealCombatFX(); } catch (_) {}
+    // (v54.72) a phone's effects, for the NEW world's environment - this stage has a loading cover too (see _fxWarmSmall)
+    try { rep.fxSmall = await _fxWarmSmall(rep); } catch (_) {}
     rep.ms.fx = Math.round(_pbNow() - t);
     await _warmupYield();
 
