@@ -8714,7 +8714,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "54.68";
+const LSS_BUILD = "54.69";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -34373,6 +34373,23 @@ function restoreProceduralEnvironment() {
 //   hideStarfield() / showStarfield()
 // =====================================================================
 const _equirectSky = { texture: null, url: null, loading: false };
+// (v54.69) the sky cache: url -> texture, in use order (see setEquirectangularSky). Sized by what one entry costs: a
+// phone's sky is 256x128 (_lssSkyTexCap), so it keeps every zone's; a desktop's is 2048x1024 (8 MB); MEGA / ULTRA are
+// uncapped (34 MB each). Declared ABOVE its reader: a top-level const read before its line has run is a TDZ throw.
+const _skyTexCache = new Map();
+function _skyCacheMax() {
+  try {
+    const K = (typeof window !== 'undefined') ? window.__skyCache : null;
+    if (K && typeof K.max === 'number') return Math.max(0, K.max | 0);
+    const cap = _lssSkyTexCap();
+    if (cap && cap <= 512) return 10;
+    return cap ? 4 : 2;
+  } catch (_) { return 0; }
+}
+function _skyTexCached(tex) {
+  for (const t of _skyTexCache.values()) if (t === tex) return true;
+  return false;
+}
 
 // (v30.58) Sky DOME instead of scene.background for the equirect skybox.
 // scene.background renders as a dedicated FULL-SCREEN pass at the start of
@@ -34528,9 +34545,37 @@ function setEquirectangularSky(url) {
   // desktop browser anyway. Snapshot the old texture into _oldTex below,
   // and dispose it inside the success / error callback after the swap.
   const _oldTex = _equirectSky.texture;
+  // ⭐⭐⭐ (v54.69) A SKY IS DECODED ONCE, AND NOT ON THE MAIN THREAD. Owner: "exhibition had hitches on the phone".
+  // MEASURED in the pane on the phone budget (?lite=1, an exhibition patrol): the main thread stopped for 52-54 ms
+  // right after every `./skybox/sky.jpg` load and 80-81 ms after every `./skybox/cyberpunk.jpg` - eight loads, eight
+  // stalls, and nothing else in 350 s of flying came near them. No script was running (the long-frame records show
+  // 5-9 ms of it) and no profiled section moved, so they looked like nothing at all; a log of image loads beside a
+  // log of stalls is what named them.
+  // _hubZoneTick asks for the dominant zone's sky once a second, so flying into a city's dusk and out again is
+  // `setSky('cyberpunk')` then `setSky('sky')` - and each call loaded the 4096x2048 JPEG again (the HTTP cache has
+  // the file, not the pixels) and _lssShrinkTexture drew it into a canvas, which is where the browser decodes it:
+  // 8.4 megapixels, synchronously, every time the pilot crossed a zone line. A phone pays several times the pane's
+  // 52-80 ms. ⚠ And in the hub the result is never even drawn: the weather dome is the sky there, and
+  // _skyDomeRefresh hides this dome while game.hubWeather is on - the stall bought a texture nobody looks at.
+  // Two parts. (1) A small cache by url, newest last: a sky that has been loaded this session is swapped in as-is
+  // (no load, no decode, no upload if it was uploaded before). (2) A first load decodes OFF the main thread:
+  // fetch -> blob -> createImageBitmap, the same route three's ImageBitmapLoader takes. The bitmap is flipped at
+  // creation (`imageOrientation: 'flipY'`) and the texture's own flipY is off, because WebGL ignores UNPACK_FLIP_Y
+  // for an ImageBitmap; the shrink then only copies an already-decoded bitmap (cost ~ the DESTINATION size: 256x128
+  // on a phone). Anything that goes wrong on that route falls back to the old TextureLoader path.
+  // window.__skyBitmap = 0 is the old decode; window.__skyCache = { max: n } sizes the cache (0 = none).
+  const _skyHit = (!isHdr && _skyCacheMax() > 0) ? _skyTexCache.get(url) : null;
+  if (_skyHit) {
+    _skyTexCache.delete(url); _skyTexCache.set(url, _skyHit);   // newest last
+    _equirectSky.texture = _skyHit;
+    _equirectSky.url = url;
+    scene.background = null;
+    _skyDomeRefresh();
+    if (_oldTex && _oldTex !== _skyHit && !_skyTexCached(_oldTex)) { try { _oldTex.dispose(); } catch (_) {} }
+    return;
+  }
   _equirectSky.loading = true;
-  const loader = isHdr ? new THREE.RGBELoader() : new THREE.TextureLoader();
-  loader.load(url, (tex) => {
+  const _skyAdopt = (tex) => {
     // (v33.02) The texture is used ONLY as the skydome sphere's material.map (NOT as
     // scene.environment — env maps come from sceneEnvMap/_heroEnv). EquirectangularReflectionMapping
     // is for ENV/reflection sampling ; on a UV-mapped sphere .map it mis-samples at the
@@ -34590,18 +34635,71 @@ function setEquirectangularSky(url) {
     // Graceful swap : new texture is now live ; safe to
     // dispose the old one. Wrapped in try because the texture may have
     // been disposed by a concurrent clearSky() while we were loading.
-    if (_oldTex && _oldTex !== tex) {
+    // (v54.69) ...unless the cache is keeping it for the next time this zone comes round. The new one joins the
+    // cache (newest last) and the oldest entries past the limit are the ones that go.
+    if (!isHdr && _skyCacheMax() > 0) {
+      _skyTexCache.delete(url); _skyTexCache.set(url, tex);
+      while (_skyTexCache.size > _skyCacheMax()) {
+        const _k = _skyTexCache.keys().next().value, _t = _skyTexCache.get(_k);
+        _skyTexCache.delete(_k);
+        if (_t && _t !== tex && _t !== _oldTex) { try { _t.dispose(); if (_t.image && _t.image.close) _t.image.close(); } catch (_) {} }
+      }
+    }
+    if (_oldTex && _oldTex !== tex && !_skyTexCached(_oldTex)) {
       try { _oldTex.dispose(); } catch (_) {}
     }
     console.log('[v16a sky] equirectangular background loaded:', url, isHdr ? '(HDR)' : '(LDR)');
-  }, undefined, (err) => {
+  };
+  const _skyFail = (err) => {
     _equirectSky.loading = false;
     // Load failed : keep the OLD texture alive. The user
     // sees their previous skybox instead of a black void on a typo'd
     // custom path, which matches the visual contract of "preset switch
     // is graceful". No dispose here.
     console.warn('[v16a sky] load failed (', url, ')', err && err.message);
-  });
+  };
+  const _skyViaLoader = () => {
+    const loader = isHdr ? new THREE.RGBELoader() : new THREE.TextureLoader();
+    loader.load(url, _skyAdopt, undefined, _skyFail);
+  };
+  // (v54.69) the off-thread decode - see the note at the top of this function
+  let _skyBmp = false;
+  try { _skyBmp = !isHdr && typeof createImageBitmap === 'function' && typeof fetch === 'function' && !(typeof window !== 'undefined' && window.__skyBitmap === 0); } catch (_) {}
+  if (!_skyBmp) { _skyViaLoader(); return; }
+  fetch(url)
+    .then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); })
+    .then((b) => {
+      // ⚠ THE SHRINK HAS TO HAPPEN IN THE DECODE TOO. The first cut of this decoded at full size off-thread and left the
+      // shrink to _lssShrinkTexture: still a 43.6 ms stall in the pane, because drawing a 34 MB bitmap into a canvas
+      // is main-thread work of its own (measured apart: 22 ms for the canvas to take a 4096x2048 bitmap, against
+      // nothing for createImageBitmap by itself). So the size is read from the header - an <img> load does not decode,
+      // 1.9 ms - and createImageBitmap is asked for the capped size directly ('low' = the bilinear the canvas shrink
+      // used; the sky never takes the box filter, it would average its stars away). What comes back is the texture's
+      // image as-is, and _lssShrinkTexture below finds nothing left to do.
+      const opts = { imageOrientation: 'flipY', premultiplyAlpha: 'none' };
+      const cap = _lssSkyTexCap();
+      if (!cap) return createImageBitmap(b, opts);
+      return new Promise((res, rej) => {
+        const u = URL.createObjectURL(b), im = new Image();
+        im.onload = () => {
+          const W = im.naturalWidth, H = im.naturalHeight, m = Math.max(W, H);
+          try { URL.revokeObjectURL(u); } catch (_) {}
+          if (m > cap) {
+            opts.resizeWidth = Math.max(1, Math.round(W * cap / m));
+            opts.resizeHeight = Math.max(1, Math.round(H * cap / m));
+            opts.resizeQuality = 'low';
+          }
+          createImageBitmap(b, opts).then(res, rej);
+        };
+        im.onerror = () => { try { URL.revokeObjectURL(u); } catch (_) {} rej(new Error('sky header')); };
+        im.src = u;
+      });
+    })
+    .then((bmp) => {
+      let tex = null;
+      try { tex = new THREE.Texture(bmp); tex.flipY = false; tex.needsUpdate = true; } catch (e) { _skyFail(e); return; }
+      try { _skyAdopt(tex); } catch (e) { _skyFail(e); }
+    }, () => { _skyViaLoader(); });   // the fetch or the decode failed: the old route, which reports its own failure
 }
 
 function setSky(which) {

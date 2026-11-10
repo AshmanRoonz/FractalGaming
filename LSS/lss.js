@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "54.68";
+const LSS_BUILD = "54.69";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -17948,6 +17948,20 @@ function restoreProceduralEnvironment() {
 }
 
 const _equirectSky = { texture: null, url: null, loading: false };
+const _skyTexCache = new Map();
+function _skyCacheMax() {
+  try {
+    const K = (typeof window !== 'undefined') ? window.__skyCache : null;
+    if (K && typeof K.max === 'number') return Math.max(0, K.max | 0);
+    const cap = _lssSkyTexCap();
+    if (cap && cap <= 512) return 10;
+    return cap ? 4 : 2;
+  } catch (_) { return 0; }
+}
+function _skyTexCached(tex) {
+  for (const t of _skyTexCache.values()) if (t === tex) return true;
+  return false;
+}
 
 let _skyDome = null;
 const _skyHazeU = {
@@ -18048,9 +18062,18 @@ function setEquirectangularSky(url) {
     return;
   }
   const _oldTex = _equirectSky.texture;
+  const _skyHit = (!isHdr && _skyCacheMax() > 0) ? _skyTexCache.get(url) : null;
+  if (_skyHit) {
+    _skyTexCache.delete(url); _skyTexCache.set(url, _skyHit);   // newest last
+    _equirectSky.texture = _skyHit;
+    _equirectSky.url = url;
+    scene.background = null;
+    _skyDomeRefresh();
+    if (_oldTex && _oldTex !== _skyHit && !_skyTexCached(_oldTex)) { try { _oldTex.dispose(); } catch (_) {} }
+    return;
+  }
   _equirectSky.loading = true;
-  const loader = isHdr ? new THREE.RGBELoader() : new THREE.TextureLoader();
-  loader.load(url, (tex) => {
+  const _skyAdopt = (tex) => {
     tex.mapping = THREE.UVMapping;
     tex.wrapS = THREE.RepeatWrapping;   
     
@@ -18083,14 +18106,57 @@ function setEquirectangularSky(url) {
     scene.background = null;          
     _skyDomeRefresh();
     _equirectSky.loading = false;
-    if (_oldTex && _oldTex !== tex) {
+    if (!isHdr && _skyCacheMax() > 0) {
+      _skyTexCache.delete(url); _skyTexCache.set(url, tex);
+      while (_skyTexCache.size > _skyCacheMax()) {
+        const _k = _skyTexCache.keys().next().value, _t = _skyTexCache.get(_k);
+        _skyTexCache.delete(_k);
+        if (_t && _t !== tex && _t !== _oldTex) { try { _t.dispose(); if (_t.image && _t.image.close) _t.image.close(); } catch (_) {} }
+      }
+    }
+    if (_oldTex && _oldTex !== tex && !_skyTexCached(_oldTex)) {
       try { _oldTex.dispose(); } catch (_) {}
     }
     console.log('[v16a sky] equirectangular background loaded:', url, isHdr ? '(HDR)' : '(LDR)');
-  }, undefined, (err) => {
+  };
+  const _skyFail = (err) => {
     _equirectSky.loading = false;
     console.warn('[v16a sky] load failed (', url, ')', err && err.message);
-  });
+  };
+  const _skyViaLoader = () => {
+    const loader = isHdr ? new THREE.RGBELoader() : new THREE.TextureLoader();
+    loader.load(url, _skyAdopt, undefined, _skyFail);
+  };
+  let _skyBmp = false;
+  try { _skyBmp = !isHdr && typeof createImageBitmap === 'function' && typeof fetch === 'function' && !(typeof window !== 'undefined' && window.__skyBitmap === 0); } catch (_) {}
+  if (!_skyBmp) { _skyViaLoader(); return; }
+  fetch(url)
+    .then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); })
+    .then((b) => {
+      const opts = { imageOrientation: 'flipY', premultiplyAlpha: 'none' };
+      const cap = _lssSkyTexCap();
+      if (!cap) return createImageBitmap(b, opts);
+      return new Promise((res, rej) => {
+        const u = URL.createObjectURL(b), im = new Image();
+        im.onload = () => {
+          const W = im.naturalWidth, H = im.naturalHeight, m = Math.max(W, H);
+          try { URL.revokeObjectURL(u); } catch (_) {}
+          if (m > cap) {
+            opts.resizeWidth = Math.max(1, Math.round(W * cap / m));
+            opts.resizeHeight = Math.max(1, Math.round(H * cap / m));
+            opts.resizeQuality = 'low';
+          }
+          createImageBitmap(b, opts).then(res, rej);
+        };
+        im.onerror = () => { try { URL.revokeObjectURL(u); } catch (_) {} rej(new Error('sky header')); };
+        im.src = u;
+      });
+    })
+    .then((bmp) => {
+      let tex = null;
+      try { tex = new THREE.Texture(bmp); tex.flipY = false; tex.needsUpdate = true; } catch (e) { _skyFail(e); return; }
+      try { _skyAdopt(tex); } catch (e) { _skyFail(e); }
+    }, () => { _skyViaLoader(); });   // the fetch or the decode failed: the old route, which reports its own failure
 }
 
 function setSky(which) {
