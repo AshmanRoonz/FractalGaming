@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "54.63";
+const LSS_BUILD = "54.65";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -10248,6 +10248,11 @@ function handleNetEvent(evt, fromPeerId) {
                 _bfB.z + _bfD.z + (Math.random() - 0.5) * 70), _col, hi);
             }
           }
+        } else if (fb && fb.hoardModelKey && HOARD_FX.on) {
+          _hoardBolt(_bfA, _bfB, 0.8);
+          const _ht = fb._hoardTgt || (fb._hoardTgt = { position: new THREE.Vector3() });
+          _ht.position.copy(_bfB);
+          _hoardHitFx(_ht, _bfA);
         } else {
           spawnTracer(_bfA, _bfB, _col, 0.8);
         }
@@ -10831,6 +10836,20 @@ function handleNetEvent(evt, fromPeerId) {
         const _vlbRange  = (typeof evt.range  === 'number') ? evt.range  : 2500;
         const _vlbRadius = (typeof evt.radius === 'number') ? evt.radius :   80;
         const _vlbLife   = (typeof evt.life   === 'number') ? evt.life   : 0.45;
+        let _vlbG = null;
+        try {
+          const _vp = (fromPeerId && net.peers && typeof net.peers.get === 'function') ? net.peers.get(fromPeerId) : null;
+          const _vn = _vp && _vp.networkPlayer, _vm = _vn && _vn.mesh;
+          const _nd = (_vm && _vm.visible && _vm.userData) ? _vm.userData.muzzleNodes : null;
+          if (_nd && _nd.length >= 2 && _vortexYKnobs().twin) {
+            _vm.updateMatrixWorld(true);
+            _vlbG = [_nd[0].getWorldPosition(new THREE.Vector3()), _nd[1].getWorldPosition(new THREE.Vector3())];
+          }
+        } catch (_) { _vlbG = null; }
+        if (_vlbG) {
+          _spawnVortexLaserShot(_vlbOrigin, _vlbDir, _vlbRange, _vlbG[0], _vlbG[1], Math.min(_vlbLife, 0.3));
+          try { if (_vortexYKnobs().arcs > 0) _vortexTwinArcs(_vlbG[0], _vlbG[1], _vlbDir, Math.max(60, _vlbRange - 20), 9, 22, 1.45, 0.18, 1.6); } catch (_) {}
+        } else
         _spawnVortexLaserPeerBeam(_vlbOrigin, _vlbDir, _vlbRange, _vlbRadius, _vlbLife);
         if (game._hubWater && typeof _swWpnCross === 'function') { try {
           const _vlbReach = Math.min(_vlbRange, raycastLevel(_vlbOrigin, _vlbDir, _vlbRange, true));   // (v49.28) clipped at the world
@@ -11603,7 +11622,112 @@ function _vortexYKnobs() {
     armAbility: (K.armAbility != null) ? K.armAbility : 0.85,
     armCore: (K.armCore != null) ? K.armCore : 0.15,
     armTip: (K.armTip != null) ? K.armTip : 0.18,
+    twin: K.twin !== false,
+    twinAbility: (K.twinAbility != null) ? K.twinAbility : 3.0,   // the Laser shot's beam radius, each
+    twinCore: (K.twinCore != null) ? K.twinCore : 7.5,            // the Mega Laser's
+    noseAbility: (K.noseAbility != null) ? K.noseAbility : 46,    // u over which a beam swells out of its muzzle hole
+    noseCore: (K.noseCore != null) ? K.noseCore : 110,
+    arcs: (K.arcs != null) ? K.arcs : 1,                          // x the lightning between the beams (0 = none)
   };
+}
+const _VORTEX_TWIN_GEO = new Map();
+function _vortexTwinGeo(frac) {
+  const q = Math.max(1, Math.min(128, Math.round((+frac || 0) * 256)));
+  let g = _VORTEX_TWIN_GEO.get(q);
+  if (g) return g;
+  const f = q / 256, tip = Math.max(0.01, Math.min(1.0, _vortexYKnobs().armTip));
+  const SEG = 20, S = [0, f * 0.34, f * 0.67, f, 1], NR = S.length;
+  const pos = new Float32Array(NR * (SEG + 1) * 3), nrm = new Float32Array(NR * (SEG + 1) * 3);
+  const uv = new Float32Array(NR * (SEG + 1) * 2), col = new Float32Array(NR * (SEG + 1) * 4), idx = [];
+  for (let r = 0; r < NR; r++) {
+    const s = S[r], k = Math.min(1, s / f), e = k * k * (3 - 2 * k), rad = tip + (1 - tip) * e;
+    for (let j = 0; j <= SEG; j++) {
+      const a = j / SEG * Math.PI * 2, c = Math.cos(a), sn = Math.sin(a), v = r * (SEG + 1) + j;
+      pos[v * 3] = c * rad; pos[v * 3 + 1] = 0.5 - s; pos[v * 3 + 2] = sn * rad;
+      nrm[v * 3] = c; nrm[v * 3 + 1] = 0; nrm[v * 3 + 2] = sn;
+      uv[v * 2] = j / SEG; uv[v * 2 + 1] = 1 - k;
+      col[v * 4] = 1; col[v * 4 + 1] = 1; col[v * 4 + 2] = 1; col[v * 4 + 3] = e;
+    }
+  }
+  for (let r = 0; r < NR - 1; r++) for (let j = 0; j < SEG; j++) {
+    const a = r * (SEG + 1) + j, b = a + SEG + 1;
+    idx.push(a, a + 1, b, a + 1, b + 1, b);   // outward-facing, as CylinderGeometry's torso is
+  }
+  g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
+  g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  g.setAttribute('color', new THREE.BufferAttribute(col, 4));
+  g.setIndex(idx);
+  _VORTEX_TWIN_GEO.set(q, g);
+  return g;
+}
+function _vortexTwinBack() {
+  const m = new THREE.Mesh(_vortexTwinGeo(0.05), new THREE.MeshBasicMaterial({
+    color: 0x8a3cf0, transparent: true, opacity: 0.85, blending: THREE.NormalBlending, depthWrite: false, vertexColors: true }));
+  m.scale.set(0.62, 1, 0.62);
+  m.renderOrder = 1; m.frustumCulled = false;
+  m.userData._twinBack = true;
+  return m;
+}
+function _vortexTwinPose(mesh, gun, from, dir, len, radius, nose) {
+  const L = Math.max(1, (from.x - gun.x) * dir.x + (from.y - gun.y) * dir.y + (from.z - gun.z) * dir.z + len);
+  const geo = _vortexTwinGeo(nose / L);
+  if (mesh.geometry !== geo) mesh.geometry = geo;
+  for (let i = 0; i < mesh.children.length; i++) { const ch = mesh.children[i]; if (ch.userData._twinBack && ch.geometry !== geo) ch.geometry = geo; }
+  mesh.position.copy(gun).addScaledVector(dir, L * 0.5);
+  mesh.quaternion.setFromUnitVectors(_mvUp, _vyDir.copy(dir).negate());
+  mesh.scale.set(radius, L, radius);
+  const u = mesh.material && mesh.material.uniforms;
+  if (u) { if (u.uPosScale) u.uPosScale.value = 1.0 / Math.max(1, radius); if (u.uAxialFalloff) u.uAxialFalloff.value = 0.95; }
+  return L;
+}
+const _vtInv = new THREE.Matrix4(), _vtG = new THREE.Vector3();
+function _vortexTwinKids(parent, shipMesh, from, dir, len, intensity) {
+  const K = _vortexYKnobs();
+  const nodes = shipMesh && shipMesh.userData && shipMesh.userData.muzzleNodes;
+  let kids = parent.userData._twinKids;
+  if (!(K.twin && nodes && nodes.length >= 2)) {
+    if (kids) for (const k of kids) k.visible = false;
+    if (parent.material) parent.material.visible = true;
+    return false;
+  }
+  if (!kids) {
+    kids = parent.userData._twinKids = [0, 1].map(() => {
+      const m = new THREE.Mesh(_vortexTwinGeo(0.05), _makeFXMaterial('core_beam'));
+      m.add(_vortexTwinBack());
+      m.frustumCulled = false; m.renderOrder = 2; m.matrixAutoUpdate = false;
+      parent.add(m);
+      return m;
+    });
+  }
+  if (parent.material) parent.material.visible = false;
+  parent.updateMatrixWorld(true);
+  _vtInv.copy(parent.matrixWorld).invert();
+  for (let i = 0; i < 2; i++) {
+    const k = kids[i];
+    nodes[i].getWorldPosition(_vtG);
+    _vortexTwinPose(k, _vtG, from, dir, len, K.twinCore, K.noseCore);
+    k.updateMatrix(); k.matrix.premultiply(_vtInv); k.matrixWorldNeedsUpdate = true;
+    k.visible = true;
+    const u = k.material.uniforms;
+    if (u && u.uIntensity) u.uIntensity.value = intensity;
+  }
+  return true;
+}
+const _vtA = new THREE.Vector3(), _vtB = new THREE.Vector3(), _vtM = new THREE.Vector3();
+function _vortexTwinArcs(gunA, gunB, dir, reach, n, first, grow, life, thick) {
+  if (typeof spawnLightningBolt !== 'function') return;
+  let s = first;
+  for (let i = 0; i < n && s < reach; i++) {
+    const lean = (10 + Math.random() * 34) * (Math.random() < 0.5 ? -1 : 1);
+    const s2 = Math.max(4, Math.min(reach, s + lean));
+    const a = (i & 1) ? gunB : gunA, b = (i & 1) ? gunA : gunB;
+    _vtA.copy(a).addScaledVector(dir, s);
+    _vtB.copy(b).addScaledVector(dir, s2);
+    spawnLightningBolt(_vtA, _vtB, (i % 3 === 2) ? 0xffffff : 0xeeccff, life * (0.8 + Math.random() * 0.5), 1, Math.min(3.2, thick + s * 0.0012));
+    s = s * grow + 6 + Math.random() * 10;
+  }
 }
 function _vortexGunPair(outA, outB) {
   const nodes = player.mesh && player.mesh.userData && player.mesh.userData.muzzleNodes;
@@ -11635,6 +11759,30 @@ function _spawnVortexLaserShot(origin, dir, range, gunA, gunB, life) {
   const beamLife = (typeof life === 'number' && life > 0) ? life : 0.22;
   const o = origin.clone(), d = dir.clone().normalize();
   const pair = !!(gunA && gunB);
+  if (pair && _vortexYKnobs().twin) {
+    const _tk = _vortexYKnobs();
+    for (const _gun of [gunA, gunB]) {
+      const _tb = new THREE.Mesh(_vortexTwinGeo(0.05), _makeFXMaterial('core_beam'));
+      _tb.add(_vortexTwinBack());
+      const _tl = _vortexTwinPose(_tb, _gun, o, d, range, _tk.twinAbility, _tk.noseAbility);
+      _tb.frustumCulled = false; _tb.renderOrder = 2;
+      scene.add(_tb);
+      game.effects.push({ mesh: _tb, type: 'vortexLaserBeam', age: 0, lifetime: beamLife, o: _gun.clone(), d: d, len: _tl });
+    }
+    try {
+      const _gmat = _vortexGlowMaterial(), _ggeo = _vortexGlowGeometry();
+      const _vfT = window.__vortexFire || {};
+      const _gMuzT = (_vfT.glowMuzzleAbility != null) ? _vfT.glowMuzzleAbility : 16;
+      for (const _gun of [gunA, gunB]) {
+        const q = new THREE.Mesh(_ggeo, _gmat);
+        q.position.copy(_gun); q.quaternion.copy(camera.quaternion); q.scale.set(_gMuzT, _gMuzT, 1);
+        q.frustumCulled = false; q.renderOrder = 3;
+        scene.add(q);
+        game.effects.push({ mesh: q, type: 'vortexLaserBeam', age: 0, lifetime: beamLife, glow: _gMuzT });
+      }
+    } catch (_) {}
+    return;
+  }
   const beamMid = o.clone().addScaledVector(d, range * 0.5);
   const beamMat = _makeFXMaterial('core_beam');
   if (beamMat.uniforms.uPosScale) beamMat.uniforms.uPosScale.value = 1.0 / Math.max(1, BEAM_RADIUS);
@@ -20910,12 +21058,23 @@ function _rplWfxDress(st, W, V, rt, dtRep) {
       const us = V.stem.material && V.stem.material.uniforms;
       if (us && us.uIntensity) us.uIntensity.value = breath;
       const nodes = (b.arms > 0.5 && m && m.userData) ? m.userData.muzzleNodes : null;
+      const _rk = _vortexYKnobs();
+      const _rTwin = !!(_rk.twin && nodes && nodes.length >= 2 && V.arms.length === 2 && V.glows.length === 3);
+      if (V.stem.material) V.stem.material.visible = !_rTwin;   // (v54.64) twin beams: posed, not drawn (as live)
       if (nodes && nodes.length >= 2 && V.arms.length === 2 && V.glows.length === 3) {
         try { m.updateMatrixWorld(true); } catch (_) {}
         nodes[0].getWorldPosition(_rplBmA); nodes[1].getWorldPosition(_rplBmB);
-        const armR = 95 * _vortexYKnobs().armCore;
-        _vortexSpan(V.arms[0], J, _rplBmA, armR);
-        _vortexSpan(V.arms[1], J, _rplBmB, armR);
+        const armR = 95 * _rk.armCore;
+        if (_rTwin) {
+          for (let i = 0; i < 2; i++) {
+            const a = V.arms[i];
+            if (!a.children.length) a.add(_vortexTwinBack());
+            _vortexTwinPose(a, i ? _rplBmB : _rplBmA, J, D, b.len, _rk.twinCore, _rk.noseCore);
+          }
+        } else {
+          _vortexSpan(V.arms[0], J, _rplBmA, armR);
+          _vortexSpan(V.arms[1], J, _rplBmB, armR);
+        }
         for (const a of V.arms) { a.visible = true; const ua = a.material && a.material.uniforms; if (ua && ua.uIntensity) ua.uIntensity.value = breath; }
         const vf = window.__vortexFire || {};
         const gMuz = (vf.glowMuzzle != null) ? vf.glowMuzzle : 30, gJoint = (vf.glowJoint != null) ? vf.glowJoint : 4.5 * armR;
@@ -20924,6 +21083,7 @@ function _rplWfxDress(st, W, V, rt, dtRep) {
         G[0].position.copy(_rplBmA); G[1].position.copy(_rplBmB); G[2].position.copy(J);
         G[0].scale.set(gMuz * pulse, gMuz * pulse, 1); G[1].scale.set(gMuz * (2 - pulse), gMuz * (2 - pulse), 1); G[2].scale.set(gJoint, gJoint, 1);
         for (const g of G) { g.quaternion.copy(camera.quaternion); g.visible = true; }
+        if (_rTwin) G[2].visible = false;
       }
       break;
     }
@@ -58661,11 +58821,20 @@ class Bot {
       const beamEnd = new THREE.Vector3().copy(this.position).addScaledVector(aim, reach);
       const _lmn = this.mesh && this.mesh.userData && this.mesh.userData.muzzleNodes;
       if (_lmn && _lmn.length) {
+        const _twB = !!(_lmn.length >= 2 && _vortexYKnobs().twin);
+        const _tw0 = _twB ? new THREE.Vector3() : null, _tw1 = _twB ? new THREE.Vector3() : null;
         for (let _g = 0; _g < _lmn.length; _g++) {
           const _lo = _lmn[_g].getWorldPosition(this._tempVec3d);
-          spawnTracer(_lo, beamEnd, 0xff2200, 1.6, _lmn[_g]);
-          spawnTracer(_lo, beamEnd, 0xffaa44, 1.4, _lmn[_g]);
+          let _le = beamEnd;
+          if (_twB) {
+            const _ll = (this.position.x - _lo.x) * aim.x + (this.position.y - _lo.y) * aim.y + (this.position.z - _lo.z) * aim.z + reach;
+            _le = new THREE.Vector3().copy(_lo).addScaledVector(aim, Math.max(1, _ll));
+            if (_g === 0) _tw0.copy(_lo); else if (_g === 1) _tw1.copy(_lo);
+          }
+          spawnTracer(_lo, _le, 0xff2200, 1.6, _lmn[_g]);
+          spawnTracer(_lo, _le, 0xffaa44, 1.4, _lmn[_g]);
         }
+        if (_twB && _vortexYKnobs().arcs > 0) { try { _vortexTwinArcs(_tw0, _tw1, aim, Math.max(60, reach - 20), 7, 24, 1.5, 0.16, 1.6); } catch (_) {} }
       } else {
         spawnTracer(this.position, beamEnd, 0xff2200, 1.6);
         spawnTracer(this.position, beamEnd, 0xffaa44, 1.4);
@@ -59335,10 +59504,23 @@ class Bot {
             const _gn = (_mn && _mn.length) ? _mn[(this._coreFxSide = ((this._coreFxSide | 0) + 1)) % _mn.length] : null;
             const end = new THREE.Vector3().copy(this.position).addScaledVector(aim, Math.min(los, 3000));
             const from = _gn ? _gn.getWorldPosition(this._tempVec3d) : this.position;
+            const _twC = !!(_gn && _mn.length >= 2 && _vortexYKnobs().twin);
+            if (_twC) {
+              const _ll = (this.position.x - from.x) * aim.x + (this.position.y - from.y) * aim.y + (this.position.z - from.z) * aim.z + Math.min(los, 3000);
+              end.copy(from).addScaledVector(aim, Math.max(1, _ll));
+            }
             try {
               spawnTracer(from, end, LSS.CLASS_COLORS.VORTEX, 2.2, _gn, true);
               spawnTracer(from, end, 0xffffff, 1.0, _gn, true);
             } catch (_) {}
+            if (_twC && _vortexYKnobs().arcs > 0) {
+              try {
+                const _oi = ((this._coreFxSide | 0) + 1) % _mn.length;
+                const _og = _mn[_oi].getWorldPosition(this._twG || (this._twG = new THREE.Vector3()));
+                const _fg = (this._twF || (this._twF = new THREE.Vector3())).copy(from);
+                _vortexTwinArcs(_fg, _og, aim, Math.max(40, Math.min(los, 3000) - 10), 1, 20 + Math.random() * Math.random() * 1600, 1, 0.12, 2.0);
+              } catch (_) {}
+            }
           }
         }
       }
@@ -60141,9 +60323,10 @@ class Bot {
       : _botFireOrigin.copy(this.position);
     const fireDir = _botFireDir; 
 
-    const flashColor = (typeof chassisFlashColor === 'function')
+    const _hoardShot = !!(this.hoardModelKey && HOARD_FX.on);
+    const flashColor = _hoardShot ? HOARD_FX.col : ((typeof chassisFlashColor === 'function')
       ? chassisFlashColor(this.loadout.name)
-      : 0xffdd44;
+      : 0xffdd44);
     const _mfR = ((typeof _fxSmallDevice === 'function') && _fxSmallDevice()) ? 1100 : 2600;
     if (typeof emitChassisMuzzleFlash === 'function' && typeof camera !== 'undefined' && camera &&
         this.position.distanceToSquared(camera.position) < _mfR * _mfR) {
@@ -60170,6 +60353,9 @@ const isChaingunBot = (weapon.fireRate <= 0.10);
         if (_shotMulUsed > 1.8) {
           try { spawnTracer(fireOrigin, target.position, 0xffffff, Math.min(2.2, _shotMulUsed * 0.55)); } catch (_) {}
         }
+      } else if (_hoardShot) {
+        try { _hoardBolt(fireOrigin, target.position, isChaingunBot ? 0.55 : 1.0, true); }
+        catch (_) { spawnTracer(fireOrigin, target.position, flashColor, isChaingunBot ? 0.55 : 1.0); }
       } else
       spawnTracer(fireOrigin, target.position, flashColor, isChaingunBot ? 0.55 : 1.0);
 
@@ -60227,10 +60413,11 @@ const isChaingunBot = (weapon.fireRate <= 0.10);
     }
 
     if (_tgtIsPlayer) {
-      playerTakeDamage(damage, this, null, { splashFrom: fireOrigin, splashColor: flashColor });
+      playerTakeDamage(damage, this, null, { splashFrom: fireOrigin, splashColor: flashColor, hoard: _hoardShot && weapon.mode === 'hitscan' });
       this._addLock(player);   // (v45.42) one ladder for every target - see _addLock
     } else {
       target.takeDamage(damage, this, target.position);
+      if (_hoardShot && weapon.mode === 'hitscan') { try { _hoardHitFx(target, fireOrigin); } catch (_) {} }
       this._addLock(target);
     }
     this.coreMeter = Math.min(100, this.coreMeter + damage / 100);
@@ -60719,6 +60906,96 @@ const _SHARED_PROJ_CORE_GEO = new THREE.SphereGeometry(2.2, 8, 6);
 const _SHARED_PROJ_GLOW_GEO = new THREE.SphereGeometry(7, 16, 12);
 const _SHARED_PROJ_HAZE_GEO = new THREE.SphereGeometry(15, 10, 8);
 
+const MSL_FX = { on: true, len: 22, sizePow: 0.8, shell: 0.72, flame: 1, flameLen: 2.6, glow: 0.55 };
+try { if (typeof window !== 'undefined') window.__missileFx = MSL_FX; } catch (_) {}
+let _MSL_GEO = null;
+function _mslGeometry() {
+  if (_MSL_GEO) return _MSL_GEO;
+  const P = [[0.50, 0.001, 1.0], [0.42, 0.046, 1.0], [0.32, 0.083, 0.95], [0.20, 0.100, 0.60], [0.18, 0.100, 0.22],
+             [-0.10, 0.100, 0.17], [-0.12, 0.100, 0.80], [-0.17, 0.100, 0.80], [-0.19, 0.100, 0.17], [-0.40, 0.100, 0.14],
+             [-0.50, 0.066, 0.10]];
+  const SEG = 10, pos = [], col = [], idx = [];
+  for (let r = 0; r < P.length; r++) for (let j = 0; j <= SEG; j++) {
+    const a = j / SEG * Math.PI * 2, s = P[r][2] * ((j & 1) ? 1.0 : 0.8);   // alternate facets: a little metal on an unlit tube
+    pos.push(Math.cos(a) * P[r][1], P[r][0], Math.sin(a) * P[r][1]);
+    col.push(s, s, s, 1);
+  }
+  for (let r = 0; r < P.length - 1; r++) for (let j = 0; j < SEG; j++) {
+    const a = r * (SEG + 1) + j, b = a + SEG + 1;
+    idx.push(a, a + 1, b, a + 1, b + 1, b);
+  }
+  for (let f = 0; f < 4; f++) {
+    const a = f * Math.PI * 0.5 + Math.PI * 0.25, c = Math.cos(a), s = Math.sin(a), v0 = pos.length / 3;
+    pos.push(c * 0.098, -0.20, s * 0.098, c * 0.098, -0.50, s * 0.098, c * 0.27, -0.50, s * 0.27, c * 0.27, -0.36, s * 0.27);
+    col.push(0.55, 0.55, 0.55, 1, 0.3, 0.3, 0.3, 1, 0.45, 0.45, 0.45, 1, 0.7, 0.7, 0.7, 1);
+    idx.push(v0, v0 + 1, v0 + 2, v0, v0 + 2, v0 + 3, v0, v0 + 2, v0 + 1, v0, v0 + 3, v0 + 2);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 4));
+  g.setIndex(idx);
+  g.computeBoundingSphere();
+  _MSL_GEO = g;
+  return g;
+}
+const _mslF = new THREE.Vector3(), _mslB = new THREE.Vector3(), _mslN = new THREE.Vector3();
+function _mslDress(p) {
+  const K = MSL_FX;
+  if (!K.on || p.isPyroThermite || p.isArcWave || p.isSonar ||
+      (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato())) { p._msl = false; return; }
+  const col = p.trailColor || p.color || 0xffaa00;
+  const body = new THREE.Mesh(_mslGeometry(), new THREE.MeshBasicMaterial({
+    color: col, vertexColors: true, transparent: true, opacity: 1.0, blending: THREE.NormalBlending, depthWrite: true }));
+  body.renderOrder = 1; body.castShadow = false; body.visible = false;   // shown by its first _mslUpdate, posed
+  scene.add(body);
+  let flame = null;
+  if (K.flame > 0 && !p.isTrackerMain) {
+    const fm = _acquireFXBurstMaterial('engine_plume');
+    if (fm && fm.uniforms) {
+      if (fm.uniforms.uBaseColor && fm.uniforms.uBaseColor.value && fm.uniforms.uBaseColor.value.set) fm.uniforms.uBaseColor.value.set(col);
+      flame = new THREE.Mesh(_getSmokeConeGeometry(), fm);
+      flame.renderOrder = 2; flame.frustumCulled = false; flame.visible = false;
+      scene.add(flame);
+    }
+  }
+  p._msl = { body, flame, f: new THREE.Vector3(0, 0, -1) };
+  if (p.mesh) p.mesh.visible = false;   // the bead: the body is the round now
+}
+function _mslUpdate(p, szM, vis) {
+  const M = p._msl, K = MSL_FX, v = p.velocity;
+  const sl = v ? (v.x * v.x + v.y * v.y + v.z * v.z) : 0;
+  if (sl > 0.01) M.f.set(v.x, v.y, v.z).multiplyScalar(1 / Math.sqrt(sl));
+  const L = K.len * Math.pow(Math.max(0.2, szM), K.sizePow) * (p.isTrackerMain ? K.shell : 1);
+  M.body.position.copy(p.position);
+  M.body.quaternion.setFromUnitVectors(_mvUp, M.f);
+  M.body.scale.set(L, L, L);
+  M.body.material.opacity = vis;
+  M.body.visible = vis > 0.02;
+  _mslB.copy(p.position).addScaledVector(M.f, -L * 0.5);   // the nozzle
+  if (M.flame) {
+    const fl = L * K.flameLen * K.flame * (0.8 + Math.random() * 0.4), fr = L * 0.16 * (0.9 + Math.random() * 0.2);
+    M.flame.position.copy(_mslB).addScaledVector(M.f, -fl * 0.5);
+    M.flame.quaternion.setFromUnitVectors(_mvUp, _mslN.copy(M.f).negate());   // the cone's point (+Y) trails
+    M.flame.scale.set(fr, fl, fr);
+    const u = M.flame.material.uniforms;
+    if (u) { if (u.uPosScale) u.uPosScale.value = 1.0 / Math.max(1, fr); if (u.uIntensity) u.uIntensity.value = vis; }
+    M.flame.visible = vis > 0.02;
+  }
+  if (p.glowMesh) { p.glowMesh.position.copy(_mslB); p.glowMesh.scale.multiplyScalar(K.glow); }
+}
+function _mslStrip(p) {
+  const M = p && p._msl;
+  if (!M) return;
+  p._msl = null;
+  try {
+    if (M.body) { if (M.body.parent) scene.remove(M.body); if (M.body.material) _lssRetainMat(M.body.material); }
+    if (M.flame) {
+      if (M.flame.parent) scene.remove(M.flame);
+      const fm = M.flame.material;
+      if (fm) { if (fm.uniforms && fm.uniforms.uIntensity) fm.uniforms.uIntensity.value = 1.0; _releaseFXBurstMaterial(fm); }   // back to the pool as it left it
+    }
+  } catch (_) {}
+}
 class Projectile {
   constructor(origin, velocity, damage, splash, owner, color) {
     this.position = origin.clone();
@@ -60903,6 +61180,7 @@ class Projectile {
       if (this.mesh.material) _lssRetainMat(this.mesh.material);
       this.mesh = null;
     }
+    if (this.smokeTrail && this._msl === undefined) { try { _mslDress(this); } catch (_) { this._msl = false; } }
 
     if (this.smokeTrail) {
       if (!this.smokeCone) {
@@ -61071,6 +61349,7 @@ class Projectile {
       const hazePulse = 1 + Math.sin(this.age * 8) * 0.10;
       this.hazeMesh.scale.setScalar(hazePulse * _szM);
     }
+    if (this._msl) _mslUpdate(this, _szM, _visMul);
     if (this.trailRibbon && this.smokeTrail) {
       if (this.trailRibbon.visible) this.trailRibbon.visible = false;
     } else if (this.trailRibbon && this.trailRibbonPositions) {
@@ -61734,6 +62013,7 @@ class Projectile {
       }
       this.smokeCone = null;
     }
+    _mslStrip(this);   // (v54.64) the missile's body and flame
     if (this.trailRibbon && this.trailRibbon.parent) {
       scene.remove(this.trailRibbon);
       if (this.trailRibbon.geometry) this.trailRibbon.geometry.dispose();
@@ -61771,6 +62051,7 @@ function _despawnProjectileSilent(p) {
   if (!p) return;
   p.alive = false;
   try {
+    _mslStrip(p);   // (v54.64) the missile's body and flame
     if (p.mesh && p.mesh.parent) {
       scene.remove(p.mesh);
       if (p.mesh.material) _lssRetainMat(p.mesh.material);
@@ -73146,6 +73427,7 @@ function _releaseLightningSlot(slot) {
   if (!slot) return;
   slot.haloMesh.visible = false;
   slot.coreMesh.visible = false;
+  slot.haloMesh.position.set(0, 0, 0); slot.coreMesh.position.set(0, 0, 0);
   slot.free = true;
   slot.essential = false;
   slot.acquiredAt = 0;
@@ -75830,7 +76112,8 @@ function spawnLightningBolt(from, to, color, lifetime, branches, thickness, esse
   if (dist < 5) return;
 
   const slot = _acquireLightningSlot(essential);
-  if (!slot) return; 
+  if (!slot) return;
+  slot.haloMesh.position.set(0, 0, 0); slot.coreMesh.position.set(0, 0, 0);
 
   const depth = Math.max(3, Math.min(6, Math.round(Math.log2(Math.max(2, dist / 30)))));
   const mainPath = _generateLightningPath(from, to, depth, 0.32);
@@ -77264,6 +77547,11 @@ function updateEffects(dt) {
         ? ((e.age <= e._hold) ? 1 : Math.max(0, 1 - (e.age - e._hold) / Math.max(0.001, e.lifetime - e._hold)))
         : Math.max(0, 1 - t);
       const slot = e.poolSlot;
+      if (e._ride && slot && e._ride.position) {
+        const _rp = e._ride.position;
+        slot.haloMesh.position.set(_rp.x - e._rx, _rp.y - e._ry, _rp.z - e._rz);
+        slot.coreMesh.position.copy(slot.haloMesh.position);
+      }
       if (slot && slot.haloMat && slot.haloMat.uniforms) {
         slot.haloMat.uniforms.uOpacity.value = (e._haloOp0 || 0.55) * k;
         slot.haloMat.uniforms.uTime.value = game.time || 0;
@@ -77315,8 +77603,9 @@ function updateEffects(dt) {
       e.mesh.material.opacity = 0.6 * (1 - t);
     }
     else if (e.type === 'playerHitSplash') {
+      if (e._mvA) e.mesh.position.lerpVectors(e._mvA, e._mvB, t);   // (v54.64) a travelling flare (_hoardSprite: the hoard bolt's head)
       const _spEase = 1 - Math.pow(1 - t, 3);
-      const _spS = (e.baseScale || 60) * (0.55 + 0.75 * _spEase);
+      const _spS = e._shrink ? (e.baseScale || 60) * (1 - 0.75 * t) : (e.baseScale || 60) * (0.55 + 0.75 * _spEase);
       e.mesh.scale.set(_spS, _spS, 1);
       e.mesh.material.opacity = (e._op0 || 0.9) * (1 - t * t);
     }
@@ -78120,6 +78409,94 @@ function spawnPlayerHitSplash(srcPos, color) {
     baseScale: hull * 0.5, _op0: 0.9 });
   if (typeof spawnImpactSparks === 'function') spawnImpactSparks(_splashPosScratch, 8);
   if (typeof spawnDynamicLight === 'function') spawnDynamicLight(_splashPosScratch, col, 2.6, 320, 0.14);
+}
+
+const HOARD_FX = { on: true, col: 0xffb21c, hot: 0xff6a12, core: 0xfff4cf, width: 1.15, head: 1, crackle: 1, hit: 1, hitGap: 0.09, far: 2600 };
+try { if (typeof window !== 'undefined') window.__hoardFx = HOARD_FX; } catch (_) {}
+const _hfA = new THREE.Vector3(), _hfB = new THREE.Vector3(), _hfD = new THREE.Vector3();
+function _hoardSprite(pos, col, size, life, op, to, live) {
+  const m = new THREE.SpriteMaterial({ map: _emberFalloffTexture, color: col, transparent: true, opacity: op,
+                                       blending: THREE.AdditiveBlending, depthWrite: false });
+  const s = new THREE.Sprite(m);
+  s.position.copy(pos); s.scale.set(size, size, 1); s.renderOrder = 2;
+  scene.add(s);
+  game.effects.push({ mesh: s, lifetime: life, age: 0, type: 'playerHitSplash', baseScale: size, _op0: op, _shrink: true,
+                      _mvA: pos.clone(), _mvB: live ? to : to.clone() });
+}
+function _lightningRide(n0, ent) {
+  const E = game.effects;
+  if (!ent || !ent.position) return;
+  for (let i = E.length - 1; i >= n0; i--) {
+    const e = E[i];
+    if (e && e.type === 'lightning' && !e._ride) { e._ride = ent; e._rx = ent.position.x; e._ry = ent.position.y; e._rz = ent.position.z; }
+  }
+}
+function _hoardFxNear(a, b) {
+  if (typeof camera === 'undefined' || !camera) return false;
+  if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return false;
+  const f2 = HOARD_FX.far * HOARD_FX.far, cp = camera.position;
+  return a.distanceToSquared(cp) < f2 || (!!b && b.distanceToSquared(cp) < f2);
+}
+function _hoardBolt(from, to, wide, live) {
+  const K = HOARD_FX;
+  spawnTracer(from, to, K.col, K.width * (wide || 1));
+  if (!_hoardFxNear(from, to)) return;
+  const len = from.distanceTo(to);
+  if (len < 20) return;
+  if (K.head > 0) _hoardSprite(from, K.core, 18 * K.head, Math.max(0.06, Math.min(0.16, len / 9000)), 0.95, to, live);
+  if (K.crackle > 0 && typeof spawnLightningBolt === 'function') {
+    _hfD.subVectors(to, from).multiplyScalar(1 / len);
+    const reach = Math.min(len * 0.6, 80 + Math.random() * 110);
+    _hfA.copy(from).addScaledVector(_hfD, 6);
+    _hfB.copy(from).addScaledVector(_hfD, reach);
+    _hfB.x += (Math.random() - 0.5) * 18; _hfB.y += (Math.random() - 0.5) * 18; _hfB.z += (Math.random() - 0.5) * 18;
+    spawnLightningBolt(_hfA, _hfB, K.hot, 0.09, 1, 1.7);
+  }
+}
+function _hoardHitFx(ent, srcPos) {
+  const K = HOARD_FX;
+  if (!K.on || !(K.hit > 0) || !ent || !ent.position || !srcPos) return;
+  const now = (typeof game !== 'undefined' && typeof game.time === 'number') ? game.time : 0;
+  if (ent._hoardHitT != null && now - ent._hoardHitT >= 0 && now - ent._hoardHitT < K.hitGap) return;
+  ent._hoardHitT = now;
+  if (!_hoardFxNear(ent.position, null)) return;
+  const hull = (ent.chassis && ent.chassis.hullLength) ? ent.chassis.hullLength : 80;
+  _hfD.subVectors(srcPos, ent.position);
+  const dl = _hfD.length();
+  if (dl > 0.5) _hfD.multiplyScalar(1 / dl); else _hfD.set(0, 0, -1);
+  _hfA.copy(ent.position).addScaledVector(_hfD, hull * 0.5);
+  _hfA.x += (Math.random() - 0.5) * hull * 0.22; _hfA.y += (Math.random() - 0.5) * hull * 0.22; _hfA.z += (Math.random() - 0.5) * hull * 0.22;
+  if (typeof spawnLightningBolt === 'function') {
+    const n0 = game.effects.length;
+    for (let i = 0; i < 3; i++) {
+      _hfB.set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5);
+      _hfB.addScaledVector(_hfD, -_hfB.dot(_hfD));
+      const tl = _hfB.length();
+      if (tl < 1e-3) continue;
+      _hfB.multiplyScalar(hull * (0.3 + Math.random() * 0.35) * K.hit / tl).add(_hfA);
+      spawnLightningBolt(_hfA, _hfB, (i === 0) ? 0xfff0c0 : 0xffc64a, 0.12, 1, 1.7);
+    }
+    _hfB.set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).multiplyScalar(0.7).add(_hfD);
+    _hfB.multiplyScalar(hull * (0.35 + Math.random() * 0.3) * K.hit / (_hfB.length() || 1)).add(_hfA);
+    spawnLightningBolt(_hfA, _hfB, K.hot, 0.10, 1, 1.5);
+    _lightningRide(n0, ent);
+  }
+  try { if (typeof spawnHitFire === 'function' && ent.chassis) spawnHitFire(_hfA, K.hot, ent, 1.15 * K.hit); } catch (_) {}
+  try { if (typeof v8SpawnSparks === 'function') v8SpawnSparks(_hfA, 12, 1.2, 380, 0xffd45a, K.hot); } catch (_) {}
+  try {
+    if (game.particles && typeof _pVel === 'function') {
+      for (let i = 0; i < 6; i++) {
+        const sp = 180 + Math.random() * 260;
+        game.particles.push({
+          position: { x: _hfA.x, y: _hfA.y, z: _hfA.z },
+          velocity: _pVel(_hfD.x * sp + (Math.random() - 0.5) * 170, _hfD.y * sp + (Math.random() - 0.5) * 170, _hfD.z * sp + (Math.random() - 0.5) * 170),
+          life: 0.16 + Math.random() * 0.2, maxLife: 0.36,
+          color: (i & 1) ? K.col : K.hot, size: 1.4 + Math.random() * 1.6,
+        });
+      }
+    }
+  } catch (_) {}
+  if (typeof spawnDynamicLight === 'function') spawnDynamicLight(_hfA, K.col, 2.4, 300, 0.13);
 }
 
 
@@ -80027,11 +80404,22 @@ function _botAbMirror(evt) {
   if (k === 'laser') {
     const end = _end();
     if (mn && mn.length) {
+      const tw = !!(mn.length >= 2 && _vortexYKnobs().twin);
+      const ad = tw ? new THREE.Vector3().subVectors(end, b.position) : null, al = tw ? (ad.length() || 1) : 0;
+      if (tw) ad.multiplyScalar(1 / al);
+      const g0 = tw ? new THREE.Vector3() : null, g1 = tw ? new THREE.Vector3() : null;
       for (let g = 0; g < mn.length; g++) {
         const lo = mn[g].getWorldPosition(_bxA);
-        spawnTracer(lo, end, 0xff2200, 1.6, mn[g]);
-        spawnTracer(lo, end, 0xffaa44, 1.4, mn[g]);
+        let le = end;
+        if (tw) {
+          const ll = (b.position.x - lo.x) * ad.x + (b.position.y - lo.y) * ad.y + (b.position.z - lo.z) * ad.z + al;
+          le = new THREE.Vector3().copy(lo).addScaledVector(ad, Math.max(1, ll));
+          if (g === 0) g0.copy(lo); else if (g === 1) g1.copy(lo);
+        }
+        spawnTracer(lo, le, 0xff2200, 1.6, mn[g]);
+        spawnTracer(lo, le, 0xffaa44, 1.4, mn[g]);
       }
+      if (tw && _vortexYKnobs().arcs > 0) { try { _vortexTwinArcs(g0, g1, ad, Math.max(60, al - 20), 7, 24, 1.5, 0.16, 1.6); } catch (_) {} }
     } else { spawnTracer(b.position, end, 0xff2200, 1.6); spawnTracer(b.position, end, 0xffaa44, 1.4); }
   } else if (k === 'cs0') {
     b._mxCs = b._mxCsLen = (typeof evt.t === 'number' && evt.t > 0 && evt.t < 10) ? evt.t : 1.0;
@@ -80434,7 +80822,8 @@ function playerTakeDamage(amount, attacker, projectile, hitOpts) {
     const _splCol = (hitOpts && hitOpts.splashColor != null) ? hitOpts.splashColor
                   : (projectile && projectile.color != null) ? projectile.color
                   : null;
-    spawnPlayerHitSplash(_splSrc, _splCol);
+    if (hitOpts && hitOpts.hoard) { try { _hoardHitFx(player, _splSrc); } catch (_) {} }
+    else spawnPlayerHitSplash(_splSrc, _splCol);
   }
 
   const shakeAmt = Math.min(8, amount / 150);
@@ -85080,8 +85469,14 @@ function executeAbility(slot, ability) {
         }
       } catch (_) {}
       const _vlMuzzle = _vlOrigin;
+      const _vlTwin = !!(_vyPair && _vyK.twin);
       if (typeof _spawnSingleTracer === 'function') {
-        _spawnSingleTracer(_vlMuzzle, beamEnd, LSS.CLASS_COLORS.VORTEX, 1.6);
+        if (_vlTwin) {
+          for (const _gun of [_vyGunA, _vyGunB]) {
+            const _tl = (_vlOrigin.x - _gun.x) * _vlDir.x + (_vlOrigin.y - _gun.y) * _vlDir.y + (_vlOrigin.z - _gun.z) * _vlDir.z + range;
+            _spawnSingleTracer(_gun.clone(), _gun.clone().addScaledVector(_vlDir, _tl), LSS.CLASS_COLORS.VORTEX, 0.9);
+          }
+        } else _spawnSingleTracer(_vlMuzzle, beamEnd, LSS.CLASS_COLORS.VORTEX, 1.6);
       }
       if (net.active && net.sendEvent) {
         net.sendEvent({
@@ -85100,8 +85495,11 @@ function executeAbility(slot, ability) {
           life: beamLife,
         });
       }
+      if (_vlTwin && _vyK.arcs > 0) {
+        try { _vortexTwinArcs(_vyGunA, _vyGunB, _vlDir, Math.max(60, Math.min(range, _vlReach) - 20), Math.round(11 * _vyK.arcs), 22, 1.42, 0.18, 1.5); } catch (_) {}
+      }
       if (typeof spawnLightningBolt === 'function') {
-        for (let a = 0; a < 6; a++) {
+        for (let a = (_vlTwin ? 4 : 0); a < 6; a++) {
           const t = 0.12 + (a / 6) * 0.78 + (Math.random() - 0.5) * 0.05;
           const along = _vlOrigin.clone().addScaledVector(_vlDir, range * t);
           const reach = 90 + Math.random() * 100;
@@ -87878,6 +88276,22 @@ function updateWorldEffects(dt) {
           const breath = 0.92 + 0.10 * Math.sin(game.time * 7.0);
           eff.mesh.material.uniforms.uIntensity.value = breath;
         }
+        try {
+          const _br = 0.92 + 0.10 * Math.sin(game.time * 7.0);
+          if (_vortexTwinKids(eff.mesh, np.mesh, np.position, eff._fwd, _vcbRange, _br)) {
+            eff._arcT = (eff._arcT || 0) - dt;
+            if (eff._arcT <= 0) {
+              eff._arcT = 0.05 + Math.random() * 0.05;
+              const _pn = np.mesh.userData.muzzleNodes, _ak = _vortexYKnobs().arcs;
+              if (_ak > 0) {
+                _pn[0].getWorldPosition(_vtM);
+                const _gB = _pn[1].getWorldPosition(eff._gB || (eff._gB = new THREE.Vector3()));
+                const _gA = (eff._gA || (eff._gA = new THREE.Vector3())).copy(_vtM);
+                for (let a = 0; a < 2; a++) _vortexTwinArcs(a ? _gB : _gA, a ? _gA : _gB, eff._fwd, _vcbRange - 10, 1, 20 + Math.random() * Math.random() * 2000, 1, 0.12, 2.0);
+              }
+            }
+          }
+        } catch (_) {}
       }
     }
     else if (eff.type === 'slayer_core_damage_fx') {
@@ -87947,6 +88361,7 @@ function updateWorldEffects(dt) {
       }
       if (eff.type === 'vortex_core_beam_remote' && eff.mesh) {
         try { scene.remove(eff.mesh); } catch (_) {}
+        try { const _tk = eff.mesh.userData && eff.mesh.userData._twinKids; if (_tk) for (const _k of _tk) { if (_k.material && _k.material.dispose) _k.material.dispose(); for (const _c of _k.children) if (_c.material && _c.material.dispose) _c.material.dispose(); } } catch (_) {}
         try { if (eff.mesh.geometry && eff.mesh.geometry !== _getVortexCoreBeamGeometry() && eff.mesh.geometry !== _getVortexCoreBeamConeGeometry()) eff.mesh.geometry.dispose(); } catch (_) {}
         try { if (eff.mesh.material && eff.mesh.material.dispose) eff.mesh.material.dispose(); } catch (_) {}
         eff.mesh = null;
@@ -88219,6 +88634,8 @@ function updateAbilities(dt) {
       beam.quaternion.setFromUnitVectors(_mvUp, forward);
       beam.scale.set(BEAM_RADIUS, _stemLen, BEAM_RADIUS);
       beam.visible = true;
+      const _twinC = !!(_vyPairC && _vyKc.twin);
+      if (beam.material) beam.material.visible = !_twinC;
       player._vcbTTL = 0.2;   // (v48.14) fed every frame it is drawn; updateWorldEffects puts it out if nothing is feeding it
       try {
         const _vfK = window.__vortexFire || (window.__vortexFire = { hz: 10, life: 1.6, size: 26, max: 22, color: 0xc46cff, out: 1.0, grow: 1.0, shotMuzzle: 12, shotHit: 20, shotDeep: 0, shotTint: 0xc46cff });   // (v39.56) purple as seen, not as stored
@@ -88228,16 +88645,19 @@ function updateAbilities(dt) {
           let _live = 0;
           for (const _we of game.worldEffects) if (_we && _we._beamFlame) _live++;
           if (_live < _vfK.max) {
-            const _joinF = _vyPairC ? _vyKc.join : 0;
-            const _reachF = (player._mlHitDist != null) ? Math.max(40, Math.min(_stemLen, player._mlHitDist - _joinF)) : _stemLen;
-            const _along = _reachF * (0.12 + Math.random() * 0.86);
+            const _joinF = _twinC ? 0 : (_vyPairC ? _vyKc.join : 0);
+            const _lenF = _twinC ? range : _stemLen;
+            const _fireR = _twinC ? (_vyGunA.distanceTo(_vyGunB) * 0.5 + _vyKc.twinCore) : BEAM_RADIUS;
+            const _fireFrom = _twinC ? _vtM.copy(_vyGunA).add(_vyGunB).multiplyScalar(0.5) : _stemFrom;
+            const _reachF = (player._mlHitDist != null) ? Math.max(40, Math.min(_lenF, player._mlHitDist - _joinF)) : _lenF;
+            const _along = _reachF * (_twinC ? (0.03 + Math.random() * Math.random() * 0.95) : (0.12 + Math.random() * 0.86));
             const _ang = Math.random() * Math.PI * 2;
             const _ax = (Math.abs(forward.y) < 0.9) ? _vfTmpA.set(0, 1, 0) : _vfTmpA.set(1, 0, 0);
             const _r1 = _vfTmpB.crossVectors(forward, _ax).normalize();
             const _r2 = _vfTmpC.crossVectors(forward, _r1).normalize();
-            const _pt = _vfTmpD.copy(_stemFrom).addScaledVector(forward, _along)
-              .addScaledVector(_r1, Math.cos(_ang) * BEAM_RADIUS * _vfK.out)
-              .addScaledVector(_r2, Math.sin(_ang) * BEAM_RADIUS * _vfK.out);
+            const _pt = _vfTmpD.copy(_fireFrom).addScaledVector(forward, _along)
+              .addScaledVector(_r1, Math.cos(_ang) * _fireR * _vfK.out)
+              .addScaledVector(_r2, Math.sin(_ang) * _fireR * _vfK.out);
             const _n0 = game.worldEffects.length;
             _spawnClassFireBurst(_pt, _vfK.color, _vfK.size * (0.75 + Math.random() * 0.5), _vfK.life);
             if (game.worldEffects.length > _n0) { const _fe = game.worldEffects[game.worldEffects.length - 1]; _fe._beamFlame = true; _fe._grow = (_vfK.grow != null ? _vfK.grow : 1.0); }
@@ -88257,8 +88677,23 @@ function updateAbilities(dt) {
           });
         }
         const _armR = BEAM_RADIUS * _vyKc.armCore;
-        _vortexSpan(player._vortexCoreArms[0], _stemFrom, _vyGunA, _armR);
-        _vortexSpan(player._vortexCoreArms[1], _stemFrom, _vyGunB, _armR);
+        if (_twinC) {
+          for (let _i = 0; _i < 2; _i++) {
+            const _a = player._vortexCoreArms[_i];
+            if (!_a.children.length) _a.add(_vortexTwinBack());
+            _a.children[0].visible = true;
+            _vortexTwinPose(_a, _i ? _vyGunB : _vyGunA, _stemFrom, forward, _stemLen, _vyKc.twinCore, _vyKc.noseCore);
+          }
+        } else {
+          const _armGeo = _getVortexCoreArmConeGeometry();
+          for (const _a of player._vortexCoreArms) {
+            if (_a.geometry !== _armGeo) _a.geometry = _armGeo;
+            if (_a.children.length) _a.children[0].visible = false;
+            if (_a.material.uniforms.uPosScale) _a.material.uniforms.uPosScale.value = 1.0 / Math.max(1, 95 * 0.15);
+          }
+          _vortexSpan(player._vortexCoreArms[0], _stemFrom, _vyGunA, _armR);
+          _vortexSpan(player._vortexCoreArms[1], _stemFrom, _vyGunB, _armR);
+        }
         try {
           if (!player._vortexCoreGlows) {
             const _gm = _vortexGlowMaterial();   // (v39.68) shared with the Laser ability
@@ -88272,6 +88707,7 @@ function updateAbilities(dt) {
           const _gPulse = 0.9 + 0.14 * Math.sin(game.time * 23.0);
           _G[0].scale.set(_gMuz * _gPulse, _gMuz * _gPulse, 1); _G[1].scale.set(_gMuz * (2 - _gPulse), _gMuz * (2 - _gPulse), 1); _G[2].scale.set(_gJoint, _gJoint, 1);
           for (const _g of _G) { _g.quaternion.copy(camera.quaternion); _g.visible = true; }
+          if (_twinC) _G[2].visible = false;   // (v54.64) no joint to cover
           const _mHz = (_vfG.muzzleHz != null) ? _vfG.muzzleHz : 14;
           player._mlMuzzleT = (player._mlMuzzleT || 0) - dt;
           if (_mHz > 0 && player._mlMuzzleT <= 0 && typeof _spawnClassFireBurst === 'function') {
@@ -88313,7 +88749,18 @@ function updateAbilities(dt) {
         if (!player._laserCoreArcTimer) player._laserCoreArcTimer = 0;
         player._laserCoreArcTimer -= dt;
         if (player._laserCoreArcTimer <= 0) {
-          for (let a = 0; a < 4; a++) {
+          let _a0 = 0;
+          if (_twinC && _vyKc.arcs > 0) {
+            _a0 = 3;
+            try {
+              const _nR = Math.max(1, Math.round(3 * _vyKc.arcs));
+              for (let a = 0; a < _nR; a++) {
+                const _s = 20 + Math.random() * Math.random() * Math.max(80, Math.min(range - 60, 2400));
+                _vortexTwinArcs((a & 1) ? _vyGunB : _vyGunA, (a & 1) ? _vyGunA : _vyGunB, forward, Math.max(40, range - 10), 1, _s, 1, 0.12, 2.0);
+              }
+            } catch (_) {}
+          }
+          for (let a = _a0; a < 4; a++) {
             const t = 0.15 + Math.random() * 0.78;
             const along = _abTmpA.copy(player.position).addScaledVector(forward, range * t);
             const reach = 110 + Math.random() * 90; 
