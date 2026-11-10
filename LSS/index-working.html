@@ -8714,7 +8714,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "54.67";
+const LSS_BUILD = "54.68";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -22219,7 +22219,13 @@ class NetworkPlayer {
           const _fp = _hy ? _hy.fp : _swPeerFootprint(this);
           const _W3 = window.__water || {};
           _swImpact(this.position.x, this.position.z, _above < 0 ? +1 : -1, _fp, _hy ? _hy.mass : _fp.heft * ((_W3.mass != null) ? _W3.mass : 1.0), this.velocity, _WL, this);
-          if (typeof playSpatialSound === 'function') playSpatialSound(_above < 0 ? 'water_bloop' : 'water_bloop_soft', new THREE.Vector3(this.position.x, _WL, this.position.z), { refDistance: 300, maxDistance: 5200 });
+          // (v54.68) one crossing sound per 0.25 s per hull, as yours (the ripple tick's note): an interpolated peer's keel
+          // chatters on the surface more than a local one
+          const _blNow = performance.now();
+          if (!(_blNow - (this._wBloopT || 0) < 250) && typeof playSpatialSound === 'function') {
+            this._wBloopT = _blNow;
+            playSpatialSound(_above < 0 ? 'water_bloop' : 'water_bloop_soft', new THREE.Vector3(this.position.x, _WL, this.position.z), { refDistance: 300, maxDistance: 5200 });
+          }
         } catch (_) {}
       }
       this._wPrevAbove = _above;
@@ -55635,14 +55641,24 @@ function _swRippleTick(dt) {
     const _wooshV = _swWetAtT(R, px, pz) ? Math.max(_swWooshK(keelA, DR, _skHOf(fp, DR)), R._wingWoosh || 0) : 0;
     try { W3.woosh = +_wooshV.toFixed(3); } catch (_) {}   // live readout
     const _wantHiss = sp > 20 && _wooshV > 0.01;   // (no underwater gate: the old `touching` rule had none either)
+    // (v54.68) THE VOICE OUTLIVES A GAP. Not wanted = glide to silence (set(sp, 0), tau 0.08 s); the voice is only torn
+    // down after 0.3 s of not being wanted. Every term of `_wantHiss` is a bare threshold, so a ship riding one of them
+    // used to stop and restart the voice per frame - and a stop on the frame after a start is the snap (_swStartDragHiss).
+    const _hissHold = (W3.hissFix !== 0) ? 0.3 : 0;
+    R._hissOff = _wantHiss ? 0 : (R._hissOff || 0) + dt;
     if (_wantHiss && !game._dragHiss) { try { game._dragHiss = _swStartDragHiss(); } catch (_) {} }
-    else if (!_wantHiss && game._dragHiss) { try { _swStopDragHiss(game._dragHiss); } catch (_) {} game._dragHiss = null; }
-    if (game._dragHiss && game._dragHiss.set) { try { game._dragHiss.set(sp, _wooshV); } catch (_) {} }
+    else if (!_wantHiss && game._dragHiss && R._hissOff >= _hissHold) { try { _swStopDragHiss(game._dragHiss); } catch (_) {} game._dragHiss = null; }
+    if (game._dragHiss && game._dragHiss.set) { try { game._dragHiss.set(sp, _wantHiss ? _wooshV : 0); } catch (_) {} }
     // (v42.63) THE SPLASH BELONGS TO THE KEEL, not the waist. On `above` the entry crown fired
     // with the ship already half under, and the exit crown once the waterline had climbed back to
     // the mid-plane - both a full half-hull-height late.
-    if (keelA < 0 && prevKeelA >= 0)      { _swImpact(px, pz, +1, fp, mass, player.velocity, WL, R); try { if (typeof playSpatialSound === 'function') playSpatialSound('water_bloop', new THREE.Vector3(px, WL, pz), { refDistance: 300, maxDistance: 5200 }); } catch (_) {} }
-    else if (keelA > 0 && prevKeelA <= 0) { _swImpact(px, pz, -1, fp, mass, player.velocity, WL, R); try { if (typeof playSpatialSound === 'function') playSpatialSound('water_bloop_soft', new THREE.Vector3(px, WL, pz), { refDistance: 260, maxDistance: 4200 }); } catch (_) {} }
+    // (v54.68) ...and ONE CROSSING SOUND PER 0.25 s PER HULL. _SOUND_MIN_GAP has always said `water_bloop: 0.25`, but the
+    // gate that read it has been 'off' since v35.49 (only the explosion fold survived, v39.49d), and this test has no dead
+    // band: a keel chattering on the surface fired a bloop per frame, each a 4 ms attack at 0.5 on top of the last. The
+    // splash itself (_swImpact) is untouched - only the sound is spaced.
+    const _blNow = performance.now(), _blOk = !(_blNow - (R._bloopT || 0) < 250);
+    if (keelA < 0 && prevKeelA >= 0)      { _swImpact(px, pz, +1, fp, mass, player.velocity, WL, R); if (_blOk) { R._bloopT = _blNow; try { if (typeof playSpatialSound === 'function') playSpatialSound('water_bloop', new THREE.Vector3(px, WL, pz), { refDistance: 300, maxDistance: 5200 }); } catch (_) {} } }
+    else if (keelA > 0 && prevKeelA <= 0) { _swImpact(px, pz, -1, fp, mass, player.velocity, WL, R); if (_blOk) { R._bloopT = _blNow; try { if (typeof playSpatialSound === 'function') playSpatialSound('water_bloop_soft', new THREE.Vector3(px, WL, pz), { refDistance: 260, maxDistance: 4200 }); } catch (_) {} } }
     // ⚠⚠ (v41.04) A SHALLOW FAST ENTRY SKIPS. Clanet, Hersen & Bocquet, "Secrets of successful
     // stone-skipping" (Nature 427:29): there is a MAGIC ANGLE of about 20° between the body and the
     // surface that minimises the speed needed to ricochet - below it a fast body bounces off the
@@ -77506,12 +77522,29 @@ function _swStartDragHiss() {
   bp.frequency.value = 2400;
   bp.Q.value = 0.35;
   const g = ctx.createGain();
-  g.gain.setValueAtTime(0.0001, now);
+  // ⭐⭐⭐ (v54.68) THE WATER "SNAP": THE GAIN STARTS AT ITS INTRINSIC VALUE, NOT AT AN EVENT. Owner: "i also hear a glitch
+  // sometimes when there's water around, it's like a snapping sound... it's very infrequent, but it's loud and doesn't
+  // make sense when it happens". This line was `g.gain.setValueAtTime(0.0001, now)`. A GainNode is born at 1.0, and an
+  // event only replaces that once the audio thread has RENDERED it - and `ctx.currentTime` moves one audio callback at a
+  // time (10 ms on 'interactive', ~40 ms on the desktop's 'playback', 20-40 ms on a phone), so two or three frames in a
+  // row read the SAME clock. A hiss started on one frame and stopped on the next - the ship crossing 20 u/s, a shoreline
+  // (_swWetAtT), the foam's edge (_swWooshK), a wing tip: none of them had any hysteresis - ran _swStopDragHiss at that
+  // same `now`: cancelScheduledValues(now) deleted the 0.0001 event (its time is >= now), `gain.value` read the
+  // never-rendered 1.0, and the voice played its whole 0.18 s fade FROM FULL SCALE. Band-passed noise at eleven times the
+  // loudest the hiss ever gets, with no cause on screen.
+  // MEASURED in the pane with this exact call sequence on the game's own context: peak 0.468, against 0.051 for the hiss
+  // at full speed (+19 dB) and 0.003 once one audio callback had passed between start and stop. The trap is already in
+  // the map for other looping voices ("a new looping voice's gain must start at gain.value = 0"); these two never got it.
+  // Three parts, all here and in _swStopDragHiss / the driver: the intrinsic 0; the fade never starts above the loudest
+  // level the voice was ever given (`lvl`); and the voice outlives a 0.3 s gap instead of being torn down and rebuilt on
+  // every flicker. window.__water.hissFix = 0 is the old path, for an A/B by ear.
+  const _hfx = !(typeof window !== 'undefined' && window.__water && window.__water.hissFix === 0);
+  if (_hfx) g.gain.value = 0; else g.gain.setValueAtTime(0.0001, now);
   src.connect(bp); bp.connect(g);
   g.connect(audio.sfxBus || audio.masterGain || ctx.destination);
   src.start(now);
   return {
-    src, bp, g,
+    src, bp, g, lvl: 0, safe: _hfx,
     set(sp, vol) {   // (v48.98) vol 0..1 = _swWooshK / _swWooshWing (1 = the in-water level it always had)
       const t = ctx.currentTime;
       const k = Math.min(1, Math.max(0, (sp - 18) / 320));
@@ -77519,7 +77552,9 @@ function _swStartDragHiss() {
       // (v35.65) -75% : was 0.05 + 0.30*k, which drowned everything else out
       // while skimming. Kept as an explicit multiplier so the shape of the
       // speed curve stays readable against the original numbers.
-      try { this.g.gain.setTargetAtTime((0.05 + 0.30 * k) * 0.25 * v, t, 0.08); } catch (_) {}
+      const tg = (0.05 + 0.30 * k) * 0.25 * v;
+      if (tg > this.lvl) this.lvl = tg;   // (v54.68) the ceiling _swStopDragHiss fades from
+      try { this.g.gain.setTargetAtTime(tg, t, 0.08); } catch (_) {}
       try { this.bp.frequency.setTargetAtTime(1800 + 2200 * k, t, 0.15); } catch (_) {}
     },
   };
@@ -77533,7 +77568,15 @@ const _SW_PHISS = new Map();
 function _swPeerHiss(e, want, sp, x, y, z, vol) {   // (v48.98) vol = _swWooshK / _swWooshWing, as yours
   let h = _SW_PHISS.get(e);
   const K = window.__water || {};
-  if (!want || K.peerHiss === 0) { if (h) { _swStopDragHiss(h); _SW_PHISS.delete(e); } return; }
+  const _hfx = K.hissFix !== 0;   // (v54.68) see _swStartDragHiss
+  if (K.peerHiss === 0 || (!want && !_hfx)) { if (h) { _swStopDragHiss(h); _SW_PHISS.delete(e); } return; }
+  if (!want) {
+    // (v54.68) NOT WANTED IS NOT TORN DOWN: the voice glides to silence and _swPeerHissSweep retires it 250 ms after its
+    // last wanted frame (this call does not refresh `h.t`). A ship flickering across the 20 u/s gate or the foam's edge
+    // used to build and destroy a voice per flicker - and a voice destroyed before its first render faded from 1.0.
+    if (h) { try { h.g.gain.setTargetAtTime(0, audio.ctx.currentTime, 0.05); } catch (_) {} }
+    return;
+  }
   if (!h) {
     if (_SW_PHISS.size >= 4 || typeof audio === 'undefined' || !audio || !audio.initialized || !audio.ctx) return;
     try {
@@ -77542,7 +77585,8 @@ function _swPeerHiss(e, want, sp, x, y, z, vol) {   // (v48.98) vol = _swWooshK 
       src.buffer = _audioSharedNoiseBuffer(ctx, 1.0);
       src.loop = true;
       const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 2400; bp.Q.value = 0.35;
-      const g = ctx.createGain(); g.gain.setValueAtTime(0.0001, now);
+      const g = ctx.createGain();
+      if (_hfx) g.gain.value = 0; else g.gain.setValueAtTime(0.0001, now);   // (v54.68) the intrinsic value - see _swStartDragHiss
       const pan = _audioKRatePanner(ctx.createPanner());   // (v48.39) k-rate - see _audioKRateSet
       pan.panningModel = (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) ? 'equalpower' : 'HRTF';
       pan.distanceModel = 'inverse'; pan.refDistance = 300; pan.maxDistance = 5200; pan.rolloffFactor = 1;
@@ -77551,7 +77595,7 @@ function _swPeerHiss(e, want, sp, x, y, z, vol) {   // (v48.98) vol = _swWooshK 
       src.connect(bp); bp.connect(g); g.connect(pan);
       pan.connect(audio.sfxBus || audio.masterGain || ctx.destination);
       src.start(now, Math.random() * 0.9);
-      h = { src, bp, g, pan, t: 0 };
+      h = { src, bp, g, pan, t: 0, lvl: 0, safe: _hfx };
       _SW_PHISS.set(e, h);
     } catch (_) { return; }
   }
@@ -77562,7 +77606,9 @@ function _swPeerHiss(e, want, sp, x, y, z, vol) {   // (v48.98) vol = _swWooshK 
     else if (h.pan.setPosition) h.pan.setPosition(x, y, z);
     const k = Math.min(1, Math.max(0, (sp - 18) / 320));
     const v = (vol != null) ? Math.max(0, Math.min(1, vol)) : 1;   // (v48.98) the whole level scales, as yours
-    h.g.gain.setTargetAtTime((0.05 + 0.30 * k) * 0.25 * v, t, 0.08);   // your curve (_swStartDragHiss.set)
+    const tg = (0.05 + 0.30 * k) * 0.25 * v;
+    if (tg > h.lvl) h.lvl = tg;   // (v54.68) the ceiling _swStopDragHiss fades from
+    h.g.gain.setTargetAtTime(tg, t, 0.08);   // your curve (_swStartDragHiss.set)
     h.bp.frequency.setTargetAtTime(1800 + 2200 * k, t, 0.15);
   } catch (_) {}
 }
@@ -77580,10 +77626,18 @@ function _swStopDragHiss(h) {
   const ctx = audio.ctx, now = ctx.currentTime;
   try {
     h.g.gain.cancelScheduledValues(now);
-    h.g.gain.setValueAtTime(h.g.gain.value, now);
-    h.g.gain.exponentialRampToValueAtTime(0.0001, now + 0.18);
+    // (v54.68) THE FADE NEVER STARTS ABOVE WHAT THE VOICE WAS EVER ASKED TO PLAY. `gain.value` is the audio thread's last
+    // RENDERED value; before the first render it is whatever the node was born with, and the cancel above has just removed
+    // any event that would have said otherwise (see _swStartDragHiss - this read is where the snap came from). `lvl` is
+    // the largest target the voice was given, and a gain that only ever glides toward its targets cannot be above it.
+    const v0 = h.safe ? Math.min(h.g.gain.value, h.lvl || 0) : h.g.gain.value;
+    if (v0 > 0.0002) { h.g.gain.setValueAtTime(v0, now); h.g.gain.exponentialRampToValueAtTime(0.0001, now + 0.18); }
+    else h.g.gain.setValueAtTime(0, now);
   } catch (_) {}
   try { h.src.stop(now + 0.22); } catch (_) {}
+  // (v54.68) and the chain leaves the graph when the source ends (the railgun's v35.47 rule: a gain left wired to sfxBus is
+  // one more node the audio thread walks, per stop, for the rest of the match)
+  try { h.src.onended = () => { try { h.g.disconnect(); } catch (_) {} try { if (h.pan) h.pan.disconnect(); } catch (_) {} }; } catch (_) {}
 }
 
 
@@ -103821,7 +103875,17 @@ function _setpBuild() {
   // back, a clean interleaved A/B in the pane read 142 / 141.5 fps with the piece and 143.9 / 143.7 without (owner: "144 in
   // both"), and the owner: "put it back to the way we had it at first, it looked epic". The 51.87 numbers (5-6 ms) were
   // measured on a starved CPU. The cut-down wreck stays behind __setp.lite = 1.
-  sp.lite = !!+_setpK('lite');
+  // ⭐ (v54.68) ...AND THE PHONE-CLASS BUDGET TAKES THE CUT-DOWN ONE BY DEFAULT. Owner: "i noticed some hitching on
+  // mobile" (elimination). 51.89's A/B was the desktop's ("144 in both"); a phone was never measured, and it was building
+  // the full 120k-triangle hull every round - per-pixel soot (three fbm reads a pixel on a double-sided standard
+  // material), six fires of three shells, the heavy smoke - on the hardware 51.88's wreck was made for. _LSS_IS_MOBILE
+  // is the budget flag (a touch phone, or lite mode: an Xbox, ?lite=1). window.__setp = { lite: 0 } is the full hull on a
+  // phone, { lite: 1 } the cut-down one on a desktop; either is read at the next build (__setpRebuild()).
+  // NOT YET SEEN BY THE OWNER ON A PHONE.
+  { let _w = null, _ph = false;
+    try { _w = window.__setp; } catch (_) {}
+    try { _ph = !!_LSS_IS_MOBILE; } catch (_) {}
+    sp.lite = (_w && _w.lite != null) ? !!+_w.lite : _ph; }
   sp.model = (kind === 'leviathan') ? MONSTER_DEFS[Math.floor(rnd() * MONSTER_DEFS.length) % MONSTER_DEFS.length].key : (sp.lite ? 'carrier2_wreck' : 'carrier2');
   _SETP.cur = sp;
   scene.add(sp.group);
@@ -103840,7 +103904,15 @@ function _setpDispose() {
   sp.job = null;
   try { if (sp.group.parent) sp.group.parent.remove(sp.group); } catch (_) {}
   for (const ch of sp.chunks) { try { ch.mesh.geometry.dispose(); } catch (_) {} }
-  for (const m of sp.mats) { try { m.dispose(); } catch (_) {} }   // clones: their textures belong to the cached GLB
+  // ⭐⭐ (v54.68) RETAINED, NOT DISPOSED. Owner: "i noticed some hitching on mobile" (elimination). These clones are the only
+  // holders of the piece's program (its customProgramCacheKey is its own), and the piece is torn down and rebuilt every
+  // round, so `m.dispose()` here freed the program at each bell and the next round's first frame of the arena - the one
+  // the countdown opens on, once the ship picker stops owning the canvas - linked it again, on top of uploading the new
+  // hull. MEASURED in the pane (The Nexus, phone budget, seven rounds): "material [FORK: emissiveMapUv customCacheKey]
+  // [RELINK]" at every round start; that frame was 391 ms the first time and 20-30 ms after (the driver's cache), and a
+  // phone compiles it each time. _lssRetainMat keeps one material per real program key and disposes the duplicates, so
+  // round 2 onward finds the program resident. (Their textures belong to the cached GLB either way.)
+  for (const m of sp.mats) { try { if (typeof _lssRetainMat === 'function') _lssRetainMat(m); else m.dispose(); } catch (_) {} }
   for (const f of sp.fires) _setpFireKill(f);
   sp.chunks = []; sp.fires = []; sp.mats = [];
 }
@@ -103970,8 +104042,22 @@ function* _setpLeviG(sp, gltf) {
 
 // ---- THE NEXUS: carrier2, broken in two, burning ----
 function* _setpWreckG(sp, gltf) {
-  const X = yield* _setpExtractG(gltf.scene);
-  if (!X.nt) return;
+  // ⭐ (v54.68) THE HULL IS READ ONCE A SESSION. The wreck is the same triangles every round - only where it breaks and how
+  // it lies change - but each round re-read the GLB into corner arrays: every vertex through its matrix, the smoothed
+  // normals (computeVertexNormals over the whole hull, one unyielded step), the de-index. The build runs under the ship
+  // picker at every round start (the `dynObj+monsters+organics` frames of 15-39 ms in the pane, ten in a row; a phone is
+  // several times that). The read is kept (`_SETP.xw`, per model: ~11 MB for the full hull, ~5 MB for the cut-down one)
+  // and each round poses a COPY. MEASURED (pane, the cut-down hull): 98 ms of work with the read, 85-91 without - a
+  // tenth, not more; what it really removes is the one long step. The leviathan is a different creature in a different
+  // pose each round, so it still reads its own.
+  let X0 = (_SETP.xw && _SETP.xw.model === sp.model) ? _SETP.xw.X : null;
+  if (!X0) {
+    X0 = yield* _setpExtractG(gltf.scene);
+    if (!X0.nt) return;
+    _SETP.xw = { model: sp.model, X: X0 };
+  }
+  const X = { P: X0.P.slice(), N: X0.N.slice(), UV: X0.UV, MI: X0.MI, mats: X0.mats, nt: X0.nt, H: null };
+  yield;
   const P = X.P, nt = X.nt;
   let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity, z0 = Infinity, z1 = -Infinity;
   for (let i = 0; i < nt * 9; i += 3) {
@@ -103999,12 +104085,12 @@ function* _setpWreckG(sp, gltf) {
   for (let k = 0; k < 2; k++) {
     const Mp = new THREE.Matrix4().makeRotationX(roll[k]).multiply(new THREE.Matrix4().makeRotationZ(pitch[k]))
       .multiply(new THREE.Matrix4().makeScale(s, s, s)).multiply(new THREE.Matrix4().makeTranslation(-B.x, -B.y, -B.z));
-    _setpXform(X, Mp, 0, nt, pieceOf, k);
+    // (v54.68) in slices: each of these was one pass over the whole hull between two yields
+    for (let a = 0; a < nt; a += 32768) { _setpXform(X, Mp, a, Math.min(nt, a + 32768), pieceOf, k); yield; }
     let ymin = Infinity;   // sit it on (and a little into) the floor
     for (let t = 0; t < nt; t++) if (pieceOf[t] === k) for (let j = 0; j < 3; j++) ymin = Math.min(ymin, P[t * 9 + j * 3 + 1]);
     const Mt = new THREE.Matrix4().copy(Mw).multiply(new THREE.Matrix4().makeTranslation((k ? 1 : -1) * gap / 2, sp.floorY - sink - ymin, 0));
-    _setpXform(X, Mt, 0, nt, pieceOf, k);
-    yield;
+    for (let a = 0; a < nt; a += 32768) { _setpXform(X, Mt, a, Math.min(nt, a + 32768), pieceOf, k); yield; }
   }
   X.H = heat;
   sp.pieceOf = pieceOf;
@@ -104140,10 +104226,20 @@ function* _setpGridMakeG(sp, X, owner) {
     if ((t & 8191) === 8191) yield;
   }
   sp.grid = G;
-  _setpGridMeasure(G);
+  yield* _setpGridMeasureG(G, G.dist);   // (v54.68) in slices, like the rest of the build
 }
-function _setpGridMeasure(G) {
-  const { nx, ny, nz, own, dist } = G, N = nx * ny * nz, out = new Uint8Array(N), q = new Int32Array(N);
+// ⭐⭐ (v54.68) THE MEASURE IS A JOB TOO. Owner: "i noticed some hitching on mobile" (elimination). This was one call: a
+// flood fill over the whole box and two chamfer passes over ~100k voxels (2.5 M neighbour reads), plus two fresh arrays
+// the size of the grid - and it ran in one frame EVERY TIME A CHUNK BROKE, which is mid-fight, at the centre of the map
+// (the `dynObj+monsters+organics` 8-13 ms frames during play in the pane on the phone budget; a phone is several times
+// that). It was also the build's one long unyielded step. Now a generator: the build runs it in place (the piece is not
+// live yet), and a break runs it into a SPARE distance array a few ms a frame (_setpUpdate) and swaps the two when it is
+// done - the live grid is never half-written, the breach just opens a few frames later than it used to. A second break
+// during a measure restarts it (the owners changed under it). The flood's scratch arrays live on the grid.
+function* _setpGridMeasureG(G, dist) {
+  const { nx, ny, nz, own } = G, N = nx * ny * nz;
+  const out = G._out || (G._out = new Uint8Array(N)), q = G._q || (G._q = new Int32Array(N));
+  out.fill(0);
   // the outside: every empty voxel reachable from the box's skin (a broken hull opens its inside to it)
   let qh = 0, qt = 0;
   const push = (i) => { if (!out[i] && !own[i]) { out[i] = 1; q[qt++] = i; } };
@@ -104155,25 +104251,31 @@ function _setpGridMeasure(G) {
     if (i > 0) push(c - 1); if (i < nx - 1) push(c + 1);
     if (j > 0) push(c - nx); if (j < ny - 1) push(c + nx);
     if (k > 0) push(c - sxy); if (k < nz - 1) push(c + sxy);
+    if ((qh & 16383) === 0) yield;
   }
   // distance (in voxels) from every outside voxel to the nearest solid one: two chamfer passes (1 / sqrt2 / sqrt3 steps)
   // over the interior voxels, by precomputed offsets - the 2.5-voxel margin keeps every solid voxel off the box's skin
   for (let c = 0; c < N; c++) dist[c] = out[c] ? 1e6 : 0;
+  yield;
   const offs = [], ws = [];
   for (let dk = -1; dk <= 0; dk++) for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
     if (dk === 0 && (dj > 0 || (dj === 0 && di >= 0))) continue;
     offs.push(di + nx * (dj + ny * dk)); ws.push(Math.sqrt(Math.abs(di) + Math.abs(dj) + Math.abs(dk)));
   }
   const no = offs.length;
-  for (let k = 1; k < nz - 1; k++) for (let j = 1; j < ny - 1; j++) { const row = nx * (j + ny * k);
+  for (let k = 1; k < nz - 1; k++) { for (let j = 1; j < ny - 1; j++) { const row = nx * (j + ny * k);
     for (let i = 1; i < nx - 1; i++) { const c = row + i; let d = dist[c]; if (d === 0) continue;
       for (let q2 = 0; q2 < no; q2++) { const v = dist[c + offs[q2]] + ws[q2]; if (v < d) d = v; }
       dist[c] = d; } }
-  for (let k = nz - 2; k >= 1; k--) for (let j = ny - 2; j >= 1; j--) { const row = nx * (j + ny * k);
+    if ((k & 3) === 3) yield; }
+  for (let k = nz - 2; k >= 1; k--) { for (let j = ny - 2; j >= 1; j--) { const row = nx * (j + ny * k);
     for (let i = nx - 2; i >= 1; i--) { const c = row + i; let d = dist[c]; if (d === 0) continue;
       for (let q2 = 0; q2 < no; q2++) { const v = dist[c - offs[q2]] + ws[q2]; if (v < d) d = v; }
       dist[c] = d; } }
+    if ((k & 3) === 0) yield; }
 }
+// the whole measure at once (nothing calls it per frame any more; kept for a caller that needs the grid NOW)
+function _setpGridMeasure(G) { const it = _setpGridMeasureG(G, G.dist); while (!it.next().done) { /* run it out */ } }
 // signed-ish distance to the piece (world units): about half a voxel out from a solid voxel's centre is the surface
 function _setpSdf(G, x, y, z) {
   const ics = 1 / G.cs, fx = (x - G.o[0]) * ics - 0.5, fy = (y - G.o[1]) * ics - 0.5, fz = (z - G.o[2]) * ics - 0.5;
@@ -104481,7 +104583,8 @@ function _setpFireAdd(sp, p, r, life) {
   return f;
 }
 function _setpFireKill(f) {
-  for (const m of (f.meshes || [])) { try { if (m.parent) m.parent.remove(m); m.material.dispose(); } catch (_) {} }
+  // (v54.68) retained, as every other fire cloud's teardown does (the lite fires' `oct: 4` is a program of their own)
+  for (const m of (f.meshes || [])) { try { if (m.parent) m.parent.remove(m); if (typeof _lssRetainMat === 'function') _lssRetainMat(m.material); else m.material.dispose(); } catch (_) {} }
   f.meshes = [];
 }
 // one smoke ball (the cluster plumes' shaderSmoke: it grows to maxSize x, fades as (1-t)^2, drifts, and explosions light it)
@@ -104512,7 +104615,10 @@ function _setpUpdate(dt) {
   const sp = _SETP ? _SETP.cur : null;
   if (!sp) return;
   if (sp.job) {   // the build, a few ms a frame (a 120k-triangle carrier is ~150 ms of work in all)
-    const t0 = performance.now(), budget = (game.state === 'playing') ? Math.max(1, +_setpK('budget')) : 14;
+    // (v54.68) 14 ms a frame is most of a phone's frame, and between rounds this runs UNDER THE SHIP PICKER, which has to
+    // stay usable (v40.43: "doesn't give a chance to select a ship"): 6 there. The picker is up for seconds; the build is not.
+    let _small = false; try { _small = _fxSmallDevice(); } catch (_) {}
+    const t0 = performance.now(), budget = (game.state === 'playing') ? Math.max(1, +_setpK('budget')) : (_small ? 6 : 14);
     try {
       while (performance.now() - t0 < budget) { const r = sp.job.next(); if (r.done) { sp.job = null; break; } }
     } catch (e) { console.warn('[setp] build failed:', e); sp.job = null; }
@@ -104530,7 +104636,20 @@ function _setpUpdate(dt) {
     }
     _SETP.outDmg.clear();
   }
-  if (sp.gridDirty) { sp.gridDirty = false; _setpGridMeasure(sp.grid); }
+  // (v54.68) a break's re-measure: into the spare array, a few ms a frame, swapped in when done (see _setpGridMeasureG)
+  if (sp.gridDirty && sp.grid) {
+    sp.gridDirty = false;
+    const G = sp.grid;
+    if (!G._spare || G._spare.length !== G.dist.length) G._spare = new Float32Array(G.dist.length);
+    sp.gridJob = _setpGridMeasureG(G, G._spare);
+  }
+  if (sp.gridJob) {
+    const t1 = performance.now(), bud = Math.max(1, +_setpK('budget'));
+    let fin = false;
+    try { while (performance.now() - t1 < bud) { if (sp.gridJob.next().done) { fin = true; break; } } }
+    catch (e) { console.warn('[setp] grid measure failed:', e); sp.gridJob = null; }
+    if (fin) { const G = sp.grid, old = G.dist; G.dist = G._spare; G._spare = old; sp.gridJob = null; }
+  }
   const t = (game && game.time) || performance.now() / 1000;
   _SETP.uT.value = t;
   if (!sp.fires.length) return;
@@ -135762,13 +135881,23 @@ function updateWorldEffects(dt) {
       // expiring mid-fight freed the GPU buffers out from under every future wall, and three.js
       // re-uploaded them on the next deploy. The shield has a 10s timer, so this recurred all match.
       // The material is still disposed: that one really is built per wall (_makeHexHologramMaterial).
+      // ⭐⭐ (v54.68) ...AND THAT DISPOSE WAS A COLD LINK PER SHIELD ON A PHONE - the v43.81 line above is reversed for the
+      // wall. Owner: "i noticed some hitching on mobile" (elimination). _wallDestroy (a shield shot down) has RETAINED the
+      // shell since v43.87 and says why: _pinCombatEffectPrograms returns early on _fxSmallDevice(), so on a phone the
+      // live walls' own materials are the hex program's only holders. This branch - a shield running out its 10 s timer,
+      // which is how most of them end - was never given the same treatment. MEASURED in the pane on the phone budget
+      // (?lite=1, The Nexus, seven rounds): every Plasma Shield linked a NEW program on its first frame and freed it
+      // exactly 10.0 s later (ids 201 / 202 / 203 ..., `__coldSeen` "(unnamed)" + "freed x1" per shield). On the dev
+      // machine that link is ~2 ms because the driver's binary cache answers it; on a phone it is a compile, mid-fight,
+      // every time any Tracker raises a shield. Retained, the first shield's material holds the program for the session
+      // and the rest dispose as duplicates. Desktop was never affected (the pin holds the program there).
       if (eff.mesh && eff.mesh.parent) {
         scene.remove(eff.mesh);
         // (v43.86) unified onto the shared predicate with the same null-check its plasmaMesh twin
         // already had - the v43.81 form would have thrown on a mesh with a null geometry, and having
         // one of the four copies use a different test is exactly how they drifted apart before.
         if (eff.mesh.geometry && !_isSharedEffectGeometry(eff.mesh.geometry)) eff.mesh.geometry.dispose();
-        if (eff.mesh.userData && eff.mesh.userData._fireCloud && typeof _lssRetainMat === 'function') _lssRetainMat(eff.mesh.material);
+        if (((eff.mesh.userData && eff.mesh.userData._fireCloud) || eff.type === 'particle_wall') && typeof _lssRetainMat === 'function') _lssRetainMat(eff.mesh.material);
         else eff.mesh.material.dispose();
       }
       if (eff.coreMesh && eff.coreMesh.parent) { scene.remove(eff.coreMesh); eff.coreMesh.geometry.dispose(); eff.coreMesh.material.dispose(); }
@@ -135778,7 +135907,9 @@ function updateWorldEffects(dt) {
       // _WALL_RIM_GEO and must survive, so only the material goes.
       if (eff.edgeMesh && eff.edgeMesh.parent) {
         scene.remove(eff.edgeMesh);
-        if (eff.edgeMesh.material && eff.edgeMesh.material.dispose) eff.edgeMesh.material.dispose();
+        // (v54.68) retained, as _wallDestroy does (one LineBasicMaterial per program key; duplicates still dispose)
+        if (eff.type === 'particle_wall' && typeof _lssRetainMat === 'function') _lssRetainMat(eff.edgeMesh.material);
+        else if (eff.edgeMesh.material && eff.edgeMesh.material.dispose) eff.edgeMesh.material.dispose();
       }
       // Plasma Shield plasma backing layer ; tear it down too.
       if (eff.plasmaMesh && eff.plasmaMesh.parent) {
@@ -137737,8 +137868,11 @@ function updateRoundSystem(dt) {
             // Stasis Trap octahedron, the gas cloud sphere and the sonar pulse are all fresh
             // allocations, so none of them is identical to any singleton and none is exempted.
             // The MATERIAL is still disposed either way - that one really is built per wall.
+            // (v54.68) ...except the wall's own shell, which is RETAINED here as in the expiry walk and _wallDestroy: a
+            // shield standing at the bell could be the hex program's only holder on a phone (see updateWorldEffects).
             if (eff.mesh.geometry && !_isSharedEffectGeometry(eff.mesh.geometry)) eff.mesh.geometry.dispose();
-            if (eff.mesh.material && eff.mesh.material.dispose) eff.mesh.material.dispose();
+            if (eff.type === 'particle_wall' && typeof _lssRetainMat === 'function') _lssRetainMat(eff.mesh.material);
+            else if (eff.mesh.material && eff.mesh.material.dispose) eff.mesh.material.dispose();
           }
           if (eff.plasmaMesh && eff.plasmaMesh.parent) {
             scene.remove(eff.plasmaMesh);
@@ -184205,6 +184339,7 @@ function _startRailgunChargeSound(initialCharge) {
     osc.frequency.setValueAtTime(
       _RAIL_FREQ_START[i] + (_railPeakHz(i) - _RAIL_FREQ_START[i]) * c0, t0);
     const g = ctx.createGain();
+    g.gain.value = 0;   // (v54.68) born silent: until its event at t0 is rendered `gain.value` reads this, not 1.0 (see the stop)
     g.gain.setValueAtTime(0.0001, t0);
     g.gain.linearRampToValueAtTime(finalVol, t0 + attack);
     osc.connect(g);
@@ -184246,8 +184381,13 @@ function _stopRailgunChargeSound(handle) {
   for (const g of handle.gains) {
     try {
       g.gain.cancelScheduledValues(now);
-      g.gain.setValueAtTime(g.gain.value, now);
-      g.gain.exponentialRampToValueAtTime(0.0001, now + 0.08);
+      // (v54.68) the fade never starts above the whine's own level. The second and third oscillators start 35 and 70 ms
+      // after the first, so a tap shorter than that reached this line with their gain events still in the future: the
+      // cancel removed them, `gain.value` read the node's default 1.0, and each played its 80 ms fade from full scale -
+      // twelve times the whine. Same trap as the water hiss (_swStartDragHiss); the gains are also born at 0 now.
+      const v0 = Math.min(g.gain.value, handle.baseVol || 0.081);
+      if (v0 > 0.0002) { g.gain.setValueAtTime(v0, now); g.gain.exponentialRampToValueAtTime(0.0001, now + 0.08); }
+      else g.gain.setValueAtTime(0, now);
     } catch (_) {}
   }
   for (let i = 0; i < handle.oscs.length; i++) {
@@ -185113,13 +185253,40 @@ const _flybyVoices = [];
 const _flybyScratch = new THREE.Vector3();
 function _flybyRelease(v) {
   if (!v) return;
-  try { if (v.src) { v.src.stop(); v.src.disconnect(); } } catch (_) {}
+  const src = v.src;
   v.src = null;
-  try { v.pan.disconnect(); } catch (_) {}
   v.proj = null;
+  if (!src) { try { v.pan.disconnect(); } catch (_) {} return; }
+  // (v54.68) FADE, THEN STOP. This was `src.stop()` on the spot: a ship's hum at up to 0.9 (a missile's whistle at 0.5) cut
+  // inside one sample every time its emitter left the pool - out of range, out-ranked by a nearer one, dead. A low sine
+  // stack cut mid-cycle is a click. And the next emitter was handed the same gain node on the same tick: _flybyAssign's
+  // `setValueAtTime(0.0001, t)` is removed by the tick's own `cancelScheduledValues(t)` a few lines later, so the new
+  // source started at whatever level the old one had left behind.
+  // Now the gain glides to 0 (tau 12 ms), the source stops 80 ms later, and the voice is `busy` for 110 ms - not handed
+  // out again until its gain is back at 0 (_flybyEnsureVoice), so every emitter fades in from silence. `gen` keeps a
+  // late `onended` from unplugging a panner that has since been given to someone else.
+  let ok = false;
+  try {
+    const t = audio.ctx.currentTime;
+    v.g.gain.cancelScheduledValues(t);
+    v.g.gain.setTargetAtTime(0, t, 0.012);
+    src.stop(t + 0.08);
+    const gen = (v.gen = (v.gen | 0) + 1);
+    v.busy = performance.now() + 110;
+    src.onended = () => {
+      try { src.disconnect(); } catch (_) {}
+      if (v.gen === gen && !v.src) { try { v.pan.disconnect(); } catch (_) {} }
+    };
+    ok = true;
+  } catch (_) {}
+  if (!ok) { try { src.stop(); src.disconnect(); } catch (_) {} try { v.pan.disconnect(); } catch (_) {} }
 }
 function _flybyEnsureVoice(ctx) {
-  for (let i = 0; i < _flybyVoices.length; i++) if (!_flybyVoices[i].proj) return _flybyVoices[i];
+  // (v54.68) a voice still fading its last emitter out is not free yet (_flybyRelease). The pool is capped at 8: with
+  // every voice playing or fading, the pick simply waits a tick (the caller breaks on null).
+  const _now = performance.now();
+  for (let i = 0; i < _flybyVoices.length; i++) if (!_flybyVoices[i].proj && !(_flybyVoices[i].busy > _now)) return _flybyVoices[i];
+  if (_flybyVoices.length >= 8) return null;
   const bp = ctx.createBiquadFilter();
   bp.type = 'bandpass';
   bp.frequency.value = 700;
@@ -186012,7 +186179,9 @@ function _musicSynthBass(freq, g, when, out, durSec) {
       if (stopped) return; stopped = true;
       try {
         amp.gain.cancelScheduledValues(t);
-        amp.gain.setValueAtTime(amp.gain.value, t);
+        // (v54.68) never from above the note's own peak: a note cut before its `when` still reads the gain node's default
+        // 1.0 here (its envelope has just been cancelled, nothing was ever rendered) - the water hiss's trap, _swStartDragHiss
+        amp.gain.setValueAtTime(Math.min(amp.gain.value, 0.50 * g), t);
         amp.gain.linearRampToValueAtTime(0, t + 0.05);
         osc.stop(t + 0.1); sub.stop(t + 0.1);
       } catch (_) {}
@@ -186088,7 +186257,7 @@ function _musicSynthPad(freq, g, when, out, durSec) {
       if (stopped) return; stopped = true;
       try {
         amp.gain.cancelScheduledValues(t);
-        amp.gain.setValueAtTime(amp.gain.value, t);
+        amp.gain.setValueAtTime(Math.min(amp.gain.value, 0.15 * g), t);   // (v54.68) as the bass: never above the pad's own peak
         amp.gain.linearRampToValueAtTime(0, t + 0.5);
         o1.stop(t + 0.55); o2.stop(t + 0.55);
         oSub.stop(t + 0.55); oFifth.stop(t + 0.55);
@@ -186147,7 +186316,7 @@ function _musicSynthLead(freq, g, when, out, durSec) {
       if (stopped) return; stopped = true;
       try {
         amp.gain.cancelScheduledValues(t);
-        amp.gain.setValueAtTime(amp.gain.value, t);
+        amp.gain.setValueAtTime(Math.min(amp.gain.value, 0.30 * g), t);   // (v54.68) as the bass: never above the lead's own peak
         amp.gain.linearRampToValueAtTime(0, t + 0.08);
         osc.stop(t + 0.12);
         oct.stop(t + 0.12);

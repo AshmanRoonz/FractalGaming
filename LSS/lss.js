@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "54.67";
+const LSS_BUILD = "54.68";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -9183,7 +9183,11 @@ class NetworkPlayer {
           const _fp = _hy ? _hy.fp : _swPeerFootprint(this);
           const _W3 = window.__water || {};
           _swImpact(this.position.x, this.position.z, _above < 0 ? +1 : -1, _fp, _hy ? _hy.mass : _fp.heft * ((_W3.mass != null) ? _W3.mass : 1.0), this.velocity, _WL, this);
-          if (typeof playSpatialSound === 'function') playSpatialSound(_above < 0 ? 'water_bloop' : 'water_bloop_soft', new THREE.Vector3(this.position.x, _WL, this.position.z), { refDistance: 300, maxDistance: 5200 });
+          const _blNow = performance.now();
+          if (!(_blNow - (this._wBloopT || 0) < 250) && typeof playSpatialSound === 'function') {
+            this._wBloopT = _blNow;
+            playSpatialSound(_above < 0 ? 'water_bloop' : 'water_bloop_soft', new THREE.Vector3(this.position.x, _WL, this.position.z), { refDistance: 300, maxDistance: 5200 });
+          }
         } catch (_) {}
       }
       this._wPrevAbove = _above;
@@ -32221,11 +32225,14 @@ function _swRippleTick(dt) {
     const _wooshV = _swWetAtT(R, px, pz) ? Math.max(_swWooshK(keelA, DR, _skHOf(fp, DR)), R._wingWoosh || 0) : 0;
     try { W3.woosh = +_wooshV.toFixed(3); } catch (_) {}   // live readout
     const _wantHiss = sp > 20 && _wooshV > 0.01;   // (no underwater gate: the old `touching` rule had none either)
+    const _hissHold = (W3.hissFix !== 0) ? 0.3 : 0;
+    R._hissOff = _wantHiss ? 0 : (R._hissOff || 0) + dt;
     if (_wantHiss && !game._dragHiss) { try { game._dragHiss = _swStartDragHiss(); } catch (_) {} }
-    else if (!_wantHiss && game._dragHiss) { try { _swStopDragHiss(game._dragHiss); } catch (_) {} game._dragHiss = null; }
-    if (game._dragHiss && game._dragHiss.set) { try { game._dragHiss.set(sp, _wooshV); } catch (_) {} }
-    if (keelA < 0 && prevKeelA >= 0)      { _swImpact(px, pz, +1, fp, mass, player.velocity, WL, R); try { if (typeof playSpatialSound === 'function') playSpatialSound('water_bloop', new THREE.Vector3(px, WL, pz), { refDistance: 300, maxDistance: 5200 }); } catch (_) {} }
-    else if (keelA > 0 && prevKeelA <= 0) { _swImpact(px, pz, -1, fp, mass, player.velocity, WL, R); try { if (typeof playSpatialSound === 'function') playSpatialSound('water_bloop_soft', new THREE.Vector3(px, WL, pz), { refDistance: 260, maxDistance: 4200 }); } catch (_) {} }
+    else if (!_wantHiss && game._dragHiss && R._hissOff >= _hissHold) { try { _swStopDragHiss(game._dragHiss); } catch (_) {} game._dragHiss = null; }
+    if (game._dragHiss && game._dragHiss.set) { try { game._dragHiss.set(sp, _wantHiss ? _wooshV : 0); } catch (_) {} }
+    const _blNow = performance.now(), _blOk = !(_blNow - (R._bloopT || 0) < 250);
+    if (keelA < 0 && prevKeelA >= 0)      { _swImpact(px, pz, +1, fp, mass, player.velocity, WL, R); if (_blOk) { R._bloopT = _blNow; try { if (typeof playSpatialSound === 'function') playSpatialSound('water_bloop', new THREE.Vector3(px, WL, pz), { refDistance: 300, maxDistance: 5200 }); } catch (_) {} } }
+    else if (keelA > 0 && prevKeelA <= 0) { _swImpact(px, pz, -1, fp, mass, player.velocity, WL, R); if (_blOk) { R._bloopT = _blNow; try { if (typeof playSpatialSound === 'function') playSpatialSound('water_bloop_soft', new THREE.Vector3(px, WL, pz), { refDistance: 260, maxDistance: 4200 }); } catch (_) {} } }
     try { const _wx = (window.__water = window.__water || {});
       _wx.xAbove = Math.round(above); _wx.xPrev = Math.round(prevAbove);
       _wx.xKeel = Math.round(keelA); _wx.xDraft = Math.round(DR); _wx.xKeelOff = Math.round(_keelH);   // (v42.63)
@@ -48072,17 +48079,20 @@ function _swStartDragHiss() {
   bp.frequency.value = 2400;
   bp.Q.value = 0.35;
   const g = ctx.createGain();
-  g.gain.setValueAtTime(0.0001, now);
+  const _hfx = !(typeof window !== 'undefined' && window.__water && window.__water.hissFix === 0);
+  if (_hfx) g.gain.value = 0; else g.gain.setValueAtTime(0.0001, now);
   src.connect(bp); bp.connect(g);
   g.connect(audio.sfxBus || audio.masterGain || ctx.destination);
   src.start(now);
   return {
-    src, bp, g,
+    src, bp, g, lvl: 0, safe: _hfx,
     set(sp, vol) {   // (v48.98) vol 0..1 = _swWooshK / _swWooshWing (1 = the in-water level it always had)
       const t = ctx.currentTime;
       const k = Math.min(1, Math.max(0, (sp - 18) / 320));
       const v = (vol != null) ? Math.max(0, Math.min(1, vol)) : 1;   // (v48.98) the WHOLE level scales, so no foam = silence
-      try { this.g.gain.setTargetAtTime((0.05 + 0.30 * k) * 0.25 * v, t, 0.08); } catch (_) {}
+      const tg = (0.05 + 0.30 * k) * 0.25 * v;
+      if (tg > this.lvl) this.lvl = tg;   // (v54.68) the ceiling _swStopDragHiss fades from
+      try { this.g.gain.setTargetAtTime(tg, t, 0.08); } catch (_) {}
       try { this.bp.frequency.setTargetAtTime(1800 + 2200 * k, t, 0.15); } catch (_) {}
     },
   };
@@ -48091,7 +48101,12 @@ const _SW_PHISS = new Map();
 function _swPeerHiss(e, want, sp, x, y, z, vol) {   // (v48.98) vol = _swWooshK / _swWooshWing, as yours
   let h = _SW_PHISS.get(e);
   const K = window.__water || {};
-  if (!want || K.peerHiss === 0) { if (h) { _swStopDragHiss(h); _SW_PHISS.delete(e); } return; }
+  const _hfx = K.hissFix !== 0;   // (v54.68) see _swStartDragHiss
+  if (K.peerHiss === 0 || (!want && !_hfx)) { if (h) { _swStopDragHiss(h); _SW_PHISS.delete(e); } return; }
+  if (!want) {
+    if (h) { try { h.g.gain.setTargetAtTime(0, audio.ctx.currentTime, 0.05); } catch (_) {} }
+    return;
+  }
   if (!h) {
     if (_SW_PHISS.size >= 4 || typeof audio === 'undefined' || !audio || !audio.initialized || !audio.ctx) return;
     try {
@@ -48100,7 +48115,8 @@ function _swPeerHiss(e, want, sp, x, y, z, vol) {   // (v48.98) vol = _swWooshK 
       src.buffer = _audioSharedNoiseBuffer(ctx, 1.0);
       src.loop = true;
       const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 2400; bp.Q.value = 0.35;
-      const g = ctx.createGain(); g.gain.setValueAtTime(0.0001, now);
+      const g = ctx.createGain();
+      if (_hfx) g.gain.value = 0; else g.gain.setValueAtTime(0.0001, now);   // (v54.68) the intrinsic value - see _swStartDragHiss
       const pan = _audioKRatePanner(ctx.createPanner());   // (v48.39) k-rate - see _audioKRateSet
       pan.panningModel = (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) ? 'equalpower' : 'HRTF';
       pan.distanceModel = 'inverse'; pan.refDistance = 300; pan.maxDistance = 5200; pan.rolloffFactor = 1;
@@ -48109,7 +48125,7 @@ function _swPeerHiss(e, want, sp, x, y, z, vol) {   // (v48.98) vol = _swWooshK 
       src.connect(bp); bp.connect(g); g.connect(pan);
       pan.connect(audio.sfxBus || audio.masterGain || ctx.destination);
       src.start(now, Math.random() * 0.9);
-      h = { src, bp, g, pan, t: 0 };
+      h = { src, bp, g, pan, t: 0, lvl: 0, safe: _hfx };
       _SW_PHISS.set(e, h);
     } catch (_) { return; }
   }
@@ -48120,7 +48136,9 @@ function _swPeerHiss(e, want, sp, x, y, z, vol) {   // (v48.98) vol = _swWooshK 
     else if (h.pan.setPosition) h.pan.setPosition(x, y, z);
     const k = Math.min(1, Math.max(0, (sp - 18) / 320));
     const v = (vol != null) ? Math.max(0, Math.min(1, vol)) : 1;   // (v48.98) the whole level scales, as yours
-    h.g.gain.setTargetAtTime((0.05 + 0.30 * k) * 0.25 * v, t, 0.08);   // your curve (_swStartDragHiss.set)
+    const tg = (0.05 + 0.30 * k) * 0.25 * v;
+    if (tg > h.lvl) h.lvl = tg;   // (v54.68) the ceiling _swStopDragHiss fades from
+    h.g.gain.setTargetAtTime(tg, t, 0.08);   // your curve (_swStartDragHiss.set)
     h.bp.frequency.setTargetAtTime(1800 + 2200 * k, t, 0.15);
   } catch (_) {}
 }
@@ -48138,10 +48156,12 @@ function _swStopDragHiss(h) {
   const ctx = audio.ctx, now = ctx.currentTime;
   try {
     h.g.gain.cancelScheduledValues(now);
-    h.g.gain.setValueAtTime(h.g.gain.value, now);
-    h.g.gain.exponentialRampToValueAtTime(0.0001, now + 0.18);
+    const v0 = h.safe ? Math.min(h.g.gain.value, h.lvl || 0) : h.g.gain.value;
+    if (v0 > 0.0002) { h.g.gain.setValueAtTime(v0, now); h.g.gain.exponentialRampToValueAtTime(0.0001, now + 0.18); }
+    else h.g.gain.setValueAtTime(0, now);
   } catch (_) {}
   try { h.src.stop(now + 0.22); } catch (_) {}
+  try { h.src.onended = () => { try { h.g.disconnect(); } catch (_) {} try { if (h.pan) h.pan.disconnect(); } catch (_) {} }; } catch (_) {}
 }
 
 
@@ -66782,7 +66802,10 @@ function _setpBuild() {
     lightT: 0, t0: performance.now(), pend: null, broken: 0,
   };
   sp.group.name = 'setPiece:' + kind;
-  sp.lite = !!+_setpK('lite');
+  { let _w = null, _ph = false;
+    try { _w = window.__setp; } catch (_) {}
+    try { _ph = !!_LSS_IS_MOBILE; } catch (_) {}
+    sp.lite = (_w && _w.lite != null) ? !!+_w.lite : _ph; }
   sp.model = (kind === 'leviathan') ? MONSTER_DEFS[Math.floor(rnd() * MONSTER_DEFS.length) % MONSTER_DEFS.length].key : (sp.lite ? 'carrier2_wreck' : 'carrier2');
   _SETP.cur = sp;
   scene.add(sp.group);
@@ -66801,7 +66824,7 @@ function _setpDispose() {
   sp.job = null;
   try { if (sp.group.parent) sp.group.parent.remove(sp.group); } catch (_) {}
   for (const ch of sp.chunks) { try { ch.mesh.geometry.dispose(); } catch (_) {} }
-  for (const m of sp.mats) { try { m.dispose(); } catch (_) {} }   // clones: their textures belong to the cached GLB
+  for (const m of sp.mats) { try { if (typeof _lssRetainMat === 'function') _lssRetainMat(m); else m.dispose(); } catch (_) {} }
   for (const f of sp.fires) _setpFireKill(f);
   sp.chunks = []; sp.fires = []; sp.mats = [];
 }
@@ -66921,8 +66944,14 @@ function* _setpLeviG(sp, gltf) {
 }
 
 function* _setpWreckG(sp, gltf) {
-  const X = yield* _setpExtractG(gltf.scene);
-  if (!X.nt) return;
+  let X0 = (_SETP.xw && _SETP.xw.model === sp.model) ? _SETP.xw.X : null;
+  if (!X0) {
+    X0 = yield* _setpExtractG(gltf.scene);
+    if (!X0.nt) return;
+    _SETP.xw = { model: sp.model, X: X0 };
+  }
+  const X = { P: X0.P.slice(), N: X0.N.slice(), UV: X0.UV, MI: X0.MI, mats: X0.mats, nt: X0.nt, H: null };
+  yield;
   const P = X.P, nt = X.nt;
   let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity, z0 = Infinity, z1 = -Infinity;
   for (let i = 0; i < nt * 9; i += 3) {
@@ -66947,12 +66976,11 @@ function* _setpWreckG(sp, gltf) {
   for (let k = 0; k < 2; k++) {
     const Mp = new THREE.Matrix4().makeRotationX(roll[k]).multiply(new THREE.Matrix4().makeRotationZ(pitch[k]))
       .multiply(new THREE.Matrix4().makeScale(s, s, s)).multiply(new THREE.Matrix4().makeTranslation(-B.x, -B.y, -B.z));
-    _setpXform(X, Mp, 0, nt, pieceOf, k);
+    for (let a = 0; a < nt; a += 32768) { _setpXform(X, Mp, a, Math.min(nt, a + 32768), pieceOf, k); yield; }
     let ymin = Infinity;   // sit it on (and a little into) the floor
     for (let t = 0; t < nt; t++) if (pieceOf[t] === k) for (let j = 0; j < 3; j++) ymin = Math.min(ymin, P[t * 9 + j * 3 + 1]);
     const Mt = new THREE.Matrix4().copy(Mw).multiply(new THREE.Matrix4().makeTranslation((k ? 1 : -1) * gap / 2, sp.floorY - sink - ymin, 0));
-    _setpXform(X, Mt, 0, nt, pieceOf, k);
-    yield;
+    for (let a = 0; a < nt; a += 32768) { _setpXform(X, Mt, a, Math.min(nt, a + 32768), pieceOf, k); yield; }
   }
   X.H = heat;
   sp.pieceOf = pieceOf;
@@ -67082,10 +67110,12 @@ function* _setpGridMakeG(sp, X, owner) {
     if ((t & 8191) === 8191) yield;
   }
   sp.grid = G;
-  _setpGridMeasure(G);
+  yield* _setpGridMeasureG(G, G.dist);   // (v54.68) in slices, like the rest of the build
 }
-function _setpGridMeasure(G) {
-  const { nx, ny, nz, own, dist } = G, N = nx * ny * nz, out = new Uint8Array(N), q = new Int32Array(N);
+function* _setpGridMeasureG(G, dist) {
+  const { nx, ny, nz, own } = G, N = nx * ny * nz;
+  const out = G._out || (G._out = new Uint8Array(N)), q = G._q || (G._q = new Int32Array(N));
+  out.fill(0);
   let qh = 0, qt = 0;
   const push = (i) => { if (!out[i] && !own[i]) { out[i] = 1; q[qt++] = i; } };
   for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++)
@@ -67096,23 +67126,28 @@ function _setpGridMeasure(G) {
     if (i > 0) push(c - 1); if (i < nx - 1) push(c + 1);
     if (j > 0) push(c - nx); if (j < ny - 1) push(c + nx);
     if (k > 0) push(c - sxy); if (k < nz - 1) push(c + sxy);
+    if ((qh & 16383) === 0) yield;
   }
   for (let c = 0; c < N; c++) dist[c] = out[c] ? 1e6 : 0;
+  yield;
   const offs = [], ws = [];
   for (let dk = -1; dk <= 0; dk++) for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
     if (dk === 0 && (dj > 0 || (dj === 0 && di >= 0))) continue;
     offs.push(di + nx * (dj + ny * dk)); ws.push(Math.sqrt(Math.abs(di) + Math.abs(dj) + Math.abs(dk)));
   }
   const no = offs.length;
-  for (let k = 1; k < nz - 1; k++) for (let j = 1; j < ny - 1; j++) { const row = nx * (j + ny * k);
+  for (let k = 1; k < nz - 1; k++) { for (let j = 1; j < ny - 1; j++) { const row = nx * (j + ny * k);
     for (let i = 1; i < nx - 1; i++) { const c = row + i; let d = dist[c]; if (d === 0) continue;
       for (let q2 = 0; q2 < no; q2++) { const v = dist[c + offs[q2]] + ws[q2]; if (v < d) d = v; }
       dist[c] = d; } }
-  for (let k = nz - 2; k >= 1; k--) for (let j = ny - 2; j >= 1; j--) { const row = nx * (j + ny * k);
+    if ((k & 3) === 3) yield; }
+  for (let k = nz - 2; k >= 1; k--) { for (let j = ny - 2; j >= 1; j--) { const row = nx * (j + ny * k);
     for (let i = nx - 2; i >= 1; i--) { const c = row + i; let d = dist[c]; if (d === 0) continue;
       for (let q2 = 0; q2 < no; q2++) { const v = dist[c - offs[q2]] + ws[q2]; if (v < d) d = v; }
       dist[c] = d; } }
+    if ((k & 3) === 0) yield; }
 }
+function _setpGridMeasure(G) { const it = _setpGridMeasureG(G, G.dist); while (!it.next().done) { /* run it out */ } }
 function _setpSdf(G, x, y, z) {
   const ics = 1 / G.cs, fx = (x - G.o[0]) * ics - 0.5, fy = (y - G.o[1]) * ics - 0.5, fz = (z - G.o[2]) * ics - 0.5;
   if (fx < 0 || fy < 0 || fz < 0 || fx > G.nx - 1.001 || fy > G.ny - 1.001 || fz > G.nz - 1.001) {
@@ -67390,7 +67425,7 @@ function _setpFireAdd(sp, p, r, life) {
   return f;
 }
 function _setpFireKill(f) {
-  for (const m of (f.meshes || [])) { try { if (m.parent) m.parent.remove(m); m.material.dispose(); } catch (_) {} }
+  for (const m of (f.meshes || [])) { try { if (m.parent) m.parent.remove(m); if (typeof _lssRetainMat === 'function') _lssRetainMat(m.material); else m.material.dispose(); } catch (_) {} }
   f.meshes = [];
 }
 function _setpDust(p, size, col, alpha, life) {
@@ -67419,7 +67454,8 @@ function _setpUpdate(dt) {
   const sp = _SETP ? _SETP.cur : null;
   if (!sp) return;
   if (sp.job) {   // the build, a few ms a frame (a 120k-triangle carrier is ~150 ms of work in all)
-    const t0 = performance.now(), budget = (game.state === 'playing') ? Math.max(1, +_setpK('budget')) : 14;
+    let _small = false; try { _small = _fxSmallDevice(); } catch (_) {}
+    const t0 = performance.now(), budget = (game.state === 'playing') ? Math.max(1, +_setpK('budget')) : (_small ? 6 : 14);
     try {
       while (performance.now() - t0 < budget) { const r = sp.job.next(); if (r.done) { sp.job = null; break; } }
     } catch (e) { console.warn('[setp] build failed:', e); sp.job = null; }
@@ -67436,7 +67472,19 @@ function _setpUpdate(dt) {
     }
     _SETP.outDmg.clear();
   }
-  if (sp.gridDirty) { sp.gridDirty = false; _setpGridMeasure(sp.grid); }
+  if (sp.gridDirty && sp.grid) {
+    sp.gridDirty = false;
+    const G = sp.grid;
+    if (!G._spare || G._spare.length !== G.dist.length) G._spare = new Float32Array(G.dist.length);
+    sp.gridJob = _setpGridMeasureG(G, G._spare);
+  }
+  if (sp.gridJob) {
+    const t1 = performance.now(), bud = Math.max(1, +_setpK('budget'));
+    let fin = false;
+    try { while (performance.now() - t1 < bud) { if (sp.gridJob.next().done) { fin = true; break; } } }
+    catch (e) { console.warn('[setp] grid measure failed:', e); sp.gridJob = null; }
+    if (fin) { const G = sp.grid, old = G.dist; G.dist = G._spare; G._spare = old; sp.gridJob = null; }
+  }
   const t = (game && game.time) || performance.now() / 1000;
   _SETP.uT.value = t;
   if (!sp.fires.length) return;
@@ -88369,14 +88417,15 @@ function updateWorldEffects(dt) {
       if (eff.mesh && eff.mesh.parent) {
         scene.remove(eff.mesh);
         if (eff.mesh.geometry && !_isSharedEffectGeometry(eff.mesh.geometry)) eff.mesh.geometry.dispose();
-        if (eff.mesh.userData && eff.mesh.userData._fireCloud && typeof _lssRetainMat === 'function') _lssRetainMat(eff.mesh.material);
+        if (((eff.mesh.userData && eff.mesh.userData._fireCloud) || eff.type === 'particle_wall') && typeof _lssRetainMat === 'function') _lssRetainMat(eff.mesh.material);
         else eff.mesh.material.dispose();
       }
       if (eff.coreMesh && eff.coreMesh.parent) { scene.remove(eff.coreMesh); eff.coreMesh.geometry.dispose(); eff.coreMesh.material.dispose(); }
       if (eff.glow && eff.glow.parent) { scene.remove(eff.glow); eff.glow.geometry.dispose(); eff.glow.material.dispose(); }
       if (eff.edgeMesh && eff.edgeMesh.parent) {
         scene.remove(eff.edgeMesh);
-        if (eff.edgeMesh.material && eff.edgeMesh.material.dispose) eff.edgeMesh.material.dispose();
+        if (eff.type === 'particle_wall' && typeof _lssRetainMat === 'function') _lssRetainMat(eff.edgeMesh.material);
+        else if (eff.edgeMesh.material && eff.edgeMesh.material.dispose) eff.edgeMesh.material.dispose();
       }
       if (eff.plasmaMesh && eff.plasmaMesh.parent) {
         scene.remove(eff.plasmaMesh);
@@ -89625,7 +89674,8 @@ function updateRoundSystem(dt) {
           if (eff.mesh && eff.mesh.parent) {
             scene.remove(eff.mesh);
             if (eff.mesh.geometry && !_isSharedEffectGeometry(eff.mesh.geometry)) eff.mesh.geometry.dispose();
-            if (eff.mesh.material && eff.mesh.material.dispose) eff.mesh.material.dispose();
+            if (eff.type === 'particle_wall' && typeof _lssRetainMat === 'function') _lssRetainMat(eff.mesh.material);
+            else if (eff.mesh.material && eff.mesh.material.dispose) eff.mesh.material.dispose();
           }
           if (eff.plasmaMesh && eff.plasmaMesh.parent) {
             scene.remove(eff.plasmaMesh);
@@ -124889,6 +124939,7 @@ function _startRailgunChargeSound(initialCharge) {
     osc.frequency.setValueAtTime(
       _RAIL_FREQ_START[i] + (_railPeakHz(i) - _RAIL_FREQ_START[i]) * c0, t0);
     const g = ctx.createGain();
+    g.gain.value = 0;   // (v54.68) born silent: until its event at t0 is rendered `gain.value` reads this, not 1.0 (see the stop)
     g.gain.setValueAtTime(0.0001, t0);
     g.gain.linearRampToValueAtTime(finalVol, t0 + attack);
     osc.connect(g);
@@ -124926,8 +124977,9 @@ function _stopRailgunChargeSound(handle) {
   for (const g of handle.gains) {
     try {
       g.gain.cancelScheduledValues(now);
-      g.gain.setValueAtTime(g.gain.value, now);
-      g.gain.exponentialRampToValueAtTime(0.0001, now + 0.08);
+      const v0 = Math.min(g.gain.value, handle.baseVol || 0.081);
+      if (v0 > 0.0002) { g.gain.setValueAtTime(v0, now); g.gain.exponentialRampToValueAtTime(0.0001, now + 0.08); }
+      else g.gain.setValueAtTime(0, now);
     } catch (_) {}
   }
   for (let i = 0; i < handle.oscs.length; i++) {
@@ -125501,13 +125553,30 @@ const _flybyVoices = [];
 const _flybyScratch = new THREE.Vector3();
 function _flybyRelease(v) {
   if (!v) return;
-  try { if (v.src) { v.src.stop(); v.src.disconnect(); } } catch (_) {}
+  const src = v.src;
   v.src = null;
-  try { v.pan.disconnect(); } catch (_) {}
   v.proj = null;
+  if (!src) { try { v.pan.disconnect(); } catch (_) {} return; }
+  let ok = false;
+  try {
+    const t = audio.ctx.currentTime;
+    v.g.gain.cancelScheduledValues(t);
+    v.g.gain.setTargetAtTime(0, t, 0.012);
+    src.stop(t + 0.08);
+    const gen = (v.gen = (v.gen | 0) + 1);
+    v.busy = performance.now() + 110;
+    src.onended = () => {
+      try { src.disconnect(); } catch (_) {}
+      if (v.gen === gen && !v.src) { try { v.pan.disconnect(); } catch (_) {} }
+    };
+    ok = true;
+  } catch (_) {}
+  if (!ok) { try { src.stop(); src.disconnect(); } catch (_) {} try { v.pan.disconnect(); } catch (_) {} }
 }
 function _flybyEnsureVoice(ctx) {
-  for (let i = 0; i < _flybyVoices.length; i++) if (!_flybyVoices[i].proj) return _flybyVoices[i];
+  const _now = performance.now();
+  for (let i = 0; i < _flybyVoices.length; i++) if (!_flybyVoices[i].proj && !(_flybyVoices[i].busy > _now)) return _flybyVoices[i];
+  if (_flybyVoices.length >= 8) return null;
   const bp = ctx.createBiquadFilter();
   bp.type = 'bandpass';
   bp.frequency.value = 700;
@@ -126208,7 +126277,7 @@ function _musicSynthBass(freq, g, when, out, durSec) {
       if (stopped) return; stopped = true;
       try {
         amp.gain.cancelScheduledValues(t);
-        amp.gain.setValueAtTime(amp.gain.value, t);
+        amp.gain.setValueAtTime(Math.min(amp.gain.value, 0.50 * g), t);
         amp.gain.linearRampToValueAtTime(0, t + 0.05);
         osc.stop(t + 0.1); sub.stop(t + 0.1);
       } catch (_) {}
@@ -126276,7 +126345,7 @@ function _musicSynthPad(freq, g, when, out, durSec) {
       if (stopped) return; stopped = true;
       try {
         amp.gain.cancelScheduledValues(t);
-        amp.gain.setValueAtTime(amp.gain.value, t);
+        amp.gain.setValueAtTime(Math.min(amp.gain.value, 0.15 * g), t);   // (v54.68) as the bass: never above the pad's own peak
         amp.gain.linearRampToValueAtTime(0, t + 0.5);
         o1.stop(t + 0.55); o2.stop(t + 0.55);
         oSub.stop(t + 0.55); oFifth.stop(t + 0.55);
@@ -126327,7 +126396,7 @@ function _musicSynthLead(freq, g, when, out, durSec) {
       if (stopped) return; stopped = true;
       try {
         amp.gain.cancelScheduledValues(t);
-        amp.gain.setValueAtTime(amp.gain.value, t);
+        amp.gain.setValueAtTime(Math.min(amp.gain.value, 0.30 * g), t);   // (v54.68) as the bass: never above the lead's own peak
         amp.gain.linearRampToValueAtTime(0, t + 0.08);
         osc.stop(t + 0.12);
         oct.stop(t + 0.12);
